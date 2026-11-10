@@ -4,7 +4,7 @@ module snakebite.backends.closureplan;
 private:
 
 
-import snakebite.backends.argumentflow: SignatureTable;
+import snakebite.native.argumentflow: SignatureTable;
 import snakebite.backends.layout: ClosureLayout, FrameLayout;
 
 

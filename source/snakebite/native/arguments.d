@@ -1,4 +1,4 @@
-module snakebite.callarguments;
+module snakebite.native.arguments;
 
 
 private:

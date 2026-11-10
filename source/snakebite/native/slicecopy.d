@@ -1,4 +1,4 @@
-module snakebite.backends.slicecopy;
+module snakebite.native.slicecopy;
 
 
 private:

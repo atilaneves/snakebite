@@ -1,4 +1,4 @@
-module snakebite.nativevalue;
+module snakebite.native.value;
 
 
 private:

@@ -401,7 +401,7 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
     driver.write_text(
         "module internal_failure_driver;\n"
         "import snakebite.failure.report: internalFailure;\n"
-        "import snakebite.nativevalue: loadIntegral;\n"
+        "import snakebite.native.value: loadIntegral;\n"
         "noreturn pureFailure() @safe pure nothrow @nogc {\n"
         '    internalFailure("pure caller failed");\n'
         "}\n"
@@ -419,7 +419,7 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
          "-link-defaultlib-shared", "-preview=dip1000",
          f"-I{root / 'source'}", f"-of={binary}", str(driver),
          str(root / "source/snakebite/failure/report.d"),
-         str(root / "source/snakebite/nativevalue.d")],
+         str(root / "source/snakebite/native/value.d")],
         cwd=tmp_path, capture_output=True, text=True, check=False, timeout=120,
     )
     assert compiled.returncode == 0, output(compiled)
@@ -432,7 +432,7 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
         "message": (f"{driver}:8:", "driver failed"),
         "default": (f"{driver}:9:", "internal invariant failed"),
         "pure": (f"{driver}:5:", "pure caller failed"),
-        "native": ("snakebite/nativevalue.d:", "no native layout"),
+        "native": ("snakebite/native/value.d:", "no native layout"),
     }
     location, message = expected[mode]
     assert "snakebite: internal failure at " in result.stderr, output(result)

@@ -12,7 +12,7 @@ import core.memory: GC;
 import core.sync.mutex: Mutex;
 import dmd.typesem: arrayOf, constOf, immutableOf, sarrayOf, sharedOf;
 import snakebite.frontend.compiler: arenaReport, newInFrontend, parseSnippet;
-import snakebite.nativevalue: TypeFacts;
+import snakebite.native.value: TypeFacts;
 import ut.backends;
 
 

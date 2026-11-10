@@ -10,8 +10,8 @@ import snakebite.frontend.typefacts: typeFacts;
 import snakebite.failure.report: internalFailure;
 
 
-import snakebite.nativevalue: TypeFacts;
-import snakebite.nativevalue: CastKind, CastLayout;
+import snakebite.native.value: TypeFacts;
+import snakebite.native.value: CastKind, CastLayout;
 
 
 public struct CastPlan {
@@ -21,7 +21,7 @@ public struct CastPlan {
     // interpreter used to re-derive this from the same `(sourceType.ty,
     // destType.ty)` if-chain; `classify` decides it once, and each backend
     // keeps only the primitive that executes the chosen kind. `kind` is
-    // `snakebite.nativevalue.CastKind`, not an enum of its own: that
+    // `snakebite.native.value.CastKind`, not an enum of its own: that
     // enum is already DMD-free, so it is the one place both this
     // (dmd-typed) classifier and `applyCast`/`applyCastAs`/the VM's own
     // per-kind ops (none of which may import dmd) name a cast's kind.
@@ -427,7 +427,7 @@ public CastPlan classify(
     return classify(expression.type, destType);
 }
 
-// The DMD-free subset of `plan` that `snakebite.nativevalue.applyCast`
+// The DMD-free subset of `plan` that `snakebite.native.value.applyCast`
 // needs to turn its source bytes into its destination bytes -
 // `snakebite.backends.bytecode.vm` may not import DMD frontend modules,
 // so it reaches `plan.sourceFacts`/`destFacts` through this value

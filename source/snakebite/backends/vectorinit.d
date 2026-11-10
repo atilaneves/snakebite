@@ -6,7 +6,7 @@ private:
 import snakebite.frontend.typefacts: typeFacts;
 
 
-import snakebite.nativevalue: TypeFacts;
+import snakebite.native.value: TypeFacts;
 
 
 // Evaluate the source once, then copy its native bytes `count` times. An

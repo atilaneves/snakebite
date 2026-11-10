@@ -15,10 +15,10 @@ import snakebite.backends.casts: CastPlan, classify;
 import snakebite.backends.contextsource: ContextSource, calleeContextSourceOf;
 import snakebite.frontend.compiler: gagged;
 import snakebite.frontend.typefacts: typeFacts, tryTypeFacts, bitfieldAccess;
-import snakebite.nativevalue: TypeFacts;
+import snakebite.native.value: TypeFacts;
 import snakebite.nativelayout: NativeData;
-import snakebite.nativevalue: BitfieldAccess;
-import snakebite.backends.argumentflow: SignatureTable;
+import snakebite.native.value: BitfieldAccess;
+import snakebite.native.argumentflow: SignatureTable;
 import snakebite.host.sharedtable: SharedTable;
 
 // Facts have one program owner. Preparation and ordinary execution use the

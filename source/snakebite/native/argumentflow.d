@@ -1,9 +1,9 @@
-module snakebite.backends.argumentflow;
+module snakebite.native.argumentflow;
 
 
 private:
 
-import snakebite.nativevalue: TypeFacts;
+import snakebite.native.value: TypeFacts;
 import snakebite.host.sharedtable: SharedTable;
 
 

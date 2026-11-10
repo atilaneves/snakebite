@@ -8,8 +8,8 @@ import snakebite.frontend.typefacts: typeFacts;
 
 import snakebite.failure.report: internalFailure;
 
-import snakebite.nativevalue: TypeFacts;
-import snakebite.nativevalue: ComplexOperands;
+import snakebite.native.value: TypeFacts;
+import snakebite.native.value: ComplexOperands;
 
 // How an arithmetic operator combines its operands. Semantic analysis has
 // already applied D's usual arithmetic conversions, so the operation's own
@@ -45,7 +45,7 @@ package ArithmeticPlan arithmeticPlan(
 ) {
     import dmd.astenums: Tpointer;
     import dmd.typesem: toBasetype;
-    import snakebite.nativevalue: ComplexOperand;
+    import snakebite.native.value: ComplexOperand;
 
     // DMD represents a compound assignment's operation at its target's
     // promoted type, which the assignment's own type does not show.
@@ -144,12 +144,12 @@ package ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type type) {
     }
 }
 
-private imported!"snakebite.nativevalue".ComplexOperand complexOperand(
+private imported!"snakebite.native.value".ComplexOperand complexOperand(
     imported!"dmd.mtype".Type type,
 ) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.nativevalue: ComplexOperand;
+    import snakebite.native.value: ComplexOperand;
     import std.conv: text;
 
     type = type.toBasetype;

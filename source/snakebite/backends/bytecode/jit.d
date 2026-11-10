@@ -1268,7 +1268,7 @@ private struct Gen {
         chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
         DispatchState, Function, indirectBit, IndexBase, Instruction;
     import snakebite.framestack: FrameStack;
-    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset,
+    import snakebite.native.value: arrayLengthOffset, arrayPointerOffset,
         shiftCount;
 
     @nogc nothrow:

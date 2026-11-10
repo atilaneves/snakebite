@@ -26,7 +26,7 @@ public alias BuiltinCall = extern(C) void function(
 public extern(C) void startVariadicEntry(
     void*, scope const(void*)* arguments, size_t,
 ) nothrow @nogc {
-    import snakebite.backends.variadic: startVariadic;
+    import snakebite.native.variadic: startVariadic;
 
     startVariadic(
         *cast(void**) arguments[0], *cast(void**) arguments[2]);

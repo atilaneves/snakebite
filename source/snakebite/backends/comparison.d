@@ -8,7 +8,7 @@ import snakebite.frontend.typefacts: typeFacts;
 
 import snakebite.failure.report: internalFailure;
 
-import snakebite.nativevalue: TypeFacts;
+import snakebite.native.value: TypeFacts;
 
 package struct ComparisonPlan {
     enum Kind {

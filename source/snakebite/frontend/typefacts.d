@@ -7,7 +7,7 @@ private:
 import snakebite.failure.report: internalFailure;
 
 
-import snakebite.nativevalue:
+import snakebite.native.value:
     arrayLengthOffset, arrayPointerOffset, arrayValueSize, BitfieldAccess,
     delegateContextOffset, delegateFunctionOffset, TypeFacts;
 

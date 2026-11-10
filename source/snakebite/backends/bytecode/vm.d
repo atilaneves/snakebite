@@ -39,17 +39,17 @@ extern(C) bool executeIndirectCallPlan(
     out ptrdiff_t contextAdjustment,
 );
 
-import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
+import snakebite.native.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.backends.hostcalllayout: HostCallLayout;
 import snakebite.failure.halt: HaltAction, isHalt;
 import snakebite.failure.unwind:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
-import snakebite.callarguments: CallArguments;
+import snakebite.native.arguments: CallArguments;
 import snakebite.ffi.load: callDirectWords, Load, loadWidth, loadWord;
-import snakebite.nativevalue: TypeFacts;
-import snakebite.nativevalue:
+import snakebite.native.value: TypeFacts;
+import snakebite.native.value:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
@@ -2433,7 +2433,7 @@ private void redirectArguments(Decoded)(
     const(Function)* callee, ubyte* frame,
 ) {
     import core.stdc.string: memcpy, memset;
-    import snakebite.backends.variadic: VariadicLayout;
+    import snakebite.native.variadic: VariadicLayout;
     import std.algorithm: min;
 
     const value = &site.value;
@@ -2848,7 +2848,7 @@ package alias opComplex(ComplexOperation operation) =
 private const(Instruction)* runComplex(ComplexOperation operation, Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: applyComplex, ComplexOperands;
+    import snakebite.native.value: applyComplex, ComplexOperands;
 
     applyComplex!operation(execution.destination, execution.destination,
         execution.source, ComplexOperands.unpack(execution.sourceWidth),
@@ -2863,7 +2863,7 @@ package alias opComplexNegate =
 private const(Instruction)* runComplexNegate(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: negateComplex;
+    import snakebite.native.value: negateComplex;
 
     negateComplex(execution.destination, execution.destination,
         execution.width);
@@ -3288,7 +3288,7 @@ private alias opIndex(IndexBase base) =
 private const(Instruction)* runIndex(IndexBase base, Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: arrayPointerOffset;
+    import snakebite.native.value: arrayPointerOffset;
 
     static if (base == IndexBase.slice)
         auto first = *cast(ubyte**) (execution.source + arrayPointerOffset);
@@ -3335,7 +3335,7 @@ private const(Instruction)* runCheckedIndex(CheckedAccess access,
     Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+    import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
     const packed = execution.width;
     static if (fixedLength)
@@ -4219,7 +4219,7 @@ private const(Instruction)* runCastWidenUnsigned(Decoded)(
 }
 
 // A cast whose `CastKind` is a pure transformation of its source's own
-// bytes into its destination's - `snakebite.nativevalue.applyCastAs`
+// bytes into its destination's - `snakebite.native.value.applyCastAs`
 // carries out every one, with `kind` itself a template parameter, so
 // `snakebite.backends.bytecode.compiler.compileCast`'s own `final
 // switch` on `CastPlan.kind` picks one instance of this op per
@@ -4244,7 +4244,7 @@ package alias opCastAs(CastKind kind) =
 private const(Instruction)* runCastAs(CastKind kind, Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: applyCastAs, CastLayout;
+    import snakebite.native.value: applyCastAs, CastLayout;
 
     with (CastKind) {
     static if (kind == integralToFloat || kind == integralToComplex)
@@ -4341,7 +4341,7 @@ private const(Instruction)* runCastFixedAs(
 )(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: applyCastAs, CastLayout;
+    import snakebite.native.value: applyCastAs, CastLayout;
 
     applyCastAs!kind(
         CastLayout(kind, sourceSize, destSize),
@@ -4430,7 +4430,7 @@ package alias opLoadBitfield =
 private const(Instruction)* runLoadBitfield(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: BitfieldAccess;
+    import snakebite.native.value: BitfieldAccess;
 
     auto address = *cast(void**) (execution.source);
     const metadata = execution.sourceWidth;
@@ -4541,7 +4541,7 @@ package alias opStoreBitfield =
 private const(Instruction)* runStoreBitfield(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: BitfieldAccess;
+    import snakebite.native.value: BitfieldAccess;
 
     auto address = *cast(void**) (execution.destination);
     BitfieldAccess.decode(execution.sourceWidth).store(
@@ -4562,7 +4562,7 @@ package alias opSliceCopy =
 private const(Instruction)* runSliceCopy(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.backends.slicecopy: copyUnchecked;
+    import snakebite.native.slicecopy: copyUnchecked;
 
     copyUnchecked(
         *cast(void[]*) execution.destination,
@@ -4582,7 +4582,7 @@ package alias opSlicesConform =
 private const(Instruction)* runSlicesConform(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.backends.slicecopy: slicesConform;
+    import snakebite.native.slicecopy: slicesConform;
 
     auto dest = execution.destination;
     *cast(ubyte*) dest = slicesConform(
@@ -4608,7 +4608,7 @@ private const(Instruction)* runSliceFill(Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
-    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+    import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
     auto dest = execution.destination;
     auto value = execution.source;

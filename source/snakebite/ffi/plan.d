@@ -284,8 +284,8 @@ public struct CallPlan {
         scope const(void*)[] arguments,
     ) const {
         import core.stdc.string: memcpy;
-        import snakebite.callarguments: CallArguments;
-        import snakebite.nativevalue: delegateFunctionOffset, delegateValueSize;
+        import snakebite.native.arguments: CallArguments;
+        import snakebite.native.value: delegateFunctionOffset, delegateValueSize;
 
         // See `_callbacks`'s own doc for why the `const` goes.
         auto bridge = cast(CallbackBridge*) _callbacks;
@@ -383,7 +383,7 @@ public struct CallPlan {
     ) const {
         if (!_callbackVariadic)
             return null;
-        import snakebite.backends.variadic:
+        import snakebite.native.variadic:
             initializeNativeCursor;
         import snakebite.ffi.abi:
             maxFloatingArguments, maxIntegerArguments;
@@ -527,7 +527,7 @@ public struct CallPlan {
         if (!_hiddenReturnPointer)
             offset += alignScratch(bytesOf(_return));
         if (_callbackVariadic) {
-            import snakebite.backends.variadic: nativeCursorSize;
+            import snakebite.native.variadic: nativeCursorSize;
             _callbackVariadicOffset = alignScratch(offset);
             offset = _callbackVariadicOffset + nativeCursorSize;
         }
@@ -2056,7 +2056,7 @@ private NativeSignature signatureOf(
         // `classify`'s later, recursive field reads find every size it
         // touches already resolved.
         {
-            import snakebite.nativevalue: TypeFacts;
+            import snakebite.native.value: TypeFacts;
 
             auto returnType = type.nextOf;
             if (returnType !is null)

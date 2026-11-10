@@ -592,7 +592,7 @@ public struct CallSelection {
             import core.bitop: popcnt;
             import core.stdc.fenv;
             import snakebite.backends.dmdintrinsics: swapTo;
-            import snakebite.nativevalue: TypeFacts;
+            import snakebite.native.value: TypeFacts;
 
             auto function_ = expression.f;
             if (function_ is null || function_.fbody !is null
@@ -835,7 +835,7 @@ public struct CallSelection {
         import core.stdc.fenv;
         import core.stdc.string: memcpy;
         import snakebite.backends.dmdintrinsics: magnitudeTo;
-        import snakebite.nativevalue: TypeFacts;
+        import snakebite.native.value: TypeFacts;
 
         // e2ir replaces toPrec with conversions, and evalu8 folds OPabs.
         // The other floating intrinsic ops remain instructions.
@@ -1195,7 +1195,7 @@ public bool arityMismatches(
 // has the parameters of `withoutContext`.
 public struct ValueCall {
     import dmd.mtype: TypeFunction;
-    import snakebite.backends.argumentflow:
+    import snakebite.native.argumentflow:
         ArgumentFlow, Shape, Signature, SignatureTable;
     import snakebite.backends.layout: FrameLayout;
 

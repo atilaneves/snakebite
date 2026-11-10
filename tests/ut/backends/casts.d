@@ -7,7 +7,7 @@ import dmd.func: FuncDeclaration;
 import snakebite.backends.casts: classify;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction, typeFunctionOf;
-import snakebite.nativevalue: CastKind;
+import snakebite.native.value: CastKind;
 
 
 // `classify` is a pure function of a `CastExp`'s source and destination

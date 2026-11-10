@@ -27,8 +27,8 @@ import snakebite.backends.interpreter.faultslot:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.frontend.storage: SlicePlan;
-import snakebite.nativevalue: TypeFacts;
-import snakebite.nativevalue: BitfieldAccess, CastLayout;
+import snakebite.native.value: TypeFacts;
+import snakebite.native.value: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
 import std.traits: Select, isFloatingPoint;
 
@@ -765,11 +765,11 @@ private struct SliceValue {
     public ubyte* pointer;
 }
 
-private enum lengthOffset = imported!"snakebite.nativevalue".arrayLengthOffset;
-private enum pointerOffset = imported!"snakebite.nativevalue".arrayPointerOffset;
+private enum lengthOffset = imported!"snakebite.native.value".arrayLengthOffset;
+private enum pointerOffset = imported!"snakebite.native.value".arrayPointerOffset;
 static assert(SliceValue.length.offsetof == lengthOffset
     && SliceValue.pointer.offsetof == pointerOffset
-    && SliceValue.sizeof == imported!"snakebite.nativevalue".arrayValueSize);
+    && SliceValue.sizeof == imported!"snakebite.native.value".arrayValueSize);
 
 private abstract class SliceNode : Node {
     public override void executeVoid(ubyte* frame) {
@@ -1051,7 +1051,7 @@ private final class SliceCopy : SliceNode {
     }
     pragma(inline, true)
     private SliceValue copy(ubyte* frame) {
-        import snakebite.backends.slicecopy: copyUnchecked, slicesConform;
+        import snakebite.native.slicecopy: copyUnchecked, slicesConform;
 
         SliceValue to = void, from = void;
         _to.executeInto(frame, cast(ubyte*) &to);
@@ -1130,7 +1130,7 @@ private final class ReinterpretSlice : SliceNode {
     }
 
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.nativevalue: applyCast;
+        import snakebite.native.value: applyCast;
 
         SliceValue value = void;
         _operand.executeInto(frame, cast(ubyte*) &value);
@@ -2451,14 +2451,14 @@ private final class Scoped(E) : BoolNode {
 // there is tested after the expression ends.
 private final class ScopedTruth(E) : BoolNode {
     private Scoped!E _scope;
-    private imported!"snakebite.nativevalue".TypeFacts.Truth _truth;
+    private imported!"snakebite.native.value".TypeFacts.Truth _truth;
     public this(Scoped!E scope_, Type type) {
         import snakebite.frontend.typefacts: truthFacts;
 
         _scope = scope_; _truth = truthFacts(type);
     }
     public override bool executeBool(ubyte* frame) {
-        import snakebite.nativevalue: isTrueAt;
+        import snakebite.native.value: isTrueAt;
 
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
@@ -2477,7 +2477,7 @@ private final class ScopedIntegral(E) : LongNode {
         _scope = scope_; _facts = facts;
     }
     public override long executeLong(ubyte* frame) {
-        import snakebite.nativevalue: checkedLoadIntegral;
+        import snakebite.native.value: checkedLoadIntegral;
 
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
@@ -2729,7 +2729,7 @@ private final class FrameDelegate : SliceNode {
         _hops = hops; _function = function_;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.nativevalue:
+        import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset;
 
         *cast(ubyte**) (dest + delegateContextOffset)
@@ -2758,7 +2758,7 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
         _root = ev._treeRoot;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.nativevalue:
+        import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset, virtualFunctionWord;
 
         static if (kind == MethodReceiver.structAddress)
@@ -5151,10 +5151,10 @@ private struct DelegateValue {
 }
 
 static assert(DelegateValue.context.offsetof
-        == imported!"snakebite.nativevalue".delegateContextOffset
+        == imported!"snakebite.native.value".delegateContextOffset
     && DelegateValue.function_.offsetof
-        == imported!"snakebite.nativevalue".delegateFunctionOffset
-    && DelegateValue.sizeof == imported!"snakebite.nativevalue".delegateValueSize);
+        == imported!"snakebite.native.value".delegateFunctionOffset
+    && DelegateValue.sizeof == imported!"snakebite.native.value".delegateValueSize);
 
 // What the word of a function pointer or a delegate names: the adjustment
 // of the context, and the callee when the tree runs the function.
@@ -6558,7 +6558,7 @@ private Node buildDelegate(E)(E ev, Expression expression) {
 // `typeof(null)`.
 private Node buildDelegateCast(E)(E ev, CastExp castExp) {
     import snakebite.failure.report: internalFailure;
-    import snakebite.nativevalue: CastKind;
+    import snakebite.native.value: CastKind;
 
     if (castExp.lowering !is null)
         return buildDelegate(ev, castExp.lowering);
@@ -6645,7 +6645,7 @@ private Node buildMethodDelegate(E)(
 }
 
 private Node constantDelegate(void* function_) {
-    import snakebite.nativevalue: delegateContextOffset, delegateFunctionOffset;
+    import snakebite.native.value: delegateContextOffset, delegateFunctionOffset;
 
     SliceValue value;
     auto bytes = cast(ubyte*) &value;
@@ -6943,7 +6943,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
 private Node buildSliceCast(E)(E ev, CastExp castExp) {
     import snakebite.backends.casts: layoutOf;
     import snakebite.failure.report: internalFailure;
-    import snakebite.nativevalue: CastKind;
+    import snakebite.native.value: CastKind;
 
     if (castExp.lowering !is null)
         return buildSlice(ev, castExp.lowering);
@@ -7395,8 +7395,8 @@ private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
     import snakebite.frontend.storage: typeInfoAddressedBy;
     import snakebite.frontend.typefacts: isStaticStructAddress;
-    import snakebite.nativevalue: checkedLoadIntegral;
-    import snakebite.nativevalue: loadFloating;
+    import snakebite.native.value: checkedLoadIntegral;
+    import snakebite.native.value: loadFloating;
 
     // A call whose result is a struct or a static array has no value in a
     // register. The value of a `ref` result is read at its address.
@@ -7712,7 +7712,7 @@ private template unaryOf(string op) {
 
 private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
     import snakebite.failure.report: internalFailure;
-    import snakebite.nativevalue: CastKind;
+    import snakebite.native.value: CastKind;
 
     if (castExp.lowering !is null)
         return buildValue(ev, castExp.lowering);
@@ -7765,10 +7765,10 @@ private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
 
 // A cast of a dynamic array to its truth or to its pointer.
 private Node buildSliceToScalar(E)(
-    E ev, CastExp castExp, in imported!"snakebite.nativevalue".CastKind kind,
+    E ev, CastExp castExp, in imported!"snakebite.native.value".CastKind kind,
     in Scalar scalar,
 ) {
-    import snakebite.nativevalue: CastKind;
+    import snakebite.native.value: CastKind;
 
     auto slice = buildSlice(ev, castExp.e1);
     if (slice is null || scalar.kind != Scalar.Kind.integral)
