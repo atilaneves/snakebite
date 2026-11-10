@@ -377,7 +377,7 @@ private struct Shared {
             &callableAddress,
             &classRuntimeInfo,
             (type, loc) => nativeData.initialValue(type, loc));
-        facts = PreparedFacts(&nativeData, &runtimeTypes);
+        facts = PreparedFacts(&nativeData, &runtimeTypes, &signatures);
     }
 
     private FuncDeclaration definitionOf(FuncDeclaration function_) {
@@ -1092,24 +1092,19 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private FrameLayout buildLayout(
         FuncDeclaration function_, in LayoutKind kind,
     ) {
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.frontend.dmd.mangle: completeFunctionType;
 
         if (kind == LayoutKind.parameters) {
             // Native code owns its locals. Only its inferred signature,
             // if any, is needed to bind this call's arguments.
             completeFunctionType(function_);
-            auto parameters = FrameLayout.ofParameters(function_);
-            parameters.internSignature(
-                _shared.signatures, typeFunctionOf(function_));
-            return parameters;
+            return FrameLayout.ofParameters(function_, _shared.signatures);
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
         import std.string: fromStringz;
 
-        auto layout = FrameLayout.of(function_);
-        layout.internSignature(_shared.signatures, typeFunctionOf(function_));
+        auto layout = FrameLayout.of(function_, _shared.signatures);
         // `toPrettyChars` allocates and reads shared DMD symbol state.
         withCompilerLock({
             _shared.names.insert(
@@ -3903,7 +3898,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return *cached;
 
         return *_staticChains.build(key,
-            () => ClosurePlan.staticChainPath(from, owner));
+            () => ClosurePlan.staticChainPath(
+                from, owner, _shared.signatures));
     }
 
     private bool functionNeedsClosure(FuncDeclaration function_) {
@@ -7450,7 +7446,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return _callVariadicIndirect(
                 expression, type, address, context, hasContext, returnPlace);
 
-        const layout = FrameLayout.ofParameters(type, hasContext);
+        const layout = FrameLayout.ofParameters(
+            type, _shared.signatures, hasContext);
         auto frame = _frames.push(layout.size, layout.alignment);
         _bindArguments(type, expression.arguments, expression.loc,
             frame.base, &layout);
@@ -7479,7 +7476,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const plan = preparation.prepareAtAddress(
             *_plans, address, hasContext,
         );
-        const layout = FrameLayout.ofParameters(type, hasContext);
+        const layout = FrameLayout.ofParameters(
+            type, _shared.signatures, hasContext);
         auto frame = _frames.push(layout.size, layout.alignment);
         _bindArguments(type, expression.arguments, expression.loc,
             frame.base, &layout, true);

@@ -153,6 +153,7 @@ public PairPlan pairPlanOf(
 public ContextSource calleeContextSourceOf(
     imported!"dmd.func".FuncDeclaration caller,
     imported!"dmd.func".FuncDeclaration callee,
+    ref imported!"snakebite.backends.argumentflow".SignatureTable signatures,
 ) {
     import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
 
@@ -161,7 +162,7 @@ public ContextSource calleeContextSourceOf(
             || !overrides(caller, owner))
         return contextSourceOf(caller, owner);
 
-    return overriderSourceOf(caller, owner);
+    return overriderSourceOf(caller, owner, signatures);
 }
 
 private bool isContract(imported!"dmd.func".FuncDeclaration function_) {
@@ -183,6 +184,7 @@ private bool overrides(
 private ContextSource overriderSourceOf(
     imported!"dmd.func".FuncDeclaration caller,
     imported!"dmd.func".FuncDeclaration owner,
+    ref imported!"snakebite.backends.argumentflow".SignatureTable signatures,
 ) {
     import snakebite.backends.closureplan: ClosurePlan;
     import snakebite.backends.layout: FrameLayout;
@@ -194,7 +196,7 @@ private ContextSource overriderSourceOf(
         internalFailure("an overridden method belongs to a base of the overrider");
 
     const closure = ClosurePlan.of(owner);
-    const layout = FrameLayout.of(owner);
+    const layout = FrameLayout.of(owner, signatures);
     // `auto`: `hasSlot` and `offsetOf` take a mutable `VarDeclaration`.
     auto variable = cast() layout.hiddenThis.variable;
     const slotOffset = closure.needsClosure && closure.layout.hasSlot(variable)

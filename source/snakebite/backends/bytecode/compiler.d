@@ -286,7 +286,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
 
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
         import snakebite.frontend.compiler: withCompilerLock;
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (auto found = function_ in _layouts)
             return found;
@@ -301,9 +300,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             // FrameLayout.of completes body semantics before collecting
             // locals, including lowering temporaries. Publish only that
             // complete layout, owned by this backend rather than the AST.
-            auto layout = FrameLayout.of(function_);
-            layout.internSignature(signatures, typeFunctionOf(function_));
-            result = _layouts.insert(function_, layout);
+            result = _layouts.insert(
+                function_, FrameLayout.of(function_, signatures));
         });
         return result;
     }
@@ -9750,7 +9748,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
-        auto valueCall = ValueCall.of(calleeType, true, _bytecode.signatures);
+        auto valueCall = ValueCall.of(
+            calleeType, true, _bytecode.signatures);
         const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
@@ -10013,7 +10012,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _receiverDest = size_t.max;
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
-            return contextOffsetOf(calleeContextSourceOf(_function, callee));
+            return contextOffsetOf(calleeContextSourceOf(
+                _function, callee, _bytecode.signatures));
         case classValue:
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
@@ -10809,7 +10809,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileNullCheck(calleeOffset, expression.loc);
         }
 
-        auto valueCall = ValueCall.of(functionType, isDelegateCall, _bytecode.signatures);
+        auto valueCall = ValueCall.of(
+            functionType, isDelegateCall, _bytecode.signatures);
         if (valueCall.mismatches(expression.arguments))
             internalFailure("dmd rejects a call with the wrong number of arguments");
 

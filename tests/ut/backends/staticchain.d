@@ -5,6 +5,7 @@ import ut;
 import dmd.dsymbol: Dsymbol;
 import dmd.func: FuncDeclaration;
 import dmd.statement: Statement;
+import snakebite.backends.argumentflow: SignatureTable;
 import snakebite.backends.closureplan: ClosurePlan, Hop;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -107,7 +108,9 @@ unittest {
         }
     }, "outer", "leaf");
 
-    const path = ClosurePlan.staticChainPath(nesting.target, nesting.outer);
+    SignatureTable signatures;
+    const path = ClosurePlan.staticChainPath(
+        nesting.target, nesting.outer, signatures);
 
     path.length.should == 2;
     path[0].kind.should == Hop.Kind.frameSlot;
@@ -125,6 +128,8 @@ unittest {
         }
     }, "outer", "inner");
 
-    (ClosurePlan.staticChainPath(nesting.outer, nesting.outer) is null)
+    SignatureTable signatures;
+    (ClosurePlan.staticChainPath(
+        nesting.outer, nesting.outer, signatures) is null)
         .should == true;
 }

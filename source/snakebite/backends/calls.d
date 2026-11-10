@@ -1207,15 +1207,12 @@ public struct ValueCall {
     public static ValueCall of(
         TypeFunction type, in bool hasContext, ref SignatureTable signatures,
     ) {
-        auto call = ValueCall(
+        return ValueCall(
             type,
             hasContext,
-            FrameLayout.ofParameters(type, hasContext),
-            FrameLayout.ofParameters(type, false),
+            FrameLayout.ofParameters(type, signatures, hasContext),
+            FrameLayout.ofParameters(type, signatures, false),
         );
-        call.layout.internSignature(signatures, type);
-        call.withoutContext.internSignature(signatures, type);
-        return call;
     }
 
     public bool isVariadic() const {

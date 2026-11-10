@@ -160,6 +160,21 @@ public struct GuestModules {
         return _failed;
     }
 
+    // What the calling thread registered with druntime and did not unregister,
+    // and the registry images it opened and did not close. Unlike the maps of
+    // the process, other threads cannot change them.
+    version(unittest)
+    public static Held held() {
+        return Held(_registrations, _images, _leftToExit);
+    }
+
+    public struct Held {
+        ptrdiff_t registrations;
+        ptrdiff_t images;
+        // The registrations that this thread left to the end of the process.
+        ptrdiff_t leftToExit;
+    }
+
     // Ends the program. When the process ends with it, `rt_term` runs the
     // destructors and `exit` no longer has to. Otherwise this does what
     // `rt_term` does for the thread that ran the program: that thread's
@@ -311,6 +326,7 @@ private ExitRecord* newExitRecord(Run* run, void** slot) {
 private void leaveToExit(Run* run) {
     run.exit = newExitRecord(null, run.image.slot);
     run.exit.left = true;
+    ++_leftToExit;
 }
 
 
@@ -357,6 +373,9 @@ private extern(C) void endAtExit() {
 
 
 private shared(ExitRecord*) _ending;
+private ptrdiff_t _registrations;
+private ptrdiff_t _images;
+private ptrdiff_t _leftToExit;
 private shared bool _endHandlerRegistered;
 
 
@@ -1035,6 +1054,7 @@ private struct Image {
         if (image._slot is null)
             internalFailure("the registry image exports its slot");
 
+        ++_images;
         return image;
     }
 
@@ -1075,6 +1095,7 @@ private struct Image {
             1, _slot, records.ptr, records.ptr + records.length);
         // druntime keeps the registration when a constructor throws.
         _registered = true;
+        ++_registrations;
         _d_dso_registry(&data);
     }
 
@@ -1089,6 +1110,7 @@ private struct Image {
     public static void unregister(void** slot) {
         auto data = CompilerDSOData(1, slot, null, null);
         _d_dso_registry(&data);
+        --_registrations;
     }
 
     public void** slot() {
@@ -1103,5 +1125,6 @@ private struct Image {
 
         dlclose(_handle);
         close(_file);
+        --_images;
     }
 }

@@ -17,6 +17,7 @@ import snakebite.frontend.compiler: gagged;
 import snakebite.nativelayout:
     NativeData, TypeFacts, typeFacts, tryTypeFacts, bitfieldAccess;
 import snakebite.nativevalue: BitfieldAccess;
+import snakebite.backends.argumentflow: SignatureTable;
 import snakebite.sharedtable: SharedTable;
 
 // Facts have one program owner. Preparation and ordinary execution use the
@@ -34,10 +35,15 @@ package struct PreparedFacts {
 
     private NativeData* _nativeData;
     private RuntimeTypes* _runtimeTypes;
+    private SignatureTable* _signatures;
 
-    package this(NativeData* nativeData, RuntimeTypes* runtimeTypes) {
+    package this(
+        NativeData* nativeData, RuntimeTypes* runtimeTypes,
+        SignatureTable* signatures,
+    ) {
         _nativeData = nativeData;
         _runtimeTypes = runtimeTypes;
+        _signatures = signatures;
     }
 
     package TypeFacts typeOf(Type type) {
@@ -162,6 +168,7 @@ package struct PreparedFacts {
             return found;
         // Inherited contracts can need a base frame even if its body never
         // runs. Callback preparation must build that context before entry.
-        return _contexts.insert(key, calleeContextSourceOf(caller, callee));
+        return _contexts.insert(key,
+            calleeContextSourceOf(caller, callee, *_signatures));
     }
 }

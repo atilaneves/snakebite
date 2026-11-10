@@ -3364,7 +3364,7 @@ private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 
 // Every instantiation of `opCheckedIndex`: the one list that the lookups and
 // the roles below are built from.
-private static immutable CheckedInstance[] checkedInstances =
+private immutable CheckedInstance[] checkedInstances =
     allCheckedInstances();
 // The hash uses a handler address, which is known only at load time.
 private immutable CheckedInstance[Instruction.Handler] checkedInstanceOf;
@@ -3790,7 +3790,7 @@ static foreach (comparison; EnumMembers!Comparison)
 // branch, so the handlers are also kept in a hash set.
 private enum fusedSlots = 256;
 static assert(fusedSlots >= 2 * fusedCount);
-private static immutable Instruction.Handler[fusedCount] fusedHandlers = () {
+private immutable Instruction.Handler[fusedCount] fusedHandlers = () {
     Instruction.Handler[fusedCount] handlers;
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
@@ -3962,7 +3962,7 @@ private const(Instruction)* runFusedBranchR(string operation, CompareKind kind,
     return execution.next;
 }
 
-private static immutable Instruction.Handler[fusedCount]
+private immutable Instruction.Handler[fusedCount]
 fusedRegisterHandlers = () {
     Instruction.Handler[fusedCount] handlers;
     static foreach (comparison; EnumMembers!Comparison)
@@ -4969,8 +4969,9 @@ private void specialiseWith(alias executor, alias operation,
     tables.addSpecialisation(entry,
         rolesOfOperation!(operation, sourceKind, Parameters));
     static if (jitSupported && countsEvents!operation)
-        tables.addCountedTwins(entry, specialisationOf!(true, executor, operation,
-            destinationKind, sourceKind, widths, right, Parameters));
+        tables.addCountedTwins(entry, specialisationOf!(true, executor,
+            operation, destinationKind, sourceKind, widths, right,
+            Parameters));
 }
 
 // The branches that count an event of the function for the JIT when they jump
@@ -5073,7 +5074,8 @@ shared static this() {
                     specialise!(runFusedBranch, S, constant ? I : S,
                         kind == CompareKind.floating
                             ? floatingWidths : integralWidths,
-                        false, comparisonSymbols[comparison], kind, jumpWhen)(tables);
+                        false, comparisonSymbols[comparison], kind,
+                        jumpWhen)(tables);
     static foreach (name; AliasSeq!("runBranchFalse", "runBranchTrue",
         "runCastToBool", "runLogicalNot"))
         specialise!(mixin(name), S, I, integralWidths, false)(tables);
@@ -5111,7 +5113,8 @@ shared static this() {
                         constant ? I : S,
                         kind == CompareKind.floating
                             ? noWidths : integralWidths,
-                        false, comparisonSymbols[comparison], kind, jumpWhen)(tables);
+                        false, comparisonSymbols[comparison], kind,
+                        jumpWhen)(tables);
     static foreach (width; [1, 2, 4, 8, 16, 32]) {
         specialiseIndirect!width(tables);
         static foreach (copyWidth; [1, 2, 4, 8, 16]) {{
