@@ -10,7 +10,7 @@ import snakebite.frontend.typefacts: typeFacts;
 import snakebite.internalfailure: internalFailure;
 
 
-import snakebite.frontend.typefacts: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.nativevalue: CastKind, CastLayout;
 
 

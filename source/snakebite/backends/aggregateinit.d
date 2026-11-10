@@ -7,7 +7,7 @@ import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.frontend.typefacts: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.frontend.typefacts: fieldOffset;
 import dmd.typesem: toBasetype;
 

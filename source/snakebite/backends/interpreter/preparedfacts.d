@@ -14,8 +14,8 @@ import snakebite.backends.aggregateinit: AggregateInitPlan, planStructLiteral;
 import snakebite.backends.casts: CastPlan, classify;
 import snakebite.backends.contextsource: ContextSource, calleeContextSourceOf;
 import snakebite.frontend.compiler: gagged;
-import snakebite.frontend.typefacts:
-    TypeFacts, typeFacts, tryTypeFacts, bitfieldAccess;
+import snakebite.frontend.typefacts: typeFacts, tryTypeFacts, bitfieldAccess;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.nativelayout: NativeData;
 import snakebite.nativevalue: BitfieldAccess;
 import snakebite.backends.argumentflow: SignatureTable;

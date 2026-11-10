@@ -116,13 +116,13 @@ public struct StorageResolver(Result, Adapter) {
             return _adapter.storagePointer(ptrExp);
 
         if (auto context = expression.isDelegatePtrExp) {
-            import snakebite.frontend.typefacts: delegateContextOffset;
+            import snakebite.nativevalue: delegateContextOffset;
             return _adapter.storageDelegateWord(
                 resolve(context.e1), delegateContextOffset);
         }
 
         if (auto functionPointer = expression.isDelegateFuncptrExp) {
-            import snakebite.frontend.typefacts: delegateFunctionOffset;
+            import snakebite.nativevalue: delegateFunctionOffset;
             return _adapter.storageDelegateWord(
                 resolve(functionPointer.e1), delegateFunctionOffset);
         }

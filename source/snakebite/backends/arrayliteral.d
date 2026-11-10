@@ -6,7 +6,7 @@ private:
 import snakebite.frontend.typefacts: typeFacts;
 
 
-import snakebite.frontend.typefacts: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 
 
 public struct ArrayLiteralPlan {

@@ -7,8 +7,8 @@ import snakebite.internalfailure: internalFailure;
 package ulong combine(string op)(
     in long a,
     in long b,
-    in imported!"snakebite.frontend.typefacts".TypeFacts aFacts,
-    in imported!"snakebite.frontend.typefacts".TypeFacts bFacts,
+    in imported!"snakebite.nativevalue".TypeFacts aFacts,
+    in imported!"snakebite.nativevalue".TypeFacts bFacts,
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
         // dmd rejects a vector shift and a shift has its own `ShiftPlan`.
@@ -27,8 +27,8 @@ package ulong combine(string op)(
 // type before the interpreter sees the node - a narrower or differently
 // signed operand arrives wrapped in a `CastExp` - so the two agree.
 private bool sharedSignedness(
-    in imported!"snakebite.frontend.typefacts".TypeFacts a,
-    in imported!"snakebite.frontend.typefacts".TypeFacts b,
+    in imported!"snakebite.nativevalue".TypeFacts a,
+    in imported!"snakebite.nativevalue".TypeFacts b,
 ) {
     assert(a.isUnsigned == b.isUnsigned,
         "D arithmetic conversions give both operands one signedness");

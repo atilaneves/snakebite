@@ -28,7 +28,7 @@ import snakebite.backends.aggregateinit: NewPlan, planNew;
 import dmd.visitor: Visitor;
 import dmd.mtype: Type;
 import dmd.func: FuncDeclaration;
-import snakebite.frontend.typefacts: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.frontend.compiler: newInFrontend;
 import std.meta: AliasSeq;
 
@@ -300,7 +300,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         CallSelection.ScalarConstant constant;
         if (callSelection.foldedScalarIntrinsic(expression, constant)) {
             if (constant.hasStorage) {
-                import snakebite.frontend.typefacts: TypeFacts;
+                import snakebite.nativevalue: TypeFacts;
 
                 visitConstantBytes(expression,
                     constant.bytes(typeFacts(expression.type).size));
@@ -589,8 +589,8 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
         import dmd.mtype: Type;
         import dmd.typesem: pointerTo;
         import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
-        import snakebite.frontend.typefacts:
-            arrayLengthOffset, arrayPointerOffset, isStoredLiteral;
+        import snakebite.frontend.typefacts: isStoredLiteral;
+        import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
         // Element types must remain mutable for DMD.
         auto plan = planArrayLiteral(expression, currentFunction);

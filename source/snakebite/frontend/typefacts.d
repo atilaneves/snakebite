@@ -8,81 +8,9 @@ import snakebite.internalfailure: internalFailure;
 
 
 import snakebite.nativevalue:
-    BitfieldAccess,
-    nativeArrayLengthOffset = arrayLengthOffset,
-    nativeArrayPointerOffset = arrayPointerOffset,
-    nativeArrayValueSize = arrayValueSize,
-    nativeDelegateContextOffset = delegateContextOffset,
-    nativeDelegateFunctionOffset = delegateFunctionOffset,
-    nativeDelegateValueSize = delegateValueSize,
-    nativeIsIntegralSize = isIntegralSize,
-    nativeLoadIntegral = loadIntegral,
-    nativeStoreIntegral = storeIntegral;
+    arrayLengthOffset, arrayPointerOffset, arrayValueSize, BitfieldAccess,
+    delegateContextOffset, delegateFunctionOffset, TypeFacts;
 
-public alias arrayLengthOffset = nativeArrayLengthOffset;
-public alias arrayPointerOffset = nativeArrayPointerOffset;
-public alias arrayValueSize = nativeArrayValueSize;
-public alias delegateContextOffset = nativeDelegateContextOffset;
-public alias delegateFunctionOffset = nativeDelegateFunctionOffset;
-
-// The function word at `index` in the vtable of the class object at
-// `receiver`: the one rule of a virtual call.
-public void* virtualFunctionWord(in void* receiver, size_t index) {
-    auto table = *cast(void***) receiver;
-    return table[index];
-}
-public alias delegateValueSize = nativeDelegateValueSize;
-
-// `snakebite.backends.interpreter.walker` calls this on every integral
-// assignment it interprets, so it collapses into that caller instead of
-// staying a real call boundary on that hot path - not, any more, for an
-// FFI return-value write (issue #334 deleted that caller, `abi.
-// writeWord`).
-pragma(inline, true) public bool isIntegralSize(in size_t size) {
-    return nativeIsIntegralSize(size);
-}
-
-// Keep the DMD-facing module's historical error behavior while the actual
-// byte operations live in the DMD-free native-value module. Backend code
-// that already validated its widths can call that module directly.
-// `snakebite.backends.interpreter.walker` is this wrapper's own hot
-// caller - one of these on nearly every assignment it interprets - so
-// this still collapses into it instead of staying a real call boundary;
-// not, any more, for an FFI return-value write (issue #334 deleted that
-// caller, `abi.writeWord`).
-pragma(inline, true) public void storeIntegral(
-    void* place, in ulong value, in size_t size,
-) {
-    import std.conv: text;
-
-    if (!isIntegralSize(size))
-        throw new Exception(
-            text("no native layout for an integral of ", size, " byte(s)"),
-        );
-    nativeStoreIntegral(place, value, size);
-}
-
-// Reads `size` bytes at `place`, laid out as compiled D lays them out, and
-// widens them to 64 bits: sign-extended if `signed`, zero-extended
-// otherwise. The result is a `long` either way - for an unsigned width the
-// caller reinterprets it as `ulong`, the same 64 bits, since D has no
-// integral type wider than either.
-//
-// The counterpart to `storeIntegral`: an interpreter comparing two
-// integral operands needs the bytes-to-value direction as well as the one
-// `storeIntegral` already covers.
-public long loadIntegral(in void* place, in size_t size, in bool signed) {
-    import std.conv: text;
-
-    if (!isIntegralSize(size))
-        throw new Exception(
-            text("no native layout for an integral of ", size, " byte(s)"),
-        );
-    return nativeLoadIntegral(place, size, signed);
-}
-
-public alias TypeFacts = imported!"snakebite.nativevalue".TypeFacts;
-public alias alignUp = imported!"snakebite.nativevalue".alignUp;
 
 // The facts for `type`, read from dmd exactly once by the caller
 // that builds this. `resolved`/`forceResolved` force any forward
@@ -282,28 +210,6 @@ private void forceResolved(imported!"dmd.mtype".Type type) {
 
     if (auto arrayType = type.isTypeSArray)
         forceResolved(arrayType.next);
-}
-
-// Whether the value stored at `value` is true, as a condition tests it, for
-// a type whose `truthFacts` are `truth`.
-public bool isTrueAt(in void* value, in TypeFacts.Truth truth) {
-    import snakebite.nativevalue: loadFloating;
-
-    const buffer = cast(const(ubyte)*) value;
-    if (truth.isFloat) {
-        if (loadFloating(buffer + truth.offset, truth.size) != 0)
-            return true;
-        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
-            return false;
-        return loadFloating(buffer + truth.secondOffset, truth.size) != 0;
-    }
-
-    if (loadIntegral(buffer + truth.offset, truth.size, false) != 0)
-        return true;
-    if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
-        return false;
-    return loadIntegral(
-        buffer + truth.secondOffset, size_t.sizeof, false) != 0;
 }
 
 // Which native bytes of a value of `type` decide whether it is true

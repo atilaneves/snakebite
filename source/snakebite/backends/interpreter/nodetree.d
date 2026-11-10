@@ -27,7 +27,7 @@ import snakebite.backends.interpreter.faultslot:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
 import snakebite.frontend.storage: SlicePlan;
-import snakebite.frontend.typefacts: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 import snakebite.nativevalue: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
 import std.traits: Select, isFloatingPoint;
@@ -765,11 +765,11 @@ private struct SliceValue {
     public ubyte* pointer;
 }
 
-private enum lengthOffset = imported!"snakebite.frontend.typefacts".arrayLengthOffset;
-private enum pointerOffset = imported!"snakebite.frontend.typefacts".arrayPointerOffset;
+private enum lengthOffset = imported!"snakebite.nativevalue".arrayLengthOffset;
+private enum pointerOffset = imported!"snakebite.nativevalue".arrayPointerOffset;
 static assert(SliceValue.length.offsetof == lengthOffset
     && SliceValue.pointer.offsetof == pointerOffset
-    && SliceValue.sizeof == imported!"snakebite.frontend.typefacts".arrayValueSize);
+    && SliceValue.sizeof == imported!"snakebite.nativevalue".arrayValueSize);
 
 private abstract class SliceNode : Node {
     public override void executeVoid(ubyte* frame) {
@@ -2451,14 +2451,14 @@ private final class Scoped(E) : BoolNode {
 // there is tested after the expression ends.
 private final class ScopedTruth(E) : BoolNode {
     private Scoped!E _scope;
-    private imported!"snakebite.frontend.typefacts".TypeFacts.Truth _truth;
+    private imported!"snakebite.nativevalue".TypeFacts.Truth _truth;
     public this(Scoped!E scope_, Type type) {
         import snakebite.frontend.typefacts: truthFacts;
 
         _scope = scope_; _truth = truthFacts(type);
     }
     public override bool executeBool(ubyte* frame) {
-        import snakebite.frontend.typefacts: isTrueAt;
+        import snakebite.nativevalue: isTrueAt;
 
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
@@ -2477,11 +2477,11 @@ private final class ScopedIntegral(E) : LongNode {
         _scope = scope_; _facts = facts;
     }
     public override long executeLong(ubyte* frame) {
-        import snakebite.frontend.typefacts: loadIntegral;
+        import snakebite.nativevalue: checkedLoadIntegral;
 
         ubyte* address;
         _scope.run(frame, { address = _scope._inner.executeAddr(frame); });
-        return loadIntegral(address, _facts.size, !_facts.isUnsigned);
+        return checkedLoadIntegral(address, _facts.size, !_facts.isUnsigned);
     }
 }
 
@@ -2729,7 +2729,7 @@ private final class FrameDelegate : SliceNode {
         _hops = hops; _function = function_;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.frontend.typefacts:
+        import snakebite.nativevalue:
             delegateContextOffset, delegateFunctionOffset;
 
         *cast(ubyte**) (dest + delegateContextOffset)
@@ -2758,7 +2758,7 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
         _root = ev._treeRoot;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        import snakebite.frontend.typefacts:
+        import snakebite.nativevalue:
             delegateContextOffset, delegateFunctionOffset, virtualFunctionWord;
 
         static if (kind == MethodReceiver.structAddress)
@@ -5151,10 +5151,10 @@ private struct DelegateValue {
 }
 
 static assert(DelegateValue.context.offsetof
-        == imported!"snakebite.frontend.typefacts".delegateContextOffset
+        == imported!"snakebite.nativevalue".delegateContextOffset
     && DelegateValue.function_.offsetof
-        == imported!"snakebite.frontend.typefacts".delegateFunctionOffset
-    && DelegateValue.sizeof == imported!"snakebite.frontend.typefacts".delegateValueSize);
+        == imported!"snakebite.nativevalue".delegateFunctionOffset
+    && DelegateValue.sizeof == imported!"snakebite.nativevalue".delegateValueSize);
 
 // What the word of a function pointer or a delegate names: the adjustment
 // of the context, and the callee when the tree runs the function.
@@ -6645,8 +6645,7 @@ private Node buildMethodDelegate(E)(
 }
 
 private Node constantDelegate(void* function_) {
-    import snakebite.frontend.typefacts:
-        delegateContextOffset, delegateFunctionOffset;
+    import snakebite.nativevalue: delegateContextOffset, delegateFunctionOffset;
 
     SliceValue value;
     auto bytes = cast(ubyte*) &value;
@@ -7395,7 +7394,8 @@ private Node notOf(Node operand) {
 private Node buildValue(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
     import snakebite.frontend.storage: typeInfoAddressedBy;
-    import snakebite.frontend.typefacts: isStaticStructAddress, loadIntegral;
+    import snakebite.frontend.typefacts: isStaticStructAddress;
+    import snakebite.nativevalue: checkedLoadIntegral;
     import snakebite.nativevalue: loadFloating;
 
     // A call whose result is a struct or a static array has no value in a
@@ -7418,7 +7418,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             align(8) ubyte[8] buffer;
             ev._nativeData.write(expression.type, scalar.facts, expression,
                 buffer.ptr);
-            return new Constant!long(loadIntegral(
+            return new Constant!long(checkedLoadIntegral(
                 buffer.ptr, scalar.facts.size, !scalar.facts.isUnsigned));
         }
         case float64: {

@@ -6,6 +6,10 @@ private:
 
 import snakebite.internalfailure: internalFailure;
 import snakebite.frontend.typefacts;
+import snakebite.nativevalue:
+    arrayLengthOffset, arrayPointerOffset, arrayValueSize, checkedLoadIntegral,
+    checkedStoreIntegral, delegateContextOffset, delegateFunctionOffset,
+    TypeFacts;
 
 
 // Owns constant storage and its referenced data for the backend's lifetime.
@@ -469,7 +473,7 @@ public struct NativeData {
             if (field.isBitFieldDeclaration !is null) {
                 const access = bitfieldAccess(field);
                 access.store(place + access.offset,
-                    loadIntegral(bytes.ptr, bytes.length, false));
+                    checkedLoadIntegral(bytes.ptr, bytes.length, false));
                 continue;
             }
 
@@ -658,12 +662,12 @@ private void storeValue(
         ulong offset;
         if (isSymbolAddress(value, symbol, offset)) {
             assert(symbolAddress !is null);
-            storeIntegral(place,
+            checkedStoreIntegral(place,
                 cast(ulong) symbolAddress(symbol) + offset, facts.size);
             return;
         }
 
-        storeIntegral(place, value.toInteger, facts.size);
+        checkedStoreIntegral(place, value.toInteger, facts.size);
         return;
     }
 
@@ -672,7 +676,7 @@ private void storeValue(
     // DMD represents an integer-to-pointer cast as an integer literal. Its
     // low pointer-width bits are the pointer value in the native layout.
     if (type.ty == Tpointer && value.isIntegerExp) {
-        storeIntegral(place, cast(ulong) value.toInteger, facts.size);
+        checkedStoreIntegral(place, cast(ulong) value.toInteger, facts.size);
         return;
     }
 
@@ -758,7 +762,7 @@ private void storeValue(
             *cast(const(void)**) place = stringPointer(nativeData, literal);
         } else {
             assert(type.ty == Tarray);
-            storeIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
+            checkedStoreIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
             *cast(const(void)**) (bytes + arrayPointerOffset) =
                 stringPointer(nativeData, literal);
         }
@@ -778,7 +782,7 @@ private void storeValue(
             *cast(void**) place = data.ptr;
             return;
         }
-        storeIntegral(bytes + arrayLengthOffset, literal.elements.length,
+        checkedStoreIntegral(bytes + arrayLengthOffset, literal.elements.length,
             size_t.sizeof);
         *cast(void**) (bytes + arrayPointerOffset) = data.ptr;
         return;
@@ -896,11 +900,11 @@ private void storeValue(
 
             ubyte[size_t.sizeof * 2] keysArgument = void;
             ubyte[size_t.sizeof * 2] valuesArgument = void;
-            storeIntegral(keysArgument.ptr + arrayLengthOffset,
+            checkedStoreIntegral(keysArgument.ptr + arrayLengthOffset,
                 literal.keys.length, size_t.sizeof);
             *cast(void**) (keysArgument.ptr + arrayPointerOffset) =
                 keyBytes.ptr;
-            storeIntegral(valuesArgument.ptr + arrayLengthOffset,
+            checkedStoreIntegral(valuesArgument.ptr + arrayLengthOffset,
                 literal.values.length, size_t.sizeof);
             *cast(void**) (valuesArgument.ptr + arrayPointerOffset) =
                 valueBytes.ptr;

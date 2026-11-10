@@ -2,13 +2,11 @@ module snakebite.backends.compoundassign;
 
 private:
 
-import snakebite.frontend.typefacts: typeFacts;
-
-
 import dmd.typesem: toBasetype;
 
 import snakebite.backends.arithmetic: ArithmeticPlan;
 import snakebite.backends.casts: CastPlan;
+import snakebite.frontend.typefacts: typeFacts;
 
 // DMD represents the target of a compound assignment at its promoted
 // operation type. The original target type remains on the assignment node;
@@ -65,7 +63,7 @@ package CompoundConversion compoundConversion(
 ) {
     import snakebite.backends.arithmetic: arithmeticKind;
     import snakebite.backends.casts: classify;
-    import snakebite.frontend.typefacts: TypeFacts;
+    import snakebite.nativevalue: TypeFacts;
 
     auto targetType = compoundTarget(expression).type;
     auto operationType = expression.e1.type;

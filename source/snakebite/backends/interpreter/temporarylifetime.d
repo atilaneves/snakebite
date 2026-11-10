@@ -11,7 +11,7 @@ import snakebite.backends.fullexpression:
     FullExpressionScope;
 import snakebite.framestack: FrameStack, defaultFrameCapacity;
 import snakebite.cstack: CStack;
-import snakebite.frontend.typefacts: TypeFacts;
+import snakebite.nativevalue: TypeFacts;
 
 
 // Owns the storage and lifetime rules for expression-scoped guest values.

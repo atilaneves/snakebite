@@ -492,6 +492,67 @@ public bool isIntegralSize(in size_t size) @safe @nogc nothrow pure {
     return size == 1 || size == 2 || size == 4 || size == 8;
 }
 
+// The function word at `index` in the vtable of the class object at
+// `receiver`: the one rule of a virtual call.
+public void* virtualFunctionWord(in void* receiver, size_t index) {
+    auto table = *cast(void***) receiver;
+    return table[index];
+}
+
+// `storeIntegral` for a caller that has not validated `size`: it throws an
+// `Exception` for a width with no native layout, as the `nativelayout`
+// wrappers did before the native value operations moved to this module. A
+// caller that already validated its width calls `storeIntegral` directly.
+// `snakebite.backends.interpreter.walker` calls this on nearly every
+// integral assignment it interprets, so it collapses into that caller
+// instead of staying a real call boundary.
+pragma(inline, true) public void checkedStoreIntegral(
+    void* place, in ulong value, in size_t size,
+) {
+    import std.conv: text;
+
+    if (!isIntegralSize(size))
+        throw new Exception(
+            text("no native layout for an integral of ", size, " byte(s)"),
+        );
+    storeIntegral(place, value, size);
+}
+
+// `loadIntegral` for a caller that has not validated `size`: it throws an
+// `Exception` for a width with no native layout. A caller that already
+// validated its width calls `loadIntegral` directly.
+public long checkedLoadIntegral(
+    in void* place, in size_t size, in bool signed,
+) {
+    import std.conv: text;
+
+    if (!isIntegralSize(size))
+        throw new Exception(
+            text("no native layout for an integral of ", size, " byte(s)"),
+        );
+    return loadIntegral(place, size, signed);
+}
+
+// Whether the value stored at `value` is true, as a condition tests it, for
+// a type whose truth facts are `truth`.
+public bool isTrueAt(in void* value, in TypeFacts.Truth truth) {
+    const buffer = cast(const(ubyte)*) value;
+    if (truth.isFloat) {
+        if (loadFloating(buffer + truth.offset, truth.size) != 0)
+            return true;
+        if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+            return false;
+        return loadFloating(buffer + truth.secondOffset, truth.size) != 0;
+    }
+
+    if (checkedLoadIntegral(buffer + truth.offset, truth.size, false) != 0)
+        return true;
+    if (truth.secondOffset == TypeFacts.Truth.noSecondWord)
+        return false;
+    return checkedLoadIntegral(
+        buffer + truth.secondOffset, size_t.sizeof, false) != 0;
+}
+
 // The count a shift uses. D leaves a count outside `[0, width)` undefined;
 // compiled D on x86-64 answers it with the CPU's own rule, the low 5 bits
 // of the count for a shift narrower than 64 bits - 8- and 16-bit shifts
