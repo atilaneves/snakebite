@@ -65,6 +65,12 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         };
     }
 
+    // How many chunks of callback entries this instance's bridge has.
+    version(unittest)
+    public size_t callbackChunkCount() {
+        return _shared.plans.callbackChunkCount;
+    }
+
     protected override void release() {
         if (_checksNullDeref)
             _checkedEvaluators.end;

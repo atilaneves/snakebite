@@ -4,14 +4,13 @@ module ut.ffi.callback;
 import ut;
 import dmd.func: FuncDeclaration;
 import snakebite.ffi.callback:
-    beginCallbackChunk, callbackChunkCount, CallbackBridge, CallbackCall,
-    ChunkStrategy;
+    CallbackBridge, CallbackCall, ChunkStrategy;
 import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end;
 import snakebite.ffi.plan: nativeSignatureOf;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.conv: text;
+import std.conv: text, to;
 
 
 // These tests drive the callback pool (`snakebite.ffi.callback`, ADR-0003)
@@ -392,12 +391,12 @@ unittest {
 }
 
 
-// A chunk the pool copied from the template at run time works the same
-// as the template: `beginCallbackChunk` forces a fresh chunk made with
-// the given strategy, so the entry reserved next lives outside the
-// binary's own chunk. The dual-mapping strategy is the fallback for a
-// kernel that refuses to make written memory executable; a kernel that
-// allows it never takes that path on its own, so this drives it directly.
+// Every chunk of a bridge is a copy of the template: `beginChunk` forces a
+// fresh chunk made with the given strategy, so the entry reserved next lives
+// outside the binary's own template bytes. The dual-mapping strategy is the
+// fallback for a kernel that refuses to make written memory executable; a
+// kernel that allows it never takes that path on its own, so this drives it
+// directly.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
     @("chunk." ~ text(strategy))
     unittest {
@@ -408,15 +407,40 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
         int word;
         bridge.registerFunction(&word, function_);
 
-        const chunksBefore = callbackChunkCount;
-        beginCallbackChunk(strategy);
-        callbackChunkCount.should == chunksBefore + 1;
+        const chunksBefore = bridge.chunkCount;
+        bridge.beginChunk(strategy);
+        bridge.chunkCount.should == chunksBefore + 1;
 
         auto entry = cast(IntOfInt) bridge.entryOf(&word);
         inTemplateChunk(entry).should == false;
 
         entry(100).should == 201;
         recorded.integers.should == [100];
+    }
+}
+
+
+// A released bridge gives back its chunks: it has none left, however many it
+// had. That every chunk is also unmapped is measured on the whole process in
+// `bin/at` (`at.runtime.registration`), where no other thread maps memory.
+static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
+    @("release.givesBackChunks." ~ text(strategy))
+    unittest {
+        auto function_ = declarationOf(
+            q{ extern(C) int twice(int x); }, "twice");
+        int word;
+        Recorded recorded;
+
+        auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+        bridge.register(&word, nativeSignatureOf(function_));
+        auto entry = cast(IntOfInt) bridge.entryOf(&word);
+        bridge.beginChunk(strategy);
+        bridge.chunkCount.should == 2;
+        entry(3).should == 7;
+
+        bridge.release;
+
+        bridge.chunkCount.should == 0;
     }
 }
 
@@ -435,7 +459,7 @@ static foreach (freshChunk; [false, true]) {
         int word;
         owner.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            owner.beginChunk(ChunkStrategy.protect);
         const entry = owner.entryOf(&word);
 
         owner.guestTarget(entry).word.should == &word;
@@ -457,7 +481,7 @@ static foreach (freshChunk; [false, true]) {
         int word;
         bridge.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            bridge.beginChunk(ChunkStrategy.protect);
         const entry = bridge.entryOf(&word);
         bridge.guestTarget(entry).word.should == &word;
 
@@ -466,6 +490,26 @@ static foreach (freshChunk; [false, true]) {
 
         bridge.guestTarget(entry).word.should == null;
     }
+}
+
+
+// A bridge that has more chunks than its reserved address range holds still
+// names the guest function behind an entry of a chunk outside the range.
+@("guestTarget.chunkOutsideTheRange")
+unittest {
+    auto function_ = declarationOf(
+        q{ extern(C) int twice(int x); }, "twice");
+    Recorded recorded;
+    auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+    int word;
+    bridge.register(&word, nativeSignatureOf(function_));
+    foreach (_; 0 .. 300)
+        bridge.beginChunk(ChunkStrategy.protect);
+
+    const entry = bridge.entryOf(&word);
+
+    bridge.guestTarget(entry).word.should == &word;
+    (cast(IntOfInt) entry)(100).should == 201;
 }
 
 
@@ -488,7 +532,7 @@ static foreach (freshChunk; [false, true]) {
         int word;
         bridge.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            bridge.beginChunk(ChunkStrategy.protect);
 
         const entry = bridge.adjustedFunctionEntryOf(&word, function_, -16);
 

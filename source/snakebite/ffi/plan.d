@@ -1422,6 +1422,12 @@ public struct PlanCache {
         _callbacks = callbacks;
     }
 
+    // How many chunks of entries the installed bridge has.
+    version(unittest)
+    public size_t callbackChunkCount() {
+        return _callbacks is null ? 0 : _callbacks.chunkCount;
+    }
+
     // Records that `word` is what this backend stores for the guest
     // function `declaration` when guest code takes its address or makes
     // a delegate to it. Only a word a backend itself emitted is ever
