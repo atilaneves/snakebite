@@ -12,9 +12,8 @@ module ut.backends.run.jit;
 import ut.backends;
 
 static foreach (backend; Matrix!()) {
-    // A division keeps its handler and an add does not, so one function runs
-    // JIT code and handlers in turn. The call is an instruction without a
-    // template as well.
+    // An unsigned division keeps its handler, so one function runs JIT code
+    // and handlers in turn.
     @("jit.handlersAndJitCodeInOneFunction." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -24,7 +23,7 @@ static foreach (backend; Matrix!()) {
                 assert(n > 0);
                 long sum;
                 foreach (i; 1 .. n + 1)
-                    sum += twice(i) + 100 / i + (i << 1);
+                    sum += twice(i) + cast(long) (100UL / i) + (i << 1);
                 return sum;
             }
             int main() {
@@ -34,6 +33,63 @@ static foreach (backend; Matrix!()) {
                 return mixed(3000) == expected ? 0 : 1;
             }
         }, ["mixed"]);
+    }
+
+    @("jit.signedDivisionAndRemainder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            void checkInt(int left, int right) {
+                assert(right != 0);
+                assert(left / right == -2);
+                assert(left % right == -1);
+                assert(left / -3 == 2);
+                assert(left % -3 == -1);
+                int[2] values = [left, right];
+                int* value = &values[0];
+                *value /= values[1];
+                assert(values[0] == -2);
+                *value %= *value;
+                assert(values[0] == 0 && values[1] == right);
+            }
+            void checkLong(long left, long right) {
+                assert(right != 0);
+                const quotient = left / right;
+                const remainder = left % right;
+                assert(quotient == -(1L << 20) && remainder == -1);
+                left %= right;
+                assert(left == -1);
+            }
+            int main() {
+                foreach (_; 0 .. 300) {
+                    checkInt(-7, 3);
+                    checkLong(-((1L << 40) + 1), 1L << 20);
+                }
+                return 0;
+            }
+        }, ["checkInt", "checkLong"]);
+    }
+
+    @("jit.signedDivisionByConstants." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            enum constants = [1, 2, -2, 3, -7, 10, -10, 256, int.max, int.min];
+            void check(int dividend, int[] divisors) {
+                static foreach (index, divisor; constants) {
+                    assert(dividend / divisor == dividend / divisors[index]);
+                    assert(dividend % divisor == dividend % divisors[index]);
+                }
+            }
+            int main() {
+                auto divisors = constants.dup;
+                foreach (_; 0 .. 40)
+                    foreach (dividend; [int.min, int.min + 1, -21, -20, -19,
+                            -1, 0, 1, 19, 20, 21, int.max - 1, int.max])
+                        check(dividend, divisors);
+                return 0;
+            }
+        }, ["check"]);
     }
 
     // The loop is the only thing that makes `scan` hot: it is called once.

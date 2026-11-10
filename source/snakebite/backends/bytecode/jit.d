@@ -54,7 +54,7 @@ package struct JitOp {
         none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
         fpcmp3, index, checked, castFixed, sliceToPointer, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
-        callWindow, returnValue, returnVoid, arrayEqual,
+        callWindow, returnValue, returnVoid, arrayEqual, signedDivide,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -156,6 +156,14 @@ package struct JitOp {
         bool indirect;
     }
 
+    static struct SignedDivide {
+        bool remainder;
+        bool constantRight;
+        bool twoAddress;
+        // The general two-address handlers divide sign-extended longs.
+        bool widenInt;
+    }
+
     Kind kind;
     ubyte width;
     union {
@@ -174,6 +182,7 @@ package struct JitOp {
         Unary unary;
         Shift shift;
         CallWindow callWindow;
+        SignedDivide signedDivide;
     }
 
     // A kind that has no parameters.
@@ -1096,6 +1105,28 @@ private struct Asm {
         d32(imm);
     }
 
+    // cdq or cqo prepares the implicit high half of the dividend.
+    void extendDividend(int w) {
+        if (w == 8)
+            b(0x48);
+        b(0x99);
+    }
+
+    void idivM(int w, in Mem m) {
+        memOp(w, byteReg: false, 7, m, 0xF7);
+    }
+
+    void idivR(int w, int r) {
+        rrOp(w, byteReg: false, 7, r, 0xF7);
+    }
+
+    void shiftRightI(int w, bool arithmetic, int r, ubyte count) {
+        rrOp(w, byteReg: false, arithmetic ? 7 : 5, r,
+            count == 1 ? 0xD1 : 0xC1);
+        if (count != 1)
+            b(count);
+    }
+
     void movRR64(int dst, int src) {
         rrOp(8, byteReg: false, src, dst, 0x89);
     }
@@ -1847,6 +1878,8 @@ private struct Gen {
 
         case int3:
             return emitInt3(ins, op);
+        case signedDivide:
+            return emitSignedDivide(ins, op);
         case cmp3:
             return emitCmp3(ins, op);
         case fused: {
@@ -2169,6 +2202,127 @@ private struct Gen {
             a.alu(aluOf(p.operation), w, acc, right.memory);
         if (!p.resultInR0)
             a.st(w, d, acc);
+        return true;
+    }
+
+    bool emitSignedDivide(in Instruction ins, in JitOp op) {
+        const p = op.signedDivide;
+        if (!goodWidth(ins.width))
+            return false;
+        const w = cast(int) ins.width;
+        const divideWidth = w == 8 || (w == 4 && p.widenInt) ? 8 : 4;
+        Mem d, l;
+        IntegerRight right;
+        if (!binary(ins, p.twoAddress, p.constantRight,
+                leftInReg: false, destInReg: false, w, d, l, right))
+            return false;
+        if (right.constant && w == 4 && divideWidth == 4
+                && emitSigned32Constant(d, l, cast(int) right.bits, p.remainder))
+            return true;
+        if (w == divideWidth)
+            a.ld(w, RAX, l);
+        else
+            a.ldsx(w, RAX, l);
+        if (right.constant) {
+            int imm;
+            const divisor = w != divideWidth && immOf(w, right.bits, imm)
+                ? cast(ulong) imm : right.bits;
+            a.movI(R11, divisor);
+        } else if (w != divideWidth)
+            a.ldsx(w, R11, right.memory);
+
+        // idiv uses rdx for the dividend and remainder. Save the VM state
+        // until the result is stored. The hardware reports the same faults
+        // as the handler.
+        a.movRR64(SC2, STATE);
+        a.extendDividend(divideWidth);
+        if (right.constant || w != divideWidth)
+            a.idivR(divideWidth, R11);
+        else
+            a.idivM(divideWidth, right.memory);
+        a.st(w, d, p.remainder ? RDX : RAX);
+        a.movRR64(STATE, SC2);
+        return true;
+    }
+
+    bool emitSigned32Constant(in Mem d, in Mem l, int divisor,
+        bool remainder)
+    {
+        import core.bitop: bsr;
+
+        // Leave divide by zero and int.min / -1 to the hardware.
+        if (divisor == 0 || divisor == -1)
+            return false;
+        const magnitude = divisor < 0 ? -cast(uint) divisor : cast(uint) divisor;
+        if (magnitude == 1) {
+            a.ld(4, RAX, l);
+            if (remainder)
+                a.stI(4, d, 0);
+            else
+                a.st(4, d, RAX);
+            return true;
+        }
+
+        const log = cast(ubyte) bsr(magnitude);
+        if ((magnitude & (magnitude - 1)) == 0) {
+            // Bias a negative dividend before rounding down with sar.
+            const mask = cast(int) (magnitude - 1);
+            a.ld(4, RAX, l);
+            a.movRR64(R10, RAX);
+            if (log == 1)
+                a.shiftRightI(4, false, R10, 31);
+            else {
+                a.shiftRightI(4, true, R10, 31);
+                a.aluRI(Alu.and, 4, R10, mask);
+            }
+            a.aluRR(Alu.add, 4, RAX, R10);
+            if (remainder) {
+                a.aluRI(Alu.and, 4, RAX, mask);
+                a.aluRR(Alu.sub, 4, RAX, R10);
+            } else {
+                a.shiftRightI(4, true, RAX, log);
+                if (divisor < 0)
+                    a.rrOp(4, byteReg: false, 3, RAX, 0xF7); // neg
+            }
+            a.st(4, d, RAX);
+            return true;
+        }
+
+        // For M = ceil(S / magnitude), require M*magnitude - S < S/2^31.
+        // Then multiplying a nonzero |dividend| by M/S rounds up by less
+        // than 1/magnitude, so the product lies strictly between the
+        // absolute quotient and its successor. A negative product needs
+        // one added after sar to round toward zero.
+        auto shift = cast(ubyte) (31 + log);
+        auto scale = 1UL << shift;
+        auto multiplier = scale / magnitude + 1;
+        if (multiplier * magnitude - scale >= (scale >> 31)) {
+            ++shift;
+            scale <<= 1;
+            multiplier = scale / magnitude + 1;
+        }
+        a.ldsx(4, RAX, l);
+        if (multiplier <= int.max)
+            a.imulRI(R10, RAX, cast(int) multiplier);
+        else {
+            a.movI(R10, multiplier);
+            a.imulRR(8, R10, RAX);
+        }
+        a.shiftRightI(8, true, R10, shift);
+        const sign = remainder ? R11 : RAX;
+        if (remainder)
+            a.movRR64(sign, RAX);
+        a.shiftRightI(4, false, sign, 31);
+        a.aluRR(Alu.add, 4, R10, sign);
+        if (remainder) {
+            a.imulRI(R10, R10, cast(int) magnitude);
+            a.aluRR(Alu.sub, 4, RAX, R10);
+            a.st(4, d, RAX);
+        } else {
+            if (divisor < 0)
+                a.rrOp(4, byteReg: false, 3, R10, 0xF7); // neg
+            a.st(4, d, R10);
+        }
         return true;
     }
 
