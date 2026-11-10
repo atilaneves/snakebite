@@ -2,13 +2,13 @@ module snakebite.backends.arithmetic;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
 import snakebite.internalfailure: internalFailure;
 
-import snakebite.nativelayout: TypeFacts;
+import snakebite.frontend.typefacts: TypeFacts;
 import snakebite.nativevalue: ComplexOperands;
 
 // How an arithmetic operator combines its operands. Semantic analysis has

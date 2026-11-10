@@ -1,6 +1,6 @@
 module arena.memory;
 
-import snakebite.nativelayout: typeFacts, truthFacts;
+import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
 // The frontend allocates like dmd does: from an arena that is never
@@ -12,7 +12,7 @@ import core.memory: GC;
 import core.sync.mutex: Mutex;
 import dmd.typesem: arrayOf, constOf, immutableOf, sarrayOf, sharedOf;
 import snakebite.frontend.compiler: arenaReport, newInFrontend, parseSnippet;
-import snakebite.nativelayout: TypeFacts;
+import snakebite.frontend.typefacts: TypeFacts;
 import ut.backends;
 
 

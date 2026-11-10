@@ -3,12 +3,12 @@ module snakebite.backends.aggregateinit;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.nativelayout: TypeFacts;
-import snakebite.nativelayout: fieldOffset;
+import snakebite.frontend.typefacts: TypeFacts;
+import snakebite.frontend.typefacts: fieldOffset;
 import dmd.typesem: toBasetype;
 
 

@@ -2,7 +2,7 @@ module snakebite.backends.compoundassign;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 import dmd.typesem: toBasetype;
@@ -65,7 +65,7 @@ package CompoundConversion compoundConversion(
 ) {
     import snakebite.backends.arithmetic: arithmeticKind;
     import snakebite.backends.casts: classify;
-    import snakebite.nativelayout: TypeFacts;
+    import snakebite.frontend.typefacts: TypeFacts;
 
     auto targetType = compoundTarget(expression).type;
     auto operationType = expression.e1.type;

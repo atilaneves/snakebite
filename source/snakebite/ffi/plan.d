@@ -8,7 +8,7 @@ import snakebite.ffi.symbol: Resolver;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
@@ -285,7 +285,7 @@ public struct CallPlan {
     ) const {
         import core.stdc.string: memcpy;
         import snakebite.callarguments: CallArguments;
-        import snakebite.nativelayout:
+        import snakebite.frontend.typefacts:
             delegateFunctionOffset, delegateValueSize;
 
         // See `_callbacks`'s own doc for why the `const` goes.
@@ -691,7 +691,7 @@ public struct CallPlan {
 
     // Writes `value`'s low bytes to `place`, truncated to `store`'s width -
     // the same raw-truncation rule `nativevalue.storeIntegral` uses, but
-    // written directly rather than through `nativelayout.storeIntegral`'s
+    // written directly rather than through `typefacts.storeIntegral`'s
     // validate-and-throw wrapper: a plan's own register widths are already
     // known good, fixed once at prepare time, and never need re-checking -
     // or a second switch on the width `store` has already picked - on
@@ -2043,7 +2043,7 @@ private NativeSignature signatureOf(
         // `classify`'s later, recursive field reads find every size it
         // touches already resolved.
         {
-            import snakebite.nativelayout: TypeFacts;
+            import snakebite.frontend.typefacts: TypeFacts;
 
             auto returnType = type.nextOf;
             if (returnType !is null)

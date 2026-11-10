@@ -3,7 +3,7 @@ module snakebite.ffi.call;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
@@ -42,7 +42,7 @@ public alias CallInvoker = void delegate(
 public struct CallAdapter {
     import dmd.func: FuncDeclaration;
     import dmd.mtype: TypeFunction;
-    import snakebite.nativelayout: TypeFacts;
+    import snakebite.frontend.typefacts: TypeFacts;
 
     private bool _referenceResult;
     private size_t _resultSize;
@@ -432,14 +432,14 @@ pragma(inline, true) private void storeReference(
     void* place,
     void* address,
 ) {
-    import snakebite.nativelayout: storeIntegral;
+    import snakebite.frontend.typefacts: storeIntegral;
 
     storeIntegral(place, cast(size_t) address, size_t.sizeof);
 }
 
 
 private void* referenceAt(const(void)* place) {
-    import snakebite.nativelayout: loadIntegral;
+    import snakebite.frontend.typefacts: loadIntegral;
 
     return cast(void*) loadIntegral(place, size_t.sizeof, false);
 }

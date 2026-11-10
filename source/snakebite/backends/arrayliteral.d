@@ -3,10 +3,10 @@ module snakebite.backends.arrayliteral;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
-import snakebite.nativelayout: TypeFacts;
+import snakebite.frontend.typefacts: TypeFacts;
 
 
 public struct ArrayLiteralPlan {

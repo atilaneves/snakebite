@@ -3,7 +3,7 @@ module snakebite.backends.layout;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
@@ -28,7 +28,7 @@ import snakebite.backends.hostcalllayout:
 // instance - is not this type's concern; a caller that needs those grows
 // its own frame past `size` on top of what this type already reserved.
 package struct FrameLayout {
-    import snakebite.nativelayout: alignUp, TypeFacts;
+    import snakebite.frontend.typefacts: alignUp, TypeFacts;
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
     import dmd.expression: ArrayLiteralExp;
@@ -139,7 +139,7 @@ package struct FrameLayout {
                 typeFunctionOf(function_).next);
             layout.returnPlace = imported!"snakebite.backends.returnplace"
                 .ReturnPlace(layout.reserveSlot(
-                    imported!"snakebite.nativelayout".TypeFacts.pointer).offset,
+                    imported!"snakebite.frontend.typefacts".TypeFacts.pointer).offset,
                     result.size, result.alignment);
         }
 
@@ -492,7 +492,7 @@ package struct FrameLayout {
 package struct ClosureLayout {
     import dmd.declaration: VarDeclaration;
     import dmd.func: FuncDeclaration;
-    import snakebite.nativelayout: alignUp, TypeFacts;
+    import snakebite.frontend.typefacts: alignUp, TypeFacts;
 
     package struct Slot {
         package size_t offset;
@@ -760,7 +760,7 @@ extern(C++) private final class LocalsCollector:
             static if (is(Node == ArrayLiteralExp)) {
                 import snakebite.backends.arrayliteral:
                     ArrayLiteralPlan, planArrayLiteral;
-                import snakebite.nativelayout: isStoredLiteral, TypeFacts;
+                import snakebite.frontend.typefacts: isStoredLiteral, TypeFacts;
 
                 const plan = planArrayLiteral(expression, _function);
                 if (plan.storage == ArrayLiteralPlan.Storage.temporary
@@ -781,7 +781,7 @@ extern(C++) private final class LocalsCollector:
 
         import dmd.astenums: STC;
         import snakebite.backends.temporary: canRetainTemporaries;
-        import snakebite.nativelayout: TypeFacts;
+        import snakebite.frontend.typefacts: TypeFacts;
 
         const retains = canRetainTemporaries(variable);
         _layout.retainsTemporaries |= retains;
@@ -846,7 +846,7 @@ package Shape.Class classOf(imported!"dmd.mtype".Type type) {
 // The shape of an argument of `type` with `facts`, as a variadic argument
 // that no parameter declares.
 package Shape shapeOf(
-    imported!"dmd.mtype".Type type, in imported!"snakebite.nativelayout".TypeFacts facts,
+    imported!"dmd.mtype".Type type, in imported!"snakebite.frontend.typefacts".TypeFacts facts,
 ) {
     return Shape(facts.size, facts.alignment, classOf(type));
 }
