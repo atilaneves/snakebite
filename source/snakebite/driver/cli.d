@@ -27,7 +27,8 @@ public int run(string[] args) {
     import snakebite.backends: BackendName;
     import snakebite.image.dependency: Optimise;
     import snakebite.project.dub: fetchProject;
-    import snakebite.driver.execution: executeBackend, prepareSources, runProject;
+    import snakebite.driver.execution:
+        executeBackend, prepareSources, runProject;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;

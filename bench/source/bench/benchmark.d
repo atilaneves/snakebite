@@ -35,7 +35,8 @@ struct Options {
 public int run(string[] args) {
     import bench.report: printTable;
     import std.stdio: stderr, writeln;
-    import snakebite.driver.execution: PreparationReport, prepareSources, runProject;
+    import snakebite.driver.execution:
+        PreparationReport, prepareSources, runProject;
     import snakebite.project.loading: EndsProcess;
     import snakebite.memory.gc: selectFrontendMemory;
 

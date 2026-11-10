@@ -3,14 +3,16 @@ module snakebite.project.dependencies;
 
 private:
 
+import snakebite.project.sources: SourceSet;
+
 
 // Collects image data from a live program without resetting the frontend.
 // `program` runs at most once, only when cache validation needs image source.
 // For startup without a live program, use `prepareStartupDependencies`.
 public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDependencies(
     in string directory,
-    in imported!"snakebite.project.loading".SourceSet sources,
-    scope imported!"snakebite.backends".Program delegate() program,
+    in SourceSet sources,
+    scope imported!"snakebite.program".Program delegate() program,
     in imported!"snakebite.image.dependency".Optimise optimise
         = imported!"snakebite.image.dependency".Optimise.yes,
     in bool projectEntry = true,
@@ -28,7 +30,7 @@ public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDepe
 // during analysis because diagnostic capture redirects process-wide fd 2.
 public const(imported!"snakebite.image.dependency".DependencyImage)* prepareStartupDependencies(
     in string directory,
-    imported!"snakebite.project.loading".SourceSet sources,
+    SourceSet sources,
     in imported!"snakebite.image.dependency".Optimise optimise
         = imported!"snakebite.image.dependency".Optimise.yes,
 ) {
@@ -48,7 +50,7 @@ private struct DependencyAnalysis {
 
 
 private DependencyAnalysis dependencyAnalysis(
-    imported!"snakebite.backends".Program program,
+    imported!"snakebite.program".Program program,
 ) {
     import snakebite.frontend.compiler: withCompilerLock;
     import snakebite.project.imagesource: imageSource, imageInputs;
@@ -66,9 +68,8 @@ private enum Mode { live, projectEntry, startup }
 
 
 private struct Preparation {
-    import snakebite.backends: Program;
+    import snakebite.program: Program;
     import snakebite.image.dependency: DependencyImage, Optimise;
-    import snakebite.project.loading: SourceSet;
 
     private const(SourceSet) _sources;
     private Optimise _optimise;

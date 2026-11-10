@@ -65,7 +65,7 @@ public int runProject(
     in imported!"snakebite.project.loading".EndsProcess endsProcess,
     in int delegate(
         string,
-        imported!"snakebite.project.loading".SourceSet,
+        imported!"snakebite.project.sources".SourceSet,
         imported!"core.time".Duration,
         void delegate(),
     ) body,
@@ -118,7 +118,7 @@ public PreparationReport prepareProject(
 
 public PreparationReport prepareSources(
     in string directory,
-    imported!"snakebite.project.loading".SourceSet sources,
+    imported!"snakebite.project.sources".SourceSet sources,
     in imported!"core.time".Duration discovery,
     in bool nativeDependencies = true,
     in imported!"snakebite.image.dependency".Optimise optimise

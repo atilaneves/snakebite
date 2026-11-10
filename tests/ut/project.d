@@ -10,9 +10,8 @@ import snakebite.image.dependency: TestHooks;
 import snakebite.driver.execution: prepareProject, executeBackend, runProject;
 import snakebite.project.dub: DubDescription, dubSources;
 import snakebite.project.dubcache: projectDescriptionFromJson;
-import snakebite.project.loading:
-    EndsProcess, ProjectDirectory,
-    projectStateDirectory;
+import snakebite.project.loading: EndsProcess, ProjectDirectory;
+import snakebite.project.state: projectStateDirectory;
 import std.algorithm.searching: endsWith;
 import std.digest.sha: sha256Of;
 import std.digest: toHexString;

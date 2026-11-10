@@ -416,5 +416,6 @@ private enum helpText =
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~
     "  --lowmem              " ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
-    "  --no-jit              " ~ imported!"snakebite.driver.options".noJitHelp ~ "\n" ~
+    "  --no-jit              "
+        ~ imported!"snakebite.driver.options".noJitHelp ~ "\n" ~
     "  -h, --help            Show this help\n";

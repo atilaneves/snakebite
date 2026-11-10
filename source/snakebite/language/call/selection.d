@@ -364,10 +364,10 @@ public struct CallSelection {
         // object (ADR-0008, ADR-0009). The executable's own copy is never
         // preferred: snakebite instantiates plenty of the same templates a
         // guest program also instantiates (`dirEntries` in
-        // `snakebite.project.loading` among them), and that copy's nested closures
-        // carry the host compiler's frame layout, not this backend's -
-        // reusing it for a guest call reads that closure with the wrong
-        // layout. A missing independent symbol leaves the guest body.
+        // `snakebite.project.loading` among them), and that copy's nested
+        // closures carry the host compiler's frame layout, not this
+        // backend's - reusing it for a guest call reads that closure with the
+        // wrong layout. A missing independent symbol leaves the guest body.
         // An ordinary dependency uses its own frontend body when its exact
         // native symbol is absent (ADR-0009, decision 3).
         const prefers = context.instantiated

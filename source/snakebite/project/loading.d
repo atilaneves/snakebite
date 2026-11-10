@@ -3,12 +3,11 @@ module snakebite.project.loading;
 
 private:
 
+import snakebite.project.sources: SourceSet;
 
-public import snakebite.project.sources: SourceSet;
-public import snakebite.project.state: projectStateDirectory;
 
 public struct Project {
-    import snakebite.backends: Program;
+    import snakebite.program: Program;
 
     public string name;
     public string directory;
@@ -25,7 +24,7 @@ public Project loadProject(
     SourceSet sources,
     in bool dependencyImage,
 ) {
-    import snakebite.backends: Program;
+    import snakebite.program: Program;
     import snakebite.frontend.compiler:
         checksOf, FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
