@@ -5734,6 +5734,7 @@ static if (jitSupported) {
         put(&opShiftRightLogical, twoAddressShift(ShiftKind.logicalRight));
         put(&opShiftRightArithmetic,
             twoAddressShift(ShiftKind.arithmeticRight));
+        put(&opArrayEqual, JitOp.plain(Kind.arrayEqual));
         put(&opCopy, JitOp.plain(Kind.copy));
         static foreach (width; 1 .. 17) {
             put(&opCopyFixed!(width, true),

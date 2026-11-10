@@ -54,7 +54,7 @@ package struct JitOp {
         none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
         fpcmp3, index, checked, castFixed, sliceToPointer, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
-        callWindow, returnValue, returnVoid,
+        callWindow, returnValue, returnVoid, arrayEqual,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -1981,6 +1981,9 @@ private struct Gen {
 
         case shift:
             return emitShift(ins, op);
+
+        case arrayEqual:
+            return emitArrayEqual(i, ins, original);
         }
     }
 
@@ -2018,6 +2021,41 @@ private struct Gen {
             return false;
         return integerRight(twoAddress ? ins.source : ins.sourceWidth,
             literalRight, width, R11, right);
+    }
+
+    bool emitArrayEqual(size_t i, in Instruction ins,
+        Instruction.Handler original)
+    {
+        if (!goodWidth(ins.width))
+            return false;
+        Mem d, s;
+        if (!opnd(ins.destination, R9, d) || !opnd(ins.source, R10, s))
+            return false;
+
+        a.ld(8, RAX, Mem(d.base, d.disp + cast(int) arrayLengthOffset));
+        a.alu(Alu.cmp, 8, RAX,
+            Mem(s.base, s.disp + cast(int) arrayLengthOffset));
+        const differentLengths = jccLocal(CC_NE);
+        a.aluRI(Alu.cmp, 8, RAX, 0);
+        const empty = jccLocal(CC_E);
+        a.aluRI(Alu.cmp, 8, RAX, 1);
+        const multipleElements = jccLocal(CC_NE);
+
+        // A one-element comparison can read exactly the bytes in each slice.
+        // The handler keeps the memcmp path for longer slices.
+        a.ld(8, R11, Mem(s.base, s.disp + cast(int) arrayPointerOffset));
+        a.ld(8, R10, Mem(d.base, d.disp + cast(int) arrayPointerOffset));
+        const width = cast(int) ins.width;
+        a.ld(width, RAX, Mem(R10, 0));
+        a.alu(Alu.cmp, width, RAX, Mem(R11, 0));
+        patchHere(differentLengths);
+        patchHere(empty);
+        a.setcc(CC_E, d);
+        jmpTo(i + 1);
+
+        patchHere(multipleElements);
+        jumpToHandler(i, original);
+        return true;
     }
 
     static Alu aluOf(JitOp.IntOperation operation) {

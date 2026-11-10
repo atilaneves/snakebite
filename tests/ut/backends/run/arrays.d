@@ -2305,7 +2305,8 @@ static foreach (backend; Matrix!()) {
 
             void main() {
                 assert(count(["ab", "abc", "ab", "", "ba"], "ab") == 2 + 30);
-                assert(count([""], "") == 1);
+                assert(count(["a", "b", "ab", ""], "a") == 1 + 30);
+                assert(count([cast(string) null], "") == 1);
 
                 int[] ints = [1, 2, 3];
                 int[] same = [1, 2, 3];
