@@ -36,18 +36,24 @@ static if (jitSupported):
 
 @nogc nothrow:
 
+// Each guest call or backward branch adds `jitStep` to `Function.jitHeat`.
+// A carry out of the 32-bit sum means the function has reached the threshold.
+private enum jitThreshold = 256;
+package enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
+
 // What the JIT does for one instruction: the kind of template and its
 // parameters. Each kind that has parameters has the member of its own name in
 // the union; `width` is a fixed operand width, or 0 when the instruction holds
 // it. `emitOp` says what each kind emits.
 package struct JitOp {
     import snakebite.backends.bytecode.vm: CheckedAccess, CompareKind,
-        Comparison, IndexBase;
+        Comparison, Destination, IndexBase;
 
     enum Kind : ubyte {
         none, copy, constant, zero, jump, branch, int3, cmp3, fused, fp3,
         fpcmp3, index, checked, castFixed, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
+        callWindow, returnValue, returnVoid,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -143,6 +149,11 @@ package struct JitOp {
         bool twoAddress;
     }
 
+    static struct CallWindow {
+        Destination destination;
+        bool counted;
+    }
+
     Kind kind;
     ubyte width;
     union {
@@ -160,6 +171,7 @@ package struct JitOp {
         BoolOp boolOp;
         Unary unary;
         Shift shift;
+        CallWindow callWindow;
     }
 
     // A kind that has no parameters.
@@ -248,7 +260,7 @@ private enum : ubyte {
 // What the JIT keeps from one compile to the next. It belongs to the JIT lock:
 // only `JitLock.owned` gives access to it.
 private struct JitState {
-    import snakebite.backends.bytecode.vm: Instruction;
+    import snakebite.backends.bytecode.vm: Function, Instruction;
 
     @nogc nothrow:
 
@@ -262,14 +274,13 @@ private struct JitState {
     Scratch!size_t labels;
     PerfMap perfMap;
 
-    Emitted emitFunction(Instruction[] instructions,
+    Emitted emitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals,
-        const(long)[] constants, in char[] name)
+        const(Instruction.Handler)[] originals)
     {
         import core.atomic: atomicStore, MemoryOrder;
-        import snakebite.backends.bytecode.vm: chainedDispatch, DispatchState;
 
+        const instructions = function_.instructions;
         const start = region.chunkUsed;
         const cap = region.chunkCapacity - start;
         Gen g;
@@ -279,7 +290,8 @@ private struct JitState {
         g.bmi2 = bmi2;
         g.instructions = instructions;
         g.snapshot = snapshot;
-        g.constants = constants;
+        g.constants = function_.constants;
+        g.callSites = function_.callSites;
         auto labelMemory = labels.reserve(instructions.length + 1);
         if (labelMemory is null)
             return Emitted.failed;
@@ -296,7 +308,7 @@ private struct JitState {
             const savedLiterals = g.literalCount;
             bool done;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
-                done = g.emitOp(i, ops[i]);
+                done = g.emitOp(i, ops[i], originals[i]);
             if (g.outOfMemory)
                 return Emitted.failed;
             if (!done) {
@@ -305,22 +317,8 @@ private struct JitState {
                 g.literalCount = savedLiterals;
                 if (originals[i] is null)
                     g.a.ud2();
-                else {
-                    // Without chained dispatch the handler returns the next
-                    // instruction to `dispatchLoop`, which then passes the
-                    // register arguments from `DispatchState`: save r0 and fp0
-                    // there first, as `executeRegister` does at its end.
-                    static if (!chainedDispatch) {
-                        g.a.st(8,
-                            Mem(STATE, cast(int) DispatchState.r0.offsetof),
-                            REG0);
-                        g.a.sse(doublePrefix, storeOpcode, fp0Register,
-                            Mem(STATE, cast(int) DispatchState.fp0.offsetof));
-                    }
-                    g.a.movI(PCREG, cast(size_t) &instructions[i]);
-                    g.a.movI(RAX, cast(size_t) originals[i]);
-                    g.a.jmpRax;
-                }
+                else
+                    g.jumpToHandler(i, originals[i]);
             }
         }
         if (cap - g.a.n - g.literalBytes < codeAlignment)
@@ -341,8 +339,8 @@ private struct JitState {
             region.populate;
 
         const code = region.execBase + start;
-        if (name.length)
-            perfMap.record(code, g.a.n, name);
+        if (function_.jitName.length)
+            perfMap.record(code, g.a.n, function_.jitName);
         // One aligned 8-byte store with release order for each word, after
         // the code is complete. A thread that runs the function moves to JIT
         // code at its next dispatch.
@@ -484,7 +482,7 @@ private shared int _lockWord;
 // lock can wait for a thread that the GC suspended while it held the lock. The
 // lock is released when the `JitLock` that holds it goes out of scope.
 package struct JitLock {
-    import snakebite.backends.bytecode.vm: Instruction;
+    import snakebite.backends.bytecode.vm: Function, Instruction;
 
     @nogc nothrow:
 
@@ -527,23 +525,20 @@ package struct JitLock {
     // little room left, emission stops (it checks before each instruction)
     // and starts again in a new chunk, whose size no function can exceed. A
     // function does not reserve room for its worst case before it emits.
-    package bool jitFunction(Instruction[] instructions,
+    package bool jitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals,
-        const(long)[] constants, in char[] name)
+        const(Instruction.Handler)[] originals)
     {
-        if (instructions.length == 0)
+        if (snapshot.length == 0)
             return false;
         ref state = owned(_jitState);
-        auto result = state.emitFunction(instructions, snapshot, ops, originals,
-            constants, name);
+        auto result = state.emitFunction(function_, snapshot, ops, originals);
         if (result == Emitted.full) {
-            const worst = instructions.length * maximumBytesPerInstruction
+            const worst = snapshot.length * maximumBytesPerInstruction
                 + 4096;
             if (!state.region.newChunk(worst))
                 return false;
-            result = state.emitFunction(instructions, snapshot, ops,
-                originals, constants, name);
+            result = state.emitFunction(function_, snapshot, ops, originals);
         }
         return result == Emitted.done;
     }
@@ -955,11 +950,15 @@ private struct Asm {
 
     // `jmp rax`.
     void jmpRax() { b(0xFF); b(0xE0); }
+
+    void jmpM(in Mem target) { memOp(4, byteReg: false, 4, target, 0xFF); }
 }
 
 private struct Gen {
-    import snakebite.backends.bytecode.vm: CheckedAccess, CompareKind,
-        Comparison, DispatchState, indirectBit, IndexBase, Instruction;
+    import snakebite.backends.bytecode.vm: Activation, CallSite,
+        chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
+        DispatchState, Function, indirectBit, IndexBase, Instruction;
+    import snakebite.framestack: FrameStack;
     import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
 
     @nogc nothrow:
@@ -971,6 +970,7 @@ private struct Gen {
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     const(long)[] constants;
+    const(CallSite)[] callSites;
     size_t[] labels;
     Fixup* fixups;
     size_t fixupCount;
@@ -1107,6 +1107,135 @@ private struct Gen {
         }
     }
 
+    bool emitCallWindow(size_t i, in JitOp.CallWindow op,
+        Instruction.Handler original)
+    {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        const ins = snapshot[i];
+        const site = &callSites[ins.source];
+        const fast = &site.fast;
+        // Preparing a site may compile guest bytecode. Only read facts that
+        // the handler has published and that will stay valid for this site.
+        if (atomicLoad!(MemoryOrder.acq)(
+                *cast(shared(uint)*) &fast.state) != CallSite.FastCall.State.ready)
+            return false;
+        const callee = fast.callee;
+        const hasPlace = callee.returnPlace.offset != size_t.max;
+        const hasWindows = callee.windowSlot != size_t.max;
+        if (site.windowSlot > int.max || site.windowDisp > int.max
+                || site.windowScratch > int.max || fast.frameBytes > int.max
+                || fast.frameOffset > int.max || fast.reachBytes > int.max
+                || (hasPlace && fast.placeStore > int.max)
+                || (hasWindows && (fast.windowStore > int.max
+                    || fast.windowBase > int.max)))
+            return false;
+
+        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+        a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
+        a.lea(R11, Mem(R10, cast(int) site.windowDisp));
+        a.lea(RAX, Mem(R11, cast(int) fast.reachBytes));
+        a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.fastEndOffset));
+        const grow = jccLocal(CC_A);
+
+        a.movI(PCREG, cast(size_t) callee);
+        size_t tierUp;
+        if (op.counted) {
+            const heat = Mem(PCREG, Function.jitHeat.offsetof);
+            a.ld(4, RAX, heat);
+            a.aluRI(Alu.add, 4, RAX, jitStep);
+            // Let the counting handler perform the event on carry.
+            tierUp = jccLocal(CC_B);
+            a.st(4, heat, RAX);
+        }
+        a.st(8, Mem(R11, Activation.function_.offsetof), PCREG);
+
+        Mem place;
+        if (op.destination == Destination.discard)
+            place = Mem(R10, cast(int) site.windowScratch);
+        else if (!opnd(ins.destination, RAX, place))
+            return false;
+        a.lea(RAX, place);
+        a.st(8, Mem(R11, Activation.returnPlace.offsetof), RAX);
+        a.lea(FRAME, Mem(R11, cast(int) fast.frameOffset));
+        a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
+        if (hasPlace)
+            a.st(8, Mem(FRAME, cast(int) fast.placeStore), RAX);
+        if (hasWindows) {
+            a.lea(RAX, Mem(R11, cast(int) fast.windowBase));
+            a.st(8, Mem(FRAME, cast(int) fast.windowStore), RAX);
+        }
+
+        a.ld(8, RAX, Mem(R9, FrameStack.topOffset));
+        a.alu(Alu.sub, 8, RAX, Mem(R9, FrameStack.baseOffset));
+        a.st(8, Mem(R11, Activation.frameMark.offsetof), RAX);
+        a.lea(RAX, Mem(R11, cast(int) fast.frameBytes));
+        a.st(8, Mem(R9, FrameStack.topOffset), RAX);
+        a.ld(8, RAX, Mem(R9, FrameStack.cleanupMarkOffset));
+        a.st(8, Mem(R11, Activation.cleanupMark.offsetof), RAX);
+
+        // A throw from the callee uses the call site in the parent.
+        a.movI(PCREG, cast(size_t) &instructions[i]);
+        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
+        a.lea(RAX, Mem(PCREG, Instruction.sizeof));
+        a.st(8, Mem(ACTIVE, Activation.resume.offsetof), RAX);
+        a.st(8, Mem(R11, Activation.parent.offsetof), ACTIVE);
+        a.movI(PCREG, cast(size_t) callee.instructions.ptr);
+        a.st(8, Mem(R11, Activation.pc.offsetof), PCREG);
+        a.st(8, Mem(STATE, DispatchState.current.offsetof), R11);
+        a.movRR64(ACTIVE, R11);
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+
+        patchHere(grow);
+        if (op.counted)
+            patchHere(tierUp);
+        jumpToHandler(i, original);
+        return true;
+    }
+
+    bool emitReturn(size_t i, bool hasValue, Instruction.Handler original) {
+        const ins = snapshot[i];
+        if (hasValue && ins.width > 64)
+            return false;
+
+        a.ld(8, R10, Mem(ACTIVE, Activation.parent.offsetof));
+        a.aluRI(Alu.cmp, 8, R10, 0);
+        const root = jccLocal(CC_E);
+        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+        a.ld(8, R11, Mem(R9, FrameStack.cleanupMarkOffset));
+        a.alu(Alu.cmp, 8, R11, Mem(ACTIVE, Activation.cleanupMark.offsetof));
+        const cleanup = jccLocal(CC_NE);
+
+        if (hasValue && ins.width != 0) {
+            Mem source;
+            if (!opnd(ins.source, SC2, source))
+                return false;
+            a.ld(8, R11, Mem(ACTIVE, Activation.returnPlace.offsetof));
+            a.aluRI(Alu.cmp, 8, R11, 0);
+            const discard = jccLocal(CC_E);
+            a.lea(RAX, source);
+            a.aluRR(Alu.cmp, 8, RAX, R11);
+            const aliased = jccLocal(CC_E);
+            copyChunks(source, Mem(R11, 0), ins.width);
+            patchHere(aliased);
+            patchHere(discard);
+        }
+
+        a.ld(8, RAX, Mem(ACTIVE, Activation.frameMark.offsetof));
+        a.alu(Alu.add, 8, RAX, Mem(R9, FrameStack.baseOffset));
+        a.st(8, Mem(R9, FrameStack.topOffset), RAX);
+        a.st(8, Mem(STATE, DispatchState.current.offsetof), R10);
+        a.movRR64(ACTIVE, R10);
+        a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
+        a.ld(8, PCREG, Mem(ACTIVE, Activation.resume.offsetof));
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+
+        patchHere(root);
+        patchHere(cleanup);
+        jumpToHandler(i, original);
+        return true;
+    }
+
     // The value of `width` bytes at a constant-pool address, zero-extended.
     static ulong constantAt(size_t address, int w) {
         switch (w) {
@@ -1146,11 +1275,30 @@ private struct Gen {
         return t[comparison];
     }
 
-    bool emitOp(size_t i, in JitOp op) {
+    void jumpToHandler(size_t i, Instruction.Handler handler) {
+        // The unchained dispatcher gets its register arguments from the state.
+        static if (!chainedDispatch) {
+            a.st(8, Mem(STATE, DispatchState.r0.offsetof), REG0);
+            a.sse(doublePrefix, storeOpcode, fp0Register,
+                Mem(STATE, DispatchState.fp0.offsetof));
+        }
+        a.movI(PCREG, cast(size_t) &instructions[i]);
+        a.movI(RAX, cast(size_t) handler);
+        a.jmpRax;
+    }
+
+    bool emitOp(size_t i, in JitOp op, Instruction.Handler original) {
         const ins = snapshot[i];
         final switch (op.kind) with (JitOp.Kind) {
         case none:
             return false;
+
+        case callWindow:
+            return emitCallWindow(i, op.callWindow, original);
+
+        case returnValue:
+        case returnVoid:
+            return emitReturn(i, op.kind == returnValue, original);
 
         case copy: {
             const size = op.width ? op.width : ins.width;
