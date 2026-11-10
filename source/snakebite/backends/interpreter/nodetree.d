@@ -7263,7 +7263,7 @@ private Node buildAssertion(E)(E ev, AssertExp expression) {
 // The node that tests the truth of `expression`, as a condition does.
 private Node buildTruth(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.language.control.plaincondition: isPlainCondition;
+    import snakebite.language.control.condition: isPlainCondition;
 
     if (expression.op == EXP.comma)
         return buildComma(ev, expression.isCommaExp, &buildTruth!E);
@@ -7345,7 +7345,7 @@ private Node buildTruthAfterEnd(E)(
 // `&&` or `||` as its plan says (`logicalPlan`): a right operand with a
 // value is a test, and one without runs for its effect.
 private Node buildLogical(E)(E ev, imported!"dmd.expression".LogicalExp logical) {
-    import snakebite.language.control.logical: LogicalPlan, logicalPlan;
+    import snakebite.language.control.condition: LogicalPlan, logicalPlan;
 
     const plan = logicalPlan(logical);
     auto left = buildTruth(ev, logical.e1);
@@ -8632,7 +8632,7 @@ private Node buildReferenceBinding(E)(
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     import dmd.astenums: STMT;
     import dmd.tokens: EXP;
-    import snakebite.language.control.ifplan: IfPlan, ifPlan;
+    import snakebite.language.control.condition: IfPlan, ifPlan;
     import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
 
     Node generic() {

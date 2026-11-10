@@ -241,8 +241,8 @@ import snakebite.failure.halt: isHalt;
 import snakebite.language.checks.assertion: CAssertCall;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison: IdentityPlan;
-import snakebite.language.control.ifplan: IfPlan;
-import snakebite.language.control.logical: LogicalPlan;
+import snakebite.language.control.condition: IfPlan;
+import snakebite.language.control.condition: LogicalPlan;
 import snakebite.language.operators.comparison: ComparisonPlan;
 import snakebite.language.control.transfer: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;

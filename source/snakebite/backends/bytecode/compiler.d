@@ -15,9 +15,9 @@ import object: TypeInfo_Class;
 import snakebite.native.argumentflow: Shape, SignatureTable;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison: IdentityPlan, identityPlan;
-import snakebite.language.control.ifplan: IfPlan;
-import snakebite.language.control.logical: LogicalPlan;
-import snakebite.language.control.plaincondition:
+import snakebite.language.control.condition: IfPlan;
+import snakebite.language.control.condition: LogicalPlan;
+import snakebite.language.control.condition:
     isPlainCondition, isPlainPlace, isRealFloatType;
 import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
 import snakebite.language.control.cases:
