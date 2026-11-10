@@ -161,7 +161,10 @@ public struct GuestModules {
     }
 
     // What the process registered with druntime and did not unregister, and
-    // the registry images it opened and did not close.
+    // the registry images it opened and did not close. The counts are for the
+    // whole process, so a test that reads them must run with no other test in
+    // the process: tag it `@alone` (build/ci.sh runs those with
+    // `bin/at -s '@alone'`).
     version(unittest)
     public static Held held() {
         return Held(
