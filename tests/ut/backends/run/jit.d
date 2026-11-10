@@ -189,6 +189,52 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
+    @("jit.floatingPointLoopCanEnterAtTheCounterUpdate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int orbit(double realPart, double imaginaryPart, bool skipFirst) {
+                double realSquared = 0;
+                double imaginarySquared = 0;
+                double imaginary = 0;
+                int steps = 0;
+                bool keepGoing = true;
+                int escaped = 0;
+                // A jump to the counter update skips the first FP step.
+                if (skipFirst)
+                    goto count;
+                while (keepGoing && steps < 50) {
+                    {
+                        const realValue = realSquared - imaginarySquared + realPart;
+                        imaginary = 2.0 * realValue * imaginary + imaginaryPart;
+                        realSquared = realValue * realValue;
+                        imaginarySquared = imaginary * imaginary;
+                    }
+                    if (realSquared + imaginarySquared > 4.0) {
+                        keepGoing = false;
+                        escaped = 1;
+                    }
+                count:
+                    steps += 1;
+                }
+                return steps * 2 + escaped;
+            }
+            int main() {
+                foreach (_; 0 .. 12) {
+                    if (orbit(0, 0, false) != 100)
+                        return 1;
+                    if (orbit(1, 0, false) != 7)
+                        return 2;
+                    if (orbit(0, 2, false) != 5)
+                        return 3;
+                    if (orbit(1, 0, true) != 9)
+                        return 4;
+                }
+                return 0;
+            }
+        }, ["orbit"]);
+    }
+
     @("jit.hotForLoopChecksItsFirstIterationAndContinue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

@@ -336,6 +336,22 @@ package struct JitState {
             if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
             g.labels[i] = g.a.n;
+            if (!g.fpLoop.backedge && ops[i].kind == JitOp.Kind.branch)
+                g.fpLoop = g.planFpLoop(i, ops, originals);
+            if (g.fpLoop.backedge) {
+                if (i == g.fpLoop.head) {
+                    g.fpSlots = g.fpLoop.seed;
+                    g.fpSlots.reload(g.a);
+                    g.fpLoop.headBody = g.a.n;
+                } else if (i == g.fpLoop.compare) {
+                    g.fpLoop.joinFixups = g.fixupCount;
+                } else if (i == g.fpLoop.join) {
+                    // The compare preserves the map expected by its target.
+                    foreach (f; g.fixups[g.fpLoop.joinFixups .. g.fixupCount])
+                        g.patchHere(f.position);
+                    g.fixupCount = g.fpLoop.joinFixups;
+                }
+            }
             const saved = g.a.n;
             const savedFixups = g.fixupCount;
             const savedLiterals = g.literalCount;
@@ -347,8 +363,12 @@ package struct JitState {
                 g.fpSlots = FpSlots.init;
                 g.intSlot = IntSlot.init;
             }
-            if (g.outOfMemory)
+            if (g.outOfMemory || (g.fpLoop.backedge && (!done || g.usedKnown)))
                 return Emitted.failed;
+            if (g.fpLoop.backedge && i == g.fpLoop.backedge) {
+                g.fpLoop = FpLoop.init;
+                g.fpSlots = FpSlots.init;
+            }
             if (!done) {
                 g.a.n = saved;
                 g.fixupCount = savedFixups;
@@ -1328,6 +1348,16 @@ private struct ReloadEntry {
     IntSlot intSlot;
 }
 
+private struct FpLoop {
+    size_t head;
+    size_t compare;
+    size_t join;
+    size_t backedge;
+    FpSlots seed;
+    size_t headBody;
+    size_t joinFixups;
+}
+
 private struct Gen {
     import snakebite.backends.bytecode.vm: Activation, CallSite,
         chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
@@ -1343,6 +1373,7 @@ private struct Gen {
     Scratch!Literal* literalScratch;
     Scratch!ReloadEntry* reloadEntryScratch;
     FpSlots fpSlots;
+    FpLoop fpLoop;
     IntSlot intSlot;
     bool readIntSlot;
     size_t reloadEntryCount;
@@ -1500,6 +1531,10 @@ private struct Gen {
             m = Mem(scratch, cast(int) disp);
             return true;
         }
+        return frameOperand(raw, m);
+    }
+
+    static bool frameOperand(size_t raw, out Mem m) pure @safe {
         if (raw > 0x7fff_0000)
             return false;
         m = Mem(FRAME, cast(int) raw);
@@ -1751,6 +1786,145 @@ private struct Gen {
         a.jmpRax;
     }
 
+    FpLoop planFpLoop(size_t head, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals)
+    {
+        // One backedge and one join suffice for a local register-map check.
+        with (JitOp.Kind) {
+            enum minLoopInstructions = 6;
+            enum maxLoopInstructions = 24;
+            size_t exit, target;
+            if (!targetIndex(snapshot[head].source, exit) || exit <= head
+                    || exit - head < minLoopInstructions
+                    || exit - head > maxLoopInstructions
+                    || ops[exit - 1].kind != jump
+                    || !targetIndex(snapshot[exit - 1].destination, target)
+                    || target != head)
+                return FpLoop.init;
+
+            const limit = head + 1;
+            if (ops[limit].kind != fused
+                    || ops[limit].fused.kind == CompareKind.floating
+                    || !ops[limit].fused.constantRight
+                    || !targetIndex(snapshot[limit].sourceWidth, target)
+                    || target != exit)
+                return FpLoop.init;
+
+            foreach (original; originals[head .. exit])
+                if (original is null)
+                    return FpLoop.init;
+            Mem memory;
+            const header = snapshot[head];
+            const test = snapshot[limit];
+            if (!goodWidth(ops[head].width ? ops[head].width : header.width)
+                    || !frameOperand(header.destination, memory)
+                    || !goodWidth(test.width)
+                    || (!ops[limit].fused.leftInR0
+                        && !frameOperand(test.destination, memory)))
+                return FpLoop.init;
+
+            const join = exit - 2;
+            const firstFp = limit + 1;
+            size_t compare = firstFp;
+            FpSlots endSlots;
+            for (; compare < join && ops[compare].kind == fp3; ++compare)
+                if (!advanceDirectFpSlots(compare, ops[compare].fp3, endSlots))
+                    return FpLoop.init;
+            const cmp = snapshot[compare];
+            if (compare == firstFp || compare == join || ops[compare].kind != fused
+                    || ops[compare].fused.kind != CompareKind.floating
+                    || !targetIndex(cmp.sourceWidth, target) || target != join
+                    || (cmp.width != 4 && cmp.width != 8)
+                    || (!ops[compare].fused.leftInR0
+                        && !frameOperand(cmp.destination, memory))
+                    || (!ops[compare].fused.constantRight
+                        && !frameOperand(cmp.source, memory)))
+                return FpLoop.init;
+
+            FpSlots seed;
+            foreach (index, slot; endSlots.slots)
+                if (slot.offset >= 0 && readsBeforeWrite(slot, firstFp,
+                        ops[firstFp .. compare]))
+                    seed.slots[index] = slot;
+            if (seed.empty)
+                return FpLoop.init;
+            // A carried right operand can change the register assignment.
+            endSlots = seed;
+            foreach (i; firstFp .. compare)
+                if (!advanceDirectFpSlots(i, ops[i].fp3, endSlots))
+                    return FpLoop.init;
+            foreach (index, slot; seed.slots)
+                if (slot.offset >= 0 && endSlots.slots[index] != slot)
+                    return FpLoop.init;
+
+            foreach (i; compare + 1 .. join) {
+                const ins = snapshot[i];
+                const op = ops[i];
+                const width = op.kind == copy && op.width ? op.width : ins.width;
+                if (!(op.kind == zero || (op.kind == constant
+                            && ins.source < constants.length)
+                        || (op.kind == copy && isLiteralCopy(ins, op, width)))
+                        || !preservesFpSlots(ins.destination, width, endSlots))
+                    return FpLoop.init;
+            }
+
+            const update = snapshot[join];
+            const op = ops[join];
+            const width = op.width ? op.width : update.width;
+            if (op.kind != int3 || !op.int3.constantRight || op.int3.resultInR0
+                    || (!op.int3.twoAddress && !op.int3.leftInR0
+                        && !frameOperand(update.source, memory))
+                    || !preservesFpSlots(update.destination, width, endSlots))
+                return FpLoop.init;
+
+            return FpLoop(head, compare, join, exit - 1, seed);
+        }
+    }
+
+    bool advanceDirectFpSlots(size_t i, in JitOp.Fp3 op, ref FpSlots slots) {
+        const ins = snapshot[i];
+        const width = cast(int) ins.width;
+        Mem dest, left, right;
+        if ((width != 4 && width != 8) || (op.leftInFp0 && width != 8)
+                || (!op.resultInFp0 && !frameOperand(ins.destination, dest))
+                || (!op.leftInFp0 && !frameOperand(ins.source, left))
+                || (!op.constantRight && !frameOperand(ins.sourceWidth, right)))
+            return false;
+        if (!op.resultInFp0)
+            slots.assign(dest, width,
+                op.leftInFp0 ? fp0Register : slots.find(left, width),
+                op.constantRight ? -1 : slots.find(right, width));
+        return true;
+    }
+
+    bool readsBeforeWrite(in FpSlots.Slot slot, size_t first,
+        const(JitOp)[] ops)
+    {
+        foreach (offset, ref const op; ops) {
+            const ins = snapshot[first + offset];
+            if (slot.width == ins.width
+                    && ((!op.fp3.leftInFp0 && slot.offset == ins.source)
+                        || (!op.fp3.constantRight && slot.offset == ins.sourceWidth)))
+                return true;
+            if (!op.fp3.resultInFp0
+                    && ins.destination < slot.offset + slot.width
+                    && cast(size_t) slot.offset < ins.destination + ins.width)
+                return false;
+        }
+        return false;
+    }
+
+    static bool preservesFpSlots(size_t raw, size_t width, in FpSlots slots) {
+        Mem dest;
+        if (!goodWidth(width) || !frameOperand(raw, dest))
+            return false;
+        foreach (slot; slots.slots)
+            if (slot.offset >= 0 && slot.offset < dest.disp + width
+                    && dest.disp < slot.offset + slot.width)
+                return false;
+        return true;
+    }
+
     bool emitOp(size_t i, const(JitOp)[] ops,
         Instruction.Handler original)
     {
@@ -1762,22 +1936,24 @@ private struct Gen {
             || op.kind == JitOp.Kind.castFixed || op.kind == JitOp.Kind.widen
             || op.kind == JitOp.Kind.jump
             || (op.kind == JitOp.Kind.fused && !fpCompare);
-        if (!fpArithmetic && !fpCompare)
+        const inFpLoop = fpLoop.backedge != 0;
+        if (!fpArithmetic && !fpCompare && !inFpLoop)
             fpSlots = FpSlots.init;
         if (!usesInt)
             intSlot = IntSlot.init;
-        if (!fpArithmetic && !fpCompare && !usesInt)
+        if (!fpArithmetic && !fpCompare && !usesInt && !inFpLoop)
             return emitTemplate(i, ops, op, original);
 
         const incomingFp = fpSlots;
         const incomingInt = intSlot;
         readIntSlot = false;
         const done = emitTemplate(i, ops, op, original);
-        if (!done || fpCompare)
+        if (!done || (fpCompare && !inFpLoop))
             fpSlots = FpSlots.init;
         if (!done || op.kind == JitOp.Kind.jump)
             intSlot = IntSlot.init;
-        if (done && (!incomingFp.empty || readIntSlot)) {
+        if (done && (!incomingFp.empty || readIntSlot)
+                && !(inFpLoop && i == fpLoop.head)) {
             // Only the preceding template's fallthrough can assume these
             // registers are live. All other entries reload the frame.
             auto entries = reloadEntryScratch.grow(reloadEntryCount + 1);
@@ -1875,6 +2051,10 @@ private struct Gen {
         }
 
         case jump: {
+            if (fpLoop.backedge && i == fpLoop.backedge) {
+                jmpLocalTo(fpLoop.headBody);
+                return true;
+            }
             size_t t;
             if (!targetIndex(ins.destination, t))
                 return false;
