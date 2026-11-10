@@ -11,7 +11,7 @@ import snakebite.internalfailure: internalFailure;
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
-import snakebite.backends.argumentflow: Shape;
+import snakebite.backends.argumentflow: Shape, SignatureTable;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.ifplan: IfPlan;
@@ -69,10 +69,25 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // out of nesting order, so they cannot share one LIFO stack.
     // Entries are owned and released by their host thread (ADR-0006).
     private ExecutionStates!(Vm*) _vms;
+    private CallbackBridge* _callbacks;
+    // Set by `release` when no host code holds a callback entry, so that no
+    // guest code of this instance can run again once its states are gone.
+    private shared bool _jitCodeCanGo;
     private NativeData _nativeData;
     private PlanCache _plans;
     // What the functions of this backend do with the JIT.
     private JitSetting _jit;
+    // The JIT code region and the other JIT state of this instance. Its
+    // address never changes, and each `Function` that this instance compiles
+    // points to it. The destructor of the field frees the region.
+    static if (imported!"snakebite.backends.bytecode.jit".jitSupported) {
+        private imported!"snakebite.backends.bytecode.jit".JitInstance
+            _jitInstance;
+
+        package auto jitInstance() {
+            return &_jitInstance;
+        }
+    }
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -117,6 +132,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // paths and host entry. Publication permits lock-free callback reads
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
+    // The interned parameter signatures of the layouts of this backend. A
+    // `Signature*` of this backend meets only others of this backend.
+    package SignatureTable signatures;
+
+    // Whether the compiler records relocs. It is off: nothing reads the
+    // relocs yet, and recording them costs compile time and memory.
+    public bool recordRelocs;
 
     public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
@@ -135,13 +157,31 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             (type, loc) => _nativeData.initialValue(type, loc));
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
-        }, () => _nativeData.release);
-        _plans.useCallbacks(
-            new CallbackBridge(&invokeCallback, cast(void*) this));
+        }, () => _nativeData.release, &releaseJitCode);
+        _callbacks = new CallbackBridge(&invokeCallback, cast(void*) this);
+        _plans.useCallbacks(_callbacks);
     }
 
+    // The owner ends the instance. The JIT code goes when no guest code can
+    // run: host code holds no callback entry, and (`ExecutionStates`) no
+    // thread has an execution state left, which is checked when the last
+    // one ends. Active calls and fibers keep a state until they return. If
+    // host code holds an entry, the callbacks keep the instance reachable
+    // for the life of the process, and its JIT code stays with it.
     protected override void release() {
+        import core.atomic: atomicStore;
+
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            atomicStore(_jitCodeCanGo, !_callbacks.hasEntries);
         _vms.end;
+    }
+
+    private void releaseJitCode() nothrow @nogc {
+        import core.atomic: atomicLoad;
+
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            if (atomicLoad(_jitCodeCanGo))
+                _jitInstance.release;
     }
 
     private void* constantSymbolAddress(
@@ -293,7 +333,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             // FrameLayout.of completes body semantics before collecting
             // locals, including lowering temporaries. Publish only that
             // complete layout, owned by this backend rather than the AST.
-            result = _layouts.insert(function_, FrameLayout.of(function_));
+            result = _layouts.insert(
+                function_, FrameLayout.of(function_, signatures));
         });
         return result;
     }
@@ -920,7 +961,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         constructsThroughPair, contextSourceOf,
         pairPlanOf;
     import snakebite.backends.bytecode.relocation:
-        Address, Place, Reloc, Target, recordRelocs;
+        Address, Place, Reloc, Target;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
     import snakebite.exception: SnakebiteException;
@@ -1297,7 +1338,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     site.cleanupEndIndex);
             }
 
-        if (recordRelocs) {
+        if (_bytecode.recordRelocs) {
             foreach (index, ref site; _callSites)
                 recordCallSiteRelocs(_relocs, index, site);
             foreach (index, ref site; _assertSites)
@@ -1347,6 +1388,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.fixWindowFacts();
         result.jitHeat = _jit.jitStartHeat;
         result.jitCounts = _jit.jitCounting;
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            result.jit = _bytecode.jitInstance;
         return result;
     }
 
@@ -2116,7 +2159,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (!recordRelocs)
+        if (!_bytecode.recordRelocs)
             return;
         Roles roles;
         const known = rolesOf(handler, roles);
@@ -2138,7 +2181,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t addConstant(in Address address) {
-        if (recordRelocs && !address.isNull)
+        if (_bytecode.recordRelocs && !address.isNull)
             _relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _constants.length),
@@ -9745,7 +9788,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
-        auto valueCall = ValueCall.of(calleeType, true);
+        auto valueCall = ValueCall.of(
+            calleeType, true, _bytecode.signatures);
         const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
@@ -10008,7 +10052,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _receiverDest = size_t.max;
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
-            return contextOffsetOf(calleeContextSourceOf(_function, callee));
+            return contextOffsetOf(calleeContextSourceOf(
+                _function, callee, _bytecode.signatures));
         case classValue:
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
@@ -10804,7 +10849,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileNullCheck(calleeOffset, expression.loc);
         }
 
-        auto valueCall = ValueCall.of(functionType, isDelegateCall);
+        auto valueCall = ValueCall.of(
+            functionType, isDelegateCall, _bytecode.signatures);
         if (valueCall.mismatches(expression.arguments))
             internalFailure("dmd rejects a call with the wrong number of arguments");
 

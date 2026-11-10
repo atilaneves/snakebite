@@ -1195,7 +1195,8 @@ public bool arityMismatches(
 // has the parameters of `withoutContext`.
 public struct ValueCall {
     import dmd.mtype: TypeFunction;
-    import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
+    import snakebite.backends.argumentflow:
+        ArgumentFlow, Shape, Signature, SignatureTable;
     import snakebite.backends.layout: FrameLayout;
 
     public TypeFunction type;
@@ -1203,12 +1204,14 @@ public struct ValueCall {
     public FrameLayout layout;
     public FrameLayout withoutContext;
 
-    public static ValueCall of(TypeFunction type, in bool hasContext) {
+    public static ValueCall of(
+        TypeFunction type, in bool hasContext, ref SignatureTable signatures,
+    ) {
         return ValueCall(
             type,
             hasContext,
-            FrameLayout.ofParameters(type, hasContext),
-            FrameLayout.ofParameters(type, false),
+            FrameLayout.ofParameters(type, signatures, hasContext),
+            FrameLayout.ofParameters(type, signatures, false),
         );
     }
 
