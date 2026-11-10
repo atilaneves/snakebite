@@ -36,8 +36,8 @@ package(snakebite) struct FrameLayout {
 
     package(snakebite) size_t size;
     package(snakebite) uint alignment = 1;
-    package(snakebite) imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
-    private imported!"snakebite.language.layout.returnstorage".ReturnStoragePlan _returns;
+    package(snakebite) imported!"snakebite.stack.frames".ReturnPlace returnPlace;
+    private ReturnStoragePlan _returns;
 
     // Whether a local of the function can point into the temporaries of its
     // initialiser: decided once here, so a call of any other function does
@@ -131,13 +131,12 @@ package(snakebite) struct FrameLayout {
         // Imported guest bodies can still have unresolved locals.
         runSemantic3(function_);
         auto layout = ofParameters(function_, signatures);
-        layout._returns = imported!"snakebite.language.layout.returnstorage"
-            .ReturnStoragePlan.of(function_);
+        layout._returns = ReturnStoragePlan.of(function_);
 
         if (layout._returns.hasPlace) {
             const result = typeFacts(
                 typeFunctionOf(function_).next);
-            layout.returnPlace = imported!"snakebite.stack.returnplace"
+            layout.returnPlace = imported!"snakebite.stack.frames"
                 .ReturnPlace(layout.reserveSlot(
                     imported!"snakebite.native.value".TypeFacts.pointer).offset,
                     result.size, result.alignment);
@@ -850,4 +849,30 @@ package(snakebite) Shape shapeOf(
     imported!"dmd.mtype".Type type, in imported!"snakebite.native.value".TypeFacts facts,
 ) {
     return Shape(facts.size, facts.alignment, classOf(type));
+}
+
+
+package(snakebite) struct ReturnStoragePlan {
+    import dmd.declaration: VarDeclaration;
+    import dmd.func: FuncDeclaration;
+
+    package(snakebite) bool hasPlace;
+    private VarDeclaration _selected;
+
+    package(snakebite) static ReturnStoragePlan of(FuncDeclaration function_) {
+        import snakebite.frontend.compiler: returnsOnStack;
+
+        ReturnStoragePlan plan;
+        plan.hasPlace = returnsOnStack(function_);
+        // semantic3 owns checkNRVO: captures, alignment, local ownership,
+        // and agreement between all returns are already resolved here.
+        plan._selected = function_.isNRVO ? function_.nrvo_var : null;
+        return plan;
+    }
+
+    package(snakebite) bool aliases(VarDeclaration variable) const {
+        // DMD e2ir also maps generated copy/move and out-result locals
+        // marked nrvo to the hidden return pointer, independently of isNRVO.
+        return hasPlace && (variable is _selected || variable.nrvo);
+    }
 }

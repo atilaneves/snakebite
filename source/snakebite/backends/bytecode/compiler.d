@@ -14,12 +14,10 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.argumentflow: Shape, SignatureTable;
 import snakebite.language.traversal.lowering: LoweringVisitor;
-import snakebite.language.operators.identity: IdentityPlan, identityPlan;
-import snakebite.language.control.ifplan: IfPlan;
-import snakebite.language.control.logical: LogicalPlan;
-import snakebite.language.control.plaincondition:
-    isPlainCondition, isPlainPlace, isRealFloatType;
-import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
+import snakebite.language.operators.comparison:
+    IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
+import snakebite.language.control.condition:
+    IfPlan, LogicalPlan, isPlainCondition, isPlainPlace, isRealFloatType;
 import snakebite.language.control.cases:
     SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
 import snakebite.language.traversal.fullexpression:
@@ -60,7 +58,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
     import snakebite.stack.frames: defaultFrameCapacity;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
@@ -967,7 +965,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, outerFunctionOf;
-    import snakebite.language.storage.aggregateinit: InitStep, NewPlan;
+    import snakebite.language.storage.lifetime: InitStep, NewPlan;
     import snakebite.frontend.typefacts: bitfieldAccess, fieldOffset;
     import snakebite.builtin.call: BuiltinCall;
     import snakebite.language.call.selection: CallSelection;
@@ -984,7 +982,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Address, Place, Reloc, Target;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.language.layout.temporary: TemporaryPlan, constructTemporary;
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
     import snakebite.frontend.typefacts:
         initializerRunsForEffect, initializerValueOf, isThreadLocalStorage;
     import snakebite.native.value: alignUp, isIntegralSize, TypeFacts;
@@ -1758,9 +1756,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // old destination until then. A function whose returns are all of that
     // kind keeps a pointer to the place in a frame slot; the callers store it
     // there. Returns the place of the function.
-    private imported!"snakebite.stack.returnplace".ReturnPlace
+    private imported!"snakebite.stack.frames".ReturnPlace
     redirectReturns() {
-        import snakebite.stack.returnplace: ReturnPlace;
+        import snakebite.stack.frames: ReturnPlace;
 
         auto place = _layout.returnPlace;
         if (_isVoidReturn || _isRefReturn)
@@ -5165,7 +5163,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const facts = typeFacts(expression.e1.type);
-        import snakebite.language.storage.assignment: executeAssignment;
+        import snakebite.language.storage.lifetime: executeAssignment;
 
         const valueOffset = executeAssignment!size_t(
             expression.isConstructExp !is null,
@@ -6076,7 +6074,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(VectorExp expression) {
-        import snakebite.language.storage.vectorinit: planVectorInit;
+        import snakebite.language.storage.lifetime: planVectorInit;
 
         requireDestination(expression);
         const plan = planVectorInit(expression);
@@ -6418,12 +6416,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // The four hooks `snakebite.language.storage.aggregateinit.applyStep` and
+    // The four hooks `snakebite.language.storage.lifetime.applyStep` and
     // `driveInit` drive, one per `InitStep.Kind`, each turning one step
     // into bytecode at `base`, a storage operand that preserves field
     // offsets for both frame values and allocations alike.
 
-    // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
+    // Satisfies `lifetime`'s `Hooks` contract: forwards each
     // `InitStep.Kind` to the matching `apply*Step` method below, at
     // whichever `base` its call site is compiling into. Built
     // once per call site instead of the four lambdas each used to
@@ -6515,7 +6513,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opZero, _destination, 0, _width);
 
-        import snakebite.language.storage.aggregateinit: applyStep, planStructLiteral;
+        import snakebite.language.storage.lifetime: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
         auto hooks = AggregateInitHooks(this, _destination);
@@ -7045,7 +7043,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // DMD leaves constructor and positional field initialization outside
     // the allocation lowering. Its result already occupies _destination.
-    // `driveInit` (`aggregateinit.d`) owns the order the `vthis` steps, the
+    // `driveInit` (`lifetime.d`) owns the order the `vthis` steps, the
     // constructor call, and the remaining positional field stores run in -
     // a nested struct's or nested class's `vthis` sits inside the
     // allocation the lowering just returned, at the same native offset a
@@ -7054,7 +7052,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `new Adder(2)` with a constructor and a bare `new Reader` (no
     // arguments at all) get a real context rather than `.init`'s zero.
     private void compileNew(NewExp expression) {
-        import snakebite.language.storage.aggregateinit:
+        import snakebite.language.storage.lifetime:
             driveInit, planClassContext, planNew, planPositionalFields;
 
         auto newPlan = planNew(expression);
@@ -7081,7 +7079,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        import snakebite.language.storage.deletion: planDelete;
+        import snakebite.language.storage.lifetime: planDelete;
 
         auto deletion = planDelete(expression);
         const object = reserveTemp(pointerFacts);
@@ -8545,8 +8543,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in FullExpressionScope.Position position,
         in Flag!"plain" plain,
     ) {
-        import snakebite.language.operators.comparison: ComparisonPlan, comparisonPlan;
-
         const logical = condition.op == EXP.andAnd
             || condition.op == EXP.orOr;
         if (logical && plain == Yes.plain) {

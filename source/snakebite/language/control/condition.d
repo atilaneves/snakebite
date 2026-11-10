@@ -1,14 +1,72 @@
-module snakebite.language.control.plaincondition;
+module snakebite.language.control.condition;
 
 
 private:
 
+
 import dmd.expression: Expression;
 import dmd.tokens: EXP;
-import snakebite.language.operators.identity: identityPlan;
+import snakebite.language.operators.comparison: identityPlan;
 import snakebite.frontend.typefacts: typeFacts;
 import snakebite.native.value: isIntegralSize;
 import std.typecons: Flag, No, Yes;
+
+
+// What an `if` does at run time. `__ctfe` is `false` there, so the body of
+// an `if (__ctfe)` block never runs through the `if` itself. A `case` or
+// `default` label in the body is still a target of the enclosing `switch`,
+// and dmd leaves the statements of that body without their lowerings.
+package(snakebite) struct IfPlan {
+    enum Kind {
+        condition,
+        ctfeBlock,
+    }
+
+    Kind kind;
+    bool bodyHasLabels;
+}
+
+package(snakebite) IfPlan ifPlan(imported!"dmd.statement".IfStatement statement) {
+    if (!statement.isIfCtfeBlock)
+        return IfPlan(IfPlan.Kind.condition, false);
+
+    return IfPlan(
+        IfPlan.Kind.ctfeBlock,
+        statement.ifbody !is null && statement.ifbody.comeFrom,
+    );
+}
+
+
+// What `&&` and `||` do with their right operand. An operand of type `void`
+// or `noreturn` has no value for the truth test: dmd types `a || throw e` as
+// `bool` anyway, and the only path that completes is the one where the left
+// operand decided the answer.
+package(snakebite) struct LogicalPlan {
+    enum Right {
+        value,
+        effect,
+    }
+
+    bool andAnd;
+    Right right;
+    bool hasValue;
+}
+
+package(snakebite) LogicalPlan logicalPlan(
+    imported!"dmd.expression".LogicalExp expression,
+) {
+    import dmd.astenums: Tnoreturn, Tvoid;
+    import dmd.typesem: toBasetype;
+
+    const rightType = expression.e2.type.toBasetype.ty;
+    const hasNoValue = rightType == Tvoid || rightType == Tnoreturn;
+    return LogicalPlan(
+        expression.op == EXP.andAnd,
+        hasNoValue ? LogicalPlan.Right.effect : LogicalPlan.Right.value,
+        expression.type.toBasetype.ty != Tvoid,
+    );
+}
+
 
 // A condition that creates no temporary with a lifetime of its own, so
 // that splitting `&&` and `||` into branches changes no destructor

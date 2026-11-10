@@ -5,7 +5,7 @@ import dmd.func: FuncDeclaration;
 import snakebite.program: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.ctfe: Ctfe;
-import snakebite.failure.exception: SnakebiteException;
+import snakebite.failure.report: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
     findFunction,

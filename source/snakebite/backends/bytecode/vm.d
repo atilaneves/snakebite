@@ -1034,7 +1034,7 @@ public struct Function {
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
     package const(Signature)* signature;
-    package imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
+    package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
     package HostCallLayout hostCall;
     // Not null when a caller can copy this function in place of a call.
@@ -4642,7 +4642,7 @@ package alias opSliceCopy =
 private const(Instruction)* runSliceCopy(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.native.slicecopy: copyUnchecked;
+    import snakebite.native.value: copyUnchecked;
 
     copyUnchecked(
         *cast(void[]*) execution.destination,
@@ -4662,7 +4662,7 @@ package alias opSlicesConform =
 private const(Instruction)* runSlicesConform(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.native.slicecopy: slicesConform;
+    import snakebite.native.value: slicesConform;
 
     auto dest = execution.destination;
     *cast(ubyte*) dest = slicesConform(

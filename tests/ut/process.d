@@ -4,7 +4,7 @@ module ut.process;
 import ut;
 
 
-// Every host executable links `snakebite.memory.process`; `bin/ut` and `bin/at`
+// Every host executable links `snakebite.memory.gc`; `bin/ut` and `bin/at`
 // both run this test, so both prove druntime read its options.
 @("hostRuntimeOptions")
 unittest {
