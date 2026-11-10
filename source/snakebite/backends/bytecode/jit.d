@@ -6,8 +6,9 @@ module snakebite.backends.bytecode.jit;
 // with the operands as immediates. The address of the code of instruction i
 // replaces `instructions[i].handler`. The code obeys the `Instruction.Handler`
 // calling convention (see the register map below). It has no stack frame,
-// makes no call and uses only the scratch registers, so r0 and fp0 survive,
-// and a throw needs no unwind information: it happens only in real handlers,
+// and makes no native call. Scratch registers hold operands; guest calls
+// and returns also set the handler arguments. A throw needs no unwind
+// information: it happens only in real handlers,
 // which the JIT code reaches by a tail jump. An instruction without a
 // template gets a stub that sets `pc` and jumps to its handler.
 //
@@ -427,7 +428,7 @@ private struct PerfMap {
     }
 }
 
-// The code region. It is a memfd file that grows by chunks. Each chunk is
+// The code region grows by chunks. Each chunk has its own memfd file and is
 // mapped twice: `writeBase` is read+write, where the JIT emits, and `execBase`
 // is read+execute, where the handlers point. No page changes protection.
 // Functions are packed with 16-byte alignment, and a function never spans two
@@ -439,8 +440,6 @@ private struct CodeRegion {
     @nogc nothrow:
 
     private pid_t _process;
-    int file = -1;
-    size_t fileSize;
     ubyte* writeBase;
     ubyte* execBase;
     size_t chunkCapacity;
@@ -449,29 +448,19 @@ private struct CodeRegion {
 
     bool prepare() {
         import core.sys.posix.sys.mman: munmap;
-        import core.sys.posix.unistd: close, getpid;
+        import core.sys.posix.unistd: getpid;
 
         const process = getpid();
         if (process == _process)
-            return file >= 0;
+            return chunkCapacity != 0;
 
         // After fork the copied cursor would write into the parent's file.
         // Keep the execute views because the child still uses their handlers.
-        if (file >= 0) {
+        if (chunkCapacity != 0)
             munmap(writeBase, chunkCapacity);
-            close(file);
-        }
         this = CodeRegion.init;
         _process = process;
-
-        file = memfd_create("snakebite-jit", MFD_CLOEXEC);
-        if (file < 0)
-            return false;
-        if (newChunk(chunkSize))
-            return true;
-        close(file);
-        file = -1;
-        return false;
+        return newChunk(chunkSize);
     }
 
     // Makes a chunk of at least `bytes` the current one. The old chunks stay
@@ -479,16 +468,20 @@ private struct CodeRegion {
     bool newChunk(size_t bytes) {
         import core.sys.posix.sys.mman: MAP_FAILED, MAP_SHARED, mmap, munmap,
             PROT_EXEC, PROT_READ, PROT_WRITE;
-        import core.sys.posix.unistd: ftruncate;
+        import core.sys.posix.unistd: close, ftruncate;
 
+        const file = memfd_create("snakebite-jit", MFD_CLOEXEC);
+        if (file < 0)
+            return false;
+        scope(exit) close(file);
         const size = (bytes + chunkSize - 1) & ~(chunkSize - 1);
-        if (ftruncate(file, fileSize + size) != 0)
+        if (ftruncate(file, size) != 0)
             return false;
         // `auto`: `munmap` takes a mutable pointer.
         auto write = mmap(null, size, PROT_READ | PROT_WRITE, MAP_SHARED,
-            file, fileSize);
+            file, 0);
         auto execute = mmap(null, size, PROT_READ | PROT_EXEC, MAP_SHARED,
-            file, fileSize);
+            file, 0);
         if (write is MAP_FAILED || execute is MAP_FAILED) {
             if (write !is MAP_FAILED)
                 munmap(write, size);
@@ -496,7 +489,6 @@ private struct CodeRegion {
                 munmap(execute, size);
             return false;
         }
-        fileSize += size;
         writeBase = cast(ubyte*) write;
         execBase = cast(ubyte*) execute;
         chunkCapacity = size;

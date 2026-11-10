@@ -5975,8 +5975,10 @@ def test_fork_keeps_compiled_functions_in_both_processes(
     write(
         source,
         """
+        import core.sys.posix.fcntl: open, O_RDONLY;
         import core.sys.posix.sys.wait: waitpid;
-        import core.sys.posix.unistd: _exit, close, fork, pipe, read, write;
+        import core.sys.posix.unistd: _exit, close, dup2, fork, pipe, read,
+            write;
 
         int beforeFork(int count) {
             assert(count > 0);
@@ -6010,8 +6012,14 @@ def test_fork_keeps_compiled_functions_in_both_processes(
                 close(gate[1]);
                 assert(read(gate[0], &ready, 1) == 1);
                 close(gate[0]);
+                const file = open("/dev/null", O_RDONLY);
+                assert(file >= 0);
+                foreach (fd; 3 .. 32)
+                    assert(dup2(file, fd) == fd);
                 assert(childHot(300) == 134550, "child new function");
                 assert(beforeFork(300) == 44850, "child inherited function");
+                foreach (fd; 3 .. 32)
+                    assert(read(fd, &ready, 1) == 0, "child descriptor");
                 _exit(0);
             }
 

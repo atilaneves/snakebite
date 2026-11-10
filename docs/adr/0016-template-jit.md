@@ -156,18 +156,17 @@ the fallback. A call template adds the same event to the callee's count.
 
 ### Code memory
 
-The code is in a `memfd` file. Each part of the file is mapped twice: a
-write view, which the emitter uses, and an execute view, which the handler
-words point to. No page changes protection, so a compile makes no
-`mprotect` call, and no page is both writable and executable in one view.
+Each chunk of code has a `memfd` file. The JIT maps each file twice: a write
+view for the emitter and an execute view for the handler words. The JIT
+closes the file descriptor after it maps the chunk. The mappings keep the
+file alive. No page changes protection, so a compile makes no `mprotect`
+call, and no page is both writable and executable in one view.
 
-The file starts with 1 MiB and grows on demand: `ftruncate` extends it, and
-the next chunk is mapped in both views. Old chunks stay mapped, because their
-code is in use. Functions are packed with 16-byte alignment. A function never
-spans two chunks: when the room that a function can need is more than what
-is left of the chunk, the function goes to a new chunk. Pages are made
-present with `MADV_POPULATE_*` in parts of 128 KiB, so no compile takes a
-page fault.
+The JIT adds chunks of at least 1 MiB as needed. Old chunks stay mapped
+because their code is in use. Functions are packed with 16-byte alignment.
+If the function can need more space than remains in the current chunk, it
+goes in a new chunk. Pages are made present with `MADV_POPULATE_*` in parts
+of 128 KiB, so no compile takes a page fault.
 
 Code is never freed. A function that has JIT code keeps it until the process
 ends.
