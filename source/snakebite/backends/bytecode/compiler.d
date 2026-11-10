@@ -29,7 +29,7 @@ import snakebite.language.control.transfer:
 import snakebite.language.control.unwinding:
     UnwindPlan, catchPlanOf, unwindPlanOf;
 import snakebite.backends.checkplan: BoundsCheck, hookOf;
-import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 import snakebite.frontend.storage: planSlice;
 import snakebite.backends.exceptions: AssertFailure, CAssertCall;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
@@ -54,7 +54,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.root.string: toDString;
     import snakebite.backends.api: CompilationStatistics;
     import snakebite.program: Program;
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
     import snakebite.language.layout.frame: FrameLayout;
@@ -970,7 +970,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.frontend.typefacts: bitfieldAccess, fieldOffset;
     import snakebite.builtin.call: BuiltinCall;
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.language.operators.casts: CastPlan;
     import snakebite.language.context.chain: ClosurePlan;
     import snakebite.language.operators.compound:
@@ -4097,7 +4097,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssertExp expression, AssertFailure failure,
     ) {
         import core.stdc.string: strlen;
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.language.call.druntimehook: DruntimeHook, planOf;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         const message = compileMessage(failure.messageExpression);
@@ -4136,7 +4136,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileCAssertCall(in CAssertCall call, in Arg assertion) {
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 
         // Without a function, `cAssertCallOf` names it with a literal of the
         // host.
@@ -9786,7 +9786,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
         import dmd.astenums: STC, Tvoid, VarArg;
-        import snakebite.backends.calls: arityMismatches, ValueCall;
+        import snakebite.language.call.selection: arityMismatches, ValueCall;
         import snakebite.frontend.dmd.dispatch: classReceiverOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
@@ -9919,7 +9919,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.location: Loc;
         import dmd.typesem: isZeroInit;
         import snakebite.frontend.compiler: newInFrontend;
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.language.call.druntimehook: DruntimeHook, planOf;
         import snakebite.frontend.dmd.functions: moduleOf;
 
         if (callee.ident is null || callee.parent is null)
@@ -10156,7 +10156,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
 
         size_t receiverOffset = size_t.max;
         if (hasThis) {
@@ -10199,7 +10199,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
 
         auto type = typeFunctionOf(callee);
 
@@ -10579,7 +10579,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         scope CallSite delegate(Arg[] args, size_t returnWidth) site,
         in size_t destinationParameter = size_t.max,
     ) {
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
 
         if (arityMismatches(type.parameterList, arguments, allowExtraArguments))
@@ -10827,7 +10827,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // parameter from the argument in the same register (`ValueCall`).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, VarArg;
-        import snakebite.backends.calls: isIndirectDelegateCall, ValueCall;
+        import snakebite.language.call.selection: isIndirectDelegateCall, ValueCall;
         import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 

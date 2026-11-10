@@ -66,7 +66,7 @@ configuration "unittest" {
 // project has no dependency, so no such independent copy exists anywhere:
 // the *only* native code for this exact `dirEntries` instantiation is the
 // one inside `bin/sb` itself. `CallSelection.buildDecision`
-// (source/snakebite/backends/calls.d) never reuses that executable-only
+// (source/snakebite/language/call/selection.d) never reuses that executable-only
 // answer for a template instance a guest call reaches: it asks the
 // resolver whether an independent copy answers - the dependency image or
 // an already-loaded shared object - and keeps the guest body otherwise, so

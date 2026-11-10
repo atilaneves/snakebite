@@ -1,4 +1,4 @@
-module snakebite.backends.druntimehooks;
+module snakebite.language.call.druntimehook;
 
 
 private:

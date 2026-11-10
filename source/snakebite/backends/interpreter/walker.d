@@ -236,7 +236,7 @@ import snakebite.native.value: BitfieldAccess;
 import snakebite.backends.checkplan:
     BoundsCheck, FailurePlan, hookOf, isUnanalysed;
 import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
-import snakebite.backends.calls: ValueCall;
+import snakebite.language.call.selection: ValueCall;
 import snakebite.failure.halt: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
@@ -276,7 +276,7 @@ private struct Shared {
     import snakebite.ffi: CallPlan;
     import snakebite.failure.unwind: ExceptionCandidate;
     import snakebite.program: Program;
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.backends.classinfo: ClassRuntimeCache;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.backends.runtimetypes: RuntimeTypes;
@@ -591,7 +591,7 @@ private struct CallShape {
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.program: Program;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, isCtfeVariable, outerFunctionOf;
@@ -608,7 +608,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ResultWord, faultSlotOf, fastFrameLead, frameLead, pushCallFrame,
         resultPlaceOf, resultWordOf, siteOf;
     import snakebite.backends.interpreter.stackpieces: StackPieces;
-    import snakebite.backends.druntimehooks: DruntimeHook;
+    import snakebite.language.call.druntimehook: DruntimeHook;
     import snakebite.ffi:
         CallAdapter, CallbackCall, CallPlan, CallResult, PlanCache;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -1151,7 +1151,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // A call through a function pointer or a delegate: the type of the value
     // gives the layout of its arguments, which `valueCallOf` makes once.
     extern(D) private void prepareValueCall(CallExp site) {
-        import snakebite.backends.calls: isIndirectDelegateCall;
+        import snakebite.language.call.selection: isIndirectDelegateCall;
 
         auto callee = site.e1;
         if (isIndirectDelegateCall(callee.type))
@@ -2045,7 +2045,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // What a failed bounds check does under the program's flags. For
     // `-checkaction=D` it calls druntime's own bounds-failure hook -
     // `_d_arraybounds_indexp` or `_d_arraybounds_slicep`, see
-    // `snakebite.backends.druntimehooks` - the same one the bytecode
+    // `snakebite.language.call.druntimehook` - the same one the bytecode
     // compiler emits a call to. Every caller here only reaches this once
     // its own bounds check already failed; wrapping the hook's throw
     // through `callPlan`, the same as any other native call, lets a guest
@@ -2074,7 +2074,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        import snakebite.backends.druntimehooks: planOf;
+        import snakebite.language.call.druntimehook: planOf;
         import snakebite.backends.exceptions: cAssertCallOf;
 
         final switch (failure.kind) with (FailurePlan.Kind) {
@@ -2136,7 +2136,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `-checkaction=C`: the C runtime's assert failure function, which
     // aborts the process.
     extern(D) private noreturn callCAssert(in CAssertCall call) {
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 
         auto plan = planOf(*_plans, DruntimeHook.cAssertFail);
         const(void*)[] arguments = [
@@ -2237,7 +2237,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             (declaration) => attempt({ classRuntimeInfo(declaration); }),
             (expression) => attempt({
                 import snakebite.backends.deleteplan: planDelete;
-                import snakebite.backends.druntimehooks: planOf;
+                import snakebite.language.call.druntimehook: planOf;
 
                 planOf(*_plans, planDelete(expression).hook);
             }),
@@ -6294,7 +6294,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // no `FuncDeclaration` of its own - and called here with the object
     // reference as its one argument.
     private void callClassInvariant(void* objectPointer) {
-        import snakebite.backends.druntimehooks: planOf;
+        import snakebite.language.call.druntimehook: planOf;
 
         countForeignNameLookup;
         auto plan = planOf(*_plans, DruntimeHook.classInvariant);
@@ -6742,7 +6742,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     override void visit(DeleteExp expression) {
         import snakebite.backends.deleteplan: planDelete;
-        import snakebite.backends.druntimehooks: planOf;
+        import snakebite.language.call.druntimehook: planOf;
 
         auto deletion = planDelete(expression);
         auto object = classReferenceOf(deletion.object);
@@ -6848,7 +6848,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in bool allowExtra = false,
         in size_t destination = size_t.max,
     ) {
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
 
         if (arityMismatches(type.parameterList, arguments, allowExtra))
             internalFailure("dmd checks a call's arity; a variadic call allows "
@@ -7142,7 +7142,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     extern(D) package const(CallPlan)* dcharAppendPlanOf(CatDcharAssignExp expression) {
-        import snakebite.backends.druntimehooks: planOf;
+        import snakebite.language.call.druntimehook: planOf;
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
@@ -7561,7 +7561,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `callee.type` there is `Tdelegate`, not the `Tfunction` a
     // dereferenced function pointer's type always is.
     private Callee calleeOf(CallExp expression) {
-        import snakebite.backends.calls: isIndirectDelegateCall;
+        import snakebite.language.call.selection: isIndirectDelegateCall;
         import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize,
             checkedLoadIntegral;
@@ -7651,7 +7651,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         import std.algorithm: max;
         import snakebite.native.value: checkedStoreIntegral;
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
         import snakebite.frontend.dmd.delegates: outerFunctionOf;
         import dmd.astenums: STC;
 

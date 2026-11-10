@@ -103,10 +103,10 @@ public string cMessageOf(in BoundsCheck check) @safe pure nothrow @nogc {
 // The druntime function that raises the error of a failed bounds check
 // under `-checkaction=D`: the one decision that a backend that raises does
 // not make for itself.
-public imported!"snakebite.backends.druntimehooks".DruntimeHook hookOf(
+public imported!"snakebite.language.call.druntimehook".DruntimeHook hookOf(
     in BoundsCheck check,
 ) @safe pure nothrow @nogc {
-    import snakebite.backends.druntimehooks: DruntimeHook;
+    import snakebite.language.call.druntimehook: DruntimeHook;
 
     final switch (check) with (BoundsCheck) {
         case index:

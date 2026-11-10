@@ -5,7 +5,7 @@ private:
 
 
 import dmd.typesem: toBasetype;
-import snakebite.backends.druntimehooks: DruntimeHook;
+import snakebite.language.call.druntimehook: DruntimeHook;
 
 
 // The single decision both backends use for a `DeleteExp`. The frontend

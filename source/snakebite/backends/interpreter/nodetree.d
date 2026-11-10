@@ -278,7 +278,7 @@ package enum CalleeResult : ubyte { value, aggregate, reference }
 // What a call node needs to know about its callee, decided once per
 // function.
 package struct TreeCallee {
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.ffi.plan: CallPlan;
 
@@ -3829,7 +3829,7 @@ private const(DirectWordCall)* directWordCallOf(
 // evaluation of the arguments.
 private struct Selection {
     public TreeCallee* callee;
-    public imported!"snakebite.backends.calls".CallSelection.Route route;
+    public imported!"snakebite.language.call.selection".CallSelection.Route route;
     public const(imported!"snakebite.ffi.plan".CallPlan)* plan;
     // Set when the call is a direct word call.
     public const(DirectWordCall)* direct;
@@ -3910,7 +3910,7 @@ private mixin template CalleeEntry(E) {
     }
 
     private Selection selectionOf(TreeCallee* callee) {
-        import snakebite.backends.calls: CallSelection;
+        import snakebite.language.call.selection: CallSelection;
 
         const decision = CallSelection.atCallSite(callee.decision, _site);
         auto steps = stepsOf(callee);
@@ -4057,7 +4057,7 @@ private mixin template CalleeEntry(E) {
     private void run(
         in Selection selection, ubyte* base, void* result, ubyte* frame,
     ) {
-        import snakebite.backends.calls: CallSelection;
+        import snakebite.language.call.selection: CallSelection;
 
         auto callee = cast(TreeCallee*) selection.callee;
         final switch (selection.route) with (CallSelection.Route) {
@@ -4312,7 +4312,7 @@ private abstract class Call(E) : Node {
 
     // How this site runs `callee` in place of a general call, or null.
     private FastCallee* fastOf(TreeCallee* callee, in Selection selected) {
-        import snakebite.backends.calls: CallSelection;
+        import snakebite.language.call.selection: CallSelection;
 
         if (selected.route != CallSelection.Route.guest)
             return null;
@@ -5537,7 +5537,7 @@ private final class BuiltinOp : Node {
 private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     const selected = ev._callSelection.floatIntrinsicOf(call, function_);
@@ -6063,7 +6063,7 @@ private bool bindsReference(E)(E ev, AssignExp e) {
 private Node buildCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
     import snakebite.language.context.source: pairPlanOf;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
@@ -6290,7 +6290,7 @@ private Node buildContext(E)(
 private Node buildIndirectCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.backends.calls: isIndirectDelegateCall;
+    import snakebite.language.call.selection: isIndirectDelegateCall;
 
     auto callee = call.e1;
     const viaDelegate = isIndirectDelegateCall(callee.type);
@@ -6347,7 +6347,7 @@ private enum Extras : ubyte { packed, separate }
 
 // How a call of `callee` passes its extra arguments.
 private Extras extrasFor(in TreeCallee* callee) {
-    import snakebite.backends.calls: CallSelection;
+    import snakebite.language.call.selection: CallSelection;
 
     return callee.decision.route == CallSelection.Route.guest
         ? Extras.packed : Extras.separate;

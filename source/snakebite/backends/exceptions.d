@@ -121,7 +121,7 @@ public struct AssertInvariantPlan {
 }
 
 // A class reference's invariant call itself goes through
-// `snakebite.backends.druntimehooks`'s `DruntimeHook.classInvariant` -
+// `snakebite.language.call.druntimehook`'s `DruntimeHook.classInvariant` -
 // `_d_invariant` is never referenced by any guest `CallExp`, so there is
 // no `FuncDeclaration` to resolve it by, and that module owns its
 // mangled linker symbol.
