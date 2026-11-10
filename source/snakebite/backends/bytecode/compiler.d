@@ -69,10 +69,25 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // out of nesting order, so they cannot share one LIFO stack.
     // Entries are owned and released by their host thread (ADR-0006).
     private ExecutionStates!(Vm*) _vms;
+    private CallbackBridge* _callbacks;
+    // Set by `release` when no host code holds a callback entry, so that no
+    // guest code of this instance can run again once its states are gone.
+    private shared bool _jitCodeCanGo;
     private NativeData _nativeData;
     private PlanCache _plans;
     // What the functions of this backend do with the JIT.
     private JitSetting _jit;
+    // The JIT code region and the other JIT state of this instance. Its
+    // address never changes, and each `Function` that this instance compiles
+    // points to it. The destructor of the field frees the region.
+    static if (imported!"snakebite.backends.bytecode.jit".jitSupported) {
+        private imported!"snakebite.backends.bytecode.jit".JitInstance
+            _jitInstance;
+
+        package auto jitInstance() {
+            return &_jitInstance;
+        }
+    }
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -142,13 +157,31 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             (type, loc) => _nativeData.initialValue(type, loc));
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
-        }, () => _nativeData.release);
-        _plans.useCallbacks(
-            new CallbackBridge(&invokeCallback, cast(void*) this));
+        }, () => _nativeData.release, &releaseJitCode);
+        _callbacks = new CallbackBridge(&invokeCallback, cast(void*) this);
+        _plans.useCallbacks(_callbacks);
     }
 
+    // The owner ends the instance. The JIT code goes when no guest code can
+    // run: host code holds no callback entry, and (`ExecutionStates`) no
+    // thread has an execution state left, which is checked when the last
+    // one ends. Active calls and fibers keep a state until they return. If
+    // host code holds an entry, the callbacks keep the instance reachable
+    // for the life of the process, and its JIT code stays with it.
     protected override void release() {
+        import core.atomic: atomicStore;
+
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            atomicStore(_jitCodeCanGo, !_callbacks.hasEntries);
         _vms.end;
+    }
+
+    private void releaseJitCode() nothrow @nogc {
+        import core.atomic: atomicLoad;
+
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            if (atomicLoad(_jitCodeCanGo))
+                _jitInstance.release;
     }
 
     private void* constantSymbolAddress(
@@ -1350,6 +1383,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.fixWindowFacts();
         result.jitHeat = _jit.jitStartHeat;
         result.jitCounts = _jit.jitCounting;
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            result.jit = _bytecode.jitInstance;
         return result;
     }
 

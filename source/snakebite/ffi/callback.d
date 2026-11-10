@@ -798,6 +798,16 @@ public struct CallbackBridge {
         });
     }
 
+    // Whether host code can hold an entry of this bridge: it reserved one and
+    // did not give it back.
+    public bool hasEntries() {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        bool result;
+        withCompilerLock({ result = _reserved.length != 0; });
+        return result;
+    }
+
     // The guest word behind one of this bridge's own entries, or null.
     public const(void)* wordOf(const(void)* entry) const {
         auto word = entry in _wordOfEntry;

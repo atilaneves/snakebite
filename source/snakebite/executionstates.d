@@ -14,20 +14,44 @@ public struct ExecutionStates(State) {
         State delegate() create;
         shared bool ended;
         void delegate() onIdle;
+        void delegate() onQuiet;
+        // The entries that exist on all threads.
+        shared size_t live;
+        shared bool quiet;
+
+        // Calls `onQuiet` once: when the owner has ended and no entry is
+        // left on any thread, so no guest code of the owner is running or
+        // suspended.
+        void checkQuiet() {
+            import core.atomic: atomicLoad, cas;
+
+            if (onQuiet !is null && atomicLoad(ended) && atomicLoad(live) == 0
+                    && cas(&quiet, false, true))
+                onQuiet();
+        }
     }
 
     private struct Entry {
         State state;
         size_t depth;
+        Core* core;
 
         @disable this(this);
 
-        this(State state) {
+        this(State state, Core* core) {
+            import core.atomic: atomicOp;
+
             this.state = state;
+            this.core = core;
+            atomicOp!"+="(core.live, 1);
         }
 
         ~this() {
+            import core.atomic: atomicOp;
+
             heapDelete(state);
+            atomicOp!"-="(core.live, 1);
+            core.checkQuiet;
         }
     }
 
@@ -37,16 +61,22 @@ public struct ExecutionStates(State) {
     @disable this();
     @disable this(this);
 
-    public this(State delegate() create, void delegate() onIdle) {
+    // `onQuiet`, when given, runs once on the thread that ends the last entry
+    // of an ended owner, or on the thread that ends the owner when no entry
+    // is left. It must not allocate from the GC or take a lock.
+    public this(State delegate() create, void delegate() onIdle,
+        void delegate() onQuiet = null)
+    {
         _core = new Core;
         _core.create = create;
         _core.onIdle = onIdle;
+        _core.onQuiet = onQuiet;
         // Capture the core, not the movable handle.
         auto core = _core;
         _entries = PerThread!(Entry*, true)(() {
             auto state = core.create();
             scope(failure) heapDelete(state);
-            return heapNew!Entry(state);
+            return heapNew!Entry(state, core);
         });
     }
 
@@ -94,6 +124,7 @@ public struct ExecutionStates(State) {
 
         atomicStore(_core.ended, true);
         releaseIdle;
+        _core.checkQuiet;
     }
 
     private void releaseIdle() {
