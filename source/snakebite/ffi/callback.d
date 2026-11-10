@@ -567,7 +567,7 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 // Any thread that runs guest code registers words and crosses the
 // barrier with them (ADR-0006): a registered word is found without a
 // lock, and only the first crossing of a word, which reserves its
-// entry, takes this bridge's lock.
+// entry, takes this bridge's mutex (never the compiler lock).
 //
 // A struct, not a class (ai/CODING.md): no base, no children, no virtual
 // methods. `PlanCache` and every plan it prepares share one instance by
@@ -590,7 +590,7 @@ public struct CallbackBridge {
     private shared(size_t) _firstWord = size_t.max;
     private shared(size_t) _lastWord;
     // Read without a lock the same way as `_words` (ADR-0006); an
-    // adjusted entry is reserved once, under this bridge's lock, the
+    // adjusted entry is reserved once, under this bridge's mutex, the
     // same as an unadjusted one.
     private SharedTable!(Adjusted, const(void)*) _adjustedEntries;
     private SharedTable!(const(void)*, const(void)*) _wordOfEntry;
@@ -598,6 +598,14 @@ public struct CallbackBridge {
     private CallbackHandler _handler;
     private void* _owner;
     private void function(void*, const(void)*) _prepare;
+    // Guards the tables above against concurrent writers: the first
+    // crossing of a word, an adjusted entry and `release`. Readers never
+    // take it. Lock order, outermost first: the compiler lock (a caller
+    // may hold it when it calls the bridge; nothing here takes it, and
+    // nothing here reads the AST), this mutex, then the pool's mutex
+    // (`reserve`, `releaseChunks`) and the tables' own insert locks, which
+    // are leaves. The mutex is recursive.
+    private Mutex _mutex;
     // This bridge's chunks of entries, free list and lock (ADR-0003).
     private Pool _pool;
 
@@ -612,6 +620,7 @@ public struct CallbackBridge {
         _handler = handler;
         _owner = owner;
         _prepare = prepare;
+        _mutex = new Mutex;
         _pool.mutex = new Mutex;
     }
 
@@ -667,13 +676,10 @@ public struct CallbackBridge {
         if (_prepare !is null)
             _prepare(_owner, word);
 
-        // The bridge has no mutex of its own: the compiler lock guards
-        // its tables and `reserve` takes the pool lock (ADR-0003) inside
-        // it, so there is one lock order everywhere, not two locks a
-        // caller could take in either order.
-        import snakebite.frontend.compiler: withCompilerLock;
+        {
+            _mutex.lock;
+            scope(exit) _mutex.unlock;
 
-        withCompilerLock({
             if (registered.entry is null) {
                 auto plan = new CallPlan;
                 *plan = prepareCallback(registered.signature);
@@ -683,12 +689,12 @@ public struct CallbackBridge {
                 _wordOfEntry.insert(entry, word);
                 atomicStore!(MemoryOrder.rel)(registered.entry, entry);
             }
-        });
+        }
 
         // A plain read here would be racing the `atomicStore` above:
         // this thread's own write is visible to itself either way, but
         // another thread's `entryOf` call for the same word, arriving
-        // just after `withCompilerLock` released the lock, needs the
+        // just after the bridge's mutex was released, needs the
         // acquire load to be certain it sees the stored entry and not
         // a stale `null` (finding 8).
         return atomicLoad!(MemoryOrder.acq)(registered.entry);
@@ -698,11 +704,10 @@ public struct CallbackBridge {
     // the owner that the pool slots held. The caller promises that no host
     // code can call an entry again, and does not use the bridge again.
     public void release() {
-        import snakebite.frontend.compiler: withCompilerLock;
+        _mutex.lock;
+        scope(exit) _mutex.unlock;
 
-        withCompilerLock({
-            _pool.releaseChunks;
-        });
+        _pool.releaseChunks;
     }
 
     // Whether host code can hold an entry of this bridge: it reserved one and
@@ -770,10 +775,24 @@ public struct CallbackBridge {
         return contains(address) ? GuestTarget(address, 0) : GuestTarget.init;
     }
 
+    // The entry `adjustedEntryOf` already reserved for `word` with a nonzero
+    // `adjustment`, or null. No lock: a caller that has to read the AST to
+    // build the signature asks this first and builds it only on a miss.
+    public const(void)* reservedAdjustedEntry(
+        const(void)* word, in ptrdiff_t adjustment,
+    ) {
+        if (auto entry = Adjusted(word, adjustment) in _adjustedEntries)
+            return *entry;
+        return null;
+    }
+
     // A native ABI thunk owns the receiver adjustment. Callers keep the
     // original interface pointer, including when they store a delegate.
+    // `signature` is not read for a zero `adjustment` or an entry that
+    // exists. The bridge never reads the AST: the caller builds `signature`
+    // before the call, under the compiler lock if it needs one.
     public const(void)* adjustedEntryOf(
-        const(void)* word, lazy NativeSignature signature,
+        const(void)* word, in NativeSignature signature,
         in ptrdiff_t adjustment,
     ) {
         if (adjustment == 0) {
@@ -784,14 +803,12 @@ public struct CallbackBridge {
         if (auto entry = key in _adjustedEntries)
             return *entry;
 
-        import snakebite.frontend.compiler: withCompilerLock;
+        _mutex.lock;
+        scope(exit) _mutex.unlock;
 
-        const(void)* entry;
-        withCompilerLock({
-            if (auto found = key in _adjustedEntries) {
-                entry = *found;
-                return;
-            }
+        {
+            if (auto found = key in _adjustedEntries)
+                return *found;
             auto plan = new CallPlan;
             *plan = prepareCallback(signature);
             assert(plan.hasHiddenContext);
@@ -802,8 +819,7 @@ public struct CallbackBridge {
             const reserved = _pool.reserve(slot);
             if (contains(word))
                 _adjustedGuestEntries.insert(reserved, key);
-            entry = *_adjustedEntries.insert(key, reserved);
-        });
-        return entry;
+            return *_adjustedEntries.insert(key, reserved);
+        }
     }
 }

@@ -1341,8 +1341,19 @@ public struct PlanCache {
     ) {
         if (word is null)
             word = of(declaration)._address;
+        // The bridge never reads the AST, so the signature is built here,
+        // under the compiler lock and only when the bridge has no entry
+        // yet; the lock is released before the bridge takes its mutex
+        // (lock order: `CallbackBridge._mutex`).
+        NativeSignature signature;
+        if (adjustment != 0
+                && _callbacks.reservedAdjustedEntry(word, adjustment) is null) {
+            import snakebite.frontend.compiler: withCompilerLock;
+
+            withCompilerLock({ signature = nativeSignatureOf(declaration); });
+        }
         return cast(void*) _callbacks.adjustedEntryOf(
-            word, nativeSignatureOf(declaration), adjustment);
+            word, signature, adjustment);
     }
 
     public CallbackBridge.GuestTarget guestTarget(const(void)* address) const {
