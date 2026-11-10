@@ -56,8 +56,9 @@ public struct GuestModules {
     private Run* _run;
     private Ends _ends;
     private bool _failed;
-    // The time to build the `ModuleInfo` records and their entries, and the time druntime
-    // took to order and run the constructors. Neither includes compilation.
+    // The time to build the `ModuleInfo` records and their entries, and the
+    // time druntime took to order and run the constructors. Neither includes
+    // compilation.
     public Duration moduleInfo;
     public Duration constructors;
 
@@ -73,7 +74,7 @@ public struct GuestModules {
             import std.string: toStringz;
             import snakebite.runtimeentry: RuntimeEntry;
 
-            auto start = &backend.startData(false);
+            auto start = &backend.startData();
             if (!start.hasCEntryPoint || start.betterC)
                 return;
 
@@ -637,13 +638,14 @@ private Run* newRun(
 ) {
     import core.memory: GC;
 
-    auto start = &backend.startData(tests == GuestModules.Tests.yes);
+    auto start = &backend.startData();
     bool needed = tests == GuestModules.Tests.yes
         && start.modules.length != 0;
     needed = needed || start.dependencyModules.length != 0
-        || start.crtConstructors.length != 0 || start.crtDestructors.length != 0;
+        || start.crtConstructors.length != 0
+        || start.crtDestructors.length != 0;
     foreach (module_; start.modules)
-        needed = needed || module_.hasFunctions;
+        needed = needed || module_.hasPhaseFunctions;
 
     if (!needed)
         return null;

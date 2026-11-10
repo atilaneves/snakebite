@@ -10,13 +10,9 @@ import snakebite.backends.startdata:
 
 
 // Reads the frontend one time and builds the start data of `program`. The
-// functions in it are the ones `backend` compiles. `unitTests` says whether
-// the modules also list their unit tests, which a backend then compiles too.
-public StartData buildStartData(
-    Backend backend,
-    Program program,
-    in bool unitTests,
-) {
+// functions in it are the ones `backend` names; it compiles them when it
+// likes. A failure throws before the caller has a value to keep.
+public StartData buildStartData(Backend backend, Program program) {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: Tvoid;
     import dmd.typesem: nextOf;
@@ -37,7 +33,7 @@ public StartData buildStartData(
 
     data.dependencyModules = program.dependencyImage is null
         ? null : program.dependencyImage.deferredModules;
-    addModules(data, backend, program, unitTests);
+    addModules(data, backend, program);
     return data;
 }
 
@@ -46,7 +42,6 @@ private void addModules(
     ref StartData data,
     Backend backend,
     Program program,
-    in bool unitTests,
 ) {
     import dmd.dmodule: Module;
     import snakebite.frontend.dmd.functions:
@@ -64,7 +59,8 @@ private void addModules(
         start.standalone = !module_.needmoduleinfo;
         bool[size_t] seen;
         foreach (imported; module_.aimports) {
-            start.importNames ~= prettyNameOf(imported).fromStringz.idup;
+            if (data.dependencyModules.length != 0)
+                start.importNames ~= prettyNameOf(imported).fromStringz.idup;
             if (!imported.needmoduleinfo || imported is module_)
                 continue;
 
@@ -87,8 +83,7 @@ private void addModules(
             compiled(backend, functions.threadDestructors);
         start.sharedGates = gatesOf(backend, functions.sharedDestructors);
         start.threadGates = gatesOf(backend, functions.threadDestructors);
-        if (unitTests)
-            start.unitTests = compiled(backend, functions.unittests);
+        start.unitTests = compiled(backend, functions.unittests);
 
         data.crtConstructors ~= compiled(backend, functions.crtConstructors);
         data.crtDestructors ~= compiled(backend, functions.crtDestructors);
@@ -108,18 +103,11 @@ private CompiledFunction[] compiled(
 }
 
 
-// A function that fails to compile fails when it is called, where an
-// uncompiled function fails.
 private CompiledFunction compiled(
     Backend backend,
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    import snakebite.exception: SnakebiteException;
-
-    try
-        return CompiledFunction(backend.compiledFunction(function_));
-    catch (SnakebiteException failure)
-        return CompiledFunction(null, failure);
+    return CompiledFunction(backend.compiledFunction(function_));
 }
 
 

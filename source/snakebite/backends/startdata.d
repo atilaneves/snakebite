@@ -7,25 +7,20 @@ private:
 // What the start of a guest program needs, with no frontend data in it: the
 // modules, their phases and the order of their imports, the gate storage,
 // the `crt_constructor` and `crt_destructor` functions, and `main` with the
-// way to call it. A backend builds it when it compiles, or a loader supplies
-// it for saved code; `GuestModules` and `runMain` run on it only.
+// way to call it. A backend builds it (`buildStartData`); `GuestModules` and
+// `runMain` run on it only.
 
-// A function that a backend compiled, as the backend names it. The word means
-// nothing outside that backend. A function that failed to compile keeps its
-// failure, which a call then throws, as the first call of an uncompiled
-// function would.
+// A function as the backend that built the start data names it. The word
+// means nothing outside that backend, and that backend decides when the
+// function is compiled.
 public struct CompiledFunction {
     import snakebite.backends.backend: Backend;
 
     public const(void)* word;
-    public Throwable failure;
 
     public void call(
         Backend backend, void* returnPlace, void*[] args,
     ) const {
-        if (failure !is null)
-            throw cast() failure;
-
         backend.callCompiled(word, returnPlace, args);
     }
 }
@@ -44,7 +39,7 @@ public struct ModuleStart {
     // that have a record.
     public size_t[] imports;
     // The names of every module this module imports, for the records of a
-    // dependency image.
+    // dependency image. Empty when the program has no dependency image.
     public string[] importNames;
     public CompiledFunction[] independentConstructors;
     public CompiledFunction[] sharedConstructors;
@@ -58,7 +53,8 @@ public struct ModuleStart {
     public GateStorage[] sharedGates;
     public GateStorage[] threadGates;
 
-    public bool hasFunctions() const {
+    // Whether the module has a constructor or a destructor.
+    public bool hasPhaseFunctions() const {
         return independentConstructors.length
             || sharedConstructors.length
             || threadConstructors.length

@@ -4,6 +4,13 @@ module snakebite.druntimemain;
 private:
 
 
+import snakebite.backends.backend: Backend;
+import snakebite.backends.startdata: StartData;
+import snakebite.ffi.abi: ArgumentPlan, Register;
+import snakebite.ffi.callback: CallbackBridge, CallbackCall;
+import snakebite.ffi.plan: NativeSignature;
+
+
 public struct StartupReport {
     import core.time: Duration;
 
@@ -49,7 +56,7 @@ public StartupReport runDruntimeMain(
         _runtimeArgs = savedArgs;
         _runtimeCArgs = savedCArgs;
     }
-    auto start = &backend.startData(true);
+    auto start = &backend.startData();
     testHooks.install;
     _runtimeArgs = arguments.length ? arguments.dup : [start.programName];
     auto cArguments = _runtimeArgs.map!(arg => cast(char*) arg.toStringz).array ~ null;
@@ -111,9 +118,13 @@ private struct MainRun {
 private enum mainSignature = NativeSignature(
     imported!"dmd.astenums".LINK.c,
     false, false, false, false, false,
-    ArgumentPlan([Register(Register.Kind.signed, 4), Register.init], 1, false),
+    ArgumentPlan(
+        [Register(Register.Kind.signed, 4), Register.init], 1, false),
     [NativeSignature.Parameter(ArgumentPlan(
-        [Register(Register.Kind.integer, 8), Register(Register.Kind.integer, 8)],
+        [
+            Register(Register.Kind.integer, 8),
+            Register(Register.Kind.integer, 8),
+        ],
         2, false, 0, size_t.sizeof))],
 );
 
@@ -134,11 +145,6 @@ pragma(mangle, "_D2rt6dmain27_d_argsAAya")
 private extern __gshared string[] _runtimeArgs;
 pragma(mangle, "_D2rt6dmain26_cArgsSQsQr5CArgs")
 private extern __gshared imported!"core.runtime".CArgs _runtimeCArgs;
-private import snakebite.backends.backend: Backend;
-private import snakebite.backends.startdata: StartData;
-private import snakebite.ffi.abi: ArgumentPlan, Register;
-private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
-private import snakebite.ffi.plan: NativeSignature;
 private alias MainFunction = extern(C) int function(char[][]);
 private extern(C) int _d_run_main(
     int argc, char** argv, MainFunction main,

@@ -299,10 +299,11 @@ public abstract class Backend {
         imported!"dmd.declaration".VarDeclaration variable,
     );
 
-    // Makes `function_` ready to run and returns the word that names it in
-    // this backend, for `callCompiled`. A word is valid for the life of the
-    // backend. This is the one place the start data (`StartData`) needs a
-    // frontend declaration.
+    // The handle of `function_` in this backend, for `callCompiled`. A
+    // handle is valid for the life of the backend. The backend decides when
+    // the function is compiled: the bytecode backend compiles it at the
+    // first `callCompiled`. The start data (`StartData`) needs a frontend
+    // declaration in this and in `staticStorage`, and nowhere else.
     public abstract const(void)* compiledFunction(FuncDeclaration function_);
 
     // As `call`, for a function named by `compiledFunction`.
@@ -310,28 +311,27 @@ public abstract class Backend {
         const(void)* word, void* returnPlace, void*[] args,
     );
 
-    // The start data of the program, built once for each value of
-    // `unitTests` (see `buildStartData`).
-    public final ref StartData startData(in bool unitTests) {
+    // The start data of the program, built once (see `buildStartData`).
+    public final ref StartData startData() {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
         import snakebite.backends.startdatabuilder: buildStartData;
         import snakebite.frontend.compiler: withCompilerLock;
 
-        const index = unitTests ? 1 : 0;
-        if (!atomicLoad!(MemoryOrder.acq)(_startBuilt[index]))
+        if (!atomicLoad!(MemoryOrder.acq)(_startBuilt))
             withCompilerLock({
-                if (atomicLoad(_startBuilt[index]))
+                if (atomicLoad(_startBuilt))
                     return;
 
-                _startData[index] = buildStartData(
-                    this, cast(Program) _program, unitTests);
-                atomicStore!(MemoryOrder.rel)(_startBuilt[index], true);
+                // `buildStartData` throws before it assigns, so a failure
+                // leaves no half-built data and the next call builds again.
+                _startData = buildStartData(this, cast(Program) _program);
+                atomicStore!(MemoryOrder.rel)(_startBuilt, true);
             });
-        return _startData[index];
+        return _startData;
     }
 
-    private StartData[2] _startData;
-    private shared bool[2] _startBuilt;
+    private StartData _startData;
+    private shared bool _startBuilt;
 
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the
@@ -361,7 +361,7 @@ public int run(
 
     // A C `main` starts no druntime: no module constructor or destructor
     // of a D module runs.
-    auto start = &backend.startData(false);
+    auto start = &backend.startData();
     if (start.hasCEntryPoint || start.betterC)
         return runMain(backend, *start, hostArguments);
 

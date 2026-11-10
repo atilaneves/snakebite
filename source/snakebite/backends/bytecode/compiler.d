@@ -248,8 +248,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _nativeData.storageOf(variable);
     }
 
+    // The handle is the declaration: the function compiles at its first
+    // call, as with `call`.
     public override const(void)* compiledFunction(FuncDeclaration function_) {
-        return compileFunction(function_);
+        return cast(const(void)*) function_;
     }
 
     public override void callCompiled(
@@ -257,7 +259,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void* returnPlace,
         void*[] args,
     ) {
-        runHostToGuest(cast(const(Function)*) word, returnPlace, args);
+        call(cast(FuncDeclaration) word, returnPlace, args);
     }
 
     // The bytecode backend's one host-to-guest entry. The program
