@@ -42,7 +42,7 @@ extern(C) bool executeIndirectCallPlan(
 import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
 import snakebite.backends.builtins: BuiltinCall;
-import snakebite.backends.layout: HostCallLayout;
+import snakebite.backends.hostcalllayout: HostCallLayout;
 import snakebite.backends.haltprocess: HaltAction, isHalt;
 import snakebite.backends.unwindplan:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
