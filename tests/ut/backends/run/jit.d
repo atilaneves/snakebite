@@ -58,6 +58,27 @@ static foreach (backend; Matrix!()) {
         }, ["scan"]);
     }
 
+    @("jit.shiftUsesValueFromTheTakenPath." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int work(int value, int count, bool reset) {
+                assert(count > 0);
+                if (reset) count = 1;
+                const shifted = value >> count;
+                const highBits = cast(uint) value >>> 28;
+                return shifted + cast(int) highBits + (count << 3);
+            }
+            int main() {
+                foreach (i; 0 .. 300) {
+                    if (work(-64, 4, true) != -9) return 1;
+                    if (work(-64, 4, false) != 43) return 2;
+                }
+                return 0;
+            }
+        }, ["work"]);
+    }
+
     @("jit.floatingLiteralsKeepTheirValues." ~ backend.stringof)
     @Tags(is(backend == Bytecode) ? [backend.stringof, "requires-jit-code"]
         : [backend.stringof])
