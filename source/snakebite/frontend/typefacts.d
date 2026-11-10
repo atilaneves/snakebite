@@ -251,7 +251,7 @@ public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
 
         // A complex value is true when either of its two
         // `float`/`double`/`real`-shaped components (`re`, `im`,
-        // each exactly half `type.size` - `nativevalue.
+        // each exactly half `type.size` - `native.value.
         // loadComplexRe`/`loadComplexIm`'s own layout) is nonzero.
         case Tcomplex32, Tcomplex64, Tcomplex80: {
             const half = type.size / 2;

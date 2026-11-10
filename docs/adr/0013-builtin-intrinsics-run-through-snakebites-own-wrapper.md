@@ -80,7 +80,7 @@ keyed by the LLVM name of the intrinsic (`FuncDeclaration.mangleOverride`),
 or by the pragma and the size of its type argument for the atomics. A
 parameter that LLVM wants as a constant is a `switch` in the wrapper. A
 declaration with no wrapper takes the native route and the resolver's
-diagnostic. `dmdintrinsics.d` and the classifier of dmd's code generator are
+diagnostic. `builtin/dmd.d` and the classifier of dmd's code generator are
 for a dmd host only. The result of an intrinsic is then the result of native
 code that LDC built: `rndtol(2.5)` is 3, `sin` is libm's.
 

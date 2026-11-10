@@ -581,7 +581,7 @@ public struct CallSelection {
     }
 
     // The rest of this struct is dmd's code generator reproduced for a host
-    // built by dmd. An LDC host takes `ldcintrinsics`.
+    // built by dmd. An LDC host takes `builtin.ldc`.
     version (DigitalMars) {
         // DMD's backend constant folder (`evalu8`, OPbswap) uses the operand
         // width; `cdbswap` uses the result width for a nonconstant operand.

@@ -689,8 +689,8 @@ public struct CallPlan {
     }
 
     // Writes `value`'s low bytes to `place`, truncated to `store`'s width -
-    // the same raw-truncation rule `nativevalue.storeIntegral` uses, but
-    // written directly rather than through `nativevalue.checkedStoreIntegral`'s
+    // the same raw-truncation rule `native.value.storeIntegral` uses, but
+    // written directly rather than through `native.value.checkedStoreIntegral`'s
     // validate-and-throw wrapper: a plan's own register widths are already
     // known good, fixed once at prepare time, and never need re-checking -
     // or a second switch on the width `store` has already picked - on

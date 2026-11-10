@@ -75,7 +75,7 @@ public enum ParameterType {
 
 
 // The wrappers below give dmd's results, for a host built by dmd. A host
-// built by LDC takes the wrappers of `ldcintrinsics`.
+// built by LDC takes the wrappers of `builtin.ldc`.
 version (DigitalMars):
 
 
