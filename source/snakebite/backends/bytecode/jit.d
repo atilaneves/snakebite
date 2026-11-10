@@ -55,6 +55,7 @@ package struct JitOp {
         fpcmp3, index, checked, castFixed, sliceToPointer, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
         callWindow, returnValue, returnVoid, arrayEqual, signedDivide,
+        temporaryTransition,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -1762,6 +1763,17 @@ private struct Gen {
         case returnValue:
         case returnVoid:
             return emitReturn(i, op.kind == returnValue, original);
+
+        case temporaryTransition:
+            // Only a direct frame slot can skip receiver resolution.
+            if (ins.source & indirectBit)
+                return false;
+            a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+            a.ld(8, RAX, Mem(R9, FrameStack.cleanupMarkOffset));
+            a.alu(Alu.cmp, 8, RAX, Mem(ACTIVE, Activation.cleanupMark.offsetof));
+            jccTo(CC_BE, i + 1);
+            jumpToHandler(i, original);
+            return true;
 
         case copy: {
             const size = op.width ? op.width : ins.width;
