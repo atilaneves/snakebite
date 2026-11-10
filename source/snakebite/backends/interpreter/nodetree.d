@@ -2782,7 +2782,7 @@ private final class MethodDelegate(E, MethodReceiver kind) : SliceNode {
 // its variable (`PairPlan`): the receiver, or the first context, and the
 // outer context. The node yields the address of the pair.
 private final class ContextPair : Node {
-    import snakebite.backends.dualcontext: PairPlan;
+    import snakebite.backends.contextsource: PairPlan;
 
     private Node _storage;
     private Node _first;
@@ -4871,7 +4871,7 @@ private final class ConstructorCall(E) : Node {
 
     public this(E ev, CallExp site, FuncDeclaration constructor,
             Node receiver, bool receiverIsAddress, SiteArguments arguments) {
-        import snakebite.backends.dualcontext: constructsThroughPair;
+        import snakebite.backends.contextpair: constructsThroughPair;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         _ev = ev; _site = site;
@@ -4906,7 +4906,7 @@ private final class ConstructorCall(E) : Node {
 
     // Runs the constructor and returns the object that it constructed.
     private size_t construct(ubyte* frame) {
-        import snakebite.backends.dualcontext: constructedObjectOffset;
+        import snakebite.backends.contextpair: constructedObjectOffset;
         import snakebite.backends.temporary: constructTemporary;
 
         auto ev = _ev;
@@ -6064,7 +6064,7 @@ private Node buildCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
     import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.dualcontext: pairPlanOf;
+    import snakebite.backends.contextsource: pairPlanOf;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
         receiverOf;
     import snakebite.frontend.dmd.functions: typeFunctionOf, unresolvedCalleeOf;
@@ -6234,9 +6234,9 @@ private Node buildCalleeContext(E)(E ev, CallExp call, FuncDeclaration callee) {
 // The context that `source` names, as an address. Null when the tree does
 // not reach it.
 private Node buildContext(E)(
-    E ev, in imported!"snakebite.backends.dualcontext".ContextSource source,
+    E ev, in imported!"snakebite.backends.contextsource".ContextSource source,
 ) {
-    import snakebite.backends.dualcontext: ContextSource;
+    import snakebite.backends.contextsource: ContextSource;
     import snakebite.internalfailure: internalFailure;
 
     final switch (source.kind) with (ContextSource.Kind) {
@@ -7119,7 +7119,7 @@ private const(void)[] classImageOf(E)(E ev, NewExp expression) {
 // made in: the frame of this function or of one that encloses it, or one
 // that the evaluator finds.
 private Node buildVthisStep(E)(E ev, InitStep step) {
-    import snakebite.backends.dualcontext: ContextSource, contextSourceOf;
+    import snakebite.backends.contextsource: ContextSource, contextSourceOf;
 
     if (step.source !is null) {
         auto value = buildValue(ev, step.source);

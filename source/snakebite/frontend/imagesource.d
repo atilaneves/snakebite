@@ -7,7 +7,7 @@ private:
 // Takes the frontend lock: a parse on another thread appends template
 // instances to the member list of a root module it does not own, and that
 // must not happen while this walk iterates the list.
-public string imageSource(imported!"snakebite.backends.backend".Program program) {
+public string imageSource(imported!"snakebite.backends.program".Program program) {
     import snakebite.frontend.compiler: withCompilerLock;
 
     string source;
@@ -25,7 +25,7 @@ public string imageSource(imported!"snakebite.backends.backend".Program program)
 //
 // Cache inputs include imported source files: changing a dependency must
 // invalidate its compiled template bodies even when their names stay the same.
-public string[] imageInputs(imported!"snakebite.backends.backend".Program program) {
+public string[] imageInputs(imported!"snakebite.backends.program".Program program) {
     import dmd.dmodule: Module;
     import snakebite.frontend.compiler: withCompilerLock;
     import std.algorithm: sort;
@@ -70,7 +70,7 @@ private extern(C++) class Collector
     import dmd.dtemplate: TemplateInstance;
     import dmd.expression: CallExp, VarExp, DelegateExp;
     import dmd.mtype: Type;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.program: Program;
     import std.string: fromStringz;
     import std.conv: text;
 

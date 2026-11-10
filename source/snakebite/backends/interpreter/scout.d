@@ -19,7 +19,7 @@ import dmd.statement:
     Statement, TryCatchStatement, TryFinallyStatement, WithStatement;
 import dmd.visitor: SemanticTimeTransitiveVisitor;
 import snakebite.backends.controlflow: ScopePaths;
-import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+import snakebite.backends.lowered: LoweredExpressionTypes;
 import snakebite.backends.switchplan: gotoCaseTarget, gotoDefaultTarget;
 import snakebite.frontend.dmd.functions: unresolvedCalleeOf;
 import snakebite.nativelayout: initializerValueOf;

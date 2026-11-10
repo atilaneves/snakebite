@@ -8,7 +8,7 @@ module ut.backends.call.routing;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
 import std.algorithm.searching: canFind;

@@ -123,7 +123,7 @@ public struct FullExpressionScope {
         import dmd.expression:
             AssertExp, DeclarationExp, FuncExp, LogicalExp, ThrowExp;
         import dmd.visitor: SemanticTimeTransitiveVisitor;
-        import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+        import snakebite.backends.lowered: LoweredExpressionTypes;
 
         extern(C++) static final class Finder: SemanticTimeTransitiveVisitor {
             alias visit = SemanticTimeTransitiveVisitor.visit;

@@ -24,7 +24,7 @@ import snakebite.callarguments: CallArguments;
 // straight into a caller-designated native address, in native layout.
 public final class Interpreter: imported!"snakebite.backends.backend".Backend {
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.program: Program;
     import snakebite.ffi: CallbackBridge, CallbackCall;
     import snakebite.hostthreads: heapNew;
     import snakebite.executionstates: ExecutionStates;
@@ -275,13 +275,13 @@ private struct Shared {
     import dmd.statement: Catch, TryCatchStatement, TryFinallyStatement;
     import snakebite.ffi: CallPlan;
     import snakebite.backends.unwindplan: ExceptionCandidate;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.program: Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo: ClassRuntimeCache;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.runtimetypes: RuntimeTypes;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
-    import snakebite.backends.dualcontext: ContextSource;
+    import snakebite.backends.contextsource: ContextSource;
     import snakebite.ffi: PlanCache;
     import dmd.declaration: VarDeclaration;
     import snakebite.nativelayout: NativeData, TypeFacts;
@@ -591,14 +591,13 @@ private struct CallShape {
 extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.backends.aggregateinit: InitStep, NewPlan;
     import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.backend: Program;
+    import snakebite.backends.program: Program;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, isCtfeVariable, outerFunctionOf;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
-    import snakebite.backends.dualcontext:
-        ContextSource, PairPlan, contextSourceOf,
-        pairPlanOf;
+    import snakebite.backends.contextsource:
+        ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.interpreter.scout: BodyScout, Preparation;
     import snakebite.backends.classinfo;
     import dmd.dclass: ClassDeclaration;
@@ -1302,7 +1301,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             });
         }
 
-        import snakebite.backends.dualcontext:
+        import snakebite.backends.contextpair:
             constructedObjectOffset, constructsThroughPair;
         import snakebite.backends.temporary: constructTemporary;
         import snakebite.nativelayout: loadIntegral;

@@ -7,7 +7,8 @@ module ut.backends.run.declarations;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program, run;
+import snakebite.backends.program: Program;
+import snakebite.backends.runprogram: run;
 import snakebite.frontend.compiler: parseSnippet;
 
 

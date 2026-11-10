@@ -10,7 +10,7 @@ module ut.backends.flags;
 // exit status) is in tests/run_flags.py.
 
 
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.backends.checkplan: BoundsCheck, cMessageOf;
 import snakebite.backends.haltprocess: Halted, HostActions;
 import snakebite.frontend.compiler:

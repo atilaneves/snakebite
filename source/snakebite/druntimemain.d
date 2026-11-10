@@ -33,7 +33,7 @@ public StartupReport runDruntimeMain(
     in string[] arguments,
     in bool endsProcess = false,
 ) {
-    import snakebite.backends.backend: runMain;
+    import snakebite.backends.runprogram: runMain;
     import snakebite.guestrunlock: guestRunLock;
     import snakebite.backends.guestmodules: GuestModules;
     import snakebite.dependencyimage: TestHooks;
@@ -130,7 +130,7 @@ private enum mainSignature = NativeSignature(
 
 
 private extern(C) void callMain(void* owner, CallbackCall* call) {
-    import snakebite.backends.backend: runMain;
+    import snakebite.backends.runprogram: runMain;
 
     auto run = cast(MainRun*) owner;
     const arguments = *cast(string[]*) call.arguments[0];

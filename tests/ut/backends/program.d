@@ -2,7 +2,7 @@ module ut.backends.program;
 
 
 import dmd.func: FuncDeclaration;
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.ctfe: Ctfe;
 import snakebite.exception: SnakebiteException;

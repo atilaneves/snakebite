@@ -156,7 +156,7 @@ public ExecutionReport executeBackend(
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import snakebite.backends: makeBackend;
-    import snakebite.backends.backend: run;
+    import snakebite.backends.runprogram: run;
     import snakebite.druntimemain: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;

@@ -10,7 +10,7 @@ import snakebite.backends: backendIdentity;
 import snakebite.execution: prepareProject, executeBackend;
 import snakebite.dependencypreparation: prepareDependencies;
 import snakebite.dependencyimage: Optimise;
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import snakebite.frontend.imagesource: imageInputs, imageSource;

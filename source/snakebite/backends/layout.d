@@ -574,7 +574,7 @@ extern(C++) private final class LocalsCollector:
     import dmd.expression: ArrayLiteralExp, DeclarationExp, Expression,
         IndexExp, NewExp, SliceExp;
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.loweringvisitor: LoweredExpressionTypes;
+    import snakebite.backends.lowered: LoweredExpressionTypes;
     import dmd.statement:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, LabelStatement, ReturnStatement,
@@ -743,7 +743,7 @@ extern(C++) private final class LocalsCollector:
     }
 
     // Every node `LoweringVisitor` follows into its own `lowering` shares
-    // one list with it (`snakebite.backends.loweringvisitor`): a `~=`'s
+    // one list with it (`snakebite.backends.lowered`): a `~=`'s
     // `__appendtmp*`, a `==`'s or an AA literal's own
     // `__arrayliteral_on_stack*` scope-argument temporary, and so on are
     // otherwise invisible here, buried inside `lowering` rather than in

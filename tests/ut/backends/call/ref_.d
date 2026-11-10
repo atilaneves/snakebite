@@ -2,7 +2,7 @@ module ut.backends.call.ref_;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 

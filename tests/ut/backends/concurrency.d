@@ -2,7 +2,7 @@ module ut.backends.concurrency;
 
 
 import ut;
-import snakebite.backends.backend: Program;
+import snakebite.backends.program: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;

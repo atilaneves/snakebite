@@ -4,15 +4,27 @@ module snakebite.backends.startdatabuilder;
 private:
 
 
-import snakebite.backends.backend: Backend, Program;
+import snakebite.backends.program: Program;
 import snakebite.backends.startdata:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 
 
+// What the builder asks of a backend.
+alias CompiledFunction =
+    FunctionHandle delegate(imported!"dmd.func".FuncDeclaration);
+alias StaticStorage =
+    void[] delegate(imported!"dmd.declaration".VarDeclaration);
+
+
 // Reads the frontend one time and builds the start data of `program`. The
-// functions in it are the ones `backend` names; it compiles them when it
-// likes. A failure throws before the caller has a value to keep.
-public StartData buildStartData(Backend backend, Program program) {
+// functions in it are the ones `compiledFunction` names; it compiles them when
+// it likes. `staticStorage` gives the bytes of a static variable. A failure
+// throws before the caller has a value to keep.
+public StartData buildStartData(
+    Program program,
+    CompiledFunction compiledFunction,
+    StaticStorage staticStorage,
+) {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: Tvoid;
     import dmd.typesem: nextOf;
@@ -25,7 +37,7 @@ public StartData buildStartData(Backend backend, Program program) {
         data.main.present = true;
         data.main.returnsVoid = main_.type.nextOf.ty == Tvoid;
         data.main.parameterCount = typeFunctionOf(main_).parameterList.length;
-        data.main.function_ = compiled(backend, main_);
+        data.main.function_ = compiled(compiledFunction, main_);
     }
 
     if (data.betterC)
@@ -33,14 +45,15 @@ public StartData buildStartData(Backend backend, Program program) {
 
     data.dependencyModules = program.dependencyImage is null
         ? null : program.dependencyImage.deferredModules;
-    addModules(data, backend, program);
+    addModules(data, compiledFunction, staticStorage, program);
     return data;
 }
 
 
 private void addModules(
     ref StartData data,
-    Backend backend,
+    CompiledFunction compiledFunction,
+    StaticStorage staticStorage,
     Program program,
 ) {
     import dmd.dmodule: Module;
@@ -72,53 +85,57 @@ private void addModules(
         }
 
         start.independentConstructors =
-            compiled(backend, functions.independentConstructors);
+            compiled(compiledFunction, functions.independentConstructors);
         start.sharedConstructors =
-            compiled(backend, functions.sharedConstructors);
+            compiled(compiledFunction, functions.sharedConstructors);
         start.threadConstructors =
-            compiled(backend, functions.threadConstructors);
+            compiled(compiledFunction, functions.threadConstructors);
         start.sharedDestructors =
-            compiled(backend, functions.sharedDestructors);
+            compiled(compiledFunction, functions.sharedDestructors);
         start.threadDestructors =
-            compiled(backend, functions.threadDestructors);
-        start.sharedGates = gatesOf(backend, functions.sharedDestructors);
-        start.threadGates = gatesOf(backend, functions.threadDestructors);
-        start.unitTests = compiled(backend, functions.unittests);
+            compiled(compiledFunction, functions.threadDestructors);
+        start.sharedGates =
+            gatesOf(staticStorage, functions.sharedDestructors);
+        start.threadGates =
+            gatesOf(staticStorage, functions.threadDestructors);
+        start.unitTests = compiled(compiledFunction, functions.unittests);
 
-        data.crtConstructors ~= compiled(backend, functions.crtConstructors);
-        data.crtDestructors ~= compiled(backend, functions.crtDestructors);
+        data.crtConstructors ~=
+            compiled(compiledFunction, functions.crtConstructors);
+        data.crtDestructors ~=
+            compiled(compiledFunction, functions.crtDestructors);
         data.modules ~= start;
     }
 }
 
 
 private FunctionHandle[] compiled(
-    Backend backend,
+    CompiledFunction compiledFunction,
     imported!"dmd.func".FuncDeclaration[] functions,
 ) {
     FunctionHandle[] result;
     foreach (function_; functions)
-        result ~= compiled(backend, function_);
+        result ~= compiled(compiledFunction, function_);
     return result;
 }
 
 
 private FunctionHandle compiled(
-    Backend backend,
+    CompiledFunction compiledFunction,
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    return backend.compiledFunction(function_);
+    return compiledFunction(function_);
 }
 
 
 private GateStorage[] gatesOf(
-    Backend backend,
+    StaticStorage staticStorage,
     imported!"dmd.func".FuncDeclaration[] destructors,
 ) {
     GateStorage[] gates;
     foreach (destructor; destructors)
         if (auto gate = destructor.isStaticDtorDeclaration.vgate)
-            if (auto storage = backend.staticStorage(gate))
+            if (auto storage = staticStorage(gate))
                 if (storage.length)
                     gates ~= storage;
     return gates;
