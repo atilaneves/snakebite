@@ -189,7 +189,6 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
-
     @("jit.hotForLoopChecksItsFirstIterationAndContinue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -215,6 +214,47 @@ static foreach (backend; Matrix!()) {
                 return countOdd(-3, -2) == 1 ? 0 : 3;
             }
         }, ["countOdd"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot reinterpret overlapped union fields"),
+)) {
+    @("jit.floatingPointSlotsFollowPartialAndAdjacentWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            union Pair {
+                double wide;
+                struct { float low; float high; }
+            }
+            struct Values {
+                Pair pair;
+                double next;
+            }
+            float update(double x, float y, bool overlap) {
+                assert(y > 0);
+                Values values = void;
+                double* view = overlap ? &values.pair.wide : &values.next;
+                values.pair.high = y + y;
+                *view = x * x;
+                return values.pair.high * y;
+            }
+            int main() {
+                version (LittleEndian)
+                    enum partialProduct = 4.5f;
+                else
+                    enum partialProduct = 0.0f;
+                foreach (i; 0 .. 300) {
+                    if (update(2, 2, true) != partialProduct)
+                        return 1;
+                    if (update(2, 2, false) != 8.0f)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["update"]);
     }
 }
 
