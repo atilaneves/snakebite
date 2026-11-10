@@ -42,7 +42,7 @@ public struct ClosurePlan {
     // receiver: none for a function with one context, and word 0 of the
     // pair for one with two.
     public static Hop[] receiverHops(FuncDeclaration function_) {
-        import snakebite.backends.dualcontext: DualContext;
+        import snakebite.backends.contextpair: DualContext;
         import snakebite.frontend.dmd.delegates: isDualContext;
 
         return isDualContext(function_)
@@ -69,7 +69,7 @@ public struct ClosurePlan {
         scope LayoutOf layoutOf,
     ) {
         import dmd.aggregate: AggregateDeclaration;
-        import snakebite.backends.dualcontext:
+        import snakebite.backends.contextpair:
             fieldTowards, parentTowards, wordTowards;
         import snakebite.frontend.dmd.delegates: isDualContext;
 
