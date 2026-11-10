@@ -2,7 +2,7 @@ module snakebite.backends.interpreter.integeroperations;
 
 private:
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 package ulong combine(string op)(
     in long a,

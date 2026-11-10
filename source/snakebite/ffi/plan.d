@@ -12,7 +12,7 @@ import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // Everything about calling one already-compiled function that does not

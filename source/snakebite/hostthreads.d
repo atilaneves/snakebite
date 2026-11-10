@@ -4,7 +4,7 @@ module snakebite.hostthreads;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import core.thread: Thread, ThreadID;
 import snakebite.cstack: CStack;

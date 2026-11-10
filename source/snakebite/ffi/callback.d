@@ -4,7 +4,7 @@ module snakebite.ffi.callback;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import core.sync.mutex: Mutex;

@@ -400,7 +400,7 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
     driver = tmp_path / "internal_failure_driver.d"
     driver.write_text(
         "module internal_failure_driver;\n"
-        "import snakebite.internalfailure: internalFailure;\n"
+        "import snakebite.failure.report: internalFailure;\n"
         "import snakebite.nativevalue: loadIntegral;\n"
         "noreturn pureFailure() @safe pure nothrow @nogc {\n"
         '    internalFailure("pure caller failed");\n'
@@ -418,7 +418,7 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
         ["ldc2", "-release", "-O", "-flto=thin", "-gcc=clang",
          "-link-defaultlib-shared", "-preview=dip1000",
          f"-I{root / 'source'}", f"-of={binary}", str(driver),
-         str(root / "source/snakebite/internalfailure.d"),
+         str(root / "source/snakebite/failure/report.d"),
          str(root / "source/snakebite/nativevalue.d")],
         cwd=tmp_path, capture_output=True, text=True, check=False, timeout=120,
     )

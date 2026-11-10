@@ -3745,7 +3745,7 @@ private struct DirectWordCall {
     // How a site reads an argument that it passes as `mode`. The plan of a
     // direct word call has no floating or two-word parameter.
     public static Read readOf(in Argument mode) {
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         final switch (mode) with (Argument) {
             case i64: return Read.word;
@@ -4176,7 +4176,7 @@ private mixin template Dispatch(E) {
     // a direct word call, null otherwise. It reads each word from its
     // operand, the receiver first, and gives the callee no frame.
     public final Node nativeWordCall() {
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         auto direct = _selected.direct;
         if (_virtual || direct is null)
@@ -5841,7 +5841,7 @@ private Node materialise(E)(E ev, Node value, Type type) {
 }
 
 private Node materialiseFacts(E)(E ev, Node value, in TypeFacts facts) {
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
 
     auto region = ev._treeRoot._region;
     if (region is null)
@@ -6237,7 +6237,7 @@ private Node buildContext(E)(
     E ev, in imported!"snakebite.backends.contextsource".ContextSource source,
 ) {
     import snakebite.backends.contextsource: ContextSource;
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
 
     final switch (source.kind) with (ContextSource.Kind) {
         case none:
@@ -6363,7 +6363,7 @@ private bool buildArguments(E)(
 ) {
     import dmd.astenums: VarArg;
     import snakebite.ffi: CallAdapter;
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
 
     auto parameters = type.parameterList;
     const variadic = parameters.varargs == VarArg.variadic;
@@ -6557,7 +6557,7 @@ private Node buildDelegate(E)(E ev, Expression expression) {
 // A cast to a delegate: of another delegate, which keeps both words, or of
 // `typeof(null)`.
 private Node buildDelegateCast(E)(E ev, CastExp castExp) {
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)
@@ -6604,7 +6604,7 @@ private Node buildMadeDelegate(E)(
     imported!"snakebite.frontend.dmd.delegates".DelegateTarget target,
 ) {
     import snakebite.frontend.dmd.delegates: isDualContext;
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
 
     if (target.function_ is null)
         internalFailure("a delegate expression names a function and has a "
@@ -6942,7 +6942,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
 // A cast whose result is a dynamic array.
 private Node buildSliceCast(E)(E ev, CastExp castExp) {
     import snakebite.backends.casts: layoutOf;
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)
@@ -7711,7 +7711,7 @@ private template unaryOf(string op) {
 }
 
 private Node buildCast(E)(E ev, CastExp castExp, in Scalar scalar) {
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
     import snakebite.nativevalue: CastKind;
 
     if (castExp.lowering !is null)

@@ -4,7 +4,7 @@ module snakebite.ffi.abi;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 // This module classifies one value's System V AMD64 ABI shape -
 // `ArgumentPlan` and `Register` - and the two host-compiler switches

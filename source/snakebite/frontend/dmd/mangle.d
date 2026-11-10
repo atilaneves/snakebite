@@ -4,7 +4,7 @@ module snakebite.frontend.dmd.mangle;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // A function's type is not complete until dmd has run semantic on its

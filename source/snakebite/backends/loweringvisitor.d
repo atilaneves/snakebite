@@ -50,7 +50,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // Every backend uses the same terminal policy if closed dispatch fails.
     final override void visit(Expression expression) {
         import std.conv: text;
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         internalFailure(text("Expression ", expression.op,
             ": no `visit` override, and not in `UnreachableNodes`"));
@@ -58,7 +58,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
 
     final override void visit(Statement statement) {
         import std.conv: text;
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         internalFailure(text("Statement ", statement.stmt,
             ": no `visit` override, and not in `UnreachableNodes`"));

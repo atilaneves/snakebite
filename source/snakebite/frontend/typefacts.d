@@ -4,7 +4,7 @@ module snakebite.frontend.typefacts;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import snakebite.nativevalue:

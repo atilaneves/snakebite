@@ -10,7 +10,7 @@ module snakebite.arena;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // dmd's own alignment (`allocmemoryNoFree`): enough for any scalar D has,

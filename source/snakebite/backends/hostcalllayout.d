@@ -5,7 +5,7 @@ module snakebite.backends.hostcalllayout;
 
 private:
 
-import snakebite.exception: SnakebiteException;
+import snakebite.failure.exception: SnakebiteException;
 
 // Where a host caller writes the arguments of a compiled function: the
 // frame offset and width of each declared parameter, of the hidden `this`

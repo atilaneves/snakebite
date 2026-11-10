@@ -5,7 +5,7 @@ private:
 
 
 import core.thread.fiber: Fiber;
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 import snakebite.hostthreads: Continuation;
 import core.sync.mutex: Mutex;
 

@@ -8,7 +8,7 @@ import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
@@ -60,7 +60,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     import snakebite.backends.layout: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.sharedtable: SharedTable;
-    import snakebite.exception: SnakebiteException;
+    import snakebite.failure.exception: SnakebiteException;
     import snakebite.framestack: defaultFrameCapacity;
     import snakebite.hostthreads: heapNew;
     import snakebite.executionstates: ExecutionStates;
@@ -388,7 +388,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.checks;
     }
 
-    package imported!"snakebite.backends.haltprocess".HaltAction
+    package imported!"snakebite.failure.halt".HaltAction
     haltAction() const {
         return _program.haltAction;
     }
@@ -984,7 +984,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Address, Place, Reloc, Target;
     import snakebite.backends.layout: ClosureLayout, FrameLayout;
     import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
-    import snakebite.exception: SnakebiteException;
+    import snakebite.failure.exception: SnakebiteException;
     import snakebite.frontend.typefacts:
         initializerRunsForEffect, initializerValueOf, isThreadLocalStorage;
     import snakebite.nativevalue: alignUp, isIntegralSize, TypeFacts;

@@ -4,7 +4,7 @@ module snakebite.backends.builtins;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // The value-passing convention every backend already uses for a native

@@ -25,7 +25,7 @@ module snakebite.gc;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import core.gc.gcinterface: GC;
 

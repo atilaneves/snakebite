@@ -3,7 +3,7 @@ module snakebite.frontend.storage;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import dmd.expression:

@@ -4,7 +4,7 @@ module snakebite.framestack;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import snakebite.backends.temporarystack: TemporaryStack;
 import snakebite.cstack: CStack;

@@ -4,7 +4,7 @@ module snakebite.nativelayout;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 import snakebite.frontend.typefacts;
 import snakebite.nativevalue:
     arrayLengthOffset, arrayPointerOffset, arrayValueSize, checkedLoadIntegral,

@@ -13,7 +13,7 @@ import snakebite.frontend.typefacts: tryTypeFacts, truthFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import std.conv: text;
 import snakebite.callarguments: CallArguments;
@@ -177,8 +177,8 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
 
 }
 
-import snakebite.exception: SnakebiteException;
-import snakebite.faulthandler: GuestPosition, GuestRun, register, unregister;
+import snakebite.failure.exception: SnakebiteException;
+import snakebite.failure.fault: GuestPosition, GuestRun, register, unregister;
 
 // Runs `action` on the evaluator of the calling thread: made on its first
 // entry, and guarded until the call returns. A free function, because a
@@ -237,7 +237,7 @@ import snakebite.backends.checkplan:
     BoundsCheck, FailurePlan, hookOf, isUnanalysed;
 import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.backends.calls: ValueCall;
-import snakebite.backends.haltprocess: isHalt;
+import snakebite.failure.halt: isHalt;
 import snakebite.backends.exceptions: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.backends.identity: IdentityPlan;
@@ -248,7 +248,7 @@ import snakebite.backends.controlflow: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.backends.exceptionplan: CatchPlan, catchPlanOf;
 import snakebite.backends.aggregateinit: AggregateInitPlan;
-import snakebite.backends.unwindplan:
+import snakebite.failure.unwind:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
 import snakebite.backends.switchplan: SwitchPlan, switchPlan, selectCase,
     gotoCaseTarget, gotoDefaultTarget;
@@ -274,7 +274,7 @@ private struct Shared {
     import dmd.expression: StructLiteralExp;
     import dmd.statement: Catch, TryCatchStatement, TryFinallyStatement;
     import snakebite.ffi: CallPlan;
-    import snakebite.backends.unwindplan: ExceptionCandidate;
+    import snakebite.failure.unwind: ExceptionCandidate;
     import snakebite.backends.program: Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo: ClassRuntimeCache;
@@ -2710,7 +2710,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private ExceptionUnwindPlan exceptionPlan(
         TypeInfo_Class actual,
     ) {
-        import snakebite.backends.unwindplan: unwindPlanOf;
+        import snakebite.failure.unwind: unwindPlanOf;
 
         return unwindPlanOf(activeExceptionCandidates(), actual);
     }

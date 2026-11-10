@@ -4,7 +4,7 @@ module snakebite.frontend.checks;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 import dmd.astenums: CHECKACTION, CHECKENABLE;

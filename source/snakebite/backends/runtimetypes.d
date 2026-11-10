@@ -4,7 +4,7 @@ module snakebite.backends.runtimetypes;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // DMD emits no linked metadata for guest declarations. Keep their fallback

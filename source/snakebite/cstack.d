@@ -4,7 +4,7 @@ module snakebite.cstack;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // A growable stack on the C heap, for state that a destructor run by the GC

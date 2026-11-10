@@ -4,7 +4,7 @@ module snakebite.tlsstorage;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // A thread-local guest variable's compile-time-constant description

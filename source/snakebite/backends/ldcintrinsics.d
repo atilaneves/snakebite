@@ -9,7 +9,7 @@ private:
 version (LDC):
 
 import snakebite.backends.builtins: BuiltinCall;
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 import ldc.intrinsics;
 import core.int128: Cent;
 

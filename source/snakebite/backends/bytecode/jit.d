@@ -713,7 +713,7 @@ package struct JitLock {
 
     // `state`, which belongs to the JIT lock, for the thread that holds it.
     package ref T owned(T)(return ref shared T state) {
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         if (!_held)
             internalFailure("JIT state used without the JIT lock");
@@ -828,7 +828,7 @@ private bool cpuHasBmi2() {
 // its convention, instead of running code that reads the wrong registers.
 private void checkCallingConvention(ref CodeRegion region) {
     import snakebite.backends.bytecode.vm: Instruction;
-    import snakebite.internalfailure: internalFailure;
+    import snakebite.failure.report: internalFailure;
     import std.traits: FunctionAttribute, functionAttributes, functionLinkage,
         Parameters, SetFunctionAttributes;
 
@@ -2059,7 +2059,7 @@ private struct Gen {
     }
 
     static Alu aluOf(JitOp.IntOperation operation) {
-        import snakebite.internalfailure: internalFailure;
+        import snakebite.failure.report: internalFailure;
 
         final switch (operation) with (JitOp.IntOperation) {
             case add: return Alu.add;

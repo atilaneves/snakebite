@@ -13,7 +13,7 @@ public struct Program {
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
-    import snakebite.backends.haltprocess: HaltAction, HostActions;
+    import snakebite.failure.halt: HaltAction, HostActions;
     import snakebite.frontend.checks: Checks;
     import snakebite.frontend.dmd.linking: LinkMap;
 

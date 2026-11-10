@@ -6,7 +6,7 @@ import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import snakebite.nativevalue: TypeFacts;
 

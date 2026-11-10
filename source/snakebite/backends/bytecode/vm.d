@@ -4,7 +4,7 @@ module snakebite.backends.bytecode.vm;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 import snakebite.backends.bytecode.jit: jitSupported;
 
 
@@ -43,8 +43,8 @@ import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
 import snakebite.backends.builtins: BuiltinCall;
 import snakebite.backends.hostcalllayout: HostCallLayout;
-import snakebite.backends.haltprocess: HaltAction, isHalt;
-import snakebite.backends.unwindplan:
+import snakebite.failure.halt: HaltAction, isHalt;
+import snakebite.failure.unwind:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
 import snakebite.callarguments: CallArguments;
 import snakebite.ffi.load: callDirectWords, Load, loadWidth, loadWord;
@@ -1590,7 +1590,7 @@ private Activation* popActivation(Activation* active, FrameStack* frames) {
 
 
 private void unwindFinally(Throwable throwable, scope void delegate() cleanup) {
-    import snakebite.backends.unwindplan: sharedUnwindFinally = unwindFinally;
+    import snakebite.failure.unwind: sharedUnwindFinally = unwindFinally;
 
     sharedUnwindFinally(throwable, cleanup);
 }

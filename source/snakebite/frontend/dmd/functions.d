@@ -3,7 +3,7 @@ module snakebite.frontend.dmd.functions;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 // The module-level function called `name`, or null if there is none.
 public imported!"dmd.func".FuncDeclaration findFunction(

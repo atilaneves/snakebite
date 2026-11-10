@@ -102,7 +102,7 @@ This means there is no need to marshall or unmarshall when doing FFI.
   member must be a real outcome, or a `final switch` over it proves
   nothing.
 - Report host internal failures with
-  `snakebite.internalfailure.internalFailure(message)`. It prints the
+  `snakebite.failure.report.internalFailure(message)`. It prints the
   message and the call site's source location, then ends the process with
   a normal failure status. It works in `pure`, `nothrow`, and `@nogc` code,
   including release builds with assertions disabled.

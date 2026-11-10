@@ -4,7 +4,7 @@ module snakebite.nativevalue;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // What a caller on a hot execution path repeatedly asks a dmd `Type`

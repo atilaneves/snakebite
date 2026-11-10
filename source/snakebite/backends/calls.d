@@ -7,7 +7,7 @@ import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // Delegate values use native callback entries, so captured guest contexts

@@ -6,7 +6,7 @@ private:
 
 import snakebite.backends.contextpair:
     DualContext, fieldTowards, parentTowards, wordTowards;
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // Where a context pointer that a call or a delegate hands to its callee
