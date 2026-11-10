@@ -1406,7 +1406,7 @@ public struct PlanCache {
     // own doc), and `_signatures` is a `SharedTable`, which brings its
     // own insert lock (ADR-0006) - the same reasoning `snakebite.
     // backends.interpreter.walker`'s `Cache.build` and `snakebite.
-    // backends.calls.CallSelection.decisionOf` already apply to their
+    // language.call.selection.CallSelection.decisionOf` already apply to their
     // own caches.
     public const(CallPlan)* signatureOf(
         TypeFunction type, in bool context,
@@ -2130,7 +2130,7 @@ private NativeSignature signatureOf(
             // A `ref` parameter occupies a pointer slot in the caller's
             // frame - the address of the argument's own storage, not a
             // copy of its value (see `FrameLayout.of` in
-            // `backends/layout.d`, which lays such a slot out the
+            // `language/layout/frame.d`, which lays such a slot out the
             // same way). That address is the value that travels, so the
             // argument is one pointer register whatever
             // `parameterList[i].type` - the *pointee* type - would

@@ -3017,7 +3017,7 @@ unittest {
 // real, compiled callee's own `_argptr`/register-save-area machinery
 // expects. `elementTypes` below is `typeid(PlanPoint)` - a real, host-
 // compiled `TypeInfo_Struct`, not the fabricated one `snakebite.
-// backends.runtimetypes.RuntimeTypes.structInfo`'s own `setSysVArgTypes`
+// language.statics.typeinfo.RuntimeTypes.structInfo`'s own `setSysVArgTypes`
 // builds for a *guest*-declared struct - so this plan-level test checks
 // only the ABI placement `CallPlan` itself computes, never that
 // fabrication; `ut.backends.call.ffi`'s own `variadic.externD.
