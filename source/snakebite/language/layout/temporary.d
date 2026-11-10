@@ -1,4 +1,4 @@
-module snakebite.backends.temporary;
+module snakebite.language.layout.temporary;
 
 
 private:

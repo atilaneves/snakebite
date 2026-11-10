@@ -42,7 +42,7 @@ package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 // the function runs. A tree node reads none of those fields; the nodes that
 // hand control to the evaluator set them first (`syncTree`).
 package struct TreeRoot {
-    private const(imported!"snakebite.backends.layout".FrameLayout)* _layout;
+    private const(imported!"snakebite.language.layout.frame".FrameLayout)* _layout;
     // The statements of the body: one node, a short sequence whose
     // children are fields, or a sequence.
     private Node _body;
@@ -70,13 +70,13 @@ package struct TreeRoot {
         return found is null ? null : *found;
     }
 
-    package const(imported!"snakebite.backends.layout".FrameLayout)* layout()
+    package const(imported!"snakebite.language.layout.frame".FrameLayout)* layout()
         const {
         return _layout;
     }
 
     package bool hasLayout(
-        in imported!"snakebite.backends.layout".FrameLayout* layout,
+        in imported!"snakebite.language.layout.frame".FrameLayout* layout,
     ) const {
         return _layout is layout;
     }
@@ -135,7 +135,7 @@ private ulong resultBits(T)(in T value) {
 
 package TreeRoot* rootOf(E)(
     E ev, FuncDeclaration function_, Statement body_,
-    const(imported!"snakebite.backends.layout".FrameLayout)* layout,
+    const(imported!"snakebite.language.layout.frame".FrameLayout)* layout,
 ) {
     import dmd.typesem: nextOf;
 
@@ -192,7 +192,7 @@ package TreeRoot* rootOf(E)(
 // Allocates the closure of a function whose captured variables dmd moves to
 // the heap, and keeps its address in the frame (`FrameLayout.closure`).
 private final class ClosureEntry(E) : Node {
-    import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
 
     private E _ev;
     private FuncDeclaration _function;
@@ -279,7 +279,7 @@ package enum CalleeResult : ubyte { value, aggregate, reference }
 // function.
 package struct TreeCallee {
     import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.language.layout.frame: FrameLayout;
     import snakebite.ffi.plan: CallPlan;
 
     package FuncDeclaration function_;
@@ -4907,7 +4907,7 @@ private final class ConstructorCall(E) : Node {
     // Runs the constructor and returns the object that it constructed.
     private size_t construct(ubyte* frame) {
         import snakebite.backends.contextpair: constructedObjectOffset;
-        import snakebite.backends.temporary: constructTemporary;
+        import snakebite.language.layout.temporary: constructTemporary;
 
         auto ev = _ev;
         const receiver = runReceiver(frame);
@@ -7441,7 +7441,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             return new Constant!long(cast(long) address);
         }
         case arrayLiteral: {
-            import snakebite.backends.arrayliteral: planArrayLiteral;
+            import snakebite.language.layout.arrayliteral: planArrayLiteral;
 
             auto literal = expression.isArrayLiteralExp;
             return buildArrayLiteralStorage(
@@ -8193,7 +8193,7 @@ private Position positionOf(E)(E ev, Expression root) {
 // declares. A declaration of an alias, a type, a template or a manifest
 // constant has nothing to run.
 private Node buildDeclaration(E)(E ev, DeclarationExp declaration) {
-    import snakebite.backends.declaration: forEachRuntimeVariable;
+    import snakebite.language.layout.variables: forEachRuntimeVariable;
 
     Node[] nodes;
     bool covered = true;
@@ -8241,7 +8241,7 @@ private Node initializationOf(E)(
     E ev, VarDeclaration variable, DeclarationExp declaration, Node store,
     in size_t materialised,
 ) {
-    import snakebite.backends.temporary: hasTemporaryDestructor;
+    import snakebite.language.layout.temporary: hasTemporaryDestructor;
 
     auto region = ev._treeRoot._region;
     const slot = ev._layout.slotOf(variable);
@@ -8477,7 +8477,7 @@ private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteral
 private Node buildArrayLiteral(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
 ) {
-    import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
+    import snakebite.language.layout.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
     import snakebite.frontend.typefacts: isStoredLiteral;
 
     auto plan = planArrayLiteral(literal, ev._function);
@@ -8506,9 +8506,9 @@ private Node buildArrayLiteral(E)(
 // of the destination.
 private Node buildArrayLiteralStorage(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
-    imported!"snakebite.backends.arrayliteral".ArrayLiteralPlan plan,
+    imported!"snakebite.language.layout.arrayliteral".ArrayLiteralPlan plan,
 ) {
-    import snakebite.backends.arrayliteral: ArrayLiteralPlan;
+    import snakebite.language.layout.arrayliteral: ArrayLiteralPlan;
     import snakebite.frontend.compiler: arrayLiteralLowering;
     import snakebite.frontend.dmd.functions: moduleOf;
 
@@ -8541,7 +8541,7 @@ private Node buildArrayLiteralStorage(E)(
 private Node buildArrayLiteralSlice(E)(
     E ev, imported!"dmd.expression".ArrayLiteralExp literal,
 ) {
-    import snakebite.backends.arrayliteral: planArrayLiteral;
+    import snakebite.language.layout.arrayliteral: planArrayLiteral;
 
     // `auto`: dmd's element type stays mutable.
     auto plan = planArrayLiteral(literal, ev._function);
@@ -9098,7 +9098,7 @@ private bool holdsLabel(in Statement statement, const(void)* label) {
 private bool runsNothing(Statement statement) {
     import dmd.astenums: STMT;
     import dmd.statement: ExpStatement;
-    import snakebite.backends.declaration: forEachRuntimeVariable;
+    import snakebite.language.layout.variables: forEachRuntimeVariable;
 
     switch (statement.stmt) with (STMT) {
         case Import, ScopeGuard:

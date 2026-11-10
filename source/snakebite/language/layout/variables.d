@@ -1,4 +1,4 @@
-module snakebite.backends.declaration;
+module snakebite.language.layout.variables;
 
 
 private:

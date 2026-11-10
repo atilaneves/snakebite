@@ -170,7 +170,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     // difference between two readings on the same thread means anything.
     version(unittest)
     public size_t layoutBuilds() @safe @nogc nothrow const scope {
-        import snakebite.backends.layout: FrameLayout;
+        import snakebite.language.layout.frame: FrameLayout;
 
         return FrameLayout.builds;
     }
@@ -256,7 +256,7 @@ import snakebite.backends.interpreter.temporarylifetime: TemporaryLifetime;
 import snakebite.host.cstack: CStack;
 import snakebite.backends.fullexpression:
     FullExpressionScope;
-import snakebite.backends.temporary: canRetainTemporaries;
+import snakebite.language.layout.temporary: canRetainTemporaries;
 
 // The state one program's evaluators share, whichever thread they run
 // on (ADR-0006). Every table here is filled once per key - under its
@@ -278,7 +278,7 @@ private struct Shared {
     import snakebite.program: Program;
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo: ClassRuntimeCache;
-    import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.backends.runtimetypes: RuntimeTypes;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.backends.contextsource: ContextSource;
@@ -595,7 +595,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import snakebite.program: Program;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, isCtfeVariable, outerFunctionOf;
-    import snakebite.backends.layout: ClosureLayout, FrameLayout;
+    import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.backends.closureplan: ClosurePlan, Hop;
     import snakebite.backends.contextsource:
         ContextSource, PairPlan, contextSourceOf, pairPlanOf;
@@ -1305,7 +1305,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         import snakebite.backends.contextpair:
             constructedObjectOffset, constructsThroughPair;
-        import snakebite.backends.temporary: constructTemporary;
+        import snakebite.language.layout.temporary: constructTemporary;
         import snakebite.native.value: checkedLoadIntegral;
 
         CallResult result;
@@ -4132,7 +4132,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // Runs a local's initializer into the frame slot `layoutOf` already
     // gave it. `long sum = 0;` is a `DeclarationExp` here.
     protected override void visitDeclaration(DeclarationExp expression) {
-        import snakebite.backends.declaration: forEachRuntimeVariable;
+        import snakebite.language.layout.variables: forEachRuntimeVariable;
 
         forEachRuntimeVariable(expression.declaration, (variable) {
             initializeDeclaredVariable(variable, expression);
@@ -6908,7 +6908,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const(FrameLayout)* slots, const(FrameLayout)* callee,
     ) {
         import snakebite.native.argumentflow: Shape;
-        import snakebite.backends.layout: shapeOf;
+        import snakebite.language.layout.frame: shapeOf;
         import snakebite.native.variadic: VariadicLayout;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
         import core.stdc.string: memcpy, memset;

@@ -124,7 +124,7 @@ private ContextSource overriderSourceOf(
     ref imported!"snakebite.native.argumentflow".SignatureTable signatures,
 ) {
     import snakebite.backends.closureplan: ClosurePlan;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.language.layout.frame: FrameLayout;
 
     int adjustment;
     const isBase = owner.isThis.isClassDeclaration.isBaseOf(

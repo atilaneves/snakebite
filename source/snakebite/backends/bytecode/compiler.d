@@ -57,7 +57,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.backends.calls: CallSelection;
     import snakebite.backends.classinfo;
     import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.failure.exception: SnakebiteException;
@@ -787,7 +787,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
         import dmd.typesem: nextOf;
-        import snakebite.backends.layout: FrameLayout;
+        import snakebite.language.layout.frame: FrameLayout;
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.native.value: TypeFacts;
@@ -982,8 +982,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         pairPlanOf;
     import snakebite.backends.bytecode.relocation:
         Address, Place, Reloc, Target;
-    import snakebite.backends.layout: ClosureLayout, FrameLayout;
-    import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
+    import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
+    import snakebite.language.layout.temporary: TemporaryPlan, constructTemporary;
     import snakebite.failure.exception: SnakebiteException;
     import snakebite.frontend.typefacts:
         initializerRunsForEffect, initializerValueOf, isThreadLocalStorage;
@@ -4679,7 +4679,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
-        import snakebite.backends.declaration: forEachRuntimeVariable;
+        import snakebite.language.layout.variables: forEachRuntimeVariable;
 
         forEachRuntimeVariable(expression.declaration, (variable) {
             compileDeclaredVariable(variable, expression);
@@ -10745,7 +10745,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expressions* arguments,
         in FrameLayout layout,
     ) {
-        import snakebite.backends.layout: shapeOf;
+        import snakebite.language.layout.frame: shapeOf;
         import snakebite.native.variadic: FirstState, VariadicLayout;
 
         const hasTypes = layout.variadicTypes != size_t.max;

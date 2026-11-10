@@ -5,7 +5,7 @@ private:
 
 import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
-import snakebite.backends.temporary: TemporaryPlan;
+import snakebite.language.layout.temporary: TemporaryPlan;
 import snakebite.stack.temporaries: TemporaryStack;
 import snakebite.backends.fullexpression:
     FullExpressionScope;

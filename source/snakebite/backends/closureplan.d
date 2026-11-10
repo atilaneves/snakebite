@@ -5,7 +5,7 @@ private:
 
 
 import snakebite.native.argumentflow: SignatureTable;
-import snakebite.backends.layout: ClosureLayout, FrameLayout;
+import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
 
 
 public struct Hop {
@@ -21,7 +21,7 @@ public struct Hop {
 }
 
 public struct ClosurePlan {
-    import snakebite.backends.layout: ClosureLayout;
+    import snakebite.language.layout.frame: ClosureLayout;
     import dmd.func: FuncDeclaration;
 
     public bool needsClosure;

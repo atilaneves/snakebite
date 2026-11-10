@@ -19,7 +19,7 @@ import dmd.statement:
 import dmd.location: Loc;
 import dmd.typesem: isString;
 import snakebite.backends.fullexpression: FullExpressionScope;
-import snakebite.backends.lowered: LoweredExpressionTypes;
+import snakebite.language.layout.lowered: LoweredExpressionTypes;
 import snakebite.backends.identity: IdentityPlan, identityPlan;
 import snakebite.backends.logical: LogicalPlan, logicalPlan;
 import snakebite.backends.ifplan: IfPlan, ifPlan;
@@ -467,7 +467,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     // A declaration can read only the initializer's RHS. Keep this check
     // before that shortcut as well as on direct construction expressions.
     final override void visit(DeclarationExp expression) {
-        import snakebite.backends.declaration: forEachRuntimeVariable;
+        import snakebite.language.layout.variables: forEachRuntimeVariable;
 
         bool threw;
         if (ctfeBlockDepth != 0)
@@ -588,7 +588,7 @@ extern(C++) package abstract class LoweringVisitor: Visitor {
     final override void visit(ArrayLiteralExp expression) {
         import dmd.mtype: Type;
         import dmd.typesem: pointerTo;
-        import snakebite.backends.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
+        import snakebite.language.layout.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
         import snakebite.frontend.typefacts: isStoredLiteral;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 

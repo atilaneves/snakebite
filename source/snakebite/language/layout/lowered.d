@@ -1,4 +1,4 @@
-module snakebite.backends.lowered;
+module snakebite.language.layout.lowered;
 
 
 private:
@@ -15,7 +15,7 @@ import std.meta: AliasSeq;
 // that a backend must follow rather than walk unlowered: the one list
 // `LoweringVisitor` (`snakebite.backends.loweringvisitor`) dispatches on, and
 // the one list a locals-slot pre-pass
-// (`snakebite.backends.layout.LocalsCollector`) must also walk into to find
+// (`snakebite.language.layout.frame.LocalsCollector`) must also walk into to find
 // a lowering's own compiler temporaries (`__arrayliteral_on_stack*`,
 // `__appendtmp*`, and so on). Add a type here and to `LoweringVisitor`
 // together; a type missing from `LocalsCollector`'s side surfaces as

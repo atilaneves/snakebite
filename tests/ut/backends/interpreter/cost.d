@@ -10,7 +10,7 @@ import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
 import dmd.dsymbol: Dsymbol;
 import dmd.declaration: VarDeclaration;
-import snakebite.backends.declaration: forEachRuntimeVariable;
+import snakebite.language.layout.variables: forEachRuntimeVariable;
 import snakebite.nativelayout: NativeData;
 import std.conv: text;
 import core.exception: AssertError;

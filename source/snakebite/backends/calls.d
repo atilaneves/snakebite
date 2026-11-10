@@ -1197,7 +1197,7 @@ public struct ValueCall {
     import dmd.mtype: TypeFunction;
     import snakebite.native.argumentflow:
         ArgumentFlow, Shape, Signature, SignatureTable;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.language.layout.frame: FrameLayout;
 
     public TypeFunction type;
     public bool hasContext;
@@ -1257,7 +1257,7 @@ public struct ValueCall {
 // `&someDelegateVariable`, both give a *pointer to a delegate*; calling
 // through either dereferences with the same `(*p)(args)` syntax dmd
 // itself lowers a bare function-pointer call to (`fn(args)` becomes
-// `(*fn)(args)`, see `snakebite.backends.layout.FrameLayout.
+// `(*fn)(args)`, see `snakebite.language.layout.frame.FrameLayout.
 // ofParameters`'s own callers). Reading the syntax instead of `e1.type`
 // mistakes that delegate-pointer dereference for the function-pointer
 // shape it merely resembles: `deref.e1`, the pointer's own pointee, is a

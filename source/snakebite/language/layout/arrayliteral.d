@@ -1,4 +1,4 @@
-module snakebite.backends.arrayliteral;
+module snakebite.language.layout.arrayliteral;
 
 
 private:

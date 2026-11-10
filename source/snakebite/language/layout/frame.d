@@ -1,4 +1,4 @@
-module snakebite.backends.layout;
+module snakebite.language.layout.frame;
 
 
 private:
@@ -37,7 +37,7 @@ package struct FrameLayout {
     package size_t size;
     package uint alignment = 1;
     package imported!"snakebite.stack.returnplace".ReturnPlace returnPlace;
-    private imported!"snakebite.backends.returnstorage".ReturnStoragePlan _returns;
+    private imported!"snakebite.language.layout.returnstorage".ReturnStoragePlan _returns;
 
     // Whether a local of the function can point into the temporaries of its
     // initialiser: decided once here, so a call of any other function does
@@ -131,7 +131,7 @@ package struct FrameLayout {
         // Imported guest bodies can still have unresolved locals.
         runSemantic3(function_);
         auto layout = ofParameters(function_, signatures);
-        layout._returns = imported!"snakebite.backends.returnstorage"
+        layout._returns = imported!"snakebite.language.layout.returnstorage"
             .ReturnStoragePlan.of(function_);
 
         if (layout._returns.hasPlace) {
@@ -574,7 +574,7 @@ extern(C++) private final class LocalsCollector:
     import dmd.expression: ArrayLiteralExp, DeclarationExp, Expression,
         IndexExp, NewExp, SliceExp;
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.lowered: LoweredExpressionTypes;
+    import snakebite.language.layout.lowered: LoweredExpressionTypes;
     import dmd.statement:
         Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
         IfStatement, ImportStatement, LabelStatement, ReturnStatement,
@@ -711,7 +711,7 @@ extern(C++) private final class LocalsCollector:
     }
 
     override void visit(DeclarationExp expression) {
-        import snakebite.backends.declaration: forEachRuntimeVariable;
+        import snakebite.language.layout.variables: forEachRuntimeVariable;
 
         forEachRuntimeVariable(expression.declaration, (variable) {
             collectVariable(variable);
@@ -743,7 +743,7 @@ extern(C++) private final class LocalsCollector:
     }
 
     // Every node `LoweringVisitor` follows into its own `lowering` shares
-    // one list with it (`snakebite.backends.lowered`): a `~=`'s
+    // one list with it (`snakebite.language.layout.lowered`): a `~=`'s
     // `__appendtmp*`, a `==`'s or an AA literal's own
     // `__arrayliteral_on_stack*` scope-argument temporary, and so on are
     // otherwise invisible here, buried inside `lowering` rather than in
@@ -758,7 +758,7 @@ extern(C++) private final class LocalsCollector:
             static if (is(Node == NewExp))
                 collectDeclarations(expression.argprefix);
             static if (is(Node == ArrayLiteralExp)) {
-                import snakebite.backends.arrayliteral:
+                import snakebite.language.layout.arrayliteral:
                     ArrayLiteralPlan, planArrayLiteral;
                 import snakebite.frontend.typefacts: isStoredLiteral;
                 import snakebite.native.value: TypeFacts;
@@ -781,7 +781,7 @@ extern(C++) private final class LocalsCollector:
             return;
 
         import dmd.astenums: STC;
-        import snakebite.backends.temporary: canRetainTemporaries;
+        import snakebite.language.layout.temporary: canRetainTemporaries;
         import snakebite.native.value: TypeFacts;
 
         const retains = canRetainTemporaries(variable);
