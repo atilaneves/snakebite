@@ -5706,8 +5706,40 @@ static if (jitSupported) {
             if (!tables.unspecialise(snapshot[index]))
                 return false;
             ops[index] = tables.jitGet(snapshot[index].handler);
+            if (handler is &callGeneral!true || handler is &callGeneral!false)
+                originals[index] = nativeCallJitEntry(
+                    &function_.callSites[snapshot[index].source], handler);
         }
         return lock.jitFunction(function_, snapshot, ops, originals);
+    }
+
+    private Instruction.Handler nativeCallJitEntry(
+        const(CallSite)* site, Instruction.Handler original,
+    ) nothrow {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        if (site.kind != CallSite.Kind.native)
+            return original;
+        // A final state publishes the call shape for the lifetime of the site.
+        const current = atomicLoad!(MemoryOrder.acq)(
+            *cast(shared const(uint)*) &site.directState);
+        if (current == CallSite.DirectState.threeWordsSign32)
+            return &callPreparedThreeWords!(Load.sign32);
+        if (current == CallSite.DirectState.threeWordsZero32)
+            return &callPreparedThreeWords!(Load.zero32);
+        return original;
+    }
+
+    private const(Instruction)* callPreparedThreeWords(Load middle)(
+        const(Instruction)* pc,
+        Activation* active,
+        DispatchState* state,
+        ubyte* frame,
+        ulong r0,
+        double fp0,
+    ) {
+        return opCallDirectThreeWords!middle(
+            &active.callSites[pc.source], pc, active, state, frame);
     }
 
     private void buildJitTable(ref JitTables tables) nothrow {
