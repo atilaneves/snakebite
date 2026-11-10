@@ -146,6 +146,8 @@ public extern(C) ulong snakebite_ut_word_three_unsigned(
 
 // Returned in the two result registers, length first.
 public extern(C) long[] snakebite_ut_word_slice(long* values, long length) {
+    if (length < 0)
+        throw new Exception("negative slice length");
     return values[0 .. length];
 }
 
@@ -4690,7 +4692,8 @@ static foreach (backend; Matrix!(
 
 
 // A result of two words in the result registers, from a call with two
-// word arguments.
+// word arguments. A throw at that call must leave the previous slice
+// and the fields next to it intact.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
@@ -4703,7 +4706,16 @@ static foreach (backend; Matrix!(
                 pragma(mangle, "snakebite_ut_word_slice")
                 extern(C) long[] slice(long* values, long length);
 
+                void assign(long[]* destination, long* values, long length) {
+                    *destination = slice(values, length);
+                }
+
                 int answer() {
+                    struct GuardedSlice {
+                        long before;
+                        long[] view;
+                        long after;
+                    }
                     long[4] values = [3, 5, 7, 11];
                     foreach (round; 0 .. 3) {
                         auto whole = slice(values.ptr, 4);
@@ -4718,6 +4730,27 @@ static foreach (backend; Matrix!(
                         auto tail = slice(&values[2], 2);
                         if (tail.length != 2 || tail[0] != 7) return 4;
                     }
+                    GuardedSlice result = GuardedSlice(13, values[], 17);
+                    foreach (length; [3L, 2L, 1L, -1L, 0L]) {
+                        try {
+                            result.view = slice(&values[1], length);
+                            if (length < 0 || result.view.length != length
+                                    || result.view.ptr !is &values[1])
+                                return 5;
+                        } catch (Exception exception) {
+                            if (length != -1 || exception.msg != "negative slice length"
+                                    || result.view.length != 1
+                                    || result.view.ptr !is &values[1])
+                                return 6;
+                        }
+                        if (result.before != 13 || result.after != 17)
+                            return 7;
+                    }
+                    assign(&result.view, &values[2], 2);
+                    if (result.view.length != 2 || result.view.ptr !is &values[2]
+                            || result.view[1] != 11
+                            || result.before != 13 || result.after != 17)
+                        return 8;
                     return 0;
                 }
             },

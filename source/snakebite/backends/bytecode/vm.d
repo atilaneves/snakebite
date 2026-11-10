@@ -443,11 +443,12 @@ public struct CallSite {
 
     // A `native` site whose plan is zero to three word arguments and no
     // result or an integer result of one or two words called directly.
-    // The thread that wins `preparing` writes the `direct*` fields, then
-    // publishes the selected call shape in `directState`. `direct` is one
-    // or two whole arguments and a result of at most one word. `wide` is
-    // the fallback for other direct shapes. It uses `directLoads[a]`,
-    // how argument `a` is read, and
+    // At run time, the thread that wins `preparing` writes the `direct*`
+    // fields, then publishes the shape in `directState`. `direct` is one or
+    // two whole arguments with a result of at most one word.
+    // `twoWordsPairResult` passes two frame words in register order and
+    // keeps a two-word frame result. `wide` handles other direct shapes using
+    // `directLoads[a]`, how an argument is read, and
     // `directOrder[r]`, the argument that goes in integer register `r` (see
     // `directWordCallTarget`). `directSwapped` says the arguments are not in
     // register order.
@@ -459,6 +460,7 @@ public struct CallSite {
         wide,
         threeWordsSign32,
         threeWordsZero32,
+        twoWordsPairResult,
     }
 
     package uint directState;
@@ -2198,6 +2200,13 @@ private const(Instruction)* opCallNative(
         // The compiler gives each native call instruction its own site,
         // including copies made by inlining. Tier-up changes only handlers,
         // so the frame destination is fixed when this site is first run.
+        if (current == State.wide && site.returnWidth == 16
+                && parameterCount == 2 && !site.directSwapped
+                && loads[0] == Load.word64 && loads[1] == Load.word64
+                && isFrameOperand(site.args[0].callerOffset)
+                && isFrameOperand(site.args[1].callerOffset)
+                && isFrameOperand(pc.destination))
+            current = State.twoWordsPairResult;
         if (current == State.wide && parameterCount == 3
                 && site.returnWidth == ulong.sizeof
                 && pc.destination != discardResult
@@ -2215,6 +2224,8 @@ private const(Instruction)* opCallNative(
         atomicStore!(MemoryOrder.rel)(*stateSlot, uint(current));
     }
     if (current != State.direct) {
+        if (current == State.twoWordsPairResult)
+            return opCallDirectTwoWordsPairResult(site, pc, active, state, frame);
         if (current == State.wide)
             return opCallDirectWide(site, pc, active, state, frame);
         if (current == State.threeWordsSign32)
@@ -2253,6 +2264,24 @@ private const(Instruction)* opCallNative(
                 ~ "0, 1, 2, 4 or 8 here");
         }
     }
+    return pc + 1;
+}
+
+pragma(inline, false)
+private const(Instruction)* opCallDirectTwoWordsPairResult(
+    CallSite* site,
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    // The position of a throw selects its handler.
+    active.pc = pc;
+    state.current = active;
+    const first = loadWord(frame + site.args[0].callerOffset, Load.word64);
+    const second = loadWord(frame + site.args[1].callerOffset, Load.word64);
+    callDirectWords(site.directTarget, first, second,
+        /* third */ 0, /* resultWidth */ 16, frame + pc.destination);
     return pc + 1;
 }
 
