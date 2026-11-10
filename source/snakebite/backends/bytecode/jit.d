@@ -1774,6 +1774,11 @@ private struct Gen {
         return t[comparison];
     }
 
+    void jmpLocalTo(size_t offset) {
+        a.b(0xE9);
+        a.d32(cast(int) (offset - (a.n + 4)));
+    }
+
     void jumpToHandler(size_t i, Instruction.Handler handler) {
         // The unchained dispatcher gets its register arguments from the state.
         static if (!chainedDispatch) {
