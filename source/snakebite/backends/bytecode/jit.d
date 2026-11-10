@@ -259,11 +259,12 @@ private struct JitState {
     // The buffers of the fixup and label tables, which compiles reuse.
     Scratch!Fixup fixups;
     Scratch!size_t labels;
+    PerfMap perfMap;
 
     Emitted emitFunction(Instruction[] instructions,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals,
-        const(long)[] constants)
+        const(long)[] constants, in char[] name)
     {
         import core.atomic: atomicStore, MemoryOrder;
         import snakebite.backends.bytecode.vm: chainedDispatch, DispatchState;
@@ -333,6 +334,8 @@ private struct JitState {
             region.populate;
 
         const code = region.execBase + start;
+        if (name.length)
+            perfMap.record(code, g.a.n, name);
         // One aligned 8-byte store with release order for each word, after
         // the code is complete. A thread that runs the function moves to JIT
         // code at its next dispatch.
@@ -345,6 +348,37 @@ private struct JitState {
 }
 
 private shared JitState _jitState;
+
+private struct PerfMap {
+    import core.stdc.stdio: FILE;
+
+    private FILE* _file;
+    private bool _opened;
+
+    void record(in ubyte* code, in size_t size, in char[] name) @nogc nothrow {
+        import core.stdc.stdio: fclose, fflush, fopen, fprintf, perror,
+            snprintf;
+        import core.sys.posix.unistd: getpid;
+
+        if (!_opened) {
+            _opened = true;
+            char[64] path;
+            snprintf(path.ptr, path.length, "/tmp/perf-%d.map", getpid());
+            // A stale file or a link at this path must not be overwritten.
+            _file = fopen(path.ptr, "wex");
+            if (_file is null)
+                perror(path.ptr);
+        }
+        if (_file is null)
+            return;
+        if (fprintf(_file, "%zx %zx %.*s\n", cast(size_t) code, size,
+                cast(int) name.length, name.ptr) < 0 || fflush(_file) != 0) {
+            perror("snakebite: cannot write JIT perf map");
+            fclose(_file);
+            _file = null;
+        }
+    }
+}
 
 // The code region. It is a memfd file that grows by chunks. Each chunk is
 // mapped twice: `writeBase` is read+write, where the JIT emits, and `execBase`
@@ -489,20 +523,20 @@ package struct JitLock {
     package bool jitFunction(Instruction[] instructions,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals,
-        const(long)[] constants)
+        const(long)[] constants, in char[] name)
     {
         if (instructions.length == 0)
             return false;
         ref state = owned(_jitState);
         auto result = state.emitFunction(instructions, snapshot, ops, originals,
-            constants);
+            constants, name);
         if (result == Emitted.full) {
             const worst = instructions.length * maximumBytesPerInstruction
                 + 4096;
             if (!state.region.newChunk(worst))
                 return false;
             result = state.emitFunction(instructions, snapshot, ops,
-                originals, constants);
+                originals, constants, name);
         }
         return result == Emitted.done;
     }

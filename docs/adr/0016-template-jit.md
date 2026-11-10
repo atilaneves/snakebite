@@ -152,6 +152,13 @@ page fault.
 Code is never freed. A function that has JIT code keeps it until the process
 ends.
 
+With `bin/sb --jit-perf-map`, the JIT creates `/tmp/perf-<pid>.map` on the
+first successful compilation. Each line contains the hexadecimal start
+address, the hexadecimal size in bytes, and the mangled function name.
+The JIT writes the line before it publishes the handler addresses. The map
+stays on disk so `perf report` can read it after the process ends. The option
+is off by default.
+
 ### Independent of stored bytecode
 
 The JIT replaces handler words in the live instruction array, and the

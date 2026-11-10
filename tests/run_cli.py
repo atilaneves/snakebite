@@ -37,6 +37,88 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
+@pytest.mark.parametrize(
+    "backend, flags, mapped",
+    [
+        ("bytecode", [], False),
+        ("bytecode", ["--jit-perf-map"], True),
+        ("bytecode", ["--jit-perf-map", "--no-jit"], False),
+        ("interpreter", ["--jit-perf-map"], False),
+        ("ctfe", ["--jit-perf-map"], False),
+    ],
+)
+def test_jit_perf_map(
+    tmp_path: Path, backend: str, flags: list[str], mapped: bool,
+) -> None:
+    write(
+        tmp_path / "perf_map_guest.d",
+        """
+        module perf_map_guest;
+        import core.stdc.stdio: fflush, getchar, puts;
+
+        T hot(T)(T count) {
+            T sum;
+            foreach (i; 0 .. count)
+                sum += i;
+            return sum;
+        }
+
+        int main() {
+            assert(hot(300) == 44850);
+            assert(hot(301L) == 45150);
+            assert(hot(300) == 44850);
+            puts("ready");
+            fflush(null);
+            return getchar() == 'x' ? 0 : 1;
+        }
+        """,
+    )
+    child = subprocess.Popen(
+        [sb_path(), f"--backend={backend}", *flags, str(tmp_path)],
+        cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True,
+    )
+    path = Path(f"/tmp/perf-{child.pid}.map")
+    try:
+        # Read the map while the guest is still running.
+        assert child.stdout is not None
+        assert select.select([child.stdout], [], [], 30)[0], "guest did not start"
+        ready = child.stdout.readline()
+        assert ready.strip() == "ready", f"unexpected guest output: {ready!r}"
+        assert path.exists() == mapped
+        if mapped:
+            records = [line.split() for line in path.read_text().splitlines()]
+            assert len(records) == 2
+            assert records[0][2] != records[1][2]
+            ranges = []
+            for start, size, name in records:
+                assert name.startswith("_D14perf_map_guest")
+                assert "hot" in name
+                base, length = int(start, 16), int(size, 16)
+                assert length > 0
+                ranges.append((base, base + length))
+            ranges.sort()
+            assert ranges[0][1] <= ranges[1][0]
+
+            mappings = Path(f"/proc/{child.pid}/maps").read_text().splitlines()
+            executable = [
+                tuple(int(address, 16) for address in line.split()[0].split("-"))
+                for line in mappings
+                if "/memfd:snakebite-jit" in line and line.split()[1].startswith("r-x")
+            ]
+            for start, end in ranges:
+                assert any(low <= start < end <= high for low, high in executable)
+
+        stdout, _ = child.communicate(input="x", timeout=30)
+        assert child.returncode == 0, stdout
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=30)
+        if mapped:
+            path.unlink(missing_ok=True)
+
+
 @pytest.mark.parametrize("collector", ["", "symgc", "unknown"])
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_process_collector_choice(

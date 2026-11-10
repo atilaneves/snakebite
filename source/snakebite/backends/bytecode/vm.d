@@ -1027,6 +1027,7 @@ public struct Function {
     package uint jitState;
     // Whether calls of this function count towards `jitHeat`.
     package bool jitCounts;
+    package const(char)[] jitName;
 
     package void fixWindowFacts() {
         activationAlignment = frameAlignment > uint(Activation.alignof)
@@ -5258,6 +5259,7 @@ private const(Specialisation)* lookupSpecialisation(
 public struct JitSetting {
     public bool enabled = true;
     public bool eager;
+    public bool perfMap;
 }
 
 // The JIT: tier-up, counting and the classification of handlers. The code
@@ -5551,7 +5553,7 @@ static if (jitSupported) {
             ops[index] = tables.jitGet(snapshot[index].handler);
         }
         return lock.jitFunction(instructions, snapshot, ops, originals,
-            function_.constants);
+            function_.constants, function_.jitName);
     }
 
     // Builds the tables of `tables` once.
