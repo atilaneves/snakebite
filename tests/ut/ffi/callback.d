@@ -432,7 +432,7 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
         Recorded recorded;
 
         auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
-        bridge.register(&word, function_);
+        bridge.register(&word, nativeSignatureOf(function_), function_);
         auto entry = cast(IntOfInt) bridge.entryOf(&word);
         bridge.beginChunk(strategy);
         bridge.chunkCount.should == 2;
@@ -502,7 +502,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.register(&word, nativeSignatureOf(function_), function_);
     foreach (_; 0 .. 300)
         bridge.beginChunk(ChunkStrategy.protect);
 
