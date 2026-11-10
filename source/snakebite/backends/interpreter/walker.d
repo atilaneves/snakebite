@@ -52,7 +52,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
                 cast(void*) this,
                 &prepareCallback,
             ));
-        import snakebite.backends.checkplan: FailurePlan, nullDerefPlanOf;
+        import snakebite.language.checks.failure: FailurePlan, nullDerefPlanOf;
 
         _checksNullDeref = nullDerefPlanOf(program.checks).kind
             != FailurePlan.Kind.ignore;
@@ -233,12 +233,12 @@ private final class GuestException: Exception {
 
 import snakebite.backends.interpreter.preparedfacts: PreparedFacts;
 import snakebite.native.value: BitfieldAccess;
-import snakebite.backends.checkplan:
+import snakebite.language.checks.failure:
     BoundsCheck, FailurePlan, hookOf, isUnanalysed;
 import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.language.call.selection: ValueCall;
 import snakebite.failure.halt: isHalt;
-import snakebite.backends.exceptions: CAssertCall;
+import snakebite.language.checks.assertion: CAssertCall;
 import snakebite.backends.loweringvisitor: LoweringVisitor;
 import snakebite.language.operators.identity: IdentityPlan;
 import snakebite.language.control.ifplan: IfPlan;
@@ -2058,7 +2058,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        import snakebite.backends.checkplan: boundsPlanOf, cMessageOf;
+        import snakebite.language.checks.failure: boundsPlanOf, cMessageOf;
 
         failWithHook(
             boundsPlanOf(_program.checks, _function), cMessageOf(check),
@@ -2075,7 +2075,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         scope const(void*)[] extraArguments,
     ) {
         import snakebite.language.call.druntimehook: planOf;
-        import snakebite.backends.exceptions: cAssertCallOf;
+        import snakebite.language.checks.assertion: cAssertCallOf;
 
         final switch (failure.kind) with (FailurePlan.Kind) {
             case ignore:
@@ -2115,7 +2115,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         private void failNullDeref(in Loc loc) {
-            import snakebite.backends.checkplan:
+            import snakebite.language.checks.failure:
                 nullDerefCMessage, nullDerefPlanOf;
 
             failWithHook(
@@ -2896,7 +2896,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         TreeFlow flow;
         try {
-            import snakebite.backends.exceptions: unwindFinally;
+            import snakebite.language.checks.assertion: unwindFinally;
 
             unwindFinally(pendingException, {
                 try
@@ -4292,7 +4292,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `RangeError`.
     private void* assignSlice(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
-        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+        import snakebite.language.checks.failure: boundsPlanOf, FailurePlan;
         import snakebite.native.slicecopy: copyUnchecked, slicesConform;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
@@ -6130,8 +6130,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // still raises the same guest-visible `AssertError` as any failed
     // assertion.
     override void visit(AssertExp expression) {
-        import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
-        import snakebite.backends.exceptions:
+        import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
+        import snakebite.language.checks.assertion:
             AssertInvariantPlan, assertInvariantPlanOf;
 
         const failure = assertPlanOf(_program.checks);
@@ -6181,10 +6181,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The invariant of the object of a passing `assert(object)`.
     private void runAssertInvariant(
-        in imported!"snakebite.backends.exceptions".AssertInvariantPlan plan,
+        in imported!"snakebite.language.checks.assertion".AssertInvariantPlan plan,
         void* object,
     ) {
-        import snakebite.backends.exceptions: AssertInvariantPlan;
+        import snakebite.language.checks.assertion: AssertInvariantPlan;
 
         final switch (plan.kind) with (AssertInvariantPlan.Kind) {
             case none:
@@ -6208,7 +6208,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The invariant of the object of an assertion that a tree node passed.
     extern(D) package void runTreeAssertInvariant(
         TreeRoot* root, ubyte* frame,
-        in imported!"snakebite.backends.exceptions".AssertInvariantPlan plan,
+        in imported!"snakebite.language.checks.assertion".AssertInvariantPlan plan,
         void* object,
     ) {
         handOver(root, frame, { runAssertInvariant(plan, object); });
@@ -6219,8 +6219,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // to the guest.
     private void failAssertion(AssertExp expression) {
         import core.exception: AssertError;
-        import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
-        import snakebite.backends.exceptions:
+        import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
+        import snakebite.language.checks.assertion:
             assertFailureOf, cAssertCallOf, cAssertionOf;
         import std.string: toStringz;
 

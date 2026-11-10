@@ -1,4 +1,4 @@
-module snakebite.backends.checkplan;
+module snakebite.language.checks.failure;
 
 
 private:

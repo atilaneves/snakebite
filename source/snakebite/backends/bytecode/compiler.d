@@ -28,10 +28,10 @@ import snakebite.language.control.transfer:
     ScopeFrame, ScopePaths, labelTargetOf, scopePathsOf;
 import snakebite.language.control.unwinding:
     UnwindPlan, catchPlanOf, unwindPlanOf;
-import snakebite.backends.checkplan: BoundsCheck, hookOf;
+import snakebite.language.checks.failure: BoundsCheck, hookOf;
 import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 import snakebite.frontend.storage: planSlice;
-import snakebite.backends.exceptions: AssertFailure, CAssertCall;
+import snakebite.language.checks.assertion: AssertFailure, CAssertCall;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 import std.typecons: Flag, No, Yes;
 
@@ -4017,9 +4017,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
         import dmd.typesem: toBasetype;
-        import snakebite.backends.checkplan:
+        import snakebite.language.checks.failure:
             assertPlanOf, FailurePlan, isUnanalysed;
-        import snakebite.backends.exceptions: assertFailureOf;
+        import snakebite.language.checks.assertion: assertFailureOf;
 
         const plan = assertPlanOf(_bytecode.checks);
         if (plan.kind == FailurePlan.Kind.ignore)
@@ -4116,7 +4116,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // `-checkaction=C`: the C runtime aborts the process.
     private void compileCAssert(AssertExp expression) {
-        import snakebite.backends.exceptions:
+        import snakebite.language.checks.assertion:
             cAssertCallOf, cAssertionOf, messageExpressionOf;
         import snakebite.native.value: arrayPointerOffset;
 
@@ -4190,7 +4190,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileAssertInvariant(
         AssertExp expression, in size_t objectOffset,
     ) {
-        import snakebite.backends.exceptions:
+        import snakebite.language.checks.assertion:
             AssertInvariantPlan, assertInvariantPlanOf;
 
         auto plan = assertInvariantPlanOf(expression, _bytecode.checks);
@@ -5456,7 +5456,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in TypeFacts sliceFacts,
         in Loc loc,
     ) {
-        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+        import snakebite.language.checks.failure: boundsPlanOf, FailurePlan;
         import snakebite.native.value: arrayValueSize;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
@@ -7935,7 +7935,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: Tarray, Tsarray;
         import dmd.sideeffect: hasSideEffect;
-        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
+        import snakebite.language.checks.failure: boundsPlanOf, FailurePlan;
         import snakebite.frontend.storage: needsIndexBoundsCheck;
 
         auto arrayType = expression.e1.type.toBasetype;
@@ -11047,9 +11047,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        import snakebite.backends.checkplan:
+        import snakebite.language.checks.failure:
             boundsPlanOf, cMessageOf, FailurePlan;
-        import snakebite.backends.exceptions: cAssertCallOf;
+        import snakebite.language.checks.assertion: cAssertCallOf;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         final switch (plan.kind) with (FailurePlan.Kind) {
@@ -11113,9 +11113,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         scope Arg delegate() lengthArgument,
         in Loc loc,
     ) {
-        import snakebite.backends.checkplan:
+        import snakebite.language.checks.failure:
             boundsPlanOf, cMessageOf, FailurePlan;
-        import snakebite.backends.exceptions: cAssertCallOf;
+        import snakebite.language.checks.assertion: cAssertCallOf;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         if (plan.kind == FailurePlan.Kind.ignore)
@@ -11152,9 +11152,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `_d_nullpointerp` the same way, on the pointer itself, which is
     // nonzero when it is not null. Without the flag nothing is emitted.
     private void compileNullCheck(in size_t pointerOffset, in Loc loc) {
-        import snakebite.backends.checkplan:
+        import snakebite.language.checks.failure:
             FailurePlan, nullDerefCMessage, nullDerefPlanOf;
-        import snakebite.backends.exceptions: cAssertCallOf;
+        import snakebite.language.checks.assertion: cAssertCallOf;
 
         final switch (nullDerefPlanOf(_bytecode.checks).kind) with (FailurePlan.Kind) {
             case ignore:

@@ -1,4 +1,4 @@
-module snakebite.backends.exceptions;
+module snakebite.language.checks.assertion;
 
 
 private:
@@ -131,7 +131,7 @@ public AssertInvariantPlan assertInvariantPlanOf(
 ) {
     import dmd.astenums: CHECKENABLE, Tclass, Tpointer, Tstruct;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.backends.checkplan: assertPlanOf, FailurePlan;
+    import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
 
     auto none = AssertInvariantPlan(AssertInvariantPlan.Kind.none);
 
