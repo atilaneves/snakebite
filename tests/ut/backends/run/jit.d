@@ -189,7 +189,6 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
-
     @("jit.hotForLoopChecksItsFirstIterationAndContinue." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -215,6 +214,33 @@ static foreach (backend; Matrix!()) {
                 return countOdd(-3, -2) == 1 ? 0 : 3;
             }
         }, ["countOdd"]);
+    }
+
+    @("jit.integerSlotsFollowJumpsAndSignedWidening." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            long scale(int n, int delta, long ceiling, bool skip) {
+                assert(delta > 0);
+                if (skip)
+                    goto convert;
+                n += delta;
+            convert:
+                const long value = n;
+                if (value >= ceiling)
+                    return value;
+                return value * delta;
+            }
+            int main() {
+                foreach (_; 0 .. 300) {
+                    if (scale(-5, 4, -3, false) != -1)
+                        return 1;
+                    if (scale(-5, 4, -3, true) != -20)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["scale"]);
     }
 }
 
