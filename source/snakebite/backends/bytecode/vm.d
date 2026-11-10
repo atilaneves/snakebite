@@ -860,6 +860,10 @@ public struct Instruction {
         double fp0,
     );
 
+    // In a static load's sourceWidth, this distinguishes bytes owned by
+    // the compiler from mutable data-segment storage.
+    package enum size_t immutableSource = 1;
+
     package Handler handler;
     // What a field means is decided by the opcode alone - never dmd's own
     // numeric types, so this VM has none of them to import. `0` means an

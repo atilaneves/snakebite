@@ -316,6 +316,8 @@ package struct JitState {
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
 
+        enum needsHandlerEntry = size_t.max;
+        size_t handlerEntryCount;
         foreach (i; 0 .. instructions.length) {
             if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
@@ -324,6 +326,7 @@ package struct JitState {
             const savedFixups = g.fixupCount;
             const savedLiterals = g.literalCount;
             bool done;
+            g.usedKnown = false;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
                 done = g.emitOp(i, ops[i], originals[i]);
             if (g.outOfMemory)
@@ -336,14 +339,35 @@ package struct JitState {
                     g.a.ud2();
                 else
                     g.jumpToHandler(i, originals[i]);
+                g.known = Gen.KnownConstant.init;
+            } else {
+                if (g.usedKnown) {
+                    g.labels[i] = needsHandlerEntry;
+                    ++handlerEntryCount;
+                }
+                g.rememberConstant(snapshot[i], ops[i]);
             }
         }
         if (cap - g.a.n - g.literalBytes < codeAlignment)
             return Emitted.full;
-        if (g.literalCount && g.a.n + g.literalBytes + Asm.ud2Size > int.max)
-            return Emitted.failed;
         g.labels[instructions.length] = g.a.n;
         g.a.ud2();
+        if (handlerEntryCount) {
+            foreach (i, ref label; g.labels[0 .. instructions.length]) {
+                if (label != needsHandlerEntry)
+                    continue;
+                if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
+                    return Emitted.full;
+                // Dispatch and branches can enter here without running the
+                // preceding constant store.
+                label = g.a.n;
+                g.jumpToHandler(i, originals[i]);
+                if (--handlerEntryCount == 0)
+                    break;
+            }
+        }
+        if (g.literalCount && g.a.n + g.literalBytes > int.max)
+            return Emitted.failed;
         g.emitLiterals;
 
         foreach (f; g.fixups[0 .. g.fixupCount])
@@ -1166,7 +1190,8 @@ private struct Gen {
         chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
         DispatchState, Function, indirectBit, IndexBase, Instruction;
     import snakebite.framestack: FrameStack;
-    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset,
+        shiftCount;
 
     @nogc nothrow:
 
@@ -1184,6 +1209,46 @@ private struct Gen {
     size_t fixupCap;
     size_t literalCount;
     bool outOfMemory;
+
+    static struct KnownConstant {
+        size_t offset;
+        size_t width;
+        ulong bits;
+
+        bool covers(size_t raw, size_t size) const pure nothrow @nogc @safe {
+            return width != 0 && raw == offset && size <= width;
+        }
+    }
+
+    KnownConstant known;
+    bool usedKnown;
+
+    void rememberConstant(in Instruction ins, in JitOp op) {
+        KnownConstant next;
+        if (!(ins.destination & indirectBit)) {
+            with (JitOp.Kind) {
+                if (op.kind == constant)
+                    next = KnownConstant(ins.destination, ins.width,
+                        cast(ulong) constants[ins.source]);
+                else if (op.kind == zero)
+                    next = KnownConstant(ins.destination, ins.width, 0);
+                else if (op.kind == copy) {
+                    const width = op.width ? op.width : ins.width;
+                    if (isLiteralCopy(ins, op, width))
+                        next = KnownConstant(ins.destination, width,
+                            constantAt(ins.source, cast(int) width));
+                    else if (usedKnown)
+                        next = KnownConstant(ins.destination, width, known.bits);
+                }
+            }
+        }
+        known = next;
+    }
+
+    static bool isLiteralCopy(in Instruction ins, in JitOp op, size_t width) {
+        return op.copy.staticSource
+            && ins.sourceWidth == Instruction.immutableSource && goodWidth(width);
+    }
 
     void fix(size_t target) {
         if (fixupCount == fixupCap) {
@@ -1468,6 +1533,16 @@ private struct Gen {
         }
     }
 
+    void storeConstant(int w, in Mem d, ulong value) {
+        int imm;
+        if (immOf(w, value, imm))
+            a.stI(w, d, imm);
+        else {
+            a.movI(RAX, value);
+            a.st(8, d, RAX);
+        }
+    }
+
     static bool goodWidth(size_t w) {
         return w == 1 || w == 2 || w == 4 || w == 8;
     }
@@ -1514,11 +1589,23 @@ private struct Gen {
             Mem d, s;
             if (!opnd(ins.destination, R9, d))
                 return false;
+            if (isLiteralCopy(ins, op, size)) {
+                const width = cast(int) size;
+                storeConstant(width, d, constantAt(ins.source, width));
+                return true;
+            }
             if (op.copy.staticSource) {
                 a.movI(R10, ins.source);
                 s = Mem(R10, 0);
-            } else if (!opnd(ins.source, R10, s))
-                return false;
+            } else {
+                if (goodWidth(size) && known.covers(ins.source, size)) {
+                    usedKnown = true;
+                    storeConstant(cast(int) size, d, known.bits);
+                    return true;
+                }
+                if (!opnd(ins.source, R10, s))
+                    return false;
+            }
             copyChunks(s, d, size);
             return true;
         }
@@ -1530,14 +1617,7 @@ private struct Gen {
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            const value = cast(ulong) constants[ins.source];
-            int imm;
-            if (immOf(cast(int) w, value, imm))
-                a.stI(cast(int) w, d, imm);
-            else {
-                a.movI(RAX, value);
-                a.st(8, d, RAX);
-            }
+            storeConstant(cast(int) w, d, cast(ulong) constants[ins.source]);
             return true;
         }
 
@@ -1750,29 +1830,40 @@ private struct Gen {
         }
     }
 
-    // Left, right and destination of a binary operation. Resolves the address
-    // slots in the order destination, left, right.
-    bool binary(in Instruction ins, bool twoAddress, bool constantRight,
-        bool leftInReg, bool destInReg, out Mem d, out Mem l, out Mem r,
-        out size_t rightRaw)
+    static struct IntegerRight {
+        Mem memory;
+        ulong bits;
+        bool constant;
+    }
+
+    bool integerRight(size_t raw, bool literal, int width, ubyte scratch,
+        out IntegerRight right)
     {
-        if (twoAddress) {
-            if (!destInReg && !opnd(ins.destination, R9, d))
-                return false;
-            l = d;
-            if (!opnd(ins.source, R11, r))
-                return false;
-            rightRaw = ins.source;
-            return true;
-        }
+        if (literal) {
+            right.constant = true;
+            right.bits = constantAt(raw, width);
+        } else if (known.covers(raw, width)) {
+            usedKnown = true;
+            right.constant = true;
+            right.bits = known.bits;
+        } else
+            return opnd(raw, scratch, right.memory);
+        return true;
+    }
+
+    // Resolve the address slots in the order destination, left, right.
+    bool binary(in Instruction ins, bool twoAddress, bool literalRight,
+        bool leftInReg, bool destInReg, int width, out Mem d, out Mem l,
+        out IntegerRight right)
+    {
         if (!destInReg && !opnd(ins.destination, R9, d))
             return false;
-        if (!leftInReg && !opnd(ins.source, R10, l))
+        if (twoAddress)
+            l = d;
+        else if (!leftInReg && !opnd(ins.source, R10, l))
             return false;
-        rightRaw = ins.sourceWidth;
-        if (!constantRight && !opnd(ins.sourceWidth, R11, r))
-            return false;
-        return true;
+        return integerRight(twoAddress ? ins.source : ins.sourceWidth,
+            literalRight, width, R11, right);
     }
 
     static Alu aluOf(JitOp.IntOperation operation) {
@@ -1794,16 +1885,16 @@ private struct Gen {
         const w = cast(int) (op.width ? op.width : ins.width);
         if (!goodWidth(w))
             return false;
-        Mem d, l, r;
-        size_t rr;
+        Mem d, l;
+        IntegerRight right;
         if (!binary(ins, p.twoAddress, p.constantRight, p.leftInR0,
-                p.resultInR0, d, l, r, rr))
+                p.resultInR0, w, d, l, right))
             return false;
         const acc = p.resultInR0 ? REG0 : RAX;
         int imm = 0;
         bool haveImm;
-        if (p.constantRight)
-            haveImm = immOf(w, constantAt(rr, w), imm);
+        if (right.constant)
+            haveImm = immOf(w, right.bits, imm);
         const mul = p.operation == JitOp.IntOperation.multiply;
         const narrowMul = mul && w < 4;
         if (p.leftInR0) {
@@ -1817,9 +1908,9 @@ private struct Gen {
             a.ld(w, acc, l);
         if (mul) {
             const mw = w == 8 ? 8 : 4;
-            if (p.constantRight) {
+            if (right.constant) {
                 if (narrowMul || !haveImm) {
-                    a.movI(SC2, constantAt(rr, w));
+                    a.movI(SC2, right.bits);
                     a.imulRR(mw, acc, SC2);
                 } else {
                     // `imulRI` is 64-bit; for 4 bytes that is still right in
@@ -1827,19 +1918,19 @@ private struct Gen {
                     a.imulRI(acc, acc, imm);
                 }
             } else if (narrowMul) {
-                a.ldzx(w, SC2, r);
+                a.ldzx(w, SC2, right.memory);
                 a.imulRR(4, acc, SC2);
             } else
-                a.imulM(mw, acc, r);
-        } else if (p.constantRight) {
+                a.imulM(mw, acc, right.memory);
+        } else if (right.constant) {
             if (haveImm)
                 a.aluRI(aluOf(p.operation), w, acc, imm);
             else {
-                a.movI(SC2, constantAt(rr, w));
+                a.movI(SC2, right.bits);
                 a.aluRR(aluOf(p.operation), w, acc, SC2);
             }
         } else
-            a.alu(aluOf(p.operation), w, acc, r);
+            a.alu(aluOf(p.operation), w, acc, right.memory);
         if (!p.resultInR0)
             a.st(w, d, acc);
         return true;
@@ -1850,22 +1941,22 @@ private struct Gen {
         const w = cast(int) (op.width ? op.width : ins.width);
         if (!goodWidth(w))
             return false;
-        Mem d, l, r;
-        size_t rr;
+        Mem d, l;
+        IntegerRight right;
         if (!binary(ins, p.twoAddress, p.constantRight,
-                leftInReg: false, destInReg: false, d, l, r, rr))
+                leftInReg: false, destInReg: false, w, d, l, right))
             return false;
         a.ld(w, RAX, l);
         int imm;
-        if (p.constantRight) {
-            if (immOf(w, constantAt(rr, w), imm))
+        if (right.constant) {
+            if (immOf(w, right.bits, imm))
                 a.aluRI(Alu.cmp, w, RAX, imm);
             else {
-                a.movI(SC2, constantAt(rr, w));
+                a.movI(SC2, right.bits);
                 a.aluRR(Alu.cmp, w, RAX, SC2);
             }
         } else
-            a.alu(Alu.cmp, w, RAX, r);
+            a.alu(Alu.cmp, w, RAX, right.memory);
         a.setcc(p.signed ? signedCc(p.comparison) : unsignedCc(p.comparison),
             d);
         return true;
@@ -1877,13 +1968,14 @@ private struct Gen {
         size_t t;
         if (!targetIndex(ins.sourceWidth, t))
             return false;
-        Mem l, r;
+        Mem l;
         if (p.kind != CompareKind.floating) {
             if (!goodWidth(w))
                 return false;
             if (!p.leftInR0 && !opnd(ins.destination, R9, l))
                 return false;
-            if (!p.constantRight && !opnd(ins.source, R10, r))
+            IntegerRight right;
+            if (!integerRight(ins.source, p.constantRight, w, R10, right))
                 return false;
             int leftReg = REG0;
             if (!p.leftInR0) {
@@ -1891,16 +1983,15 @@ private struct Gen {
                 leftReg = RAX;
             }
             int imm;
-            if (p.constantRight) {
-                const v = constantAt(ins.source, w);
-                if (immOf(w, v, imm))
+            if (right.constant) {
+                if (immOf(w, right.bits, imm))
                     a.aluRI(Alu.cmp, w, leftReg, imm);
                 else {
-                    a.movI(SC2, v);
+                    a.movI(SC2, right.bits);
                     a.aluRR(Alu.cmp, w, leftReg, SC2);
                 }
             } else
-                a.alu(Alu.cmp, w, leftReg, r);
+                a.alu(Alu.cmp, w, leftReg, right.memory);
             int cc = p.kind == CompareKind.signed
                 ? signedCc(p.comparison) : unsignedCc(p.comparison);
             if (!p.jumpWhen)
@@ -2111,22 +2202,40 @@ private struct Gen {
     bool emitShift(in Instruction ins, in JitOp op) {
         const p = op.shift;
         const w = cast(int) (op.width ? op.width : ins.width);
-        if (!bmi2 || !goodWidth(w))
+        if (!goodWidth(w))
             return false;
-        Mem d, l, r;
-        size_t rr;
+        Mem d, l;
+        IntegerRight right;
         if (!binary(ins, p.twoAddress, p.constantRight,
-                leftInReg: false, destInReg: false, d, l, r, rr))
+                leftInReg: false, destInReg: false, w, d, l, right))
+            return false;
+        if (!right.constant && !bmi2)
             return false;
         if (p.kind == JitOp.ShiftKind.arithmeticRight)
             a.ldsx(w, RAX, l);
         else
             a.ldzx(w, RAX, l);
-        if (p.constantRight)
-            a.movI(SC2, constantAt(rr, w));
-        else
-            a.ldzx(w, SC2, r);
-        a.aluRI(Alu.and, 4, SC2, w == 8 ? 63 : 31);
+        if (right.constant) {
+            const count = cast(ubyte) shiftCount(right.bits, w);
+            if (count) {
+                ubyte group;
+                final switch (p.kind) with (JitOp.ShiftKind) {
+                    case left: group = 4; break;
+                    case logicalRight: group = 5; break;
+                    case arithmeticRight: group = 7;
+                }
+                enum shiftByOne = 0xD1;
+                enum shiftByImmediate = 0xC1;
+                a.rrOp(8, byteReg: false, group, RAX,
+                    count == 1 ? shiftByOne : shiftByImmediate);
+                if (count != 1)
+                    a.b(count);
+            }
+            a.st(w, d, RAX);
+            return true;
+        }
+        a.ldzx(w, SC2, right.memory);
+        a.aluRI(Alu.and, 4, SC2, cast(int) shiftCount(ulong.max, w));
         // `shlx`, `shrx` or `sarx` rax, rax, SC2 (BMI2), VEX-encoded. The
         // first byte after the escape holds W = 1, `vvvv` as the inverted
         // second source register (SC2), L = 0 and the prefix `pp`.

@@ -6008,7 +6008,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(D) private void emitBytes(in void[] bytes) {
         assert(bytes.length == _width);
         emit(&opStaticLoad, _destination,
-            Address(Target.Kind.staticData, bytes.ptr), bytes.length);
+            Address(Target.Kind.staticData, bytes.ptr), bytes.length,
+            Instruction.immutableSource);
     }
 
     private void compileConstant(Expression expression) {
