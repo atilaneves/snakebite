@@ -248,6 +248,18 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _nativeData.storageOf(variable);
     }
 
+    public override const(void)* compiledFunction(FuncDeclaration function_) {
+        return compileFunction(function_);
+    }
+
+    public override void callCompiled(
+        const(void)* word,
+        void* returnPlace,
+        void*[] args,
+    ) {
+        runHostToGuest(cast(const(Function)*) word, returnPlace, args);
+    }
+
     // The bytecode backend's one host-to-guest entry. The program
     // runner's top-level call (`call`) and a callback's re-entry
     // (`callGuestFromHost`) both reach the compiled body only here -

@@ -22,7 +22,7 @@ public struct StartupReport {
 // this returns.
 public StartupReport runDruntimeMain(
     imported!"snakebite.backends.backend".Backend backend,
-    imported!"snakebite.backends.backend".Program program,
+    in imported!"snakebite.dependencyimage".TestHooks testHooks,
     in string[] arguments,
     in bool endsProcess = false,
 ) {
@@ -44,21 +44,20 @@ public StartupReport runDruntimeMain(
     const savedHooks = TestHooks.current;
     auto savedArgs = _runtimeArgs; // Restore mutable host argument storage.
     auto savedCArgs = _runtimeCArgs; // C argv contains mutable pointers.
-    const savedMain = _main;
     scope(exit) {
         savedHooks.install;
         _runtimeArgs = savedArgs;
         _runtimeCArgs = savedCArgs;
-        _main = savedMain;
     }
-    program.testHooks.install;
-    _runtimeArgs = arguments.length ? arguments.dup : [program.name];
+    auto start = &backend.startData(true);
+    testHooks.install;
+    _runtimeArgs = arguments.length ? arguments.dup : [start.programName];
     auto cArguments = _runtimeArgs.map!(arg => cast(char*) arg.toStringz).array ~ null;
     _runtimeCArgs.argc = cast(int) _runtimeArgs.length;
     _runtimeCArgs.argv = cArguments.ptr;
 
     auto modules = GuestModules.start(
-        backend, program, GuestModules.Tests.yes,
+        backend, GuestModules.Tests.yes,
         endsProcess ? GuestModules.Ends.process : GuestModules.Ends.program);
     StartupReport report;
     report.constructorDuration = modules.constructors;
@@ -68,7 +67,13 @@ public StartupReport runDruntimeMain(
         return report;
     }
 
-    _main = (string[] args) => runMain(backend, program, args);
+    // `_d_run_main` takes a function pointer with no context: a native entry
+    // (ADR-0003) carries the run to it.
+    auto mainRun = MainRun(backend, start);
+    mainRun.bridge = new CallbackBridge(&callMain, cast(void*) &mainRun);
+    scope(exit) mainRun.bridge.release;
+    mainRun.bridge.register(cast(void*) &mainRun, mainSignature);
+    const entry = cast(MainFunction) mainRun.bridge.entryOf(&mainRun);
     // druntime owns runner selection, summaries, failure status and the
     // decision to call main. Its nested init/term pair is reference counted.
     // `_d_run_main` pairs its `rt_init` with `rt_term` only when
@@ -85,7 +90,7 @@ public StartupReport runDruntimeMain(
     TestHooks.Watch watch;
     watch.install(TestHooks.current);
     scope(exit) watch.restore;
-    report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, &callMain);
+    report.status = _d_run_main(_runtimeCArgs.argc, cArguments.ptr, entry);
     if (modules.finish && report.status == 0)
         report.status = 1;
     if (watch.escaped)
@@ -94,11 +99,32 @@ public StartupReport runDruntimeMain(
 }
 
 
-private int delegate(string[]) _main;
+private struct MainRun {
+    Backend backend;
+    StartData* start;
+    CallbackBridge* bridge;
+}
 
 
-private extern(C) int callMain(char[][] arguments) {
-    return _main(cast(string[]) arguments);
+// `extern(C) int main(char[][] arguments)`: the slice travels as two integer
+// eightbytes.
+private enum mainSignature = NativeSignature(
+    imported!"dmd.astenums".LINK.c,
+    false, false, false, false, false,
+    ArgumentPlan([Register(Register.Kind.signed, 4), Register.init], 1, false),
+    [NativeSignature.Parameter(ArgumentPlan(
+        [Register(Register.Kind.integer, 8), Register(Register.Kind.integer, 8)],
+        2, false, 0, size_t.sizeof))],
+);
+
+
+private extern(C) void callMain(void* owner, CallbackCall* call) {
+    import snakebite.backends.backend: runMain;
+
+    auto run = cast(MainRun*) owner;
+    const arguments = *cast(string[]*) call.arguments[0];
+    *cast(int*) call.returnPlace = runMain(
+        run.backend, *run.start, arguments);
 }
 
 
@@ -108,6 +134,11 @@ pragma(mangle, "_D2rt6dmain27_d_argsAAya")
 private extern __gshared string[] _runtimeArgs;
 pragma(mangle, "_D2rt6dmain26_cArgsSQsQr5CArgs")
 private extern __gshared imported!"core.runtime".CArgs _runtimeCArgs;
+private import snakebite.backends.backend: Backend;
+private import snakebite.backends.startdata: StartData;
+private import snakebite.ffi.abi: ArgumentPlan, Register;
+private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
+private import snakebite.ffi.plan: NativeSignature;
 private alias MainFunction = extern(C) int function(char[][]);
 private extern(C) int _d_run_main(
     int argc, char** argv, MainFunction main,

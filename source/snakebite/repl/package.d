@@ -157,7 +157,7 @@ public struct Repl {
         // One expression cell runs the accumulated module as a program does:
         // its module constructors before the cell, its destructors after.
         auto modules = GuestModules.start(
-            backend, program, GuestModules.Tests.no, GuestModules.Ends.program);
+            backend, GuestModules.Tests.no, GuestModules.Ends.program);
         if (modules.failed) {
             _pendingInput = null;
             return SubmitResult(
@@ -286,8 +286,7 @@ public struct Repl {
             return SubmitResult.init;
 
         auto modules = GuestModules.start(
-            _backend, _program,
-            GuestModules.Tests.no, GuestModules.Ends.program);
+            _backend, GuestModules.Tests.no, GuestModules.Ends.program);
         if (modules.failed)
             return SubmitResult(
                 SubmitResult.Kind.error, "a module constructor failed");

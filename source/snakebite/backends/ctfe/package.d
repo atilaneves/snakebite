@@ -38,6 +38,19 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
         return null;
     }
 
+    // CTFE runs a declaration, so the declaration names it.
+    public override const(void)* compiledFunction(FuncDeclaration function_) {
+        return cast(const(void)*) function_;
+    }
+
+    public override void callCompiled(
+        const(void)* word,
+        void* returnPlace,
+        void*[] args,
+    ) {
+        call(cast(FuncDeclaration) word, returnPlace, args);
+    }
+
     public override string eval(FuncDeclaration function_) {
         // `const` would qualify the dmd AST reference inside the result.
         auto result = interpret(function_);

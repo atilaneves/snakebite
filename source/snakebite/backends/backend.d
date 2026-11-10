@@ -4,6 +4,9 @@ module snakebite.backends.backend;
 private:
 
 
+import snakebite.backends.startdata: StartData;
+
+
 // The root modules of the guest program, parsed and semantically analysed by
 // the frontend, and its entry point. A dub project is not special: a
 // dub-aware driver asks dub for import paths and flags and builds one of
@@ -296,6 +299,40 @@ public abstract class Backend {
         imported!"dmd.declaration".VarDeclaration variable,
     );
 
+    // Makes `function_` ready to run and returns the word that names it in
+    // this backend, for `callCompiled`. A word is valid for the life of the
+    // backend. This is the one place the start data (`StartData`) needs a
+    // frontend declaration.
+    public abstract const(void)* compiledFunction(FuncDeclaration function_);
+
+    // As `call`, for a function named by `compiledFunction`.
+    public abstract void callCompiled(
+        const(void)* word, void* returnPlace, void*[] args,
+    );
+
+    // The start data of the program, built once for each value of
+    // `unitTests` (see `buildStartData`).
+    public final ref StartData startData(in bool unitTests) {
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import snakebite.backends.startdatabuilder: buildStartData;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        const index = unitTests ? 1 : 0;
+        if (!atomicLoad!(MemoryOrder.acq)(_startBuilt[index]))
+            withCompilerLock({
+                if (atomicLoad(_startBuilt[index]))
+                    return;
+
+                _startData[index] = buildStartData(
+                    this, cast(Program) _program, unitTests);
+                atomicStore!(MemoryOrder.rel)(_startBuilt[index], true);
+            });
+        return _startData[index];
+    }
+
+    private StartData[2] _startData;
+    private shared bool[2] _startBuilt;
+
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the
     // returned string is a natively laid out value like any other; nothing
@@ -311,29 +348,29 @@ public abstract class Backend {
 }
 
 // "Run on this project": do what a compiled build of it does, implemented
-// once on top of `call`, and return the exit status. A `Throwable` that
-// escapes `main` is handled as druntime would handle it: printed, exit
+// once on top of the start data, and return the exit status. A `Throwable`
+// that escapes `main` is handled as druntime would handle it: printed, exit
 // status 1. The module constructors and destructors belong to druntime
 // (`GuestModules`): it orders them, runs them on each thread, and prints
 // what a destructor throws.
 public int run(
     Backend backend,
-    Program program,
     in string[] hostArguments = null,
 ) {
     import snakebite.backends.guestmodules: GuestModules;
 
     // A C `main` starts no druntime: no module constructor or destructor
     // of a D module runs.
-    if (program.hasCEntryPoint || program.checks.betterC)
-        return runMain(backend, program, hostArguments);
+    auto start = &backend.startData(false);
+    if (start.hasCEntryPoint || start.betterC)
+        return runMain(backend, *start, hostArguments);
 
     auto modules = GuestModules.start(
-        backend, program, GuestModules.Tests.no, GuestModules.Ends.program);
+        backend, GuestModules.Tests.no, GuestModules.Ends.program);
     if (modules.failed)
         return 1;
 
-    const status = runMain(backend, program, hostArguments);
+    const status = runMain(backend, *start, hostArguments);
     const destructorStatus = modules.finish;
     return status != 0 ? status : destructorStatus;
 }
@@ -342,33 +379,30 @@ public int run(
 // at all is not an error: the status is 0.
 package(snakebite) int runMain(
     Backend backend,
-    Program program,
+    StartData start,
     in string[] hostArguments,
 ) {
-    import dmd.astenums: Tvoid;
-    import dmd.typesem: nextOf;
-
-    auto main_ = program.main.func;
-    if (main_ is null)
+    if (!start.main.present)
         return 0;
 
-    const isVoid = main_.type.nextOf.ty == Tvoid;
     int status;
     string[] arguments;
     void*[] mainArguments;
     CArguments cArguments;
-    if (program.hasCEntryPoint) {
-        arguments = hostArguments.length ? hostArguments.dup : [program.name];
+    if (start.hasCEntryPoint) {
+        arguments = hostArguments.length
+            ? hostArguments.dup : [start.programName];
         cArguments = CArguments(arguments);
-        mainArguments = cArguments.of(main_);
-    } else if (main_.parameters !is null && main_.parameters.length != 0) {
+        mainArguments = cArguments.of(start.main.parameterCount);
+    } else if (start.main.parameterCount != 0) {
         arguments = hostArguments.length
             ? hostArguments.dup
-            : [program.name];
+            : [start.programName];
         mainArguments = [cast(void*) &arguments];
     }
     return failing(() {
-        backend.call(main_, isVoid ? null : &status, mainArguments);
+        start.main.function_.call(
+            backend, start.main.returnsVoid ? null : &status, mainArguments);
     }) ? 1 : status;
 }
 
@@ -393,14 +427,12 @@ private struct CArguments {
         _environment = cast(char**) environ;
     }
 
-    // The address of each argument `main_` declares.
-    void*[] of(imported!"dmd.func".FuncDeclaration main_) {
-        import snakebite.frontend.dmd.functions: typeFunctionOf;
-
+    // The address of each of the first `count` arguments.
+    void*[] of(in size_t count) {
         void*[3] all = [
             cast(void*) &_argc, cast(void*) &_argv, cast(void*) &_environment,
         ];
-        return all[0 .. typeFunctionOf(main_).parameterList.length].dup;
+        return all[0 .. count].dup;
     }
 }
 

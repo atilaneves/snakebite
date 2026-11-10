@@ -93,6 +93,19 @@ public final class Interpreter: imported!"snakebite.backends.backend".Backend {
         return _shared.nativeData.storageOf(variable);
     }
 
+    // The interpreter runs a declaration, so the declaration names it.
+    public override const(void)* compiledFunction(FuncDeclaration function_) {
+        return cast(const(void)*) function_;
+    }
+
+    public override void callCompiled(
+        const(void)* word,
+        void* returnPlace,
+        void*[] args,
+    ) {
+        call(cast(FuncDeclaration) word, returnPlace, args);
+    }
+
     private void prepareOnEvaluator(FuncDeclaration function_) {
         this.onEvaluator!((evaluator) => evaluator.prepareCallback(function_));
     }

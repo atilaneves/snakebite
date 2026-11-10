@@ -179,16 +179,17 @@ public ExecutionReport executeBackend(
     import snakebite.backends.backend: ExecutionClock;
     const running = ExecutionClock.start(backend);
     import snakebite.backends.guestmodules: GuestModules;
-    const entry = GuestModules.Entry(backend, program);
+    const entry = GuestModules.Entry(backend);
     StartupReport startup;
     int status;
     // Snippet callers construct Programs that do not start as a project,
     // and a program with a C `main` is not started as a project either.
-    if (!program.startsAsProject || program.hasCEntryPoint || program.checks.betterC)
-        status = run(backend, program, hostArguments);
+    auto start = &backend.startData(true);
+    if (!program.startsAsProject || start.hasCEntryPoint || start.betterC)
+        status = run(backend, hostArguments);
     else {
         startup = runDruntimeMain(
-            backend, program, hostArguments, endsProcess);
+            backend, program.testHooks, hostArguments, endsProcess);
         status = startup.status;
     }
     const programDuration = running.peek
