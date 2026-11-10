@@ -4385,7 +4385,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         public void* storageSlice(SliceExp expression) {
-            import snakebite.backends.sliceplan: planSlice;
+            import snakebite.frontend.storage: planSlice;
 
             if (planSlice(expression).yieldsStaticArray)
                 return evaluator.sliceView(expression).pointer;
@@ -4784,7 +4784,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         import snakebite.backends.arithmetic: ArithmeticPlan;
         import snakebite.backends.compoundassign: readsTargetFirst;
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.backends.compoundassign: compoundTarget;
         import snakebite.nativevalue: loadFloating, storeFloating;
 
         auto target_ = compoundTarget(expression);
@@ -4880,7 +4880,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         void* resolvedTarget,
     ) {
         import snakebite.backends.compoundassign: readsTargetFirst;
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.backends.compoundassign: compoundTarget;
         import snakebite.nativevalue: applyComplex;
 
         auto target_ = compoundTarget(expression);
@@ -4909,7 +4909,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         BinAssignExp expression, void* resolvedTarget,
     ) {
         import snakebite.backends.shifts: shiftPlan;
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.backends.compoundassign: compoundTarget;
         import snakebite.nativelayout: loadIntegral, storeIntegral;
 
         auto target_ = compoundTarget(expression);
@@ -6422,7 +6422,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.nativelayout:
             arrayLengthOffset, arrayPointerOffset, storeIntegral;
-        import snakebite.backends.sliceplan: planSlice;
+        import snakebite.frontend.storage: planSlice;
 
         auto view = sliceView(expression);
         if (planSlice(expression).yieldsStaticArray) {
@@ -6445,7 +6445,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // a static array (`cast(T[N]) a[lo .. hi]`) is those elements in
     // place, so the address of that value is `pointer`.
     private SliceView sliceView(SliceExp expression) {
-        import snakebite.backends.sliceplan: planSlice;
+        import snakebite.frontend.storage: planSlice;
         import std.conv: text;
 
         auto array = expression.e1;

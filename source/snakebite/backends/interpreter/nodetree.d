@@ -26,7 +26,7 @@ import snakebite.backends.interpreter.faultslot:
     resultWordOf, siteWord;
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.ffi.load: callDirectWordsPair, extendWord, storeWordResult, WordPair;
-import snakebite.backends.sliceplan: SlicePlan;
+import snakebite.frontend.storage: SlicePlan;
 import snakebite.nativelayout: TypeFacts;
 import snakebite.nativevalue: BitfieldAccess, CastLayout;
 import std.meta: AliasSeq;
@@ -6772,7 +6772,7 @@ private Node buildSliceAssignment(E)(
 ) {
     import dmd.expression: MemorySet;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.backends.sliceplan: planSlice;
+    import snakebite.frontend.storage: planSlice;
 
     if (planSlice(target).yieldsStaticArray
             || (assignment.isConstructExp !is null
@@ -6875,7 +6875,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
     import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
     import dmd.typesem: nextOf, toBasetype;
-    import snakebite.backends.sliceplan: planSlice;
+    import snakebite.frontend.storage: planSlice;
 
     const plan = planSlice(expression);
     if (plan.yieldsStaticArray)
@@ -8005,7 +8005,7 @@ private Node fuseStep(alias make, V, Kind[] steps, Args...)(
 private Node buildOpAssign(string op, E)(E ev, BinAssignExp e, in Scalar scalar) {
     import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
     import snakebite.backends.shifts: shiftPlan;
-    import snakebite.frontend.storage: compoundTarget;
+    import snakebite.backends.compoundassign: compoundTarget;
 
     const plan = arithmeticPlan(e);
     auto step = buildValue(ev, e.e2);

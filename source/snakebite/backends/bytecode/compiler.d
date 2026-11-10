@@ -30,7 +30,7 @@ import snakebite.backends.exceptionplan:
     UnwindPlan, catchPlanOf, unwindPlanOf;
 import snakebite.backends.checkplan: BoundsCheck, hookOf;
 import snakebite.backends.druntimehooks: DruntimeHook, planOf;
-import snakebite.backends.sliceplan: planSlice;
+import snakebite.frontend.storage: planSlice;
 import snakebite.backends.exceptions: AssertFailure, CAssertCall;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 import std.typecons: Flag, No, Yes;
@@ -5489,7 +5489,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.backends.compoundassign: compoundTarget;
 
         if (compileDirectCompound(expression, destOffset))
             return;
@@ -5504,7 +5504,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticKind, arithmeticPlan;
         import snakebite.backends.shifts: shiftPlan;
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.backends.compoundassign: compoundTarget;
         import std.conv: text;
 
         auto target = compoundTarget(expression);
@@ -8789,7 +8789,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.sideeffect: hasSideEffect;
         import snakebite.backends.arithmetic:
             ArithmeticPlan, arithmeticPlan;
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.backends.compoundassign: compoundTarget;
 
         if (compoundTarget(expression) !is expression.e1)
             return false;

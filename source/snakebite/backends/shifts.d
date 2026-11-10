@@ -43,7 +43,7 @@ package ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
 package ShiftPlan shiftPlan(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
-    import snakebite.frontend.storage: compoundTarget;
+    import snakebite.backends.compoundassign: compoundTarget;
 
     const targetFacts = typeFacts(compoundTarget(expression).type);
     const width = typeFacts(expression.e1.type).size;
