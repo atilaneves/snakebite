@@ -7,9 +7,6 @@ import snakebite.ffi.load: LoadKind = Load, loadWidth;
 
 private:
 
-
-
-
 import snakebite.failure.report: internalFailure;
 
 
