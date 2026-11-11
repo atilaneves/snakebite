@@ -1421,12 +1421,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.hostCall = _layout.hostCall(
             cast(string) _function.toString);
         result.relocs = _relocs;
-        if (_bytecode.recordRelocs) {
-            import snakebite.frontend.dmd.mangle: mangledNameOf;
-
+        if (_bytecode.recordRelocs)
             recordFunctionRelocs(result.relocs, result);
-            result.mangledName = _function.mangledNameOf;
-        }
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);

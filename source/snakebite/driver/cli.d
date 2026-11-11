@@ -49,12 +49,19 @@ public int run(string[] args) {
     selectFrontendMemory(parsed.options.lowmem);
 
     try {
-        if (parsed.options.load.length)
-            return executeLoaded(
+        if (parsed.options.load.length) {
+            // Nothing was prepared: the report shows those phases as taking
+            // no time.
+            const report = executeLoaded(
                 parsed.options.load, parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit,
                     /*eager*/ false, parsed.options.jitPerfMap),
-            ).status;
+            );
+            _statistics = Statistics(true,
+                imported!"snakebite.driver.execution".PreparationReport.init,
+                report);
+            return report.status;
+        }
         // The project directory is where the compile runs: a relative path
         // of the caller must be absolute before that.
         const savePath = parsed.options.save.length

@@ -1755,6 +1755,49 @@ def test_saved_program_runs_as_the_compiled_program(tmp_path: Path) -> None:
         assert loaded.stderr == from_ram.stderr
 
 
+# A save never writes a file that loads into a different state: a program
+# with static data that can hold an address is refused, and no file is left.
+def test_save_of_unsupported_program_fails_and_writes_no_file(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        __gshared int* pointer;
+        int main() { return pointer is null ? 3 : 4; }
+        """)
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode != 0, output(saved)
+    assert "static data that can hold an address" in saved.stderr, output(saved)
+    assert not target.exists()
+    assert not Path(f"{target}.partial").exists()
+
+
+# A file belongs to the build that wrote it: another build refuses it before
+# it reads more, and runs nothing.
+def test_load_of_file_from_another_build_fails_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int main() { return 3; }
+        """)
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    contents = bytearray(target.read_bytes())
+    magic_and_length = len(b"snakebite-program-v1\n") + 8
+    contents[magic_and_length] ^= 1
+    target.write_bytes(contents)
+
+    loaded = run_sb(f"--load={target}", cwd=tmp_path)
+    assert loaded.returncode == 1, output(loaded)
+    assert "another build" in loaded.stderr, output(loaded)
+
+
 # A long run of guest instructions in one function, with asserts and
 # exceptions between them, finishes within a small native stack. A VM that
 # grows the native stack for each guest instruction overflows it.

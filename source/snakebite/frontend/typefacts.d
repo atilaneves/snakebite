@@ -21,7 +21,7 @@ import snakebite.native.value:
 public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tarray, Tvector;
     import dmd.typesem:
-        alignsize, isIntegral, isUnsigned, nextOf;
+        alignsize, hasPointers, isIntegral, isUnsigned, nextOf;
     import snakebite.frontend.compiler: forceIfNeeded;
 
     forceIfNeeded(() => resolved(type), () { forceResolved(type); });
@@ -51,6 +51,7 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
         type.alignsize,
         scalar && type.isIntegral,
         scalar && type.isUnsigned,
+        false, 0, type.hasPointers,
     );
 }
 

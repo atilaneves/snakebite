@@ -22,6 +22,8 @@ import snakebite.backends.bytecode.vm:
     prepareForExecution, Role, Roles, rolesOf, withoutCount;
 import snakebite.failure.report: SnakebiteException;
 import snakebite.ffi.callplan: NativeSignature;
+import snakebite.native.staticstore: StaticBlocks;
+import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
 import snakebite.start.data:
     dependencyModulesOf, FunctionHandle, MainStart, ModuleStart, StartData;
@@ -118,7 +120,7 @@ public void loadProgram(
                 throw new SnakebiteException(
                     "the program file is not valid: " ~ reason);
             prepareForExecution(function_, runner.jitSetting,
-                runner.jitInstance, function_.mangledName);
+                runner.jitInstance, function_.hostCall.name);
         }
 }
 
@@ -134,12 +136,11 @@ private void transferHeader(ref Archive archive, ref Header header) {
 // that the file cannot hold.
 private void refuseWhatIsNotSupported(ref const Program program) {
     if (!program.store.isEmpty)
-        throw refusal("the program has static data or constants");
+        throw refusal(program.store.holdsAddressData
+            ? "the program has static data that can hold an address"
+            : "the program has static data of the process store");
     if (!program.plans.isEmpty)
         throw refusal("the program calls a function with a foreign call plan");
-    foreach (module_; program._modules)
-        if (!module_.blocks.isEmpty)
-            throw refusal("a module has static data");
 }
 
 
@@ -170,11 +171,13 @@ private struct Archive {
     private Function*[][] _functions;
     private Module*[] _modules;
     private Runner* _runner;
+    private Program* _program;
     private const(imported!"snakebite.image.dependency".DependencyImage)* _image;
 
     static Archive writing(ref Program program) {
         Archive archive;
         archive._direction = Direction.writing;
+        archive._program = &program;
         foreach (m, module_; program._modules) {
             archive._moduleOfStart[&module_.start] = m;
             foreach (f, function_; module_._functions)
@@ -257,6 +260,25 @@ private struct Archive {
         if (auto found = function_ in _positionOf)
             return *found;
         throw refusal("a function points at a function that no module holds");
+    }
+
+    // Module, block and offset of an address in the blocks of a module.
+    size_t[3] dataPosition(const(void)* address) {
+        foreach (m, module_; _program._modules) {
+            size_t block, offset;
+            if (module_.blocks.locate(address, block, offset))
+                return [m, block, offset];
+        }
+        throw refusal("an instruction points at data that no module holds");
+    }
+
+    void* dataAt(in size_t[3] position) {
+        if (position[0] < _modules.length)
+            if (auto address = _modules[position[0]].blocks.addressOf(
+                    position[1], position[2]))
+                return address;
+        throw new SnakebiteException(
+            "the program file names data that it does not hold");
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
@@ -425,7 +447,7 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
 private void transferReloc(ref Archive archive, ref Reloc reloc) {
     archive.transfer(reloc.place);
     archive.transfer(reloc.target.kind);
-    size_t[2] reference;
+    size_t[3] reference;
     if (archive.isWriting)
         reference = referenceOf(archive, reloc.target);
     archive.scalar(reference);
@@ -433,15 +455,18 @@ private void transferReloc(ref Archive archive, ref Reloc reloc) {
         reloc.target.address = addressOf(archive, reloc.target.kind, reference);
 }
 
-private size_t[2] referenceOf(ref Archive archive, in Target target) {
+private size_t[3] referenceOf(ref Archive archive, in Target target) {
     final switch (target.kind) with (Target.Kind) {
         case signature:
             return [archive.signatureIndex(
-                cast(const(Signature)*) target.address), 0];
+                cast(const(Signature)*) target.address), 0, 0];
         case functionWord:
-            return archive.positionOf(cast(const(Function)*) target.address);
-        case handler:
+            const position =
+                archive.positionOf(cast(const(Function)*) target.address);
+            return [position[0], position[1], 0];
         case staticData:
+            return archive.dataPosition(cast(const(void)*) target.address);
+        case handler:
         case tlsDescriptor:
         case typeInfo:
         case hostSymbol:
@@ -456,13 +481,15 @@ private size_t[2] referenceOf(ref Archive archive, in Target target) {
 }
 
 private size_t addressOf(
-    ref Archive archive, in Target.Kind kind, in size_t[2] reference,
+    ref Archive archive, in Target.Kind kind, in size_t[3] reference,
 ) {
     switch (kind) with (Target.Kind) {
         case signature:
             return cast(size_t) archive.signatureAt(reference[0]);
         case functionWord:
             return cast(size_t) archive.functionAt(reference[0], reference[1]);
+        case staticData:
+            return cast(size_t) archive.dataAt(reference);
         default:
             throw new SnakebiteException(
                 "the program file holds a relocation that it cannot hold");
@@ -566,26 +593,26 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
 // Puts the address of a relocation at its place in `function_`.
 private void applyReloc(ref Function target, in Reloc reloc) {
     const place = reloc.place;
-    const word = reloc.target.address;
+    const address = reloc.target.address;
     bool done;
     switch (place.section) with (Place.Section) {
         case function_:
-            done = assignRelocated(target, place.field, word);
+            done = assignRelocated(target, place.field, address);
             break;
         case instruction:
             if (place.index < target.instructions.length) {
                 auto instruction = &target.instructions[place.index];
                 switch (place.field) with (Place.Field) {
                     case destination:
-                        instruction.destination = word;
+                        instruction.destination = address;
                         done = true;
                         break;
                     case source:
-                        instruction.source = word;
+                        instruction.source = address;
                         done = true;
                         break;
                     case sourceWidth:
-                        instruction.sourceWidth = word;
+                        instruction.sourceWidth = address;
                         done = true;
                         break;
                     default:
@@ -596,14 +623,14 @@ private void applyReloc(ref Function target, in Reloc reloc) {
         case constant:
             if (place.index < target.constants.length
                     && place.field == Place.Field.word) {
-                target.constants[place.index] = cast(long) word;
+                target.constants[place.index] = cast(long) address;
                 done = true;
             }
             break;
         case callSite:
             if (place.index < target.callSites.length)
                 done = assignRelocated(target.callSites[place.index],
-                    place.field, word);
+                    place.field, address);
             break;
         default:
             break;
@@ -654,8 +681,44 @@ private void transferBody(
                 archive._functions[m] ~= program._modules[m].newFunction;
     }
     transferStartData(archive, program);
+    // All data before any function: a function can point into any module.
+    foreach (m; 0 .. moduleCount)
+        transferBlocks(archive, program._modules[m].blocks);
     foreach (m; 0 .. moduleCount)
         transferModule(archive, program, *program._modules[m]);
+}
+
+
+// The data of a module as bytes. A load reserves each datum through the same
+// code as a compile, so the blocks come out the same, and checks that. A
+// datum whose type can hold an address has no relocation records yet, and a
+// save refuses it.
+private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
+    const count = archive.length(blocks.data.length);
+    foreach (index; 0 .. count) {
+        StaticBlocks.Datum datum;
+        if (archive.isWriting) {
+            datum = blocks.data[index];
+            if (datum.canHoldAddress)
+                throw refusal("a module has static data that can hold an "
+                    ~ "address");
+        }
+        archive.scalar(datum.block);
+        archive.scalar(datum.offset);
+        archive.scalar(datum.size);
+        archive.scalar(datum.alignment);
+        if (archive.isWriting) {
+            archive.bytes(cast(void[]) blocks.bytesOf(datum));
+            continue;
+        }
+        auto bytes = blocks.reserve(TypeFacts(datum.size, datum.alignment,
+            false, false, false, 0, false));
+        const placed = blocks.data[$ - 1];
+        if (placed.block != datum.block || placed.offset != datum.offset)
+            throw new SnakebiteException(
+                "the program file does not fit the memory of this process");
+        archive.bytes(bytes);
+    }
 }
 
 
@@ -665,6 +728,7 @@ private void transferModule(
     // The fields of `Module`: the start record, the blocks (empty: a save
     // refuses a module with data), and the functions.
     static assert(FieldNameTuple!Module == AliasSeq!("start", "blocks", "_functions"));
+    // `blocks` is set by `transferBlocks`, before the functions.
     transferStart(archive, module_.start);
     foreach (function_; module_._functions) {
         if (archive.isWriting) {

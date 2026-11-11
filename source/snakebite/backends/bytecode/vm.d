@@ -1014,9 +1014,6 @@ public struct Function {
     // `Bytecode.recordRelocs` is set. A file holds the list; a load applies
     // it and drops it.
     @plain package Reloc[] relocs;
-    // The mangled name of the function, set when the compiler records
-    // relocations, so that a loaded function can name its JIT code.
-    @plain package const(char)[] mangledName;
     // `size_t.max` unless this function lays out call windows. Otherwise
     // this frame slot holds the address where they start, and `windowBytes`
     // is how far they reach from it.

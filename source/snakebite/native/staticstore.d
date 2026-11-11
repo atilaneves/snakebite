@@ -17,14 +17,66 @@ public struct StaticBlocks {
     // A copy would share the free space with the original.
     @disable this(this);
 
+    // What the blocks hold, one record for each datum in the order of
+    // `reserve`: where it is and whether its type can hold an address.
+    // The blocks describe their own content, as a data section does.
+    public struct Datum {
+        public size_t block;
+        public size_t offset;
+        public size_t size;
+        public uint alignment;
+        public bool canHoldAddress;
+    }
+
     // Written under the compiler lock only, like every miss that fills
     // them.
     private void[][] _blocks;
     private void[] _available;
+    private Datum[] _data;
+
+    public const(Datum)[] data() const @safe pure nothrow @nogc {
+        return _data;
+    }
+
+    // The bytes of the datum `datum`.
+    public inout(void)[] bytesOf(in Datum datum) inout @trusted pure nothrow {
+        return _blocks[datum.block][datum.offset .. datum.offset + datum.size];
+    }
+
+    // Where an address of this process lies in the blocks, or false.
+    public bool locate(
+        in void* address, out size_t block, out size_t offset,
+    ) const @trusted pure nothrow @nogc {
+        foreach (index, candidate; _blocks) {
+            const distance = cast(size_t) address - cast(size_t) candidate.ptr;
+            if (distance < candidate.length) {
+                block = index;
+                offset = distance;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The address `offset` bytes into block `block`, or null.
+    public void* addressOf(in size_t block, in size_t offset)
+            @trusted pure nothrow @nogc {
+        if (block >= _blocks.length || offset > _blocks[block].length)
+            return null;
+        return _blocks[block].ptr + offset;
+    }
 
     // Whether nothing has reserved a byte.
     public bool isEmpty() const @safe pure nothrow @nogc {
         return _blocks.length == 0;
+    }
+
+    // Whether the type of a datum can hold an address.
+    public bool holdsAddressData() const @safe pure nothrow @nogc {
+        foreach (datum; _data)
+            if (datum.canHoldAddress)
+                return true;
+        return false;
     }
 
     // The caller holds the compiler lock.
@@ -39,6 +91,9 @@ public struct StaticBlocks {
         }
         const start = -cast(size_t) _available.ptr & (facts.alignment - 1);
         auto bytes = _available[start .. start + facts.size];
+        _data ~= Datum(_blocks.length - 1,
+            _blocks[$ - 1].length - _available.length + start, facts.size,
+            facts.alignment, facts.canHoldAddress);
         _available = _available[start + facts.size .. $];
         return bytes;
     }
@@ -72,6 +127,11 @@ public struct StaticStore {
 
         foreach (block; _stringBlocks)
             free(block);
+    }
+
+    // Whether a datum can hold an address, or a string is adopted.
+    public bool holdsAddressData() const @safe pure nothrow @nogc {
+        return _blocks.holdsAddressData || _stringBlocks.length != 0;
     }
 
     // Whether nothing has reserved a byte or adopted a string.
