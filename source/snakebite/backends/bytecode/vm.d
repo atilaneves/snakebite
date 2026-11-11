@@ -453,7 +453,7 @@ public struct CallSite {
     @plain package bool directSwapped;
     @plain package ubyte[3] directOrder;
     @plain package Load[3] directLoads;
-    @relocated(Target.Kind.hostSymbol, Place.Section.callSite,
+    @relocated(Target.Kind.handler, Place.Section.callSite,
         Place.Field.builtinEntry)
     package BuiltinCall builtinEntry;
     @plain package size_t calleeSlotOffset;
@@ -960,7 +960,7 @@ package struct AssertSite {
     @plain package string file;
     @plain package size_t line;
     // Not null for a check that halts rather than throws.
-    @relocated(Target.Kind.hostSymbol, Place.Section.assertSite,
+    @relocated(Target.Kind.handler, Place.Section.assertSite,
         Place.Field.halt)
     package HaltAction halt;
 }
@@ -1076,9 +1076,10 @@ package void recordCallSiteRelocs(
     import std.traits: FieldNameTuple;
 
     // Address fields: `callee`, `prepareGuest`, `nativePlan`,
-    // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
-    // delegate is kept by its function; its context is state of the
-    // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
+    // `prepareNativePlan`, `builtinEntry` and `value.signature`.
+    // `builtinEntry` is code of the host executable, so the file holds it
+    // by itself and it has no `Reloc`. A delegate is kept by its function;
+    // its context is state of the compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
     // follow from the two indexes. The call caches are filled at run time,
     // so the compiled bytecode has no addresses in them.
     enum plainFields = AliasSeq!(
@@ -1112,8 +1113,6 @@ package void recordCallSiteRelocs(
         Target.Kind.nativePlan, cast(size_t) site.nativePlan);
     recordAddress(relocs, section, index, Place.Field.prepareNativePlan,
         Target.Kind.callback, cast(size_t) site.prepareNativePlan.funcptr);
-    recordAddress(relocs, section, index, Place.Field.builtinEntry,
-        Target.Kind.hostSymbol, cast(size_t) site.builtinEntry);
     recordAddress(relocs, section, index, Place.Field.valueSignature,
         Target.Kind.signature, cast(size_t) site.value.signature);
 }
@@ -1141,8 +1140,6 @@ package void recordAssertSiteRelocs(
         Target.Kind.frontendString, cast(size_t) site.message.ptr);
     recordAddress(relocs, section, index, Place.Field.file,
         Target.Kind.frontendString, cast(size_t) site.file.ptr);
-    recordAddress(relocs, section, index, Place.Field.halt,
-        Target.Kind.hostSymbol, cast(size_t) site.halt);
 }
 
 package void recordExceptionHandlerRelocs(
@@ -4885,14 +4882,15 @@ package string bindInstructionReferences(ref Function function_) {
     return null;
 }
 
-// A handler as a file holds it: the distance from `opReturnVoid`. The
-// distance means something only to the build that made it.
-package ptrdiff_t handlerOffset(in Instruction.Handler handler) {
-    return cast(ptrdiff_t) handler - cast(ptrdiff_t) &opReturnVoid;
+// Code of the host executable (a handler, a builtin wrapper, the action of a
+// halt) as a file holds it: the distance from `opReturnVoid`. The distance
+// means something only to the build that made it.
+package ptrdiff_t hostCodeOffset(in size_t address) {
+    return cast(ptrdiff_t) address - cast(ptrdiff_t) &opReturnVoid;
 }
 
-package Instruction.Handler handlerAt(in ptrdiff_t offset) {
-    return cast(Instruction.Handler) (cast(ptrdiff_t) &opReturnVoid + offset);
+package size_t hostCodeAt(in ptrdiff_t offset) {
+    return cast(size_t) (cast(ptrdiff_t) &opReturnVoid + offset);
 }
 
 // The field of `instruction` that holds the instruction of the same function

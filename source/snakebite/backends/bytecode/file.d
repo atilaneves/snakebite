@@ -18,7 +18,7 @@ import snakebite.backends.bytecode.relocation:
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
 import snakebite.backends.bytecode.vm:
     AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
-    Function, handlerAt, handlerOffset, Instruction, JitSetting,
+    Function, hostCodeAt, hostCodeOffset, Instruction, JitSetting,
     prepareForExecution, Role, Roles, rolesOf, withoutCount;
 import snakebite.failure.report: SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
@@ -511,12 +511,22 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
                     archive.transfer(value.tupleof[index]);
             } else static if (is(typeof(classification) == Relocated)) {
                 static if (classification.kind == Target.Kind.handler) {
+                    // Code of the host executable. Only the handler of an
+                    // instruction is never null.
+                    bool present = true;
+                    static if (!is(Field == Instruction.Handler)) {
+                        if (archive.isWriting)
+                            present = wordOf(value.tupleof[index]) != 0;
+                        archive.scalar(present);
+                    }
                     ptrdiff_t distance;
-                    if (archive.isWriting)
-                        distance = handlerOffset(value.tupleof[index]);
-                    archive.scalar(distance);
+                    if (archive.isWriting && present)
+                        distance = hostCodeOffset(wordOf(value.tupleof[index]));
+                    if (present)
+                        archive.scalar(distance);
                     if (!archive.isWriting)
-                        value.tupleof[index] = handlerAt(distance);
+                        value.tupleof[index] = present
+                            ? cast(Field) hostCodeAt(distance) : null;
                 }
             }
         }
@@ -625,8 +635,11 @@ private void eachRelocated(T)(
     static foreach (index, name; FieldNameTuple!T) {{
         enum classification = classificationOf!(T, index);
         alias Field = typeof(T.tupleof[index]);
-        static if (is(typeof(classification) == Relocated))
-            visit(classification, wordOf(record.tupleof[index]));
+        static if (is(typeof(classification) == Relocated)) {
+            // The file holds code of the host executable by itself.
+            static if (classification.kind != Target.Kind.handler)
+                visit(classification, wordOf(record.tupleof[index]));
+        }
         else static if (is(typeof(classification) == Plain)
                 && isClassified!(Unqual!Field))
             eachRelocated(record.tupleof[index], visit);

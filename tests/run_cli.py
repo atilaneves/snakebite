@@ -1912,6 +1912,55 @@ def test_saved_program_with_c_bounds_failure_runs_as_the_compiled_program(
     })
 
 
+def test_saved_program_with_intrinsics_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.atomic: atomicLoad, atomicStore, cas;
+        import core.bitop: bsf, bswap, popcnt;
+        import core.math: fabs, sin, sqrt;
+        import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+        extern(C) int sum(int count, ...) {
+            va_list arguments;
+            va_start(arguments, count);
+            int total;
+            foreach (i; 0 .. count)
+                total += va_arg!int(arguments);
+            va_end(arguments);
+            return total;
+        }
+        shared int counter;
+        int main(string[] args) {
+            const one = cast(double) args.length;
+            atomicStore(counter, 4);
+            cas(&counter, 4, 6);
+            return cast(int) sqrt(one * 16) + cast(int) fabs(-one)
+                + cast(int) (sin(one * 0) * 10) + popcnt(0xF0u) + bsf(8u)
+                + cast(int) (bswap(0x01000000u)) + sum(2, 3, 4)
+                + atomicLoad(counter);
+        }
+        """})
+
+
+def test_saved_program_with_halt_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": f'name "{dub_name("halt")}"\n'
+                   'targetType "library"\n'
+                   'dflags "-checkaction=halt"\n',
+        "source/app.d": """
+        module app;
+        __gshared int[] numbers = [1, 2, 3];
+        unittest {
+            const index = numbers.length + 2;
+            assert(index < numbers.length);
+        }
+        """,
+    })
+
+
 def test_saved_program_with_allocation_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
