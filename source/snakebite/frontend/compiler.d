@@ -17,23 +17,8 @@ __gshared Compiler compiler;
 // registered module from DMD's tables.
 private shared uint _moduleCounter;
 
-// Thread-owned metadata belongs to one set of frontend declarations.
-// Reset and shutdown require exclusive access with no live frontend users;
-// the next read on each thread must discard its previous snapshots.
-private shared size_t _metadataGeneration;
-
-public size_t metadataGeneration() @safe nothrow @nogc {
-    import core.atomic: atomicLoad, MemoryOrder;
-
-    return atomicLoad!(MemoryOrder.acq)(_metadataGeneration);
-}
-
-private void discardMetadata() @safe nothrow @nogc {
-    import core.atomic: atomicOp;
-
-    atomicOp!"+="(_metadataGeneration, size_t(1));
-}
-
+public import snakebite.frontend.lock: metadataGeneration, withCompilerQuery;
+import snakebite.frontend.lock: discardMetadata, frontendMutex;
 
 shared static this() {
     compiler = new Compiler;
@@ -134,23 +119,6 @@ public void withCompilerLock(
     in FrontendFlags flags = FrontendFlags.init,
 ) {
     compiler.withLock(action, flags);
-}
-
-// Metadata queries can run inside an unfinished diagnostic pass. They must
-// exclude semantic writers without clearing that pass's errors or flags.
-public void withCompilerQuery(scope void delegate() query) {
-    import snakebite.memory.gc: resumeFrontend, suspendFrontend;
-
-    version(unittest) {
-        import snakebite.host.sharedtable: assertCacheFillAllowed;
-        assertCacheFillAllowed!"frontend metadata query";
-    }
-    compiler.mutex.lock;
-    scope(exit) compiler.mutex.unlock;
-
-    const depth = suspendFrontend;
-    scope(exit) resumeFrontend(depth);
-    query();
 }
 
 // Runs `action` with dmd's diagnostics gagged, for a caller that holds the
@@ -513,7 +481,7 @@ final class Compiler {
         // rod) depends on whether this process compiles snippets or a whole
         // program, which getopt has not seen yet at module-ctor time, so the
         // entry point calls initialize() once it knows.
-        mutex = new Mutex;
+        mutex = frontendMutex;
     }
 
     void initialize(in Snippets snippets) {
