@@ -6,6 +6,7 @@ private:
 
 import snakebite.failure.report: internalFailure;
 import snakebite.frontend.typefacts;
+import snakebite.native.staticstore: StaticStore;
 import snakebite.native.value:
     arrayLengthOffset, arrayPointerOffset, arrayValueSize, checkedLoadIntegral,
     checkedStoreIntegral, delegateContextOffset, delegateFunctionOffset,
@@ -28,8 +29,7 @@ public struct NativeData {
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
-    import snakebite.host.threads: heapNew, PerThread;
-    import snakebite.host.sharedtable: SharedTable;
+        import snakebite.host.sharedtable: SharedTable;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
@@ -50,10 +50,7 @@ public struct NativeData {
     // Under the compiler lock only. The copies are outside the GC heap, as
     // read-only data is in compiled D, and are freed with this object.
     private const(void)*[StringText] _stringTexts;
-    private void*[] _stringBlocks;
-    // Written under the compiler lock only, like every miss below.
-    private void[][] _blocks;
-    private void[] _available;
+    private StaticStore _store;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006). A `shared`/`__gshared`/`immutable` variable's storage
     // is published once it is resolved or initialised; until then only
@@ -69,7 +66,6 @@ public struct NativeData {
     // template on this thread's own first touch of each variable - never
     // shared, so `TlsSlots.slotFor` takes no lock.
     private SharedTable!(VarDeclaration, TlsDescriptor) _tlsDescriptors;
-    private PerThread!(TlsSlots*) _tls;
 
     public this(
         bool delegate(Dsymbol) const isRootOwned,
@@ -85,7 +81,7 @@ public struct NativeData {
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
         _callLowering = call;
-        _tls = PerThread!(TlsSlots*)(() => heapNew!TlsSlots);
+        _store = StaticStore(true);
     }
 
     private void callLowering(
@@ -173,13 +169,6 @@ public struct NativeData {
         return address;
     }
 
-    ~this() {
-        import core.stdc.stdlib: free;
-
-        foreach (block; _stringBlocks)
-            free(block);
-    }
-
     // Equal text has one address, as the object file gives in compiled D:
     // dmd makes a new literal for each use of a manifest constant, and for
     // each instance of a template.
@@ -199,7 +188,7 @@ public struct NativeData {
                 auto bytes = cast(ubyte*) calloc(
                     literal.len + 1, literal.sz);
                 assert(bytes !is null);
-                _stringBlocks ~= bytes;
+                _store.adoptString(bytes);
                 auto units = bytes[0 .. literal.len * literal.sz];
                 copyUnits(literal, units);
                 address = bytes;
@@ -255,21 +244,7 @@ public struct NativeData {
         import snakebite.frontend.compiler: withCompilerLock;
 
         void[] bytes;
-        withCompilerLock({
-            // Slots cannot move: constants can hold addresses of other
-            // slots.
-            const needed = facts.size + facts.alignment - 1;
-            if (_available.length < needed) {
-                import std.algorithm: max;
-
-                _available = new void[max(4096, needed)];
-                _blocks ~= _available;
-            }
-            const start =
-                -cast(size_t) _available.ptr & (facts.alignment - 1);
-            bytes = _available[start .. start + facts.size];
-            _available = _available[start + facts.size .. $];
-        });
+        withCompilerLock({ bytes = _store.reserve(facts); });
         return bytes;
     }
 
@@ -278,11 +253,11 @@ public struct NativeData {
     // point into the storage of one, and compiled D keeps it until the
     // thread ends too.
     public void release() {
-        _tls.release((slots) => slots.empty);
+        _store.release();
     }
 
     public TlsSlots* tlsSlots() {
-        return _tls.current;
+        return _store.tlsSlots;
     }
 
     // `variable`'s storage: this thread's own copy if it is thread-local
@@ -300,7 +275,7 @@ public struct NativeData {
 
         const facts = typeFacts(variable.type);
         if (variable.isThreadLocalStorage)
-            return _tls.current.slotFor(tlsDescriptorOf(variable));
+            return _store.tlsSlots.slotFor(tlsDescriptorOf(variable));
 
         if (hasNativeStorage(variable)) {
             // const would also make the referenced storage read-only here.
@@ -353,7 +328,7 @@ public struct NativeData {
                 // address is not the descriptor's to keep.
                 if (_threadLocalAddress(name) !is null) {
                     descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
-                        cast(const(void)*) variable, null, facts.size,
+                        null, facts.size,
                         name, _threadLocalAddress));
                     return;
                 }
@@ -361,7 +336,7 @@ public struct NativeData {
             }
             const bytes = buildInitialBytes(variable, facts);
             descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
-                cast(const(void)*) variable, bytes.ptr, bytes.length));
+                bytes.ptr, bytes.length));
         });
         return descriptor;
     }
