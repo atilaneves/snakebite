@@ -2236,6 +2236,29 @@ def test_saved_program_with_a_second_thread_runs_as_compiled(
         """})
 
 
+def test_saved_program_with_destructor_gate_and_a_second_thread_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.thread: Thread;
+        struct Counted(T) {
+            static int live;
+            static ~this() { printf("tmpl dtor %d\\n", live); }
+        }
+        alias C = Counted!int;
+        void work() { C.live = 7; printf("work %d\\n", C.live); }
+        int main() {
+            auto thread = new Thread(&work);
+            thread.start;
+            thread.join;
+            printf("main %d\\n", C.live);
+            return C.live;
+        }
+        """})
+
+
 # A save never writes a file for a program that does not compile: it fails,
 # and no file is left.
 def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
