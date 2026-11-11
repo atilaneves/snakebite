@@ -4,7 +4,6 @@ module snakebite.backends.api;
 private:
 
 
-import snakebite.backends.bytecode.linkedmodules: LinkedModules;
 import snakebite.backends.statistics: CompilationStatistics;
 import snakebite.program: Program;
 import snakebite.start.data: FunctionHandle, StartData;
@@ -79,9 +78,11 @@ public abstract class Backend {
         _program = program;
     }
 
-    // The linked modules of this backend, which hold its start data. The
-    // address does not change.
-    protected abstract LinkedModules* linkedModules();
+    // The storage of the start data of this backend. The address does not
+    // change. `startData` fills it.
+    protected abstract ref StartData startDataStorage();
+
+    private shared bool _startBuilt;
 
     // Ends the owner's execution-state lifetime. Active calls keep their
     // state until return or unwind. Later callbacks can still enter the
@@ -151,19 +152,18 @@ public abstract class Backend {
         import snakebite.start.builder: buildStartData;
         import snakebite.frontend.compiler: withCompilerLock;
 
-        auto linked = linkedModules;
-        if (!atomicLoad!(MemoryOrder.acq)(linked.startBuilt))
+        if (!atomicLoad!(MemoryOrder.acq)(_startBuilt))
             withCompilerLock({
-                if (atomicLoad(linked.startBuilt))
+                if (atomicLoad(_startBuilt))
                     return;
 
                 // `buildStartData` throws before it assigns, so a failure
                 // leaves no half-built data and the next call builds again.
-                linked.startData = buildStartData(
+                startDataStorage = buildStartData(
                     cast(Program) _program, &compiledFunction, &staticStorage);
-                atomicStore!(MemoryOrder.rel)(linked.startBuilt, true);
+                atomicStore!(MemoryOrder.rel)(_startBuilt, true);
             });
-        return linked.startData;
+        return startDataStorage;
     }
 
     // Execute one synthesised `string`-returning function and return its

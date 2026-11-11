@@ -3,7 +3,7 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
-import snakebite.start.data: FunctionHandle;
+import snakebite.start.data: FunctionHandle, StartData;
 import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
@@ -166,8 +166,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         linked.plans.bindCallbacks(&invokeCallback, cast(void*) this);
     }
 
-    protected override LinkedModules* linkedModules() {
-        return &linked;
+    protected override ref StartData startDataStorage() {
+        return linked.startData;
     }
 
     // How many chunks of callback entries this instance's bridge has.

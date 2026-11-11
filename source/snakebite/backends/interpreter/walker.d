@@ -27,7 +27,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.program: Program;
     import snakebite.ffi: CallbackCall;
-    import snakebite.backends.bytecode.linkedmodules: LinkedModules;
+    import snakebite.start.data: StartData;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
 
@@ -44,6 +44,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     // dereference sites; the checked evaluator is a separate type so that
     // an unchecked one runs no code for it.
     private bool _checksNullDeref;
+    private StartData _startData;
 
     public this(const Program program) {
         super(program);
@@ -90,8 +91,8 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
             evaluator.call(function_, returnPlace, args));
     }
 
-    protected override LinkedModules* linkedModules() {
-        return &_shared.linked;
+    protected override ref StartData startDataStorage() {
+        return _startData;
     }
 
     public override void[] staticStorage(
