@@ -4,6 +4,7 @@ module snakebite.backends.api;
 private:
 
 
+import snakebite.backends.bytecode.linkedmodules: LinkedModules;
 import snakebite.backends.statistics: CompilationStatistics;
 import snakebite.program: Program;
 import snakebite.start.data: FunctionHandle, StartData;
@@ -78,6 +79,10 @@ public abstract class Backend {
         _program = program;
     }
 
+    // The linked modules of this backend, which hold its start data. The
+    // address does not change.
+    protected abstract LinkedModules* linkedModules();
+
     // Ends the owner's execution-state lifetime. Active calls keep their
     // state until return or unwind. Later callbacks can still enter the
     // reachable backend, and release their state when they finish. Guest
@@ -146,22 +151,20 @@ public abstract class Backend {
         import snakebite.start.builder: buildStartData;
         import snakebite.frontend.compiler: withCompilerLock;
 
-        if (!atomicLoad!(MemoryOrder.acq)(_startBuilt))
+        auto linked = linkedModules;
+        if (!atomicLoad!(MemoryOrder.acq)(linked.startBuilt))
             withCompilerLock({
-                if (atomicLoad(_startBuilt))
+                if (atomicLoad(linked.startBuilt))
                     return;
 
                 // `buildStartData` throws before it assigns, so a failure
                 // leaves no half-built data and the next call builds again.
-                _startData = buildStartData(
+                linked.startData = buildStartData(
                     cast(Program) _program, &compiledFunction, &staticStorage);
-                atomicStore!(MemoryOrder.rel)(_startBuilt, true);
+                atomicStore!(MemoryOrder.rel)(linked.startBuilt, true);
             });
-        return _startData;
+        return linked.startData;
     }
-
-    private StartData _startData;
-    private shared bool _startBuilt;
 
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the

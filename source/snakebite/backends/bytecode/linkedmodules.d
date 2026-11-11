@@ -12,6 +12,7 @@ import snakebite.image.dependency: DependencyImage;
 import snakebite.native.signature: SignatureTable;
 import snakebite.native.staticstore: StaticStore;
 import snakebite.stack.tls: TlsSlots;
+import snakebite.start.data: StartData;
 
 
 // The compiled code and data of the modules of one process, bound together.
@@ -82,6 +83,12 @@ public struct LinkedModules {
                 entry !is null; entry = entry.next)
             visit(&entry.plan);
     }
+
+    // The start data of the program. The owner builds it at its first use
+    // and then sets `startBuilt`, with release order. It needs the frontend
+    // to build, which this does not.
+    public StartData startData;
+    public shared bool startBuilt;
 
     // Each is a heap block that never moves: a call site embeds the address
     // of its callee before the callee is filled. One append per function.

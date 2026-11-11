@@ -27,6 +27,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.program: Program;
     import snakebite.ffi: CallbackCall;
+    import snakebite.backends.bytecode.linkedmodules: LinkedModules;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
 
@@ -87,6 +88,10 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     ) {
         this.onEvaluator!((evaluator) =>
             evaluator.call(function_, returnPlace, args));
+    }
+
+    protected override LinkedModules* linkedModules() {
+        return &_shared.linked;
     }
 
     public override void[] staticStorage(

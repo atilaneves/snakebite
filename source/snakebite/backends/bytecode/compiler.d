@@ -166,6 +166,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         linked.bindCallbacks(&invokeCallback, cast(void*) this);
     }
 
+    protected override LinkedModules* linkedModules() {
+        return &linked;
+    }
+
     // How many chunks of callback entries this instance's bridge has.
     version(unittest)
     public size_t callbackChunkCount() {

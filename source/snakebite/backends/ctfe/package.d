@@ -8,12 +8,21 @@ private:
 public final class Ctfe: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.api: DeclarationHandle;
+    import snakebite.backends.bytecode.linkedmodules: LinkedModules;
     import snakebite.program: Program;
     import snakebite.start.data: FunctionHandle;
     import snakebite.failure.report: SnakebiteException;
 
+    // Only the start data is used.
+    private LinkedModules _linked;
+
     public this(const Program program) {
         super(program);
+        _linked = LinkedModules(null);
+    }
+
+    protected override LinkedModules* linkedModules() {
+        return &_linked;
     }
 
     public override void call(
