@@ -7513,6 +7513,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto preparation = CallAdapter.Arguments.of(
             type, expression.arguments,
         );
+        // Dropped after this execution: nothing keeps it.
         const plan = preparation.prepareAtAddress(
             *_plans, address, hasContext,
         );

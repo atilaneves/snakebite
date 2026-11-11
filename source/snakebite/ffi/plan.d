@@ -425,26 +425,34 @@ public struct PlanCache {
     // still need itself, up front (`signatureOf`'s own doc). This is
     // still a compile-time-triggered path: a caller reaches it once per
     // call site, not once per guest call.
-    public const(CallPlan)* variadicOf(
+    public CallPlan variadicOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        auto plan = _store.newPlan;
-        *plan = prepareVariadic(
+        return prepareVariadic(
             function_, _store.resolver, extraArgumentTypes, _store.callbacks);
-        return plan;
     }
 
-    public const(CallPlan)* variadicAtAddress(
+    // As `variadicOf`, for a call through an address. A caller that
+    // executes it once drops it, as the interpreter does for each
+    // execution of the call.
+    public CallPlan variadicAtAddress(
         TypeFunction type, bool hasContext, const(void)* address,
         scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        auto plan = _store.newPlan;
-        *plan = prepareVariadicAtAddress(type, hasContext, address,
+        return prepareVariadicAtAddress(type, hasContext, address,
             extraArgumentTypes, _store.callbacks);
-        return plan;
+    }
+
+    // Keeps `plan` for the life of the program and returns where. A caller
+    // that stores the plan in a call site does this; one that uses it for
+    // one execution does not.
+    public const(CallPlan)* keep(CallPlan plan) {
+        auto kept = _store.newPlan;
+        *kept = plan;
+        return kept;
     }
 
     // As `.of`, but for a raw address with no `FuncDeclaration` to key

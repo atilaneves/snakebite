@@ -696,3 +696,41 @@ private FuncDeclaration guestFunction(Module guestModule, in string name) {
 
     return function_;
 }
+
+
+// A C variadic call through a function pointer: the plan that the
+// interpreter prepares for one execution of it is not kept after the call.
+@("steadyState.indirectVariadicCall.retainsNothing")
+@Tags(Interpreter.stringof)
+unittest {
+    import core.memory: GC;
+
+    auto guestModule = parseSnippet(q{
+        extern(C) int snprintf(char*, size_t, const(char)*, ...);
+        long viaPointer(long trips) {
+            auto format = &snprintf;
+            char[32] buffer;
+            long sum = 0;
+            for (long i = 0; i < trips; ++i)
+                sum += format(buffer.ptr, buffer.length, "%d", 7);
+            return sum;
+        }
+    });
+    auto backend = Owned!Interpreter(Program([guestModule]));
+    auto function_ = guestFunction(guestModule, "viaPointer");
+    long result;
+    long trips = 10;
+    backend.call(function_, &result, [cast(void*) &trips]);
+    result.should == 10;
+
+    GC.collect;
+    const before = GC.stats.usedSize;
+    trips = 100_000;
+    backend.call(function_, &result, [cast(void*) &trips]);
+    result.should == 100_000;
+    GC.collect;
+    const after = GC.stats.usedSize;
+
+    // Much less than one byte per call: what is left is noise.
+    (cast(long) after - cast(long) before).shouldBeSmallerThan(100_000);
+}

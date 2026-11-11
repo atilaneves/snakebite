@@ -141,18 +141,18 @@ public struct CallAdapter {
             Type[] extraTypes;
             foreach (expression; _expressions[extraOffset .. $])
                 extraTypes ~= expression.type;
-            return plans.variadicOf(callee, extraTypes);
+            return plans.keep(plans.variadicOf(callee, extraTypes));
         }
 
-        public const(CallPlan)* prepareAtAddress(
+        // A plan for one execution of a call through `address`; the caller
+        // keeps it with `PlanCache.keep` or drops it. The callee is variadic.
+        public CallPlan prepareAtAddress(
             ref PlanCache plans, const(void)* address, bool hasContext,
         ) {
             import dmd.astenums: VarArg;
             import dmd.mtype: Type;
 
-            if (_type.parameterList.varargs != VarArg.variadic)
-                return null;
-
+            assert(_type.parameterList.varargs == VarArg.variadic);
             Type[] extraTypes;
             foreach (expression; _expressions[extraOffset .. $])
                 extraTypes ~= expression.type;

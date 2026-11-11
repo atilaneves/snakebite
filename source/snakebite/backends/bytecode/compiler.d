@@ -10989,8 +10989,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const nativePlan = isVariadic
-            ? cast(const(void)*) preparation.prepareAtAddress(
-                _bytecode._plans, null, hasContext)
+            ? cast(const(void)*) _bytecode._plans.keep(
+                preparation.prepareAtAddress(
+                    _bytecode._plans, null, hasContext))
             : _bytecode._plans.signatureOf(functionType, hasContext);
         auto site = CallSite.indirect(
             calleeOffset, guestArgs, nativeArgs, returnWidth, nativePlan,
