@@ -989,29 +989,6 @@ package struct ExceptionHandler {
 }
 
 
-// What a caller needs to copy a small leaf function into its own
-// instruction stream: the instructions before the compiler fuses them and
-// resolves their branches, so a branch target is still an index.
-package struct InlineBody {
-    package Instruction[] instructions;
-    package long[] constants;
-    package size_t frameSize;
-    package uint frameAlignment;
-    // The addresses in `instructions` and `constants`.
-    package Reloc[] relocs;
-    // The sites of the `opCall` instructions of the body: only calls of
-    // druntime hooks, which a failed check makes.
-    package CallSite[] callSites;
-    package struct FrameRange {
-        package size_t offset;
-        package size_t size;
-    }
-    package FrameRange[] allocations;
-    package bool exposesFrame;
-    package FrameRange[] exposedFrames;
-}
-
-
 public struct Function {
     package Instruction[] instructions;
     package long[] constants;
@@ -1037,8 +1014,6 @@ public struct Function {
     package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
     package HostCallLayout hostCall;
-    // Not null when a caller can copy this function in place of a call.
-    package const(InlineBody)* inlineBody;
     // Every word of this function that holds a process address, except the
     // handler of each instruction.
     package Reloc[] relocs;
