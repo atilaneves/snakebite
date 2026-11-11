@@ -244,6 +244,11 @@ public CliResult parseArgs(string[] args) {
     result.options.projectDirectory = args[1];
 
     if (result.options.savePath.length
+            && result.options.programArguments.length)
+        return CliResult(
+            1, "--save runs no program, so it takes no program arguments\n");
+
+    if (result.options.savePath.length
             && result.options.backend != BackendName.bytecode)
         return CliResult(1, "--save needs the bytecode backend\n");
 

@@ -6343,6 +6343,21 @@ def test_load_runs_in_the_working_directory_of_the_project(
     assert load.returncode == ram.returncode, output(load)
 
 
+def test_save_refuses_program_arguments(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        int main() { return 0; }
+        """)
+    saved = tmp_path / "main.sbc"
+    save = run_sb(
+        "--no-optimise-image", f"--save={saved}", str(app), "--", "-d",
+        cwd=tmp_path)
+    assert save.returncode == 1, output(save)
+    assert "program arguments" in save.stderr, output(save)
+    assert not saved.exists()
+
+
 @pytest.mark.parametrize("option", ["--backend=interpreter"])
 def test_load_refuses_an_option_that_it_cannot_honour(
     tmp_path: Path, option: str
