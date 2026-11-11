@@ -36,7 +36,7 @@ public int run(string[] args) {
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
-    import std.file: exists, isDir;
+    import std.file: exists, getcwd, isDir;
     import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
 
@@ -83,7 +83,8 @@ public int run(string[] args) {
                 );
                 enterWorkingDirectory();
                 if (savePath.length) {
-                    saveProgram(preparation.project.program, savePath, jit);
+                    saveProgram(
+                        preparation.project.program, savePath, jit, getcwd);
                     return 0;
                 }
                 const report = executeBackend(

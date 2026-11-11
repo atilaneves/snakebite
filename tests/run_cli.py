@@ -6324,6 +6324,25 @@ def test_load_runs_as_from_ram_with_any_jit_option(
         ram.returncode, guest_lines(ram), ram.stderr), output(load)
 
 
+def test_load_runs_in_the_working_directory_of_the_project(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        import core.sys.posix.unistd: access;
+        int main() { return access("marker", 0); }
+        """)
+    (app / "marker").write_text("")
+    saved = tmp_path / "main.sbc"
+    ram = run_backend("bytecode", app, tmp_path)
+    save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
+    assert save.returncode == 0, output(save)
+    load = run_sb(f"--load={saved}", cwd=tmp_path)
+    assert ram.returncode == 0, output(ram)
+    assert load.returncode == ram.returncode, output(load)
+
+
 @pytest.mark.parametrize("option", ["--backend=interpreter"])
 def test_load_refuses_an_option_that_it_cannot_honour(
     tmp_path: Path, option: str

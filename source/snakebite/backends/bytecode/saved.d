@@ -129,6 +129,8 @@ public struct SavedModule {
 
 public struct SavedProgram {
     public string programName;
+    // The directory that the program runs in.
+    public string workingDirectory;
     public SavedModule[] modules;
     public bool hasMain;
     public bool returnsVoid;
@@ -192,7 +194,7 @@ public SavedProgram readSaved(
 
 
 private enum ubyte[8] magic = cast(ubyte[8]) "SBCFILE\0";
-private enum ulong formatVersion = 1;
+private enum ulong formatVersion = 2;
 
 
 // Integers, bools, enums, arrays and structs of those. An array starts with

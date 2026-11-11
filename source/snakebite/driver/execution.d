@@ -234,6 +234,7 @@ public void saveProgram(
     imported!"snakebite.program".Program program,
     in string path,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    in string workingDirectory,
 ) {
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode: Bytecode;
@@ -245,7 +246,9 @@ public void saveProgram(
         throw new Exception("cannot save: this build of sb has no build ID");
     auto backend = Owned!Bytecode(new Bytecode(program, jit));
     backend.recordRelocs = true;
-    writeSaved(path, backend.save, buildId);
+    auto saved = backend.save;
+    saved.workingDirectory = workingDirectory;
+    writeSaved(path, saved, buildId);
 }
 
 
@@ -262,8 +265,12 @@ public int executeLoaded(
     import snakebite.host.buildid: ownBuildId;
     import snakebite.image.dependency: TestHooks;
     import std.datetime.stopwatch: AutoStart, StopWatch;
+    import std.file: chdir;
 
     const saved = readSaved(path, ownBuildId);
+    // The directory that `enterWorking` of `ProjectDirectory` enters.
+    if (saved.workingDirectory.length)
+        chdir(saved.workingDirectory);
     auto stopWatch = StopWatch(AutoStart.yes);
     auto backend = Owned!Backend(new LoadedBytecode(saved, jit));
     return execute(
