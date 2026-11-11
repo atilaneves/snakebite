@@ -958,6 +958,13 @@ package struct ExceptionHandler {
     package const(Instruction)* handler;
     package size_t catchOffset;
     package const(Instruction)* cleanupEnd;
+    // The same four places as indices of the function's instructions, from
+    // which `bindInstructionReferences` sets the addresses. `size_t.max`
+    // means there is no cleanup end.
+    package size_t bodyStartIndex;
+    package size_t bodyEndIndex;
+    package size_t handlerIndex;
+    package size_t cleanupEndIndex = size_t.max;
 }
 
 
@@ -1116,7 +1123,9 @@ package void recordExceptionHandlerRelocs(
     static foreach (name; FieldNameTuple!ExceptionHandler)
         static assert(name == "type" || name == "bodyStart"
             || name == "bodyEnd" || name == "handler"
-            || name == "catchOffset" || name == "cleanupEnd",
+            || name == "catchOffset" || name == "cleanupEnd"
+            || name == "bodyStartIndex" || name == "bodyEndIndex"
+            || name == "handlerIndex" || name == "cleanupEndIndex",
             "ExceptionHandler." ~ name
             ~ " has to say whether it holds an address");
 
@@ -4787,6 +4796,65 @@ package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
         slot = (slot + 1) & (roleTable.entries.length - 1);
     }
     return false;
+}
+
+// Turns every index that a complete `Function` holds for one of its own
+// instructions into the instruction's address: the target of each branch
+// (`branchTargetField`), the four places of each exception handler, and the
+// cleanup range of each call site. Returns null, or why an index is out of
+// range. A cleanup may branch to its exclusive end, which can be one past the
+// last instruction: the VM stops at that address before it reads an
+// instruction. The function must not move or grow its instructions after
+// this call.
+package string bindInstructionReferences(ref Function function_) {
+    import std.conv: text;
+
+    auto instructions = function_.instructions;
+    const(Instruction)* addressOf(in size_t index) {
+        return instructions.ptr + index;
+    }
+    bool isCleanupEndBranch(in size_t index, in size_t target) {
+        foreach (handler; function_.exceptionHandlers)
+            if (handler.cleanupEndIndex == target
+                    && index >= handler.handlerIndex && index < target)
+                return true;
+
+        return false;
+    }
+
+    foreach (index, ref instruction; instructions) {
+        auto target = branchTargetField(instruction);
+        if (target is null)
+            continue;
+
+        if (!(*target < instructions.length
+                || (*target == instructions.length
+                    && isCleanupEndBranch(index, *target))))
+            return text("branch target ", *target, " is out of range");
+
+        *target = cast(size_t) addressOf(*target);
+    }
+
+    foreach (ref handler; function_.exceptionHandlers) {
+        if (!(handler.handlerIndex < instructions.length
+                || handler.cleanupEndIndex != size_t.max))
+            return "a catch handler is followed by the code after the "
+                ~ "statement, or by the function's closing instruction";
+
+        handler.bodyStart = addressOf(handler.bodyStartIndex);
+        handler.bodyEnd = addressOf(handler.bodyEndIndex);
+        handler.handler = addressOf(handler.handlerIndex);
+        handler.cleanupEnd = handler.cleanupEndIndex == size_t.max
+            ? null : addressOf(handler.cleanupEndIndex);
+    }
+
+    foreach (ref site; function_.callSites)
+        if (site.cleanupStartIndex != size_t.max) {
+            site.cleanupStart = cast(void*) addressOf(site.cleanupStartIndex);
+            site.cleanupEnd = cast(void*) addressOf(site.cleanupEndIndex);
+        }
+
+    return null;
 }
 
 // The field of `instruction` that holds the instruction of the same function
