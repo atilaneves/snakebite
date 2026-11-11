@@ -128,8 +128,8 @@ public struct DependencyImage {
 }
 
 
-// Loads an image that is already built, instead of having `prepareImage` make
-// one.
+// Loads an image that is already built, instead of having `prepareImage`
+// (in `snakebite.image.dependency`) make one.
 public DependencyImage loadImage(in string path) {
     import snakebite.host.runlock: guestRunLock;
 
@@ -143,10 +143,11 @@ public DependencyImage loadImage(in string path) {
 
 private DependencyImage loadImageLocked(in string path) {
     import core.sys.posix.dlfcn:
-        dlerror, dlopen, RTLD_LAZY, RTLD_NODELETE;
+        dlerror, dlopen, dlsym, RTLD_LAZY, RTLD_NODELETE;
     import std.string: fromStringz, toStringz;
     import std.conv: text;
     import snakebite.failure.report: SnakebiteException;
+    import snakebite.host.runtimeentry: RuntimeEntry;
 
     const savedHooks = TestHooks.current;
     scope(exit) savedHooks.install;
@@ -175,13 +176,9 @@ private DependencyImage loadImageLocked(in string path) {
     if (image._handle is null)
         throw new SnakebiteException(text("Cannot load dependency image ",
             path, ": ", dlerror.fromStringz));
-    import core.sys.posix.dlfcn: dlsym;
     image._modules = cast(DependencyImage.Modules) dlsym(image._handle,
         "snakebite_dependency_image_modules_v1");
     if (image._modules !is null) {
-        import std.string: toStringz;
-        import snakebite.host.runtimeentry: RuntimeEntry;
-
         foreach (i, symbol; RuntimeEntry.symbols)
             image._wrappers[i] = dlsym(
                 image._handle, text("__wrap_", symbol).toStringz);
@@ -207,7 +204,7 @@ private DependencyImage loadImageLocked(in string path) {
 
 // An empty module range preserves actual image GC/TLS registration without
 // starting a full-D static dependency before its C entry requests startup.
-public enum deferredRegistrySource = q{
+private enum deferredRegistrySource = q{
     private struct SnakebiteDeferredDSO {
         size_t version_;
         void** slot;

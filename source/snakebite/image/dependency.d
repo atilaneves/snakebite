@@ -5,7 +5,7 @@ private:
 
 
 import snakebite.failure.report: internalFailure;
-import snakebite.image.loaded: DependencyImage, deferredRegistrySource, loadImage;
+import snakebite.image.loaded: DependencyImage, loadImage;
 import snakebite.host.runtimeentry: RuntimeEntry;
 
 
@@ -134,7 +134,7 @@ public DependencyImage prepareImage(
         "\n", dependencyFlags, "\n", linkerArguments, "\n",
         inputs.map!(input => input.absolutePath).array, "\n",
         source.length, ":", source,
-        deferStartup ? deferredRegistrySource : "");
+        deferStartup ? DependencyImage.entryStartupSettings : "");
     auto stamps = ProjectImageCache(
         directory.buildPath(sourceDigest(settings) ~ ".json"), settings, null,
         executable);
@@ -148,7 +148,7 @@ public DependencyImage prepareImage(
         "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
         "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
         "\n", source.length, ":", source,
-        deferStartup ? deferredRegistrySource : "");
+        deferStartup ? DependencyImage.entryStartupSettings : "");
     foreach (input; inputs ~ linkerFiles)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
             input.absolutePath, ":", fileDigest(input));
@@ -162,7 +162,7 @@ public DependencyImage prepareImage(
         const sourcePath = staging.buildPath("image.d");
         const objectPath = staging.buildPath("image.o");
         const imagePath = staging.buildPath("image.so");
-        sourcePath.write(source ~ (deferStartup ? deferredRegistrySource : "")
+        sourcePath.write(source ~ (deferStartup ? DependencyImage.entryStartupSettings : "")
             ~ text("\nstatic assert(__VERSION__ == ",
             __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
         runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
