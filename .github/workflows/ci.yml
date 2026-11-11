@@ -45,10 +45,9 @@ jobs:
       # The REPL links GNU readline for interactive line editing.
       # build/ut-without-build-tools.sh runs bin/ut under strace.
       # reggaefile.d applies the patch of LDC's frontend additions with patch.
+      # A failed install is fine when the machine already has what is needed.
       - name: Install libreadline, strace and patch
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y -o Acquire::Retries=5 libreadline-dev strace patch
+        run: build/ci-install-packages.sh
 
       - name: Run CI
         run: build/ci.sh
