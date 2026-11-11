@@ -28,6 +28,10 @@ public struct Resolver {
         _image = image;
     }
 
+    // The first name that answered each address, so that a stored program can
+    // name the code it calls and ask for it again by name.
+    private SharedTable!(const(void)*, string) _names;
+
     version(unittest) private size_t _lookups;
 
     public void* resolve(in char[] name) {
@@ -38,7 +42,17 @@ public struct Resolver {
         auto address = _image is null ? null : _image.resolve(name);
         if (address is null)
             address = symbolAddress(name);
-        return *_addresses.insert(name.idup, RuntimeEntry.route(address));
+        auto routed = RuntimeEntry.route(address);
+        if (routed !is null)
+            _names.insert(routed, name.idup);
+        return *_addresses.insert(name.idup, routed);
+    }
+
+    // A name that `resolve` answered `address` for, or null.
+    public string nameOf(const(void)* address) const {
+        if (auto found = address in _names)
+            return *found;
+        return null;
     }
 
     // `name`'s address, but only when a genuine, independent native copy

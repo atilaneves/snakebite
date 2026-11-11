@@ -1757,22 +1757,24 @@ def test_saved_program_runs_as_the_compiled_program(tmp_path: Path) -> None:
 
 # A program in `files` (path below `app`, source), saved and then loaded with
 # and without the JIT, behaves as the same program compiled and run from RAM.
+# Both runs get `arguments` as the arguments of `main`.
 def assert_saved_program_runs_as_the_compiled_program(
-    tmp_path: Path, files: dict[str, str],
+    tmp_path: Path, files: dict[str, str], arguments: tuple[str, ...] = (),
 ) -> None:
     for name, text in files.items():
         write(tmp_path / "app" / name, text)
     app = str(tmp_path / "app")
     common = ("--backend=bytecode", "--no-optimise-image")
+    main_arguments = ("--", *arguments) if arguments else ()
 
-    from_ram = run_sb(*common, app, cwd=tmp_path)
+    from_ram = run_sb(*common, app, *main_arguments, cwd=tmp_path)
     saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
                    cwd=tmp_path)
     assert saved.returncode == 0, output(saved)
 
     for flags in ([], ["--no-jit"]):
         loaded = run_sb(*flags, f"--load={tmp_path / 'program.sbc'}",
-                        cwd=tmp_path)
+                        *main_arguments, cwd=tmp_path)
         assert loaded.returncode == from_ram.returncode, output(loaded)
         assert guest_lines(loaded) == guest_lines(from_ram)
         assert loaded.stderr == from_ram.stderr
@@ -1942,7 +1944,34 @@ def test_saved_program_with_main_arguments_runs_as_the_compiled_program(
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
         module main;
-        int main(string[] args) { return cast(int) args.length + 4; }
+        import core.stdc.stdio: printf;
+        int main(string[] args) {
+            foreach (argument; args[1 .. $])
+                printf("%.*s\\n", cast(int) argument.length, argument.ptr);
+            return cast(int) args.length + 4;
+        }
+        """}, arguments=("alpha", "be"))
+
+
+def test_saved_program_with_host_function_addresses_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.atomic: atomicLoad, atomicOp;
+        import core.stdc.stdlib: abs, qsort;
+        extern(C) int compare(const(void)* a, const(void)* b) {
+            return *cast(const(int)*) a - *cast(const(int)*) b;
+        }
+        shared int counter;
+        int main() {
+            int[4] values = [4, 1, 3, 2];
+            qsort(values.ptr, values.length, int.sizeof, &compare);
+            extern(C) int function(int) absolute = &abs;
+            atomicOp!"+="(counter, 3);
+            return values[0] * 100 + values[3] * 10 + absolute(-2)
+                + atomicLoad(counter);
+        }
         """})
 
 

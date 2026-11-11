@@ -69,6 +69,7 @@ public void saveProgram(
         auto record = Signature(signature.parameters.dup, signature.variadic);
         file.transfer(record);
     }
+    file.transfer(body_._symbols);
     file.append(body_._written.data);
 
     const partial = path ~ ".partial";
@@ -114,6 +115,7 @@ public void loadProgram(
         file._signatures ~= program.signatures.intern(
             signature.parameters, signature.variadic);
     }
+    file.transfer(file._symbols);
     file._program = &program;
     file._runner = &runner;
     transferBody(file, program, &runner);
@@ -164,6 +166,10 @@ private struct Archive {
     // Writing: the place of each plan of the store. Reading: the plan at a
     // place.
     private size_t[const(CallPlan)*] _planIndex;
+    // The names of the host code that the program refers to, in the order of
+    // the first reference.
+    private string[] _symbols;
+    private size_t[string] _symbolIndex;
     private CallPlan*[] _plans;
     private Runner* _runner;
     private Program* _program;
@@ -303,6 +309,26 @@ private struct Archive {
             return address;
         throw new SnakebiteException(
             "the program file names a string that it does not hold");
+    }
+
+    size_t symbolIndexOf(const(void)* address) {
+        const name = _program.plans.resolver.nameOf(address);
+        if (name is null)
+            throw refusal("a word points at host code that has no symbol name");
+        if (auto found = name in _symbolIndex)
+            return *found;
+        _symbols ~= name;
+        return _symbolIndex[name] = _symbols.length - 1;
+    }
+
+    void* symbolAt(in size_t index) {
+        if (index >= _symbols.length)
+            throw new SnakebiteException(
+                "the program file names a symbol that it does not hold");
+        if (auto address = _program.plans.resolver.resolve(_symbols[index]))
+            return address;
+        throw new SnakebiteException(.text("the program calls `",
+            _symbols[index], "`, which this process does not have"));
     }
 
     size_t planIndexOf(const(CallPlan)* plan) {
@@ -520,10 +546,12 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             return archive.dataPosition(cast(const(void)*) target.address);
         case adoptedString:
             return archive.stringPosition(cast(const(void)*) target.address);
+        case hostSymbol:
+            return [archive.symbolIndexOf(
+                cast(const(void)*) target.address), 0, 0];
         case handler:
         case tlsDescriptor:
         case typeInfo:
-        case hostSymbol:
         case frontendString:
         case callback:
             throw refusal(text("a word needs a relocation of kind ",
@@ -541,6 +569,8 @@ private size_t addressOf(
             return cast(size_t) archive.functionAt(reference[0], reference[1]);
         case callbackEntry:
             return cast(size_t) archive.entryAt(reference);
+        case hostSymbol:
+            return cast(size_t) archive.symbolAt(reference[0]);
         case nativePlan:
             return cast(size_t) archive.planAt(reference[0]);
         case staticData:
@@ -551,7 +581,6 @@ private size_t addressOf(
         case handler:
         case tlsDescriptor:
         case typeInfo:
-        case hostSymbol:
         case frontendString:
         case callback:
             throw new SnakebiteException(
