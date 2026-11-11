@@ -4,7 +4,7 @@ module snakebite.run.program;
 private:
 
 
-import snakebite.backends.api: Backend;
+import snakebite.backends.api: ProgramBackend;
 import snakebite.start.data: StartData;
 import snakebite.ffi.abi: ArgumentPlan, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
@@ -18,7 +18,7 @@ import snakebite.ffi.plan: NativeSignature;
 // (`GuestModules`): it orders them, runs them on each thread, and prints
 // what a destructor throws.
 public int run(
-    Backend backend,
+    ProgramBackend backend,
     in string[] hostArguments = null,
 ) {
     import snakebite.run.modules: GuestModules;
@@ -42,7 +42,7 @@ public int run(
 // The program's own `main`. `void main` maps to exit status 0, and no `main`
 // at all is not an error: the status is 0.
 package(snakebite) int runMain(
-    Backend backend,
+    ProgramBackend backend,
     StartData start,
     in string[] hostArguments,
 ) {
@@ -138,7 +138,7 @@ public struct StartupReport {
 // goes on running programs in one process has its destructors run before
 // this returns.
 public StartupReport runDruntimeMain(
-    imported!"snakebite.backends.api".Backend backend,
+    imported!"snakebite.backends.api".ProgramBackend backend,
     in imported!"snakebite.image.dependency".TestHooks testHooks,
     in string[] arguments,
     in bool endsProcess = false,
@@ -216,7 +216,7 @@ public StartupReport runDruntimeMain(
 
 
 private struct MainRun {
-    Backend backend;
+    ProgramBackend backend;
     StartData* start;
     CallbackBridge* bridge;
 }

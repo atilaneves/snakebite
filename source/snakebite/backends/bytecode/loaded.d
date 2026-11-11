@@ -4,7 +4,7 @@ module snakebite.backends.bytecode.loaded;
 private:
 
 
-import snakebite.backends.api: Backend;
+import snakebite.backends.api: ProgramBackend;
 import snakebite.backends.bytecode.saved: SavedProgram, SavedTarget;
 import snakebite.backends.bytecode.vm: Function, JitSetting, Vm;
 import snakebite.start.data: FunctionHandle;
@@ -13,7 +13,7 @@ import snakebite.start.data: FunctionHandle;
 // Runs a program that `--save` stored. It has no frontend declaration: the
 // start data comes from the file, and so do the functions. Its only way in is
 // the handle of `main` and the handles of the module phases.
-public final class LoadedBytecode: Backend {
+public final class LoadedBytecode: ProgramBackend {
     import snakebite.ffi.plan: CallPlan, NativeSignature, planAt;
     import snakebite.ffi.symbol: Resolver;
     import snakebite.host.executionstates: ExecutionStates;
@@ -164,29 +164,5 @@ public final class LoadedBytecode: Backend {
             auto active = _vms.enter;
             active.state.callFromHost(_function, returnPlace, args);
         }
-    }
-
-    public override void call(
-        imported!"dmd.func".FuncDeclaration function_,
-        void* returnPlace,
-        void*[] args,
-    ) {
-        throw new Exception("a loaded program has no frontend declaration");
-    }
-
-    public override void[] staticStorage(
-        imported!"dmd.declaration".VarDeclaration variable,
-    ) {
-        throw new Exception("a loaded program has no frontend declaration");
-    }
-
-    public override FunctionHandle compiledFunction(
-        imported!"dmd.func".FuncDeclaration function_,
-    ) {
-        throw new Exception("a loaded program has no frontend declaration");
-    }
-
-    public override string eval(imported!"dmd.func".FuncDeclaration function_) {
-        throw new Exception("a loaded program has no frontend declaration");
     }
 }

@@ -38,7 +38,7 @@ import snakebite.failure.report: internalFailure, SnakebiteException;
 // the tests, the REPL) ends the phases itself with `finish`.
 public struct GuestModules {
     import core.time: Duration;
-    import snakebite.backends.api: Backend;
+    import snakebite.backends.api: ProgramBackend;
 
     // Whether the records also name the unit tests of each module, for the
     // runner that druntime starts.
@@ -69,7 +69,7 @@ public struct GuestModules {
 
         @disable this(this);
 
-        public this(Backend backend) {
+        public this(ProgramBackend backend) {
             import std.conv: text;
             import std.string: toStringz;
             import snakebite.host.runtimeentry: RuntimeEntry;
@@ -103,7 +103,7 @@ public struct GuestModules {
     // `failed` is true. A program with no constructor, no destructor and,
     // for `Tests.no`, no unit test, needs no registration.
     public static GuestModules start(
-        Backend backend,
+        ProgramBackend backend,
         in Tests tests,
         in Ends ends,
     ) {
@@ -225,7 +225,7 @@ public struct GuestModules {
 
 
 private struct EntryRun {
-    Backend backend;
+    ProgramBackend backend;
     GuestModules modules;
     int file;
     const(char)* token;
@@ -279,7 +279,7 @@ private extern(C) RuntimeGroup* registeredGroup(void* dso);
 
 
 private import core.atomic: atomicLoad, atomicOp, atomicStore, cas;
-private import snakebite.backends.api: Backend;
+private import snakebite.backends.api: ProgramBackend;
 private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
@@ -465,7 +465,7 @@ private struct Run {
         failed,
     }
 
-    Backend backend;
+    ProgramBackend backend;
     shared State state;
     ModuleInfo*[] records;
     Image image;
@@ -636,7 +636,7 @@ private void call(Phase* phase) {
 
 // The registration for the program of `backend`, or null when none is needed.
 private Run* newRun(
-    Backend backend,
+    ProgramBackend backend,
     in GuestModules.Tests tests,
 ) {
     import core.memory: GC;

@@ -169,7 +169,7 @@ public ExecutionReport executeBackend(
 // Runs the program of `backend`. `stopWatch` has been running since before
 // the backend was made.
 private ExecutionReport execute(
-    imported!"snakebite.backends.api".Backend backend,
+    imported!"snakebite.backends.api".ProgramBackend backend,
     ref imported!"std.datetime.stopwatch".StopWatch stopWatch,
     in bool startsAsProject,
     in imported!"snakebite.image.dependency".TestHooks testHooks,
@@ -261,7 +261,7 @@ public int executeLoaded(
     in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
-    import snakebite.backends.api: Backend, Owned;
+    import snakebite.backends.api: Owned, ProgramBackend;
     import snakebite.backends.bytecode.loaded: LoadedBytecode;
     import snakebite.backends.bytecode.saved: readSaved;
     import snakebite.host.buildid: ownBuildId;
@@ -274,7 +274,7 @@ public int executeLoaded(
     if (saved.workingDirectory.length)
         chdir(saved.workingDirectory);
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto backend = Owned!Backend(new LoadedBytecode(saved, jit));
+    auto backend = Owned!ProgramBackend(new LoadedBytecode(saved, jit));
     return execute(
         backend, stopWatch, /*startsAsProject*/ true, TestHooks.init,
         [saved.programName] ~ arguments, /*collectGarbage*/ false,

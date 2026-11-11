@@ -43,11 +43,11 @@ public struct CompilationStatistics {
 public struct ExecutionClock {
     import core.time: Duration, MonoTime;
 
-    private const(Backend) _backend;
+    private const(ProgramBackend) _backend;
     private MonoTime _start;
     private Duration _compiledAtStart;
 
-    public static ExecutionClock start(const(Backend) backend) {
+    public static ExecutionClock start(const(ProgramBackend) backend) {
         return ExecutionClock(
             backend,
             MonoTime.currTime,
@@ -71,7 +71,7 @@ public struct ExecutionClock {
 // finalizers can still reach it. A handle must not be a member of a GC
 // object: the destructor calls a virtual function, and the GC can finalize
 // the backend first.
-public struct Owned(B : Backend) {
+public struct Owned(B : ProgramBackend) {
     private B _backend;
 
     @disable this(this);
@@ -88,7 +88,7 @@ public struct Owned(B : Backend) {
 
     ~this() {
         // `release` is protected: through the base class it is visible here.
-        Backend base = _backend;
+        ProgramBackend base = _backend;
         if (base !is null)
             base.release;
     }
@@ -101,10 +101,9 @@ public struct Owned(B : Backend) {
 }
 
 
-public abstract class Backend {
-    import dmd.dmodule: Module;
-    import dmd.func: FuncDeclaration;
-
+// What running a program needs: its start data and its statistics. A program
+// that a file holds is one of these and nothing more.
+public abstract class ProgramBackend {
     // The program this backend runs. Whether a callee is interpreted or
     // called natively is the program's one decision (`isInterpreted`),
     // so every backend is constructed knowing which program it runs.
@@ -125,6 +124,33 @@ public abstract class Backend {
     // use the default empty result.
     public CompilationStatistics compilationStatistics() const {
         return CompilationStatistics.init;
+    }
+
+    // The start data of the program. A backend that has it from elsewhere
+    // than the frontend (a loaded program) gives it with `startWith`.
+    public ref StartData startData() {
+        return _startData;
+    }
+
+    protected final void startWith(StartData data) {
+        import core.atomic: atomicStore, MemoryOrder;
+
+        _startData = data;
+        atomicStore!(MemoryOrder.rel)(_startBuilt, true);
+    }
+
+    protected StartData _startData;
+    protected shared bool _startBuilt;
+}
+
+
+// A backend that compiles or interprets the declarations of the frontend.
+public abstract class Backend: ProgramBackend {
+    import dmd.dmodule: Module;
+    import dmd.func: FuncDeclaration;
+
+    protected this(const Program program) {
+        super(program);
     }
 
     // Invoke one guest function. `args` and the value written to
@@ -174,7 +200,7 @@ public abstract class Backend {
     public abstract FunctionHandle compiledFunction(FuncDeclaration function_);
 
     // The start data of the program, built once (see `buildStartData`).
-    public final ref StartData startData() {
+    public override final ref StartData startData() {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
         import snakebite.start.builder: buildStartData;
         import snakebite.frontend.compiler: withCompilerLock;
@@ -192,18 +218,6 @@ public abstract class Backend {
             });
         return _startData;
     }
-
-    // A backend that has the start data from elsewhere than the frontend
-    // (a loaded program) gives it here, before `startData` is first called.
-    protected final void startWith(StartData data) {
-        import core.atomic: atomicStore, MemoryOrder;
-
-        _startData = data;
-        atomicStore!(MemoryOrder.rel)(_startBuilt, true);
-    }
-
-    private StartData _startData;
-    private shared bool _startBuilt;
 
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the
