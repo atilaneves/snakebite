@@ -52,7 +52,7 @@ public struct PlanCache {
         in ptrdiff_t adjustment = 0,
     ) {
         if (word is null)
-            word = of(declaration)._address;
+            word = of(declaration).address;
         // The bridge never reads the AST, so the signature is built here,
         // under the compiler lock and only when the bridge has no entry
         // yet. Lock order, outermost first: the compiler lock, then the
@@ -134,9 +134,9 @@ public struct PlanCache {
         // These indirect calls pass only the declared parameters.
         // A C variadic call with no extra arguments still needs its
         // variadic ABI plan (including the SSE register count).
-        *plan = _shapeOf(type, context, type.linkage, null,
-            type.parameterList.varargs == VarArg.variadic);
-        plan._callbacks = _callbacks;
+        *plan = planOf(_signatureOf(type, context, type.linkage, null,
+            type.parameterList.varargs == VarArg.variadic),
+            null, _callbacks);
         return *_signatures.insert(key, plan);
     }
 
@@ -408,8 +408,7 @@ public struct PlanCache {
 
         countPreparation;
         auto plan = new CallPlan;
-        *plan = prepare(function_, _resolver);
-        plan._callbacks = _callbacks;
+        *plan = prepare(function_, _resolver, _callbacks);
         return *_plans.insert(function_, plan);
     }
 
@@ -436,8 +435,8 @@ public struct PlanCache {
     ) {
         countPreparation;
         auto plan = new CallPlan;
-        *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
-        plan._callbacks = _callbacks;
+        *plan = prepareVariadic(
+            function_, _resolver, extraArgumentTypes, _callbacks);
         return plan;
     }
 
@@ -448,8 +447,7 @@ public struct PlanCache {
         countPreparation;
         auto plan = new CallPlan;
         *plan = prepareVariadicAtAddress(type, hasContext, address,
-            extraArgumentTypes);
-        plan._callbacks = _callbacks;
+            extraArgumentTypes, _callbacks);
         return plan;
     }
 
@@ -545,8 +543,9 @@ private bool hasResultStore(
 private CallPlan prepare(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
+    CallbackBridge* callbacks,
 ) {
-    return prepareCommon(function_, resolver, null, false);
+    return prepareCommon(function_, resolver, null, false, callbacks);
 }
 
 // As `prepare`, for one call site of an `extern(C)` C-style or
@@ -572,8 +571,10 @@ package CallPlan prepareVariadic(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    CallbackBridge* callbacks,
 ) {
-    return prepareCommon(function_, resolver, extraArgumentTypes, true);
+    return prepareCommon(
+        function_, resolver, extraArgumentTypes, true, callbacks);
 }
 
 private CallPlan prepareVariadicAtAddress(
@@ -581,11 +582,10 @@ private CallPlan prepareVariadicAtAddress(
     bool hasContext,
     const(void)* address,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    CallbackBridge* callbacks,
 ) {
-    auto plan = _shapeOf(type, hasContext, type.linkage,
-        extraArgumentTypes, true);
-    plan._address = cast(void*) address;
-    return plan;
+    return planOf(_signatureOf(type, hasContext, type.linkage,
+        extraArgumentTypes, true), cast(void*) address, callbacks);
 }
 
 private CallPlan prepareCommon(
@@ -593,6 +593,7 @@ private CallPlan prepareCommon(
     ref Resolver resolver,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
+    CallbackBridge* callbacks,
 ) {
     import snakebite.druntime.constructoratomic: nativeTarget;
     import snakebite.frontend.dmd.mangle: mangledNameOf;
@@ -615,7 +616,7 @@ private CallPlan prepareCommon(
     const linkage = target.address is null
         ? function_.resolvedLinkage : target.linkage;
 
-    auto plan = shapeOf(function_, linkage, extraArgumentTypes,
+    auto signature = signatureOfFunction(function_, linkage, extraArgumentTypes,
         isVariadicCall);
 
     void* address = target.address;
@@ -643,8 +644,7 @@ private CallPlan prepareCommon(
         );
     }
 
-    plan._address = address;
-    return plan;
+    return planOf(signature, address, callbacks);
 }
 
 // The signature of the guest function `function_`, from its own declared
@@ -673,29 +673,28 @@ public NativeSignature nativeSignatureOf(
         type.parameterList.varargs == VarArg.variadic);
 }
 
-// The plan's whole shape, from `function_`'s signature and `linkage`
-// alone, with `_address` left unset: `signatureOf` classifies it and
-// `planOf` lays it out.
-private CallPlan shapeOf(
+// The signature of `function_` under `linkage`, from which `planOf` lays out
+// the plan.
+private NativeSignature signatureOfFunction(
     imported!"dmd.func".FuncDeclaration function_,
     in imported!"dmd.astenums".LINK linkage,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
     import snakebite.frontend.dmd.delegates: hasHiddenThis;
-    return _shapeOf(function_.type.isTypeFunction,
+    return _signatureOf(function_.type.isTypeFunction,
         hasHiddenThis(function_), linkage, extraArgumentTypes,
         isVariadicCall);
 }
 
-private CallPlan _shapeOf(
+private NativeSignature _signatureOf(
     imported!"dmd.mtype".TypeFunction type, in bool hasContext,
     in imported!"dmd.astenums".LINK linkage,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
-    return planOf(signatureOf(type, hasContext, linkage, extraArgumentTypes,
-        isVariadicCall));
+    return signatureOf(type, hasContext, linkage, extraArgumentTypes,
+        isVariadicCall);
 }
 
 // The part of `_shapeOf` that reads the AST: classifies every parameter

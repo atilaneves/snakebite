@@ -92,7 +92,7 @@ public struct CallPlan {
         private ubyte bytes;
     }
 
-    package void* _address;
+    private void* _address;
     // Indexed by parameter, not by register: a dynamic-array parameter
     // reserves one entry here and two registers at call time, since the
     // two travel together as one argument the guest evaluated once.
@@ -136,7 +136,12 @@ public struct CallPlan {
     // entries. Shared mutable state owned by the `PlanCache`, never part
     // of this plan's own value: `callWithCallbacks` casts the `const`
     // away to reserve an entry on first use.
-    package CallbackBridge* _callbacks;
+    private CallbackBridge* _callbacks;
+
+    // Where the code is; null for a plan that has no address to call.
+    package void* address() const {
+        return cast(void*) _address;
+    }
 
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
     // register, for a variadic callee's `%al`.
@@ -1331,9 +1336,15 @@ package CallPlan prepareCallback(in NativeSignature signature) {
     return plan;
 }
 
-// The part of `_shapeOf` that needs no AST: places every argument of
-// `signature` and builds the moves.
-package CallPlan planOf(in NativeSignature signature) {
+// The part of preparation that needs no AST: places every argument of
+// `signature` and builds the moves. The plan is complete when it returns:
+// `address` is where the code is (null for a plan that has none) and
+// `callbacks` the registry of the backend that owns the plan. This and
+// `address` are the interface between this module and `PlanCache`.
+package CallPlan planOf(
+    in NativeSignature signature, void* address = null,
+    CallbackBridge* callbacks = null,
+) {
     import snakebite.ffi.argumentplan:
         ArgumentPlan, Linkage, Register, contextPrecedesHiddenReturnPointer,
         dVariadicArgumentsIsSlice, reversedDParameters;
@@ -1357,6 +1368,8 @@ package CallPlan planOf(in NativeSignature signature) {
         + signature.hasContext + hasVArguments;
 
     CallPlan plan;
+    plan._address = address;
+    plan._callbacks = callbacks;
     plan._arguments.length = argumentCount;
     plan._hiddenReturnPointer = signature.hiddenReturnPointer;
     plan._contextPrecedesHiddenReturnPointer =
