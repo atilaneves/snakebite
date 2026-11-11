@@ -3,7 +3,8 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 # The VM must compile with no DMD frontend import paths.
-"${DMD:-dmd}" -o- -i -Isource source/snakebite/backends/bytecode/vm.d
+"${DMD:-dmd}" -o- -i -Isource source/snakebite/backends/bytecode/vm.d \
+    source/snakebite/backends/bytecode/saved.d
 
 build/reggae.sh
 ninja

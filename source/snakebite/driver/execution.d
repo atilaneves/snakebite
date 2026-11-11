@@ -156,9 +156,29 @@ public ExecutionReport executeBackend(
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import snakebite.backends: makeBackend;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
+
+    auto stopWatch = StopWatch(AutoStart.yes);
+    auto backend = makeBackend(name, program, jit);
+    return execute(
+        backend, stopWatch, program.startsAsProject, program.testHooks,
+        hostArguments, collectGarbage, endsProcess);
+}
+
+
+// Runs the program of `backend`. `stopWatch` has been running since before
+// the backend was made.
+private ExecutionReport execute(
+    imported!"snakebite.backends.api".Backend backend,
+    ref imported!"std.datetime.stopwatch".StopWatch stopWatch,
+    in bool startsAsProject,
+    in imported!"snakebite.image.dependency".TestHooks testHooks,
+    in string[] hostArguments,
+    in bool collectGarbage,
+    in bool endsProcess,
+) {
     import snakebite.run.program: run;
     import snakebite.run.program: StartupReport, runDruntimeMain;
-    import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;
 
     import std.stdio: stdin, stdout, stderr;
@@ -174,8 +194,6 @@ public ExecutionReport executeBackend(
         stderr = savedError;
     }
 
-    auto stopWatch = StopWatch(AutoStart.yes);
-    auto backend = makeBackend(name, program, jit);
     import snakebite.backends.api: ExecutionClock;
     const running = ExecutionClock.start(backend);
     import snakebite.run.modules: GuestModules;
@@ -185,11 +203,11 @@ public ExecutionReport executeBackend(
     // Snippet callers construct Programs that do not start as a project,
     // and a program with a C `main` is not started as a project either.
     auto start = &backend.startData();
-    if (!program.startsAsProject || start.hasCEntryPoint || start.betterC)
+    if (!startsAsProject || start.hasCEntryPoint || start.betterC)
         status = run(backend, hostArguments);
     else {
         startup = runDruntimeMain(
-            backend, program.testHooks, hostArguments, endsProcess);
+            backend, testHooks, hostArguments, endsProcess);
         status = startup.status;
     }
     const programDuration = running.peek
@@ -229,11 +247,21 @@ public void saveProgram(imported!"snakebite.program".Program program, in string 
 }
 
 
-// Runs the program that `path` holds. The process starts no frontend.
+// Runs the program that `path` holds the way `bin/sb` runs a project. The
+// process starts no frontend.
 public int executeLoaded(in string path, in string[] arguments) {
+    import snakebite.backends.api: Backend, Owned;
+    import snakebite.backends.bytecode.loaded: LoadedBytecode;
     import snakebite.backends.bytecode.saved: readSaved;
     import snakebite.host.buildid: ownBuildId;
+    import snakebite.image.dependency: TestHooks;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
 
     const saved = readSaved(path, ownBuildId);
-    return 0;
+    auto stopWatch = StopWatch(AutoStart.yes);
+    auto backend = Owned!Backend(new LoadedBytecode(saved));
+    return execute(
+        backend, stopWatch, /*startsAsProject*/ true, TestHooks.init,
+        [saved.programName] ~ arguments, /*collectGarbage*/ false,
+        /*endsProcess*/ true).status;
 }

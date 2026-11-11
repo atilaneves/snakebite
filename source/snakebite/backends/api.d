@@ -193,6 +193,15 @@ public abstract class Backend {
         return _startData;
     }
 
+    // A backend that has the start data from elsewhere than the frontend
+    // (a loaded program) gives it here, before `startData` is first called.
+    protected final void startWith(StartData data) {
+        import core.atomic: atomicStore, MemoryOrder;
+
+        _startData = data;
+        atomicStore!(MemoryOrder.rel)(_startBuilt, true);
+    }
+
     private StartData _startData;
     private shared bool _startBuilt;
 

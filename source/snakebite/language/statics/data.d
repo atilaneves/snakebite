@@ -238,6 +238,8 @@ public struct NativeData {
         const facts = typeFacts(type);
         auto bytes = reserve(facts);
         write(type, facts, expression, bytes.ptr);
+        if (describes)
+            describe(type, facts, bytes, expression);
         return bytes;
     }
 
@@ -248,7 +250,68 @@ public struct NativeData {
         assert(representation.length == facts.size);
         auto bytes = reserve(facts);
         memcpy(bytes.ptr, representation.ptr, bytes.length);
+        if (describes)
+            describe(type, facts, bytes, null);
         return bytes;
+    }
+
+    // Whether `value` keeps what a stored copy of a value needs. It is off:
+    // keeping it costs memory, and only a program that is saved reads it.
+    public bool describes;
+
+    // A value from `value` whose bytes a stored program can rebuild: a value
+    // with no pointer, or a pointer to the text of a string literal.
+    public struct Described {
+        public const(void)[] bytes;
+        public uint alignment;
+        public Pointer[] pointers;
+    }
+
+    // A word of a described value that holds the address of a string's text,
+    // the text included its terminator.
+    public struct Pointer {
+        public size_t offset;
+        public const(void)[] text;
+    }
+
+    private Described[const(void)*] _described;
+
+    private void describe(
+        Type type, in TypeFacts facts, void[] bytes, Expression expression,
+    ) {
+        import dmd.astenums: Tpointer;
+        import dmd.typesem: hasPointers, toBasetype;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        Described record;
+        record.bytes = bytes;
+        record.alignment = cast(uint) facts.alignment;
+        if (type.hasPointers) {
+            auto literal = expression is null ? null : expression.isStringExp;
+            if (literal is null || type.toBasetype.ty != Tpointer)
+                return;
+            record.pointers = [Pointer(
+                0,
+                (*cast(const(ubyte)**) bytes.ptr)
+                    [0 .. (literal.len + 1) * literal.sz],
+            )];
+        }
+        withCompilerLock({ _described[bytes.ptr] = record; });
+    }
+
+    // The description of the value that `value` put at `address`, or false
+    // when it described none.
+    public bool describedAt(in void* address, out Described result) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        bool found;
+        withCompilerLock({
+            if (auto record = address in _described) {
+                result = *record;
+                found = true;
+            }
+        });
+        return found;
     }
 
     private void[] reserve(in TypeFacts facts) {

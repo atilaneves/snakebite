@@ -141,10 +141,106 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // relocs yet, and recording them costs compile time and memory.
     public bool recordRelocs;
 
-    // The compiled program as plain records, for a file.
+    // The compiled program as plain records, for a file. It refuses a
+    // program that a stored file cannot run the way this process runs it, and
+    // says why. `recordRelocs` has to be on, and no guest code has run.
     public imported!"snakebite.backends.bytecode.saved".SavedProgram save() {
-        imported!"snakebite.backends.bytecode.saved".SavedProgram result;
-        result.programName = startData.programName;
+        import snakebite.backends.bytecode.saved:
+            describe, encode, SavedDatum, SavedPlan, SavedPointer,
+            SavedModule, SavedProgram, SavedTarget, SaveRefusal;
+        import snakebite.backends.bytecode.relocation: Target;
+        import snakebite.ffi.plan: CallPlan, NativeSignature, originOf;
+        import std.conv: text;
+
+        assert(recordRelocs);
+        _nativeData.describes = true;
+        if (_program.dependencyImage !is null)
+            throw new SaveRefusal("the program has a dependency image");
+        auto start = &startData();
+        if (start.hasCEntryPoint || start.betterC)
+            throw new SaveRefusal("the program has a C main or is betterC");
+        if (start.crtConstructors.length || start.crtDestructors.length)
+            throw new SaveRefusal(
+                "the program has a crt_constructor or crt_destructor");
+        SavedProgram result;
+        result.programName = start.programName;
+        foreach (module_; start.modules) {
+            if (module_.hasPhaseFunctions)
+                throw new SaveRefusal(text(
+                    "the module ", module_.name, " has a constructor or a destructor"));
+            if (module_.unitTests.length)
+                throw new SaveRefusal(text(
+                    "the module ", module_.name, " has a unit test"));
+            if (module_.sharedGates.length || module_.threadGates.length)
+                throw new SaveRefusal(text(
+                    "the module ", module_.name, " has a destructor gate"));
+            result.modules ~= SavedModule(
+                module_.name, module_.standalone, module_.imports.dup);
+        }
+
+        size_t[const(void)*] datumIndices;
+        size_t[const(void)*] textIndices;
+        size_t[const(void)*] planIndices;
+
+        SavedTarget textTarget(const(void)[] contents) {
+            if (auto found = contents.ptr in textIndices)
+                return SavedTarget(SavedTarget.Kind.text, *found, 0);
+            result.texts ~= cast(ubyte[]) contents.dup;
+            textIndices[contents.ptr] = result.texts.length - 1;
+            return SavedTarget(SavedTarget.Kind.text, result.texts.length - 1, 0);
+        }
+
+        SavedTarget targetOf(in Target target) {
+            const address = cast(const(void)*) target.address;
+            if (auto found = address in datumIndices)
+                return SavedTarget(SavedTarget.Kind.datum, *found, 0);
+            NativeData.Described described;
+            if (!_nativeData.describedAt(address, described))
+                throw new SaveRefusal(
+                    "the program uses static data that is not described");
+            SavedDatum datum;
+            datum.bytes = cast(ubyte[]) described.bytes.dup;
+            datum.alignment = described.alignment;
+            foreach (pointer; described.pointers) {
+                datum.pointers ~= SavedPointer(
+                    pointer.offset, textTarget(pointer.text));
+                // The loader writes the address. This process's own stays
+                // out of the file.
+                datum.bytes[pointer.offset .. pointer.offset + size_t.sizeof]
+                    = 0;
+            }
+            result.data ~= datum;
+            datumIndices[address] = result.data.length - 1;
+            return SavedTarget(SavedTarget.Kind.datum, result.data.length - 1, 0);
+        }
+
+        size_t planIndexOf(const(void)* plan) {
+            if (auto found = plan in planIndices)
+                return *found;
+            NativeSignature signature;
+            string symbol;
+            if (!originOf(cast(const(CallPlan)*) plan, signature, symbol))
+                throw new SaveRefusal(
+                    "the program has a foreign call that has no symbol name");
+            foreach (parameter; signature.parameters)
+                if (parameter.isCallback)
+                    throw new SaveRefusal(
+                        "the program passes a function or a delegate to a"
+                        ~ " foreign call");
+            result.plans ~= SavedPlan(symbol, encode(signature));
+            planIndices[plan] = result.plans.length - 1;
+            return result.plans.length - 1;
+        }
+
+        if (start.main.present) {
+            result.hasMain = true;
+            result.returnsVoid = start.main.returnsVoid;
+            result.parameterCount = start.main.parameterCount;
+            auto handle = cast(StartFunction) start.main.function_;
+            result.main = result.functions.length;
+            result.functions ~=
+                describe(handle.function_.get, &targetOf, &planIndexOf);
+        }
         return result;
     }
 

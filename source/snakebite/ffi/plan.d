@@ -95,6 +95,11 @@ public struct CallPlan {
     }
 
     private void* _address;
+    // What a stored copy of this plan needs to make it again: the signature,
+    // and the name of the symbol that `_address` is the address of. The name
+    // is empty for a plan whose address did not come from a symbol.
+    private NativeSignature _signature;
+    private string _symbol;
     // Indexed by parameter, not by register: a dynamic-array parameter
     // reserves one entry here and two registers at call time, since the
     // two travel together as one argument the guest evaluated once.
@@ -1909,6 +1914,29 @@ private CallPlan prepareCommon(
     }
 
     plan._address = address;
+    if (target.address is null)
+        plan._symbol = name.idup;
+    return plan;
+}
+
+// The signature and the symbol that `plan` was made from, or false when its
+// address did not come from a symbol that a later process can find by name.
+public bool originOf(
+    const(CallPlan)* plan, out NativeSignature signature, out string symbol,
+) {
+    if (plan._symbol.length == 0)
+        return false;
+    signature = cast() plan._signature;
+    symbol = plan._symbol;
+    return true;
+}
+
+// A plan for a function of `signature` at `address`: what `prepare` makes
+// for the symbol that `originOf` named, without the AST.
+public const(CallPlan)* planAt(in NativeSignature signature, void* address) {
+    auto plan = new CallPlan;
+    *plan = planOf(signature);
+    plan._address = address;
     return plan;
 }
 
@@ -2010,8 +2038,11 @@ private CallPlan _shapeOf(
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
-    return planOf(signatureOf(type, hasContext, linkage, extraArgumentTypes,
-        isVariadicCall));
+    auto signature = signatureOf(type, hasContext, linkage,
+        extraArgumentTypes, isVariadicCall);
+    auto plan = planOf(signature);
+    plan._signature = signature;
+    return plan;
 }
 
 // The part of `_shapeOf` that reads the AST: classifies every parameter

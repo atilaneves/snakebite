@@ -37,6 +37,7 @@ public int run(string[] args) {
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
     import std.file: exists, isDir;
+    import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
 
     const parsed = parseArgs(args);
@@ -57,6 +58,10 @@ public int run(string[] args) {
     selectFrontendMemory(parsed.options.lowmem);
 
     try {
+        // The program runs in the working directory of the project, so a
+        // relative path would name a file there.
+        const savePath = parsed.options.savePath.length
+            ? parsed.options.savePath.absolutePath : "";
         string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
@@ -75,9 +80,8 @@ public int run(string[] args) {
                     parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
                 );
                 enterWorkingDirectory();
-                if (parsed.options.savePath.length) {
-                    saveProgram(
-                        preparation.project.program, parsed.options.savePath);
+                if (savePath.length) {
+                    saveProgram(preparation.project.program, savePath);
                     return 0;
                 }
                 const report = executeBackend(
