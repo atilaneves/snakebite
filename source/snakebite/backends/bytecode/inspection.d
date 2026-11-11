@@ -132,5 +132,7 @@ private bool wordAt(
                 return false;
             value = cast(size_t) cast(void*) fn.exceptionHandlers[index].type;
             return place.field == Place.Field.type;
+        case datum:
+            return false;
     }
 }
