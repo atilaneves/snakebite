@@ -3,7 +3,7 @@ module snakebite.ffi.call;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
@@ -42,7 +42,7 @@ public alias CallInvoker = void delegate(
 public struct CallAdapter {
     import dmd.func: FuncDeclaration;
     import dmd.mtype: TypeFunction;
-    import snakebite.nativelayout: TypeFacts;
+    import snakebite.native.value: TypeFacts;
 
     private bool _referenceResult;
     private size_t _resultSize;
@@ -96,7 +96,7 @@ public struct CallAdapter {
         import dmd.expression: Expression;
         import dmd.func: FuncDeclaration;
         import dmd.mtype: Type, TypeFunction;
-        import snakebite.callarguments: CallArguments;
+        import snakebite.native.arguments: CallArguments;
         import snakebite.ffi.plan: CallPlan, PlanCache;
 
         private TypeFunction _type;
@@ -106,7 +106,7 @@ public struct CallAdapter {
 
         // `destination` is a declared parameter that the callee takes by
         // address though its declaration says by value (`snakebite.
-        // backends.calls.CallSelection.Decision.destinationParameter`).
+        // language.call.selection.CallSelection.Decision.destinationParameter`).
         public static Arguments of(
             TypeFunction type, Expressions* expressions,
             in size_t destination = size_t.max,
@@ -432,14 +432,14 @@ pragma(inline, true) private void storeReference(
     void* place,
     void* address,
 ) {
-    import snakebite.nativelayout: storeIntegral;
+    import snakebite.native.value: checkedStoreIntegral;
 
-    storeIntegral(place, cast(size_t) address, size_t.sizeof);
+    checkedStoreIntegral(place, cast(size_t) address, size_t.sizeof);
 }
 
 
 private void* referenceAt(const(void)* place) {
-    import snakebite.nativelayout: loadIntegral;
+    import snakebite.native.value: checkedLoadIntegral;
 
-    return cast(void*) loadIntegral(place, size_t.sizeof, false);
+    return cast(void*) checkedLoadIntegral(place, size_t.sizeof, false);
 }

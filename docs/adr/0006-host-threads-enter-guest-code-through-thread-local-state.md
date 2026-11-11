@@ -10,18 +10,23 @@ the frame stack are per-context state, and they are not thread-safe.
 Before this decision, the interim workaround was to force
 unit-threaded's single-threaded flag; #35 and #40 call that a
 restriction, not a solution. Callbacks must work from any thread, the
-same as they do for compiled D. `runMain` (`backends/backend.d`)
+same as they do for compiled D. `runMain` (`source/snakebite/run/program.d`)
 passes the host's own arguments unchanged - nothing in this project
 appends the single-threaded flag any more.
 
 Every backend keeps its mutable execution state, such as the
 evaluator, the frame stack, and per-thread caches, in thread-local
 state. This state is created the first time a thread enters guest
-code with none. Program-wide structures, such as the plan cache, the
-callback pool (ADR-0003), and the resolver, are either immutable once
-built, or guarded by a lock on their slow path only. Their fast path
-takes no lock. A thread druntime does not know about is attached on
-its first entry, so the GC can scan its stack (ADR-0005). The first
+code with none. Shared structures, such as the plan cache, the
+resolver, and the callback pool of a `CallbackBridge` (ADR-0003), are
+either immutable once built, or guarded by a lock on their slow path
+only. Their fast path takes no lock. The callback pool is not
+program-wide: each bridge owns its chunks, its mutexes (one for its
+tables, one for the pool) and the address
+range that its chunks use, and a lock-free read of the range's table tells
+a guest call which guest function an entry runs.
+A thread druntime does not know about is attached on its first entry,
+so the GC can scan its stack (ADR-0005). The first
 test of this decision is unit-threaded's task pool running without
 the single-threaded flag. Guest code creating its own threads is the
 other half of #40, and is separate work that this seam makes

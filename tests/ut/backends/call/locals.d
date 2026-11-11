@@ -2,7 +2,7 @@ module ut.backends.call.locals;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 

@@ -3,10 +3,10 @@ module ut.backends.bytecode.relocation;
 
 import ut.backends;
 import dmd.func: FuncDeclaration;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.backends.bytecode.inspection:
     handlerRoleMismatches, misplacedRelocs, relocsOf;
-import snakebite.backends.bytecode.relocation: Place, Target, recordRelocs;
+import snakebite.backends.bytecode.relocation: Place, Target;
 import snakebite.backends.bytecode.vm:
     Function, registerFormsWithChangedRoles, specialisedHandlersWithoutRoles;
 import snakebite.frontend.compiler: parseSnippet;
@@ -225,12 +225,10 @@ private void withCompiledProgram(
     string source, in Checksum[] checksums,
     scope void delegate(string, const(Function)*) visit,
 ) {
-    const before = recordRelocs;
-    recordRelocs = true;
-    scope(exit) recordRelocs = before;
     auto guestModule = parseSnippet(source);
     auto program = Program([guestModule]);
     auto backend = ownedBackend!Bytecode(program);
+    backend.recordRelocs = true;
     foreach (checksum; checksums) {
         long result;
         backend.call(findFunction(guestModule, checksum.entryPoint),

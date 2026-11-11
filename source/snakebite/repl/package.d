@@ -4,7 +4,7 @@ module snakebite.repl;
 private:
 
 private alias DependencyImage =
-    imported!"snakebite.dependencyimage".DependencyImage;
+    imported!"snakebite.image.dependency".DependencyImage;
 
 // One REPL session: an accumulated module source, the backend it runs
 // on, and any input still waiting for a closing brace. Declarations from
@@ -31,13 +31,14 @@ public struct Repl {
     private JitSetting _jit;
     private string[] _importPaths;
     private FrontendFlags _flags;
+    private uint _probeCounter;
     private const(DependencyImage)* _dependencyImage;
     private string _accumulatedSource;
     private string _pendingInput;
     private uint _cellCount = 1;
     private Module _module;
     private imported!"snakebite.backends".Program _program;
-    private imported!"snakebite.backends.backend".Owned!Backend _backend;
+    private imported!"snakebite.backends.api".Owned!Backend _backend;
 
     public this(
         BackendName backendName,
@@ -120,7 +121,7 @@ public struct Repl {
 
     private SubmitResult submitExpression(in string source) {
         import snakebite.backends: makeBackend;
-        import snakebite.backends.guestmodules: GuestModules;
+        import snakebite.run.modules: GuestModules;
         import snakebite.frontend.compiler: parseSnippet;
         import snakebite.frontend.dmd.functions: findFunction;
         import snakebite.repl.cell: replCellLineDirective;
@@ -156,7 +157,7 @@ public struct Repl {
         // One expression cell runs the accumulated module as a program does:
         // its module constructors before the cell, its destructors after.
         auto modules = GuestModules.start(
-            backend, program, GuestModules.Tests.no, GuestModules.Ends.program);
+            backend, GuestModules.Tests.no, GuestModules.Ends.program);
         if (modules.failed) {
             _pendingInput = null;
             return SubmitResult(
@@ -191,7 +192,7 @@ public struct Repl {
     // process that holds the user's work.
     private imported!"snakebite.backends".Program programOf(Module module_) {
         import snakebite.backends: Program;
-        import snakebite.backends.haltprocess: HostActions;
+        import snakebite.failure.halt: HostActions;
 
         HostActions actions;
         actions.halt = &endCell;
@@ -211,7 +212,7 @@ public struct Repl {
             isStandalonePragmaMessageStatement,
             replCellLineDirective;
 
-        if (isIncompleteDeclaration(source, _flags)) {
+        if (isIncompleteDeclaration(source, _flags, _probeCounter)) {
             _pendingInput = source;
             return SubmitResult.init;
         }
@@ -261,7 +262,7 @@ public struct Repl {
         in string fullSource,
         Module module_,
         imported!"snakebite.backends".Program program,
-        imported!"snakebite.backends.backend".Owned!Backend backend,
+        imported!"snakebite.backends.api".Owned!Backend backend,
     ) {
         import core.lifetime: move;
 
@@ -277,7 +278,7 @@ public struct Repl {
     // druntime's own default runner would. All failures are reported
     // together rather than stopping at the first one.
     private SubmitResult runLoadedTests() {
-        import snakebite.backends.guestmodules: GuestModules;
+        import snakebite.run.modules: GuestModules;
         import snakebite.frontend.dmd.functions: findUnittests;
         import std.array: join;
 
@@ -285,8 +286,7 @@ public struct Repl {
             return SubmitResult.init;
 
         auto modules = GuestModules.start(
-            _backend, _program,
-            GuestModules.Tests.no, GuestModules.Ends.program);
+            _backend, GuestModules.Tests.no, GuestModules.Ends.program);
         if (modules.failed)
             return SubmitResult(
                 SubmitResult.Kind.error, "a module constructor failed");
@@ -321,7 +321,7 @@ public struct SubmitResult {
 
 
 private noreturn endCell() {
-    import snakebite.backends.haltprocess: Halted;
+    import snakebite.failure.halt: Halted;
 
     throw new Halted;
 }

@@ -32,7 +32,7 @@ subPackage {
 // (`snakebite_registry_image_start`), which only
 // `build/reggae.sh`'s ninja build produces, from
 // `source/snakebite/ffi/sysv_amd64.S`,
-// `source/snakebite/backends/registry_image_amd64.S` (with
+// `source/snakebite/run/registry_image_amd64.S` (with
 // `registry_slot.c`) - build through reggae (`build/*.sh`), not dub
 // directly. A system C compiler (`cc`) is required to build those files.
 configuration "unittest" {
@@ -88,6 +88,7 @@ configuration "acceptance-test" {
     sourceFiles "tests/ut/package.d" "tests/ut/backends/package.d"
     sourceFiles "tests/ut/backends/call/intrinsics.d"
     sourceFiles "tests/ut/backends/call/arrayoperations.d"
+    sourceFiles "tests/ut/backends/call/windowtierup.d"
     sourceFiles "tests/ut/backends/run/hostfrontend.d"
     sourceFiles "tests/ut/backends/run/inlineasm.d"
     sourcePaths "bench/source"
@@ -108,7 +109,7 @@ configuration "sb" {
     targetPath "bin"
     lflags "--export-dynamic-symbol=rt_options" "--version-script=$PACKAGE_DIR/build/host-exports.map" platform="linux"
 
-    mainSourceFile "source/snakebite/main.d"
+    mainSourceFile "source/snakebite/driver/main.d"
     dependency "readline" version="0.3.0"
 }
 

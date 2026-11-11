@@ -123,7 +123,7 @@ unittest {
 
 // Nothing but `bin/ut` itself defines this symbol: no dependency image, no
 // separately loaded shared object. `CallSelection.buildDecision`
-// (`snakebite.backends.calls`) asks `hasIndependentNativeSymbol`, never
+// (`snakebite.language.call.selection`) asks `hasIndependentNativeSymbol`, never
 // `hasNativeSymbol`, for a template instance, precisely so a guest call
 // through one never reuses this process's own copy - the mismatch that
 // broke a guest program's own `dirEntries` call against `bin/sb`'s
@@ -1474,7 +1474,7 @@ private struct ContextThenMixedSpill {
 // body for `hasHiddenThis` to see its `vthis` (`called.
 // contextPrecedesHiddenReturnPointer`'s own doc), but any guest
 // declaration with a body always runs as guest code
-// (`snakebite.backends.calls.CallSelection`'s own doc - "a guest
+// (`snakebite.language.call.selection.CallSelection`'s own doc - "a guest
 // function's body is the one being tested, so it runs as guest even when
 // its linker name is also in this process"), never as an FFI call -
 // verified by trying it: a bodyless guest method left `hasHiddenThis`
@@ -2971,7 +2971,7 @@ unittest {
 
 // D's typesafe variadic kind (`T t...`, `VarArg.typesafe`): the frontend
 // packs a call site's trailing arguments into one array-typed argument
-// before this plan ever sees them (`snakebite.backends.calls.
+// before this plan ever sees them (`snakebite.language.call.selection.
 // arityMismatches`'s own doc), so it needs no per-call-site plan and no
 // `_arguments` - it classifies like any other declared parameter,
 // through the ordinary `PlanCache.of`, and is no longer refused
@@ -3017,7 +3017,7 @@ unittest {
 // real, compiled callee's own `_argptr`/register-save-area machinery
 // expects. `elementTypes` below is `typeid(PlanPoint)` - a real, host-
 // compiled `TypeInfo_Struct`, not the fabricated one `snakebite.
-// backends.runtimetypes.RuntimeTypes.structInfo`'s own `setSysVArgTypes`
+// language.statics.typeinfo.RuntimeTypes.structInfo`'s own `setSysVArgTypes`
 // builds for a *guest*-declared struct - so this plan-level test checks
 // only the ABI placement `CallPlan` itself computes, never that
 // fabrication; `ut.backends.call.ffi`'s own `variadic.externD.
@@ -3153,7 +3153,7 @@ unittest {
 
 @("boundsPlanOf.excludesConcurrentGlobalScopeSetup")
 unittest {
-    import snakebite.backends.checkplan: boundsPlanOf;
+    import snakebite.language.checks: boundsPlanOf;
     import snakebite.frontend.checks: Checks;
 
     readWhileGlobalScopeIsSetUp((function_) {
@@ -3165,7 +3165,7 @@ unittest {
 @("cAssertCallOf.excludesConcurrentGlobalScopeSetup")
 unittest {
     import dmd.location: Loc;
-    import snakebite.backends.exceptions: cAssertCallOf;
+    import snakebite.language.checks: cAssertCallOf;
 
     readWhileGlobalScopeIsSetUp((function_) {
         (cAssertCallOf("x", Loc.initial, function_).function_ !is null).should == true;

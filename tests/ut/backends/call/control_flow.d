@@ -2,7 +2,7 @@ module ut.backends.call.control_flow;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 
@@ -130,7 +130,7 @@ static foreach (backend; Matrix!()) {
 
 
 // A complex condition is true when either component is nonzero - `cast
-// (bool)` and `if` share the one `Truth` rule (`nativelayout.d`'s own
+// (bool)` and `if` share the one `Truth` rule (`typefacts.d`'s own
 // doc comment on `Truth.of`'s `Tcomplex*` case).
 static foreach (backend; Matrix!()) {
     @("condition.floatingTruth.complex." ~ backend.stringof)

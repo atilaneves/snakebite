@@ -1,7 +1,7 @@
 module ut.cli;
 
 
-import snakebite.cli: parseArgs;
+import snakebite.driver.cli: parseArgs;
 import snakebite.backends: BackendName;
 import std.algorithm.searching: startsWith;
 import ut;
@@ -44,6 +44,22 @@ unittest {
     result.status.should == 0;
     result.options.projectDirectory.should == "project";
     result.options.programArguments.length.should == 0;
+}
+
+@("jitPerfMapOption")
+unittest {
+    const defaults = parseArgs(["sb", "project"]);
+    defaults.status.should == 0;
+    defaults.options.jitPerfMap.should == false;
+
+    const enabled = parseArgs(["sb", "--jit-perf-map", "project"]);
+    enabled.status.should == 0;
+    enabled.options.jitPerfMap.should == true;
+
+    const guest = parseArgs(["sb", "project", "--", "--jit-perf-map"]);
+    guest.status.should == 0;
+    guest.options.jitPerfMap.should == false;
+    guest.options.programArguments.should == ["--jit-perf-map"];
 }
 
 

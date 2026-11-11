@@ -7,7 +7,7 @@ import snakebite.backends.bytecode.vm:
     opLoadIndirect, opReturn, Vm;
 import snakebite.ffi: PlanCache;
 import snakebite.ffi.abi: Register;
-import snakebite.framestack: defaultFrameCapacity;
+import snakebite.stack.frames: defaultFrameCapacity;
 
 
 // `snakebite.backends.bytecode.vm` compiles without any DMD frontend

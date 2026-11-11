@@ -4,7 +4,7 @@ module snakebite.backends.bytecode.vm;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 import snakebite.backends.bytecode.jit: jitSupported;
 
 
@@ -39,16 +39,17 @@ extern(C) bool executeIndirectCallPlan(
     out ptrdiff_t contextAdjustment,
 );
 
-import snakebite.backends.argumentflow: ArgumentFlow, Shape, Signature;
+import snakebite.native.signature: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
-import snakebite.backends.builtins: BuiltinCall;
-import snakebite.backends.haltprocess: HaltAction, isHalt;
-import snakebite.backends.unwindplan:
+import snakebite.builtin.call: BuiltinCall;
+import snakebite.stack.hostcall: HostCallLayout;
+import snakebite.failure.halt: HaltAction, isHalt;
+import snakebite.failure.unwind:
     ExceptionCandidate, UnwindPlan, unwindPlanOf;
-import snakebite.callarguments: CallArguments;
+import snakebite.native.arguments: CallArguments;
 import snakebite.ffi.load: callDirectWords, Load, loadWidth, loadWord;
-import snakebite.nativevalue: TypeFacts;
-import snakebite.nativevalue:
+import snakebite.native.value: TypeFacts;
+import snakebite.native.value:
     CastKind, ComplexOperation, floatingToBool, loadFloating, loadSigned,
     loadUnsigned, shiftCount, storeFloating, storeIntegral;
 import object: Throwable, TypeInfo_Class;
@@ -103,8 +104,8 @@ public struct CallSite {
         // call is an `indirect` site that also sets `value.signature`, for
         // the check of its call window.
         value,
-        // `builtinEntry` is a `snakebite.backends.builtins.BuiltinCall`,
-        // resolved once by `CallSelection` (`snakebite.backends.calls`)
+        // `builtinEntry` is a `snakebite.builtin.call.BuiltinCall`,
+        // resolved once by `CallSelection` (`snakebite.language.call.selection`)
         // and never re-resolved: a compiler intrinsic (`core.math.fabs`
         // and the like), which has no host symbol FFI could ever find, so this VM calls the entry
         // directly instead of going through `executeCallPlan`.
@@ -347,6 +348,33 @@ public struct CallSite {
 
     package FastCall fast;
 
+    static if (jitSupported && chainedDispatch) {
+        // The first eligible indirect target. The entry publishes the
+        // callee and adjustment. Only the thread that claims callee writes
+        // the other fields.
+        package struct IndirectTarget {
+            package const(void)* entry;
+            package const(Function)* callee;
+            package ptrdiff_t adjustment;
+
+            pragma(inline, true)
+            private void remember(const(void)* entry, const(Function)* callee,
+                in ptrdiff_t adjustment,
+            ) {
+                import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+
+                if (atomicLoad!(MemoryOrder.raw)(this.callee) !is null
+                        || !cas(&this.callee, cast(const(Function)*) null,
+                            callee))
+                    return;
+                this.adjustment = adjustment;
+                atomicStore!(MemoryOrder.rel)(this.entry, entry);
+            }
+        }
+
+        package IndirectTarget indirectTarget;
+    }
+
     // Compiles the callee of a `guest` site on its first call and keeps it
     // in `callee`: a later call reads the field, not `prepareGuest`. Two
     // threads that race here store the same value.
@@ -415,12 +443,13 @@ public struct CallSite {
 
     // A `native` site whose plan is zero to three word arguments and no
     // result or an integer result of one or two words called directly.
-    // Filled only at run time, with the protocol of `fast`: the thread that wins the
-    // `preparing` state writes the `direct*` fields, then publishes
-    // `directState` last. They are valid once `directState` is `direct` or
-    // `wide`. `direct` is one or two arguments that are whole words and a
-    // result of at most one word, the common shape. `wide` is every other
-    // shape, which also uses `directLoads[a]`, how argument `a` is read, and
+    // At run time, the thread that wins `preparing` writes the `direct*`
+    // fields, then publishes the shape in `directState`. `direct` is one or
+    // two whole arguments with a result of at most one word.
+    // `twoWordsPairResult` passes two frame words in register order and
+    // keeps a two-word frame result. `twoWordsIndirectPairResult` resolves
+    // the result place through a frame address slot. `wide` handles other
+    // direct shapes using `directLoads[a]`, how an argument is read, and
     // `directOrder[r]`, the argument that goes in integer register `r` (see
     // `directWordCallTarget`). `directSwapped` says the arguments are not in
     // register order.
@@ -430,6 +459,10 @@ public struct CallSite {
         direct,
         general,
         wide,
+        threeWordsSign32,
+        threeWordsZero32,
+        twoWordsPairResult,
+        twoWordsIndirectPairResult,
     }
 
     package uint directState;
@@ -681,71 +714,6 @@ version (LDC) {
 } else
     package enum chainedDispatch = false;
 
-// Under `-version=BytecodeCount` (the `bin/sb-count` build), every handler
-// instantiation owns one counter slot. Its first execution registers the slot;
-// the slots are printed to stderr at exit as `BCOUNT <count> <handler name>`.
-// The counts are not atomic: a guest with several threads gives approximate
-// counts.
-version (BytecodeCount) {
-    private struct CountSlot {
-        ulong n;
-        string name;
-        shared bool registered;
-    }
-
-    private enum maxCountSlots = 4096;
-    private __gshared CountSlot*[maxCountSlots] _countSlots;
-    private shared size_t _countUsed;
-    private shared bool _countExitHooked;
-
-    private enum countName(string op, OperandKind d, OperandKind s,
-        size_t width, OperandKind r, P...) =
-        op ~ "/" ~ d.stringof ~ "/" ~ s.stringof ~ "/w" ~ width.stringof
-            ~ (r == OperandKind.storage ? "" : "/r/" ~ r.stringof)
-            ~ P.stringof;
-
-    private extern(C) void dumpCounts() {
-        import core.atomic: atomicLoad;
-        import core.stdc.stdio: fprintf, stderr;
-        const used = atomicLoad(_countUsed);
-        foreach (slot; _countSlots[0 .. used < maxCountSlots ? used : maxCountSlots]) {
-            if (slot is null)
-                continue;
-            fprintf(stderr, "BCOUNT %llu %.*s\n", slot.n,
-                cast(int) slot.name.length, slot.name.ptr);
-        }
-    }
-
-    // Exactly once for each slot, whatever the number of threads: the thread
-    // that wins the compare-and-swap on `registered` appends the slot.
-    private void registerCount(CountSlot* slot, string name) {
-        import core.atomic: atomicOp, atomicStore, cas, MemoryOrder;
-        import core.stdc.stdio: fprintf, stderr;
-        import core.stdc.stdlib: atexit, abort;
-        if (!cas(&slot.registered, false, true))
-            return;
-        if (cas(&_countExitHooked, false, true))
-            atexit(&dumpCounts);
-        const index = atomicOp!"+="(_countUsed, 1) - 1;
-        if (index >= maxCountSlots) {
-            fprintf(stderr, "bin/sb-count: more than %zu handler instantiations; raise maxCountSlots\n",
-                maxCountSlots);
-            abort;
-        }
-        slot.name = name;
-        atomicStore!(MemoryOrder.rel)(*cast(shared) &_countSlots[index], cast(shared) slot);
-    }
-
-    // Counts one execution of a handler. The counts are not atomic; the
-    // registration is.
-    private void countExecution(CountSlot* slot, string name) {
-        import core.atomic: atomicLoad, MemoryOrder;
-        if (!atomicLoad!(MemoryOrder.raw)(slot.registered))
-            registerCount(slot, name);
-        slot.n++;
-    }
-}
-
 // Operations that cannot throw a D exception or call out. They never need
 // the position of the running instruction, so their handlers do not store it.
 private alias positionFree = AliasSeq!(
@@ -785,11 +753,6 @@ private const(Instruction)* executeWith(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, width, rightKind, Parameters));
-    }
     // The position of a throw selects its handler.
     static if (storesPosition!operation)
         activation.pc = pc;
@@ -835,11 +798,6 @@ private const(Instruction)* executeRegister(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, fixedWidth, rightKind, Parameters));
-    }
     static if (storesPosition!operation)
         activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind, fixedWidth,
@@ -880,11 +838,6 @@ private const(Instruction)* executeOnce(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, 0, OperandKind.storage, Parameters));
-    }
     activation.pc = pc;
     auto execution = Execution!(destinationKind, sourceKind)(
         pc, activation, state, frame,
@@ -907,11 +860,6 @@ private const(Instruction)* executeCall(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, countName!(__traits(identifier, operation),
-            destinationKind, sourceKind, 0, OperandKind.storage));
-    }
     activation.pc = pc;
     state.current = activation;
     auto execution = Execution!(destinationKind, sourceKind)(
@@ -944,6 +892,10 @@ public struct Instruction {
         ulong r0,
         double fp0,
     );
+
+    // In a static load's sourceWidth, this distinguishes bytes owned by
+    // the compiler from mutable data-segment storage.
+    package enum size_t immutableSource = 1;
 
     package Handler handler;
     // What a field means is decided by the opcode alone - never dmd's own
@@ -1082,7 +1034,9 @@ public struct Function {
     package size_t cursorOffset = size_t.max;
     package size_t declaredParameters;
     package const(Signature)* signature;
-    package imported!"snakebite.backends.returnplace".ReturnPlace returnPlace;
+    package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
+    // Where a host caller writes the arguments, fixed once compiled.
+    package HostCallLayout hostCall;
     // Not null when a caller can copy this function in place of a call.
     package const(InlineBody)* inlineBody;
     // Every word of this function that holds a process address, except the
@@ -1112,6 +1066,10 @@ public struct Function {
     package uint jitState;
     // Whether calls of this function count towards `jitHeat`.
     package bool jitCounts;
+    package const(char)[] jitName;
+    // The JIT state of the `Bytecode` instance that compiled this function.
+    static if (jitSupported)
+        package imported!"snakebite.backends.bytecode.jit".JitInstance* jit;
 
     package void fixWindowFacts() {
         activationAlignment = frameAlignment > uint(Activation.alignof)
@@ -1143,16 +1101,15 @@ package void recordCallSiteRelocs(
     // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
     // delegate is kept by its function; its context is state of the
     // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
-    // follow from the two indexes. `fast` and `directTarget` are not listed
-    // as address fields: they are filled only at run time, when a call first
-    // runs, so a compiled function never holds an address in them.
+    // follow from the two indexes. The call caches are filled at run time,
+    // so the compiled bytecode has no addresses in them.
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
         "cleanupEndIndex", "cleanupStart", "cleanupEnd", "windowSlot",
         "windowDisp", "windowScratch", "windowEnd", "windowAlignment",
         "directState", "directTarget", "directSwapped", "directOrder",
-        "directLoads",
+        "directLoads", "indirectTarget",
     );
     enum addressFields = AliasSeq!(
         "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
@@ -1221,7 +1178,7 @@ package void recordExceptionHandlerRelocs(
 }
 
 
-import snakebite.framestack: FrameStack;
+import snakebite.stack.frames: FrameStack;
 
 public struct Vm {
     private FrameStack _frames;
@@ -1229,7 +1186,7 @@ public struct Vm {
     @disable this();
     @disable this(this);
 
-    import snakebite.tlsstorage: TlsSlots;
+    import snakebite.stack.tls: TlsSlots;
 
     public this(in size_t frameCapacity, TlsSlots* tls = null) {
         _frames = FrameStack(frameCapacity, tls);
@@ -1348,7 +1305,7 @@ private void initializeClosure(
 
 // Guest calls reserve activations beside their values. Native stack use
 // therefore depends on barrier crossings, not guest call depth.
-private struct Activation {
+package struct Activation {
     const(Instruction)* pc;
     const(Instruction)* resume;
     ubyte* frame;
@@ -1638,7 +1595,7 @@ private Activation* popActivation(Activation* active, FrameStack* frames) {
 
 
 private void unwindFinally(Throwable throwable, scope void delegate() cleanup) {
-    import snakebite.backends.unwindplan: sharedUnwindFinally = unwindFinally;
+    import snakebite.failure.unwind: sharedUnwindFinally = unwindFinally;
 
     sharedUnwindFinally(throwable, cleanup);
 }
@@ -1729,10 +1686,6 @@ public const(Instruction)* opTemporaryEnd(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opTemporaryEnd");
-    }
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state, frame);
     const mark = loadUnsigned(execution.destination, size_t.sizeof);
@@ -1879,7 +1832,7 @@ private const(Instruction)* runStaticAddress(Decoded)(
 // address is never a compile-time constant (finding 1.3, ADR-0006) the
 // way a `shared`/`__gshared` variable's is: `opStatic*`'s `source`/
 // `destination` immediate holds a resolved address directly, but
-// `opTls*`'s holds a `snakebite.tlsstorage.TlsDescriptor*` instead,
+// `opTls*`'s holds a `snakebite.stack.tls.TlsDescriptor*` instead,
 // resolved through `frames.tlsSlotFor` - this thread's own storage, on
 // this thread's own frame stack - on every access, never cached in the
 // instruction itself.
@@ -1890,7 +1843,7 @@ private const(Instruction)* runTlsLoad(Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
-    import snakebite.tlsstorage: TlsDescriptor;
+    import snakebite.stack.tls: TlsDescriptor;
 
     auto slot = execution.frames.tlsSlotFor(
         cast(const(TlsDescriptor)*) execution.source);
@@ -1906,7 +1859,7 @@ private const(Instruction)* runTlsStore(Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
-    import snakebite.tlsstorage: TlsDescriptor;
+    import snakebite.stack.tls: TlsDescriptor;
 
     auto slot = execution.frames.tlsSlotFor(
         cast(const(TlsDescriptor)*) execution.destination);
@@ -1921,7 +1874,7 @@ package alias opTlsAddress =
 private const(Instruction)* runTlsAddress(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.tlsstorage: TlsDescriptor;
+    import snakebite.stack.tls: TlsDescriptor;
 
     auto slot = execution.frames.tlsSlotFor(
         cast(const(TlsDescriptor)*) execution.source);
@@ -1939,7 +1892,7 @@ private const(Instruction)* runTlsAddress(Decoded)(
 // unhandled failure both see the genuine object, never a second exception
 // type standing in for it. Each `opCall` this throw unwinds through pops
 // its own callee `Frame` via that struct's destructor (see
-// `snakebite.framestack`), so no explicit cleanup is needed here.
+// `snakebite.stack.frames`), so no explicit cleanup is needed here.
 package alias opAssert =
     executeOnce!(runAssert, OperandKind.storage, OperandKind.immediate);
 
@@ -1969,10 +1922,6 @@ package const(Instruction)* opThrow(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opThrow");
-    }
     activation.pc = pc;
     auto execution = Execution!(OperandKind.storage, OperandKind.immediate)(
         pc, activation, state, frame);
@@ -2033,16 +1982,12 @@ private const(Instruction)* callGeneral(bool counted)(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opCall");
-    }
     return opCallSlow!counted(pc, active, state, frame, r0, fp0);
 }
 
 // Where a call writes its result, which the compiler knows when it chooses
 // the handler.
-private enum Destination {
+package enum Destination {
     frame,
     indirect,
     discard,
@@ -2068,10 +2013,6 @@ private const(Instruction)* callWindow(Destination destination,
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opCallWindow." ~ destination.stringof);
-    }
     import core.atomic: atomicLoad, MemoryOrder;
 
     const site = &active.callSites[pc.source];
@@ -2106,10 +2047,6 @@ private const(Instruction)* callIndirectWindow(Destination destination,
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opCallIndirectWindow." ~ destination.stringof);
-    }
     const site = &active.callSites[pc.source];
     const address = *cast(const(void)**) (frame + site.calleeSlotOffset);
     ptrdiff_t adjustment;
@@ -2125,6 +2062,10 @@ private const(Instruction)* callIndirectWindow(Destination destination,
         state.decodedAdjustment = adjustment;
         return opCallSlow!counted(pc, active, state, frame, r0, fp0);
     }
+
+    static if (jitSupported && chainedDispatch && counted)
+        (cast(CallSite.IndirectTarget*) &site.indirectTarget)
+            .remember(address, callee, adjustment);
 
     return enterWindow!(destination, true, counted)(
         pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,
@@ -2258,11 +2199,46 @@ private const(Instruction)* opCallNative(
         site.directLoads = loads;
         current = !eligible ? State.general
             : wholeWords ? State.direct : State.wide;
+        // The compiler gives each native call instruction its own site,
+        // including copies made by inlining. Tier-up changes only handlers,
+        // so the frame destination is fixed when this site is first run.
+        if (current == State.wide && site.returnWidth == 16
+                && parameterCount == 2 && !site.directSwapped
+                && loads[0] == Load.word64 && loads[1] == Load.word64
+                && isFrameOperand(site.args[0].callerOffset)
+                && isFrameOperand(site.args[1].callerOffset)
+                && pc.destination != discardResult)
+            current = isFrameOperand(pc.destination) ? State.twoWordsPairResult
+                : State.twoWordsIndirectPairResult;
+        if (current == State.wide && parameterCount == 3
+                && site.returnWidth == ulong.sizeof
+                && pc.destination != discardResult
+                && isFrameOperand(pc.destination)
+                && !site.directSwapped
+                && loads[0] == Load.word64 && loads[2] == Load.word64
+                && isFrameOperand(site.args[0].callerOffset)
+                && isFrameOperand(site.args[1].callerOffset)
+                && isFrameOperand(site.args[2].callerOffset)) {
+            if (loads[1] == Load.sign32)
+                current = State.threeWordsSign32;
+            else if (loads[1] == Load.zero32)
+                current = State.threeWordsZero32;
+        }
         atomicStore!(MemoryOrder.rel)(*stateSlot, uint(current));
     }
     if (current != State.direct) {
+        if (current == State.twoWordsPairResult)
+            return opCallDirectTwoWordsPairResult!false(site, pc, active, state, frame);
         if (current == State.wide)
             return opCallDirectWide(site, pc, active, state, frame);
+        if (current == State.threeWordsSign32)
+            return opCallDirectThreeWords!(Load.sign32)(
+                site, pc, active, state, frame);
+        if (current == State.threeWordsZero32)
+            return opCallDirectThreeWords!(Load.zero32)(
+                site, pc, active, state, frame);
+        if (current == State.twoWordsIndirectPairResult)
+            return opCallDirectTwoWordsPairResult!true(site, pc, active, state, frame);
         return opCallNotDirect(pc, active, state, frame, r0, fp0);
     }
     }
@@ -2293,6 +2269,26 @@ private const(Instruction)* opCallNative(
                 ~ "0, 1, 2, 4 or 8 here");
         }
     }
+    return pc + 1;
+}
+
+pragma(inline, false)
+private const(Instruction)* opCallDirectTwoWordsPairResult(bool indirect)(
+    CallSite* site,
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    // The position of a throw selects its handler.
+    active.pc = pc;
+    state.current = active;
+    const first = loadWord(frame + site.args[0].callerOffset, Load.word64);
+    const second = loadWord(frame + site.args[1].callerOffset, Load.word64);
+    auto place = indirect ? indirectStorageAt(frame, pc.destination)
+        : frame + pc.destination;
+    callDirectWords(site.directTarget, first, second,
+        /* third */ 0, /* resultWidth */ 16, place);
     return pc + 1;
 }
 
@@ -2333,6 +2329,26 @@ private const(Instruction)* opCallDirectWide(
             ? operandStorage(frame, pc.destination) : cast(ubyte*) scratch.ptr);
     return pc + 1;
 }
+
+pragma(inline, false)
+private const(Instruction)* opCallDirectThreeWords(Load middle)(
+    const(CallSite)* site,
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    active.pc = pc;
+    state.current = active;
+    const first = loadWord(frame + site.args[0].callerOffset, Load.word64);
+    const second = loadWord(frame + site.args[1].callerOffset, middle);
+    const third = loadWord(frame + site.args[2].callerOffset, Load.word64);
+    callDirectWords(
+        site.directTarget, first, second, third, ulong.sizeof,
+        frame + pc.destination);
+    return pc + 1;
+}
+
 
 // Every call `opCall` does not take. A native site is a direct word call
 // when it can be; any other call goes to `opCallPlain`.
@@ -2497,7 +2513,7 @@ private void redirectArguments(Decoded)(
     const(Function)* callee, ubyte* frame,
 ) {
     import core.stdc.string: memcpy, memset;
-    import snakebite.backends.variadic: VariadicLayout;
+    import snakebite.native.variadic: VariadicLayout;
     import std.algorithm: min;
 
     const value = &site.value;
@@ -2668,10 +2684,6 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
 ) {
     import core.stdc.string: memcpy;
 
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opReturn");
-    }
     static if (frameOnly)
         const source = frame + pc.source;
     else
@@ -2739,10 +2751,6 @@ public const(Instruction)* opReturnVoid(
     ulong r0,
     double fp0,
 ) {
-    version (BytecodeCount) {
-        static __gshared CountSlot slot;
-        countExecution(&slot, "opReturnVoid");
-    }
     activation.pc = pc;
     static if (chainedDispatch) {
         const resume = leaveToCaller(activation, state);
@@ -2920,7 +2928,7 @@ package alias opComplex(ComplexOperation operation) =
 private const(Instruction)* runComplex(ComplexOperation operation, Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: applyComplex, ComplexOperands;
+    import snakebite.native.value: applyComplex, ComplexOperands;
 
     applyComplex!operation(execution.destination, execution.destination,
         execution.source, ComplexOperands.unpack(execution.sourceWidth),
@@ -2935,7 +2943,7 @@ package alias opComplexNegate =
 private const(Instruction)* runComplexNegate(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: negateComplex;
+    import snakebite.native.value: negateComplex;
 
     negateComplex(execution.destination, execution.destination,
         execution.width);
@@ -3360,7 +3368,7 @@ private alias opIndex(IndexBase base) =
 private const(Instruction)* runIndex(IndexBase base, Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: arrayPointerOffset;
+    import snakebite.native.value: arrayPointerOffset;
 
     static if (base == IndexBase.slice)
         auto first = *cast(ubyte**) (execution.source + arrayPointerOffset);
@@ -3407,7 +3415,7 @@ private const(Instruction)* runCheckedIndex(CheckedAccess access,
     Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+    import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
     const packed = execution.width;
     static if (fixedLength)
@@ -3477,7 +3485,9 @@ private enum checkedIndexElementSizes = [1UL, 2UL, 4UL, 8UL];
 
 // Every instantiation of `opCheckedIndex`: the one list that the lookups and
 // the roles below are built from.
-private immutable CheckedInstance[] checkedInstances;
+private immutable CheckedInstance[] checkedInstances =
+    allCheckedInstances();
+// The hash uses a handler address, which is known only at load time.
 private immutable CheckedInstance[Instruction.Handler] checkedInstanceOf;
 
 private CheckedInstance[] allCheckedInstances() {
@@ -3502,11 +3512,9 @@ private CheckedInstance[] allCheckedInstances() {
 }
 
 shared static this() {
-    auto all = allCheckedInstances();
     CheckedInstance[Instruction.Handler] byHandler;
-    foreach (instance; all)
+    foreach (instance; checkedInstances)
         byHandler[instance.handler] = instance;
-    checkedInstances = cast(immutable) all;
     checkedInstanceOf = cast(immutable) byHandler;
 }
 
@@ -3903,8 +3911,19 @@ static foreach (comparison; EnumMembers!Comparison)
 // branch, so the handlers are also kept in a hash set.
 private enum fusedSlots = 256;
 static assert(fusedSlots >= 2 * fusedCount);
-private __gshared Instruction.Handler[fusedCount] fusedHandlers;
-private __gshared Instruction.Handler[fusedSlots] fusedSet;
+private immutable Instruction.Handler[fusedCount] fusedHandlers = () {
+    Instruction.Handler[fusedCount] handlers;
+    static foreach (comparison; EnumMembers!Comparison)
+        static foreach (kind; EnumMembers!CompareKind)
+            static foreach (jumpWhen; [false, true])
+                static foreach (constant; [false, true])
+                    handlers[fusedIndex(comparison, kind, jumpWhen,
+                        constant)] = &opFusedBranch!(comparison, kind,
+                        jumpWhen, constant);
+    return handlers;
+}();
+// The hash uses a handler address, which is known only at load time.
+private immutable Instruction.Handler[fusedSlots] fusedSet;
 
 static assert((fusedSlots & (fusedSlots - 1)) == 0,
     "the hash keeps the top bits, so the slot count is a power of two");
@@ -3915,19 +3934,14 @@ private size_t fusedSlot(in Instruction.Handler handler) {
 }
 
 shared static this() {
-    static foreach (comparison; EnumMembers!Comparison)
-        static foreach (kind; EnumMembers!CompareKind)
-            static foreach (jumpWhen; [false, true])
-                static foreach (constant; [false, true])
-                    fusedHandlers[fusedIndex(comparison, kind, jumpWhen,
-                        constant)] = &opFusedBranch!(comparison, kind,
-                        jumpWhen, constant);
+    Instruction.Handler[fusedSlots] set;
     foreach (handler; fusedHandlers) {
         auto slot = fusedSlot(handler);
-        while (fusedSet[slot] !is null)
+        while (set[slot] !is null)
             slot = (slot + 1) % fusedSlots;
-        fusedSet[slot] = handler;
+        set[slot] = handler;
     }
+    fusedSet = set;
 }
 
 package Instruction.Handler fusedBranchHandler(
@@ -4069,17 +4083,18 @@ private const(Instruction)* runFusedBranchR(string operation, CompareKind kind,
     return execution.next;
 }
 
-private __gshared Instruction.Handler[fusedCount] fusedRegisterHandlers;
-
-shared static this() {
+private immutable Instruction.Handler[fusedCount]
+fusedRegisterHandlers = () {
+    Instruction.Handler[fusedCount] handlers;
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
             static foreach (jumpWhen; [false, true])
                 static foreach (constant; [false, true])
-                    fusedRegisterHandlers[fusedIndex(comparison, kind,
-                        jumpWhen, constant)] = &opFusedBranchR!(comparison,
-                        kind, jumpWhen, constant);
-}
+                    handlers[fusedIndex(comparison, kind, jumpWhen,
+                        constant)] = &opFusedBranchR!(comparison, kind,
+                        jumpWhen, constant);
+    return handlers;
+}();
 
 package enum RegisterFamily {
     none,
@@ -4284,7 +4299,7 @@ private const(Instruction)* runCastWidenUnsigned(Decoded)(
 }
 
 // A cast whose `CastKind` is a pure transformation of its source's own
-// bytes into its destination's - `snakebite.nativevalue.applyCastAs`
+// bytes into its destination's - `snakebite.native.value.applyCastAs`
 // carries out every one, with `kind` itself a template parameter, so
 // `snakebite.backends.bytecode.compiler.compileCast`'s own `final
 // switch` on `CastPlan.kind` picks one instance of this op per
@@ -4309,7 +4324,7 @@ package alias opCastAs(CastKind kind) =
 private const(Instruction)* runCastAs(CastKind kind, Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: applyCastAs, CastLayout;
+    import snakebite.native.value: applyCastAs, CastLayout;
 
     with (CastKind) {
     static if (kind == integralToFloat || kind == integralToComplex)
@@ -4406,7 +4421,7 @@ private const(Instruction)* runCastFixedAs(
 )(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: applyCastAs, CastLayout;
+    import snakebite.native.value: applyCastAs, CastLayout;
 
     applyCastAs!kind(
         CastLayout(kind, sourceSize, destSize),
@@ -4495,7 +4510,7 @@ package alias opLoadBitfield =
 private const(Instruction)* runLoadBitfield(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: BitfieldAccess;
+    import snakebite.native.value: BitfieldAccess;
 
     auto address = *cast(void**) (execution.source);
     const metadata = execution.sourceWidth;
@@ -4606,7 +4621,7 @@ package alias opStoreBitfield =
 private const(Instruction)* runStoreBitfield(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.nativevalue: BitfieldAccess;
+    import snakebite.native.value: BitfieldAccess;
 
     auto address = *cast(void**) (execution.destination);
     BitfieldAccess.decode(execution.sourceWidth).store(
@@ -4627,7 +4642,7 @@ package alias opSliceCopy =
 private const(Instruction)* runSliceCopy(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.backends.slicecopy: copyUnchecked;
+    import snakebite.native.value: copyUnchecked;
 
     copyUnchecked(
         *cast(void[]*) execution.destination,
@@ -4647,7 +4662,7 @@ package alias opSlicesConform =
 private const(Instruction)* runSlicesConform(Decoded)(
     ref Decoded execution,
 ) {
-    import snakebite.backends.slicecopy: slicesConform;
+    import snakebite.native.value: slicesConform;
 
     auto dest = execution.destination;
     *cast(ubyte*) dest = slicesConform(
@@ -4673,7 +4688,7 @@ private const(Instruction)* runSliceFill(Decoded)(
     ref Decoded execution,
 ) {
     import core.stdc.string: memcpy;
-    import snakebite.nativevalue: arrayLengthOffset, arrayPointerOffset;
+    import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
     auto dest = execution.destination;
     auto value = execution.source;
@@ -4776,47 +4791,53 @@ private struct RoleEntry {
     Roles roles;
 }
 
-private __gshared RoleEntry[] roleEntries;
-private __gshared size_t roleCount;
-private __gshared size_t roleShift;
+// Open addressing by handler address: the address is known only at load
+// time, so the module constructor builds the table.
+private struct RoleTable {
+    RoleEntry[] entries;
+    size_t count;
+    size_t shift;
 
-private size_t roleSlot(in Instruction.Handler handler) {
-    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> roleShift;
+    size_t slotOf(in Instruction.Handler handler) const {
+        return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> shift;
+    }
+
+    void add(Instruction.Handler handler, in Roles roles) {
+        if ((count + 1) * 2 > entries.length) {
+            auto old = entries;
+            const capacity = old.length == 0 ? 2048 : old.length * 2;
+            entries = new RoleEntry[capacity];
+            shift = size_t.sizeof * 8 - bsf(capacity);
+            count = 0;
+            foreach (previous; old)
+                if (previous.handler !is null)
+                    add(previous.handler, previous.roles);
+        }
+        auto slot = slotOf(handler);
+        while (entries[slot].handler !is null) {
+            if (entries[slot].handler is handler)
+                return;
+            slot = (slot + 1) & (entries.length - 1);
+        }
+        entries[slot] = RoleEntry(handler, roles);
+        ++count;
+    }
 }
 
-private void addRoles(Instruction.Handler handler, in Roles roles) {
-    if ((roleCount + 1) * 2 > roleEntries.length) {
-        auto old = roleEntries;
-        const capacity = old.length == 0 ? 2048 : old.length * 2;
-        roleEntries = new RoleEntry[capacity];
-        roleShift = size_t.sizeof * 8 - bsf(capacity);
-        roleCount = 0;
-        foreach (previous; old)
-            if (previous.handler !is null)
-                addRoles(previous.handler, previous.roles);
-    }
-    auto slot = roleSlot(handler);
-    while (roleEntries[slot].handler !is null) {
-        if (roleEntries[slot].handler is handler)
-            return;
-        slot = (slot + 1) & (roleEntries.length - 1);
-    }
-    roleEntries[slot] = RoleEntry(handler, roles);
-    ++roleCount;
-}
+private immutable RoleTable roleTable;
 
 // Whether the table holds the handler's roles, and what they are. A handler
 // that is not in the table holds no address and no instruction address.
 package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
-    if (roleEntries.length == 0)
+    if (roleTable.entries.length == 0)
         return false;
-    auto slot = roleSlot(handler);
-    while (roleEntries[slot].handler !is null) {
-        if (roleEntries[slot].handler is handler) {
-            roles = roleEntries[slot].roles;
+    auto slot = roleTable.slotOf(handler);
+    while (roleTable.entries[slot].handler !is null) {
+        if (roleTable.entries[slot].handler is handler) {
+            roles = roleTable.entries[slot].roles;
             return true;
         }
-        slot = (slot + 1) & (roleEntries.length - 1);
+        slot = (slot + 1) & (roleTable.entries.length - 1);
     }
     return false;
 }
@@ -4843,7 +4864,7 @@ package size_t* branchTargetField(ref Instruction instruction) {
 version (unittest)
 public size_t specialisedHandlersWithoutRoles() {
     size_t missing;
-    foreach (entry; specialisations) {
+    foreach (entry; specialisationTable.entries) {
         if (entry.general is null || entry.roles == Roles.init)
             continue;
         foreach (frame; entry.handlers)
@@ -4943,51 +4964,68 @@ private struct Specialisation {
     Roles roles;
 }
 
-private __gshared Specialisation[] specialisations;
-private __gshared size_t specialisationCount;
-private __gshared size_t specialisationShift;
+private struct SpecialisationTable {
+    Specialisation[] entries;
+    size_t count;
+    size_t shift;
 
-private size_t specialisationSlot(in Instruction.Handler handler) {
-    return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL)
-        >> specialisationShift;
+    size_t slotOf(in Instruction.Handler handler) const {
+        return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> shift;
+    }
+
+    void insert(Specialisation entry) {
+        if ((count + 1) * 2 > entries.length) {
+            auto old = entries;
+            const capacity = old.length == 0 ? 1024 : old.length * 2;
+            entries = new Specialisation[capacity];
+            shift = size_t.sizeof * 8 - bsf(capacity);
+            count = 0;
+            foreach (ref previous; old)
+                if (previous.general !is null)
+                    insert(previous);
+        }
+        auto slot = slotOf(entry.general);
+        while (entries[slot].general !is null)
+            slot = (slot + 1) & (entries.length - 1);
+        entries[slot] = entry;
+        ++count;
+    }
 }
 
-private void addSpecialisation(Specialisation entry, in Roles roles) {
-    entry.roles = roles;
-    // The table keeps only the handlers that hold an address or an
-    // instruction address. It is searched for every instruction of a
-    // function, so it stays small.
-    if (roles != Roles.init)
-    {
-        foreach (frame; entry.handlers)
-            foreach (handler; frame)
-                if (handler !is null)
-                    addRoles(handler, roles);
-        if (entry.masked !is null)
-            foreach (frame; *entry.masked)
+private immutable SpecialisationTable specialisationTable;
+
+// An instruction that counts its event, by its handler; and back.
+private struct CountingTwins {
+    Instruction.Handler[Instruction.Handler] countedOf;
+    Instruction.Handler[Instruction.Handler] uncountedOf;
+}
+
+// What the module constructor fills, before it makes the tables immutable.
+private struct Tables {
+    RoleTable roles;
+    SpecialisationTable specialisations;
+    static if (jitSupported)
+        CountingTwins twins;
+
+    void addSpecialisation(Specialisation entry, in Roles roles) {
+        entry.roles = roles;
+        // The table keeps only the handlers that hold an address or an
+        // instruction address. It is searched for every instruction of a
+        // function, so it stays small.
+        if (roles != Roles.init)
+        {
+            foreach (frame; entry.handlers)
                 foreach (handler; frame)
                     if (handler !is null)
-                        addRoles(handler, roles);
+                        this.roles.add(handler, roles);
+            if (entry.masked !is null)
+                foreach (frame; *entry.masked)
+                    foreach (handler; frame)
+                        if (handler !is null)
+                            this.roles.add(handler, roles);
+        }
+        specialisations.insert(entry);
     }
-    insertSpecialisation(entry);
-}
-
-private void insertSpecialisation(Specialisation entry) {
-    if ((specialisationCount + 1) * 2 > specialisations.length) {
-        auto old = specialisations;
-        const capacity = old.length == 0 ? 1024 : old.length * 2;
-        specialisations = new Specialisation[capacity];
-        specialisationShift = size_t.sizeof * 8 - bsf(capacity);
-        specialisationCount = 0;
-        foreach (ref previous; old)
-            if (previous.general !is null)
-                insertSpecialisation(previous);
-    }
-    auto slot = specialisationSlot(entry.general);
-    while (specialisations[slot].general !is null)
-        slot = (slot + 1) & (specialisations.length - 1);
-    specialisations[slot] = entry;
-    ++specialisationCount;
 }
 
 // The instance of `executor`, or, with `counted`, its counting twin (see
@@ -5035,25 +5073,26 @@ private void maskedInstances(bool counted, alias executor, alias operation,
 
 private void specialise(alias operation, OperandKind destinationKind,
     OperandKind sourceKind, immutable(ulong)[] widths, bool right,
-    Parameters...)()
+    Parameters...)(ref Tables tables)
 {
     specialiseWith!(executeWith, operation, destinationKind, sourceKind,
-        widths, right, Parameters)();
+        widths, right, Parameters)(tables);
 }
 
 private void specialiseWith(alias executor, alias operation,
     OperandKind destinationKind, OperandKind sourceKind,
-    immutable(ulong)[] widths, bool right, Parameters...)()
+    immutable(ulong)[] widths, bool right, Parameters...)(ref Tables tables)
 {
     // `auto`: `addSpecialisation` takes a mutable copy, and the entry has
     // pointers.
     auto entry = specialisationOf!(false, executor, operation, destinationKind,
         sourceKind, widths, right, Parameters);
-    addSpecialisation(entry,
+    tables.addSpecialisation(entry,
         rolesOfOperation!(operation, sourceKind, Parameters));
     static if (jitSupported && countsEvents!operation)
-        addCountedTwins(entry, specialisationOf!(true, executor, operation,
-            destinationKind, sourceKind, widths, right, Parameters));
+        tables.addCountedTwins(entry, specialisationOf!(true, executor,
+            operation, destinationKind, sourceKind, widths, right,
+            Parameters));
 }
 
 // The branches that count an event of the function for the JIT when they jump
@@ -5096,33 +5135,36 @@ private Specialisation specialisationOf(bool counted, alias executor,
 
 // `opCopyFixed` takes a `size_t` width, and a handler registered with another
 // type of width would never be found.
-private void specialiseCopyFixed(size_t width, bool staticSource)() {
+private void specialiseCopyFixed(size_t width, bool staticSource)(
+    ref Tables tables,
+) {
     specialise!(runCopyFixed, OperandKind.storage,
         staticSource ? OperandKind.immediate : OperandKind.storage, noWidths,
-        false, width, staticSource)();
+        false, width, staticSource)(tables);
 }
 
 // `opLoadIndirectFixed` and `opStoreIndirectFixed` take a `size_t` width, and
 // a handler registered with another type of width would never be found.
-private void specialiseIndirect(size_t width)() {
+private void specialiseIndirect(size_t width)(ref Tables tables) {
     specialise!(runLoadIndirect, OperandKind.storage, OperandKind.storage,
-        noWidths, false, width)();
+        noWidths, false, width)(tables);
     specialise!(runStoreIndirect, OperandKind.storage, OperandKind.storage,
-        noWidths, false, width)();
+        noWidths, false, width)(tables);
 }
 
 shared static this() {
+    Tables tables;
     enum S = OperandKind.storage;
     enum I = OperandKind.immediate;
     // Handlers that no specialisation covers.
-    addRoles(&opJump, rolesOfOperation!(runJump, I));
-    addRoles(&opStaticStore, rolesOfOperation!(runStaticStore, S));
-    addRoles(&opStaticAddress, rolesOfOperation!(runStaticAddress, I));
-    addRoles(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
-    addRoles(&opTlsStore, rolesOfOperation!(runTlsStore, S));
-    addRoles(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
+    tables.roles.add(&opJump, rolesOfOperation!(runJump, I));
+    tables.roles.add(&opStaticStore, rolesOfOperation!(runStaticStore, S));
+    tables.roles.add(&opStaticAddress, rolesOfOperation!(runStaticAddress, I));
+    tables.roles.add(&opTlsLoad, rolesOfOperation!(runTlsLoad, I));
+    tables.roles.add(&opTlsStore, rolesOfOperation!(runTlsStore, S));
+    tables.roles.add(&opTlsAddress, rolesOfOperation!(runTlsAddress, I));
     foreach (instance; checkedInstances)
-        addRoles(instance.handler,
+        tables.roles.add(instance.handler,
             instance.constantValue
                 ? Roles(Role.address, Role.other, Role.instruction, true)
                 : instance.access == CheckedAccess.storeUnchecked
@@ -5130,7 +5172,7 @@ shared static this() {
                     : Roles(Role.other, Role.other, Role.instruction, true));
     // The fused return keeps the roles of the producer it replaces.
     static foreach (width; 1 .. 17)
-        addRoles(&opThenReturn!(opCopyFixed!(width, true)),
+        tables.roles.add(&opThenReturn!(opCopyFixed!(width, true)),
             rolesOfOperation!(runCopyFixed, I, width, true));
     static foreach (triple; threeAddressNames) {{
         static if (triple.family == "opInt3" || triple.family == "opCompare3")
@@ -5142,9 +5184,9 @@ shared static this() {
             enum widths = noWidths;
         enum runner = "run" ~ triple.family[2 .. $];
         mixin("specialise!(" ~ runner ~ ", S, S, widths, true, "
-            ~ triple.arguments ~ ", false)();");
+            ~ triple.arguments ~ ", false)(tables);");
         mixin("specialise!(" ~ runner ~ ", S, S, widths, false, "
-            ~ triple.arguments ~ ", true)();");
+            ~ triple.arguments ~ ", true)(tables);");
     }}
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
@@ -5153,24 +5195,25 @@ shared static this() {
                     specialise!(runFusedBranch, S, constant ? I : S,
                         kind == CompareKind.floating
                             ? floatingWidths : integralWidths,
-                        false, comparisonSymbols[comparison], kind, jumpWhen)();
+                        false, comparisonSymbols[comparison], kind,
+                        jumpWhen)(tables);
     static foreach (name; AliasSeq!("runBranchFalse", "runBranchTrue",
         "runCastToBool", "runLogicalNot"))
-        specialise!(mixin(name), S, I, integralWidths, false)();
+        specialise!(mixin(name), S, I, integralWidths, false)(tables);
     static foreach (name; AliasSeq!("runAdd", "runSubtract", "runMultiply",
         "runBitAnd", "runBitOr", "runBitXor", "runLessThanSigned",
         "runLessThanUnsigned", "runLessOrEqualSigned", "runLessOrEqualUnsigned",
         "runGreaterThanSigned", "runGreaterThanUnsigned",
         "runGreaterOrEqualSigned", "runGreaterOrEqualUnsigned", "runEqual",
         "runNotEqual"))
-        specialise!(mixin(name), S, S, integralWidths, false)();
+        specialise!(mixin(name), S, S, integralWidths, false)(tables);
     static foreach (name; AliasSeq!("runShiftLeft", "runShiftRightLogical",
         "runShiftRightArithmetic", "runCopy", "runFrameAddress",
         "runLoadIndirect", "runStoreIndirect", "runStaticArrayEqual"))
-        specialise!(mixin(name), S, S, noWidths, false)();
+        specialise!(mixin(name), S, S, noWidths, false)(tables);
     static foreach (name; AliasSeq!("runConstant", "runZero", "runNegate",
         "runStaticLoad"))
-        specialise!(mixin(name), S, I, noWidths, false)();
+        specialise!(mixin(name), S, I, noWidths, false)(tables);
     static foreach (triple; registerNames)
         static foreach (constant; [false, true])
             static foreach (from; [false, true])
@@ -5181,7 +5224,7 @@ shared static this() {
                             registerKind!to, registerKind!from,
                             triple[1] == "opInt3R"
                                 ? integralWidths : noWidths,
-                            !constant, triple[2], constant, from, to)();
+                            !constant, triple[2], constant, from, to)(tables);
     static foreach (comparison; EnumMembers!Comparison)
         static foreach (kind; EnumMembers!CompareKind)
             static foreach (jumpWhen; [false, true])
@@ -5191,9 +5234,10 @@ shared static this() {
                         constant ? I : S,
                         kind == CompareKind.floating
                             ? noWidths : integralWidths,
-                        false, comparisonSymbols[comparison], kind, jumpWhen)();
+                        false, comparisonSymbols[comparison], kind,
+                        jumpWhen)(tables);
     static foreach (width; [1, 2, 4, 8, 16, 32]) {
-        specialiseIndirect!width;
+        specialiseIndirect!width(tables);
         static foreach (copyWidth; [1, 2, 4, 8, 16]) {{
             Specialisation entry;
             entry.general = &opLoadThenCopy!(width, copyWidth);
@@ -5202,15 +5246,15 @@ shared static this() {
             entry.destination = true;
             entry.source = true;
             entry.pairWithNext = true;
-            addSpecialisation(entry, Roles.init);
+            tables.addSpecialisation(entry, Roles.init);
         }}
     }
     static foreach (width; [1, 2, 4, 8, 16])
-        specialiseCopyFixed!(width, false);
+        specialiseCopyFixed!(width, false)(tables);
     static foreach (width; 1 .. 17)
-        specialiseCopyFixed!(width, true);
+        specialiseCopyFixed!(width, true)(tables);
     static foreach (base; EnumMembers!IndexBase)
-        specialise!(runIndex, S, S, noWidths, true, base)();
+        specialise!(runIndex, S, S, noWidths, true, base)(tables);
     {
         Specialisation entry;
         entry.general = &opReturn;
@@ -5221,11 +5265,24 @@ shared static this() {
             entry.handlers[0][widthSlot(width)] = &returnHandler!(width, false);
             entry.handlers[1][widthSlot(width)] = &returnHandler!(width, true);
         }
-        addSpecialisation(entry, Roles.init);
+        tables.addSpecialisation(entry, Roles.init);
     }
+    roleTable = cast(immutable) tables.roles;
+    specialisationTable = cast(immutable) tables.specialisations;
     foreach (handler; branchHandlers)
         if (!holdsInstruction(handler))
             internalFailure("a branch handler has no instruction role");
+    static if (jitSupported) {
+        tables.addCounted(&opJump, &countedHandler!opJump);
+        static foreach (destination; EnumMembers!Destination) {
+            tables.addCounted(&callWindow!destination,
+                &callWindow!(destination, true));
+            tables.addCounted(&callIndirectWindow!destination,
+                &callIndirectWindow!(destination, true));
+        }
+        tables.addCounted(&callGeneral!false, &callGeneral!true);
+        _countingTwins = cast(immutable) tables.twins;
+    }
     checkSpecialised;
 }
 
@@ -5352,13 +5409,13 @@ package bool widthHoldsIndexSlot(in Instruction.Handler handler) {
 private const(Specialisation)* lookupSpecialisation(
     in Instruction.Handler handler,
 ) {
-    if (specialisations.length == 0)
+    if (specialisationTable.entries.length == 0)
         return null;
-    auto slot = specialisationSlot(handler);
-    while (specialisations[slot].general !is null) {
-        if (specialisations[slot].general is handler)
-            return &specialisations[slot];
-        slot = (slot + 1) & (specialisations.length - 1);
+    auto slot = specialisationTable.slotOf(handler);
+    while (specialisationTable.entries[slot].general !is null) {
+        if (specialisationTable.entries[slot].general is handler)
+            return &specialisationTable.entries[slot];
+        slot = (slot + 1) & (specialisationTable.entries.length - 1);
     }
     return null;
 }
@@ -5371,6 +5428,7 @@ private const(Specialisation)* lookupSpecialisation(
 public struct JitSetting {
     public bool enabled = true;
     public bool eager;
+    public bool perfMap;
 }
 
 // The JIT: tier-up, counting and the classification of handlers. The code
@@ -5380,14 +5438,8 @@ public struct JitSetting {
 static if (jitSupported) {
 
     import core.memory: GC;
-    import snakebite.backends.bytecode.jit: JitLock, JitOp, jitUsable, Scratch;
-
-    // An event is a guest call of a function or an execution of one of its
-    // backward branches. A function with this many events gets JIT code. The
-    // counting adds `jitStep` to `Function.jitHeat`, so that the 32-bit sum
-    // carries out at the threshold.
-    package enum jitThreshold = 256;
-    private enum jitStep = cast(uint) ((1UL << 32) / jitThreshold);
+    import snakebite.backends.bytecode.jit: JitLock, JitOp, jitStep, jitUsable,
+        Scratch;
 
     // What `Function.jitHeat` starts with.
     package uint jitStartHeat(in JitSetting setting) nothrow @nogc {
@@ -5492,30 +5544,20 @@ static if (jitSupported) {
         return overflow;
     }
 
-    // An instruction that counts its event, by its handler; and back.
-    private struct CountingTwins {
-        Instruction.Handler[Instruction.Handler] countedOf;
-        Instruction.Handler[Instruction.Handler] uncountedOf;
-    }
-
-    // `specialiseWith` adds the twins of the branches to `_newTwins`, and the
-    // constructor below those of the jump and the calls; then it makes them
-    // `_countingTwins`, before any thread reads them.
+    // `specialiseWith` adds the twins of the branches to `Tables.twins`, and
+    // the module constructor those of the jump and the calls; then it makes
+    // them `_countingTwins`, before any thread reads them.
     private immutable CountingTwins _countingTwins;
-
-    // The module constructors run on the main thread, so this is a variable of
-    // that thread.
-    private CountingTwins _newTwins;
 
     // The twin of each handler that `original` has, by the place of the handler
     // in `counted`, which holds the twins.
-    private void addCountedTwins(in Specialisation original,
+    private void addCountedTwins(ref Tables tables, in Specialisation original,
         in Specialisation counted)
     {
         foreach (frame; 0 .. original.handlers.length)
             foreach (slot; 0 .. widthSlots)
                 if (original.handlers[frame][slot] !is null)
-                    addCounted(
+                    tables.addCounted(
                         cast(Instruction.Handler)
                             original.handlers[frame][slot],
                         cast(Instruction.Handler)
@@ -5524,30 +5566,17 @@ static if (jitSupported) {
             foreach (mask; 0 .. (*original.masked).length)
                 foreach (slot; 0 .. widthSlots)
                     if ((*original.masked)[mask][slot] !is null)
-                        addCounted(cast(Instruction.Handler)
+                        tables.addCounted(cast(Instruction.Handler)
                                 (*original.masked)[mask][slot],
                             cast(Instruction.Handler)
                                 (*counted.masked)[mask][slot]);
     }
 
-    shared static this() {
-        addCounted(&opJump, &countedHandler!opJump);
-        static foreach (destination; EnumMembers!Destination) {
-            addCounted(&callWindow!destination,
-                &callWindow!(destination, true));
-            addCounted(&callIndirectWindow!destination,
-                &callIndirectWindow!(destination, true));
-        }
-        addCounted(&callGeneral!false, &callGeneral!true);
-        _countingTwins = cast(immutable) _newTwins;
-        _newTwins = CountingTwins.init;
-    }
-
-    private void addCounted(Instruction.Handler original,
+    private void addCounted(ref Tables tables, Instruction.Handler original,
         Instruction.Handler counted)
     {
-        _newTwins.countedOf[original] = counted;
-        _newTwins.uncountedOf[counted] = original;
+        tables.twins.countedOf[original] = counted;
+        tables.twins.uncountedOf[counted] = original;
     }
 
     // Replaces the handler of each of `instructions[indices]` by its counting
@@ -5567,20 +5596,33 @@ static if (jitSupported) {
     // `failed` when it cannot have any.
     private enum JitTier : uint { interpreted, compiling, compiled, failed }
 
-    // The tables that classify handlers, and the buffers of one compile. They
-    // belong to the JIT lock: only `JitLock.owned` gives access to them. The
-    // first thread that compiles builds the tables.
+    // The tables that classify handlers. They are the same for each
+    // instance and nothing writes them after they are built, so they are
+    // `immutable` and shared by all instances.
     private struct JitTables {
         // The handlers that have a template, with how to emit them.
         JitOp[Instruction.Handler] jitTable;
         Unspecialised[Instruction.Handler] unspecialised;
-        bool ready;
-        Scratch!JitOp opScratch;
-        Scratch!Instruction snapshotScratch;
-        Scratch!(Instruction.Handler) originalScratch;
     }
 
-    private shared JitTables _jitTables;
+    private shared(immutable(JitTables)*) _jitTables;
+
+    // The tables, built by the first thread that needs them. Two threads can
+    // build them at the same time; the first to publish wins and the other
+    // copy is garbage. Nobody waits.
+    private immutable(JitTables)* jitTables() nothrow {
+        import core.atomic: atomicLoad, cas, MemoryOrder;
+
+        if (auto built = atomicLoad!(MemoryOrder.acq)(_jitTables))
+            return built;
+        auto fresh = new JitTables;
+        (*fresh).buildJitTable;
+        (*fresh).buildUnspecialiseTable;
+        auto frozen = cast(immutable(JitTables)*) fresh;
+        if (cas(&_jitTables, cast(immutable(JitTables)*) null, frozen))
+            return frozen;
+        return atomicLoad!(MemoryOrder.acq)(_jitTables);
+    }
 
     // How `specialiseHandlers` made a handler: the general handler, and the
     // indirect operands whose bit it cleared (`mask`: 1 destination, 2 source,
@@ -5610,7 +5652,10 @@ static if (jitSupported) {
         // A guest destructor in a GC finalizer can make a function hot. The
         // function keeps its handlers until a later event outside the
         // finalizer.
-        auto lock = GC.inFinalizer ? JitLock.init : JitLock.tryTake;
+        if (function_.jit is null)
+            internalFailure("a function that counts events has no JIT state");
+        auto lock = GC.inFinalizer
+            ? JitLock.init : JitLock.tryTake(*function_.jit);
         if (!lock.held) {
             atomicStore!(MemoryOrder.rel)(*state,
                 cast(uint) JitTier.interpreted);
@@ -5628,13 +5673,13 @@ static if (jitSupported) {
     {
         if (!lock.jitUsable)
             return false;
-        ref tables = lock.owned(_jitTables);
-        tables.ensureJitTables;
+        ref tables = *jitTables;
+        ref scratch = lock.state;
         auto instructions = function_.instructions;
         const n = instructions.length;
-        auto snapshotMemory = tables.snapshotScratch.reserve(n);
-        auto opMemory = tables.opScratch.reserve(n);
-        auto originalMemory = tables.originalScratch.reserve(n);
+        auto snapshotMemory = scratch.snapshotScratch.reserve(n);
+        auto opMemory = scratch.opScratch.reserve(n);
+        auto originalMemory = scratch.originalScratch.reserve(n);
         if (snapshotMemory is null || opMemory is null
                 || originalMemory is null)
             return false;
@@ -5657,23 +5702,44 @@ static if (jitSupported) {
                 ops[index] = JitOp.init;
                 continue;
             }
-            // A handler of a call, as installed, has no template; the general
-            // handler that `specialiseHandlers` replaced is what has one.
+            // Templates use the operand layout from before specialisation.
             if (!tables.unspecialise(snapshot[index]))
                 return false;
             ops[index] = tables.jitGet(snapshot[index].handler);
+            if (handler is &callGeneral!true || handler is &callGeneral!false)
+                originals[index] = nativeCallJitEntry(
+                    &function_.callSites[snapshot[index].source], handler);
         }
-        return lock.jitFunction(instructions, snapshot, ops, originals,
-            function_.constants);
+        return lock.jitFunction(function_, snapshot, ops, originals);
     }
 
-    // Builds the tables of `tables` once.
-    private void ensureJitTables(ref JitTables tables) nothrow {
-        if (!tables.ready) {
-            tables.buildJitTable;
-            tables.buildUnspecialiseTable;
-            tables.ready = true;
-        }
+    private Instruction.Handler nativeCallJitEntry(
+        const(CallSite)* site, Instruction.Handler original,
+    ) nothrow {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        if (site.kind != CallSite.Kind.native)
+            return original;
+        // A final state publishes the call shape for the lifetime of the site.
+        const current = atomicLoad!(MemoryOrder.acq)(
+            *cast(shared const(uint)*) &site.directState);
+        if (current == CallSite.DirectState.threeWordsSign32)
+            return &callPreparedThreeWords!(Load.sign32);
+        if (current == CallSite.DirectState.threeWordsZero32)
+            return &callPreparedThreeWords!(Load.zero32);
+        return original;
+    }
+
+    private const(Instruction)* callPreparedThreeWords(Load middle)(
+        const(Instruction)* pc,
+        Activation* active,
+        DispatchState* state,
+        ubyte* frame,
+        ulong r0,
+        double fp0,
+    ) {
+        return opCallDirectThreeWords!middle(
+            &active.callSites[pc.source], pc, active, state, frame);
     }
 
     private void buildJitTable(ref JitTables tables) nothrow {
@@ -5686,6 +5752,24 @@ static if (jitSupported) {
                 tables.jitTable[handler] = op;
         }
 
+        static if (chainedDispatch) {
+            static foreach (destination; EnumMembers!Destination)
+                static foreach (counted; [false, true]) {
+                    put(&callWindow!(destination, counted),
+                        JitOp.make!(Kind.callWindow)(JitOp.CallWindow(
+                            destination, counted, indirect: false)));
+                    put(&callIndirectWindow!(destination, counted),
+                        JitOp.make!(Kind.callWindow)(JitOp.CallWindow(
+                            destination, counted, indirect: true)));
+                }
+            put(&opReturn, JitOp.plain(Kind.returnValue));
+            put(&opReturnVoid, JitOp.plain(Kind.returnVoid));
+        }
+
+        put(&opTemporarySuspend, JitOp.plain(Kind.temporaryTransition));
+        put(&opTemporaryArm, JitOp.plain(Kind.temporaryTransition));
+        put(&opTemporaryArmAddress, JitOp.plain(Kind.temporaryTransition));
+
         static foreach (triple; threeAddressNames) {{
             static foreach (constant; [false, true]) {{
                 const handler =
@@ -5696,6 +5780,10 @@ static if (jitSupported) {
                 else static if (triple.family == "opShift3")
                     put(handler, threeAddressShift(
                         shiftKindOf(triple.symbol, triple.flag), constant));
+                else static if (triple.family == "opDivide3" && triple.flag)
+                    put(handler, JitOp.make!(Kind.signedDivide)(
+                        JitOp.SignedDivide(remainder: triple.symbol == "%",
+                            constantRight: constant)));
                 else static if (triple.family == "opFloat3")
                     put(handler, threeAddressFloat(
                         floatOperationOf(triple.symbol), constant));
@@ -5766,6 +5854,17 @@ static if (jitSupported) {
         put(&opShiftRightLogical, twoAddressShift(ShiftKind.logicalRight));
         put(&opShiftRightArithmetic,
             twoAddressShift(ShiftKind.arithmeticRight));
+        put(&opArrayEqual, JitOp.plain(Kind.arrayEqual));
+        put(&opSliceFill, JitOp.plain(Kind.sliceFill));
+        put(&opDivideSigned, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(twoAddress: true, widenInt: true)));
+        put(&opModuloSigned, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(remainder: true, twoAddress: true,
+                widenInt: true)));
+        put(&opDivideSigned32, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(twoAddress: true)));
+        put(&opModuloSigned32, JitOp.make!(Kind.signedDivide)(
+            JitOp.SignedDivide(remainder: true, twoAddress: true)));
         put(&opCopy, JitOp.plain(Kind.copy));
         static foreach (width; 1 .. 17) {
             put(&opCopyFixed!(width, true),
@@ -5773,6 +5872,9 @@ static if (jitSupported) {
             put(&opCopyFixed!width,
                 JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: false), width));
         }
+        static if (chainedDispatch)
+            put(&opThenReturn!(opCopyFixed!(1, true)),
+                JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: true), 1));
         put(&opConstant, JitOp.plain(Kind.constant));
         put(&opZero, JitOp.plain(Kind.zero));
         put(&opJump, JitOp.plain(Kind.jump));
@@ -5812,6 +5914,7 @@ static if (jitSupported) {
             JitOp.make!(Kind.widen)(JitOp.Widen(zeroExtend: false)));
         put(&opCastWidenUnsigned,
             JitOp.make!(Kind.widen)(JitOp.Widen(zeroExtend: true)));
+        put(&opCastAs!(CastKind.sliceToPointer), JitOp.plain(Kind.sliceToPointer));
         static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
             CastKind.widenUnsigned))
             static foreach (destSize; [1, 2, 4, 8])
@@ -5962,7 +6065,7 @@ static if (jitSupported) {
                     ambiguous: false);
         }
 
-        foreach (ref entry; specialisations) {
+        foreach (ref entry; specialisationTable.entries) {
             if (entry.general is null)
                 continue;
             foreach (frame; entry.handlers)

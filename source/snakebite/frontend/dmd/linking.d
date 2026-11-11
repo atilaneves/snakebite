@@ -25,8 +25,8 @@ public struct LinkMap {
     private VarDeclaration[string] _variables;
 
     public this(Module[] modules) {
-        import snakebite.frontend.dmd.mangle: mangledNameOf;
-        import snakebite.nativelayout: nativeSymbolName;
+        import snakebite.frontend.dmd.mangle:
+            mangledNameOf, nativeSymbolName;
 
         foreach (module_; modules)
             forEachModuleScopeSymbol(module_.members, (symbol) {
@@ -72,7 +72,7 @@ public struct LinkMap {
         VarDeclaration declaration,
     ) const {
         import dmd.astenums: STC;
-        import snakebite.nativelayout: nativeSymbolName;
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
         if (!(declaration.storage_class & STC.extern_)
                 || !canLinkByName(declaration)

@@ -2,8 +2,8 @@ module at.ffi.image;
 
 
 import ut;
-import snakebite.dependencyimage: Optimise, defaultCompiler, prepareImage;
-import snakebite.exception: SnakebiteException;
+import snakebite.image.dependency: Optimise, defaultCompiler, prepareImage;
+import snakebite.failure.report: SnakebiteException;
 import std.array: array;
 import std.conv: text;
 import std.file: SpanMode, dirEntries, exists, rmdirRecurse, thisExePath;
@@ -12,8 +12,8 @@ import std.process: Config, environment, execute;
 import std.string: replace;
 import core.thread: Thread;
 import snakebite.frontend.compiler: parseSnippet;
-import snakebite.project: sourceSet;
-import snakebite.dependencypreparation: prepareStartupDependencies;
+import snakebite.project.loading: sourceSet;
+import snakebite.project.dependencies: prepareStartupDependencies;
 
 
 // `bin/at` is built with ldc2, so `defaultCompiler` is ldc2 here. The image

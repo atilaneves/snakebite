@@ -26,13 +26,13 @@ public struct ReplOptions {
 public int run(string[] args) {
     import snakebite.frontend.compiler:
         compilerPath, FrontendFlags, initialize, Snippets;
-    import snakebite.dependencyimage: DependencyImage;
-    import snakebite.dub: fetchProject;
-    import snakebite.execution: runProject;
-    import snakebite.project: EndsProcess;
-    import snakebite.dependencypreparation: prepareStartupDependencies;
+    import snakebite.image.dependency: DependencyImage;
+    import snakebite.project.dub: fetchProject;
+    import snakebite.driver.execution: runProject;
+    import snakebite.project.loading: EndsProcess;
+    import snakebite.project.dependencies: prepareStartupDependencies;
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.gc: selectFrontendMemory;
+    import snakebite.memory.gc: selectFrontendMemory;
     import snakebite.repl: Repl;
     import std.algorithm.iteration: map;
     import std.array: array;
@@ -348,7 +348,7 @@ public struct ReplCliResult {
 
 public ReplCliResult parseReplArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
-    import snakebite.projectoptions:
+    import snakebite.driver.options:
         backendOption, CommonOptions;
     import std.getopt: GetOptException;
 
@@ -409,6 +409,7 @@ private enum helpText =
     "                        valid: "
         ~ imported!"snakebite.backends".validBackendNames ~ "\n" ~
     "  -l                    Stay interactive after loading file arguments\n" ~
-    "  --lowmem              " ~ imported!"snakebite.gc".lowmemHelp ~ "\n" ~
-    "  --no-jit              " ~ imported!"snakebite.projectoptions".noJitHelp ~ "\n" ~
+    "  --lowmem              " ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
+    "  --no-jit              "
+        ~ imported!"snakebite.driver.options".noJitHelp ~ "\n" ~
     "  -h, --help            Show this help\n";

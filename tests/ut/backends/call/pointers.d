@@ -2,7 +2,7 @@ module ut.backends.call.pointers;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.ffi.sysv: callbackEntriesPerChunk;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -535,10 +535,15 @@ static foreach (backend; Matrix!()) {
         120.shouldBeRetOf!(
             backend,
             q{
+                void castInto(ref int* result, ref int[] source) {
+                    result = cast(int*) source;
+                }
+
                 int sum() {
                     int[] arr = [10, 20, 30];
                     int* viaDotPtr = arr.ptr;
-                    int* viaCast = cast(int*) arr;
+                    int* viaCast;
+                    castInto(viaCast, arr);
                     return *viaDotPtr + *viaCast
                         + (viaDotPtr is viaCast ? 100 : 0);
                 }
@@ -872,7 +877,7 @@ static foreach (backend; Matrix!(
 
 
 // State after a throw on a worker (finding 3.4): frame pops are RAII
-// (`snakebite.framestack.FrameStack`), so a worker that a guest
+// (`snakebite.stack.frames.FrameStack`), so a worker that a guest
 // exception unwound through, caught by host code on that same worker,
 // must still be able to make a normal call afterwards - the same
 // worker's frame stack is left exactly as it was before the throwing
@@ -1344,7 +1349,6 @@ static foreach (backend; Matrix!(
     @("pointers.functionPointer.poolGrowth." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        import snakebite.ffi.callback: callbackChunkCount;
         import std.conv: text;
         import std.range: iota;
         import std.algorithm: map, sum;
@@ -1378,7 +1382,7 @@ static foreach (backend; Matrix!(
             backend_.call(function_, &result, []);
 
             result.should == expected;
-            callbackChunkCount.shouldBeGreaterThan(1);
+            backend_.callbackChunkCount.shouldBeGreaterThan(1);
         }
     }
 }

@@ -4,13 +4,13 @@ module ut.ffi.callback;
 import ut;
 import dmd.func: FuncDeclaration;
 import snakebite.ffi.callback:
-    beginCallbackChunk, callbackChunkCount, CallbackBridge, CallbackCall,
-    ChunkStrategy;
+    CallbackBridge, CallbackCall, ChunkStrategy;
 import snakebite.ffi.sysv:
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end;
+import snakebite.ffi.plan: nativeSignatureOf;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import std.conv: text;
+import std.conv: text, to;
 
 
 // These tests drive the callback pool (`snakebite.ffi.callback`, ADR-0003)
@@ -30,24 +30,23 @@ private struct Recorded {
     double[] doubles;
     real[] reals;
     void* context;
-    bool hasContext;
+    // Set by the test before the call: whether the signature has a
+    // hidden context. A raw handler has no layout to ask.
+    bool expectsContext;
     size_t calls;
 }
 
 
-// A raw handler has no layout of its own, only `call.declaration` - the
-// same thing a real backend's `runHostToGuest` asks to decide whether
-// `call.arguments[0]` is a hidden context or the first declared
-// parameter. There is one argument list either way: a context, when
-// there is one, is `arguments[0]`'s own address, not a separate field.
+// A raw handler has no layout of its own, so the test says through
+// `Recorded.expectsContext` whether `call.arguments[0]` is a hidden
+// context or the first declared parameter. There is one argument list
+// either way: a context, when there is one, is `arguments[0]`'s own
+// address, not a separate field.
 private extern(C) void recordIntOfInt(void* owner, CallbackCall* call) {
-    import snakebite.frontend.dmd.delegates: hasHiddenThis;
-
     auto recorded = cast(Recorded*) owner;
     ++recorded.calls;
-    recorded.hasContext = hasHiddenThis(call.declaration);
-    const first = recorded.hasContext ? 1 : 0;
-    recorded.context = recorded.hasContext
+    const first = recorded.expectsContext ? 1 : 0;
+    recorded.context = recorded.expectsContext
         ? *cast(void**) call.arguments[0] : null;
     recorded.integers ~= *cast(const int*) call.arguments[first];
     *cast(int*) call.returnPlace = cast(int) (recorded.integers[$ - 1] * 2 + 1);
@@ -99,6 +98,24 @@ private FuncDeclaration declarationOf(string code, string name) {
 }
 
 
+// The registration a backend makes: the signature comes from the
+// declaration.
+private void registerFunction(
+    CallbackBridge* bridge, const(void)* word, FuncDeclaration function_,
+) {
+    bridge.register(word, nativeSignatureOf(function_));
+}
+
+
+private const(void)* adjustedFunctionEntryOf(
+    CallbackBridge* bridge, const(void)* word, FuncDeclaration function_,
+    ptrdiff_t adjustment,
+) {
+    return bridge.adjustedEntryOf(
+        word, nativeSignatureOf(function_), adjustment);
+}
+
+
 private bool inTemplateChunk(const(void)* entry) {
     return entry >= cast(const(void)*) &snakebite_ffi_callback_chunk
         && entry < cast(const(void)*) &snakebite_ffi_callback_chunk_end;
@@ -112,7 +129,7 @@ unittest {
     );
     auto bridge = new CallbackBridge(&recordVector4, null);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
     auto entry = cast(Vector4OfVector4) bridge.entryOf(&word);
     float[4] input = [1.0f, 2.0f, 3.0f, 4.0f];
     auto output = entry(cast(Vector4) input);
@@ -125,7 +142,7 @@ unittest {
         q{ extern(C) int addExtra(int x, ...); }, "addExtra");
     auto bridge = new CallbackBridge(&recordCVariadicInt, null);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
     auto entry = cast(CVariadicInt) bridge.entryOf(&word);
 
     entry(13, 29).should == 42;
@@ -142,7 +159,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
     int[5] words;
-    bridge.register(&words[2], function_);
+    bridge.registerFunction(&words[2], function_);
 
     auto entry = cast(IntOfInt) bridge.entryOf(&words[2]);
     (entry !is null).should == true;
@@ -156,11 +173,10 @@ unittest {
 
     recorded.calls.should == 2;
     recorded.integers.should == [20, -3];
-    recorded.hasContext.should == false;
 
     foreach (index; [4, 0]) {
         (bridge.entryOf(&words[index]) is null).should == true;
-        bridge.register(&words[index], function_);
+        bridge.registerFunction(&words[index], function_);
         auto added = cast(IntOfInt) bridge.entryOf(&words[index]);
         (added !is null).should == true;
         added(10).should == 21;
@@ -214,7 +230,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordMixed, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(DoubleOfMixed) bridge.entryOf(&word);
     entry(1.5, 10, 0.25f).should == 11.75;
@@ -231,7 +247,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordReal, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(RealOfReal) bridge.entryOf(&word);
     const value = 1.0L + real.epsilon;
@@ -250,7 +266,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordReverseReal, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(ReverseReal) bridge.entryOf(&word);
     const value = 1.0L + real.epsilon;
@@ -283,7 +299,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordTriple, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(TripleOfLong) bridge.entryOf(&word);
     entry(7).should == Triple(7, 14, 21);
@@ -316,7 +332,7 @@ unittest {
     Recorded recorded;
     auto bridge = new CallbackBridge(&recordEight, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     auto entry = cast(LongOfEight) bridge.entryOf(&word);
     entry(1, 2, 3, 4, 5, 6, 7, 8).should == 204;
@@ -342,9 +358,10 @@ unittest {
     auto function_ = findFunction(findStruct(module_, "Holder"), "twice");
     assert(function_ !is null, "No method `twice` in the snippet");
     Recorded recorded;
+    recorded.expectsContext = true;
     auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
     int word;
-    bridge.register(&word, function_);
+    bridge.registerFunction(&word, function_);
 
     int delegate(int) callback;
     callback.funcptr = cast(int function(int)) bridge.entryOf(&word);
@@ -352,35 +369,34 @@ unittest {
     callback.ptr = &context;
 
     callback(4).should == 9;
-    recorded.hasContext.should == true;
     (recorded.context is &context).should == true;
     recorded.integers.should == [4];
 
     ubyte[32] object;
     callback.ptr = object.ptr + 16;
     callback.funcptr = cast(int function(int))
-        bridge.adjustedEntryOf(&word, function_, -16);
+        bridge.adjustedFunctionEntryOf(&word, function_, -16);
     callback(5).should == 11;
     (recorded.context is object.ptr).should == true;
     (callback.ptr is object.ptr + 16).should == true;
-    (bridge.adjustedEntryOf(&word, function_, -16)
+    (bridge.adjustedFunctionEntryOf(&word, function_, -16)
         is cast(const(void)*) callback.funcptr).should == true;
 
     auto native = ContextValue(37);
     auto target = &native.add;
     callback.ptr = cast(ubyte*) target.ptr + 16;
-    callback.funcptr = cast(int function(int)) bridge.adjustedEntryOf(
+    callback.funcptr = cast(int function(int)) bridge.adjustedFunctionEntryOf(
         cast(const(void)*) target.funcptr, function_, -16);
     callback(5).should == 42;
 }
 
 
-// A chunk the pool copied from the template at run time works the same
-// as the template: `beginCallbackChunk` forces a fresh chunk made with
-// the given strategy, so the entry reserved next lives outside the
-// binary's own chunk. The dual-mapping strategy is the fallback for a
-// kernel that refuses to make written memory executable; a kernel that
-// allows it never takes that path on its own, so this drives it directly.
+// Every chunk of a bridge is a copy of the template: `beginChunk` forces a
+// fresh chunk made with the given strategy, so the entry reserved next lives
+// outside the binary's own template bytes. The dual-mapping strategy is the
+// fallback for a kernel that refuses to make written memory executable; a
+// kernel that allows it never takes that path on its own, so this drives it
+// directly.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
     @("chunk." ~ text(strategy))
     unittest {
@@ -389,17 +405,42 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
         Recorded recorded;
         auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        bridge.register(&word, function_);
+        bridge.registerFunction(&word, function_);
 
-        const chunksBefore = callbackChunkCount;
-        beginCallbackChunk(strategy);
-        callbackChunkCount.should == chunksBefore + 1;
+        const chunksBefore = bridge.chunkCount;
+        bridge.beginChunk(strategy);
+        bridge.chunkCount.should == chunksBefore + 1;
 
         auto entry = cast(IntOfInt) bridge.entryOf(&word);
         inTemplateChunk(entry).should == false;
 
         entry(100).should == 201;
         recorded.integers.should == [100];
+    }
+}
+
+
+// A released bridge gives back its chunks: it has none left, however many it
+// had. That every chunk is also unmapped is measured on the whole process in
+// `bin/at` (`at.runtime.registration`), where no other thread maps memory.
+static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
+    @("release.givesBackChunks." ~ text(strategy))
+    unittest {
+        auto function_ = declarationOf(
+            q{ extern(C) int twice(int x); }, "twice");
+        int word;
+        Recorded recorded;
+
+        auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+        bridge.register(&word, nativeSignatureOf(function_));
+        auto entry = cast(IntOfInt) bridge.entryOf(&word);
+        bridge.beginChunk(strategy);
+        bridge.chunkCount.should == 2;
+        entry(3).should == 7;
+
+        bridge.release;
+
+        bridge.chunkCount.should == 0;
     }
 }
 
@@ -416,9 +457,9 @@ static foreach (freshChunk; [false, true]) {
         auto owner = new CallbackBridge(&recordIntOfInt, &recorded);
         auto other = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        owner.register(&word, function_);
+        owner.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            owner.beginChunk(ChunkStrategy.protect);
         const entry = owner.entryOf(&word);
 
         owner.guestTarget(entry).word.should == &word;
@@ -438,9 +479,9 @@ static foreach (freshChunk; [false, true]) {
         Recorded recorded;
         auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        bridge.register(&word, function_);
+        bridge.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            bridge.beginChunk(ChunkStrategy.protect);
         const entry = bridge.entryOf(&word);
         bridge.guestTarget(entry).word.should == &word;
 
@@ -449,6 +490,26 @@ static foreach (freshChunk; [false, true]) {
 
         bridge.guestTarget(entry).word.should == null;
     }
+}
+
+
+// A bridge that has more chunks than its reserved address range holds still
+// names the guest function behind an entry of a chunk outside the range.
+@("guestTarget.chunkOutsideTheRange")
+unittest {
+    auto function_ = declarationOf(
+        q{ extern(C) int twice(int x); }, "twice");
+    Recorded recorded;
+    auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
+    int word;
+    bridge.register(&word, nativeSignatureOf(function_));
+    foreach (_; 0 .. 300)
+        bridge.beginChunk(ChunkStrategy.protect);
+
+    const entry = bridge.entryOf(&word);
+
+    bridge.guestTarget(entry).word.should == &word;
+    (cast(IntOfInt) entry)(100).should == 201;
 }
 
 
@@ -469,11 +530,11 @@ static foreach (freshChunk; [false, true]) {
         Recorded recorded;
         auto bridge = new CallbackBridge(&recordIntOfInt, &recorded);
         int word;
-        bridge.register(&word, function_);
+        bridge.registerFunction(&word, function_);
         if (freshChunk)
-            beginCallbackChunk(ChunkStrategy.protect);
+            bridge.beginChunk(ChunkStrategy.protect);
 
-        const entry = bridge.adjustedEntryOf(&word, function_, -16);
+        const entry = bridge.adjustedFunctionEntryOf(&word, function_, -16);
 
         const target = bridge.guestTarget(entry);
         target.word.should == &word;

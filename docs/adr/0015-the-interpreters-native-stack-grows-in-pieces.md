@@ -58,7 +58,7 @@ which completed in both compiled D and the Bytecode VM.
   only for finalizers on threads that have no local piece.
 - State that is local to a Fiber, such as the execution state, is looked up
   by the Fiber that the piece continues, or by the thread, and not by the
-  piece (`Continuation` in `hostthreads.d`). Host code that runs on a piece,
+  piece (`Continuation` in `host/threads.d`). Host code that runs on a piece,
   such as a destructor that a collection started by the walker calls, then
   finds the execution state that owns the piece.
 

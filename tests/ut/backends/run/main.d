@@ -2,7 +2,8 @@ module ut.backends.run.main;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program, run;
+import snakebite.program: Program;
+import snakebite.run.program: run;
 import snakebite.frontend.compiler: parseSnippet, newInFrontend, withCompilerLock;
 import std.meta: AliasSeq;
 import dmd.expression: ErrorExp;
@@ -67,7 +68,7 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
         string[] hostArguments = ["sb", "first", "second"];
 
         auto instance = ownedBackend!backend(program);
-        run(instance, program, hostArguments).should == 42;
+        run(instance, hostArguments).should == 42;
     }
 }
 

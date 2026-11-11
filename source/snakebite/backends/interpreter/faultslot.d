@@ -10,7 +10,7 @@ module snakebite.backends.interpreter.faultslot;
 
 private:
 
-import snakebite.framestack: FrameStack;
+import snakebite.stack.frames: FrameStack;
 
 public enum faultSlotBytes = (const(void)*).sizeof;
 

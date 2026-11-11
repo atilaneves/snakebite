@@ -8,11 +8,11 @@ import snakebite.ffi.symbol: Resolver;
 
 private:
 
-import snakebite.nativelayout: typeFacts;
+import snakebite.frontend.typefacts: typeFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // Everything about calling one already-compiled function that does not
@@ -284,9 +284,8 @@ public struct CallPlan {
         scope const(void*)[] arguments,
     ) const {
         import core.stdc.string: memcpy;
-        import snakebite.callarguments: CallArguments;
-        import snakebite.nativelayout:
-            delegateFunctionOffset, delegateValueSize;
+        import snakebite.native.arguments: CallArguments;
+        import snakebite.native.value: delegateFunctionOffset, delegateValueSize;
 
         // See `_callbacks`'s own doc for why the `const` goes.
         auto bridge = cast(CallbackBridge*) _callbacks;
@@ -384,7 +383,7 @@ public struct CallPlan {
     ) const {
         if (!_callbackVariadic)
             return null;
-        import snakebite.backends.variadic:
+        import snakebite.native.variadic:
             initializeNativeCursor;
         import snakebite.ffi.abi:
             maxFloatingArguments, maxIntegerArguments;
@@ -528,7 +527,7 @@ public struct CallPlan {
         if (!_hiddenReturnPointer)
             offset += alignScratch(bytesOf(_return));
         if (_callbackVariadic) {
-            import snakebite.backends.variadic: nativeCursorSize;
+            import snakebite.native.variadic: nativeCursorSize;
             _callbackVariadicOffset = alignScratch(offset);
             offset = _callbackVariadicOffset + nativeCursorSize;
         }
@@ -690,8 +689,8 @@ public struct CallPlan {
     }
 
     // Writes `value`'s low bytes to `place`, truncated to `store`'s width -
-    // the same raw-truncation rule `nativevalue.storeIntegral` uses, but
-    // written directly rather than through `nativelayout.storeIntegral`'s
+    // the same raw-truncation rule `native.value.storeIntegral` uses, but
+    // written directly rather than through `native.value.checkedStoreIntegral`'s
     // validate-and-throw wrapper: a plan's own register widths are already
     // known good, fixed once at prepare time, and never need re-checking -
     // or a second switch on the width `store` has already picked - on
@@ -1313,7 +1312,7 @@ public extern(C) bool executeIndirectCallPlan(
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
-    import snakebite.dependencyimage: DependencyImage;
+    import snakebite.image.dependency: DependencyImage;
 
     // Holds `SharedTable`s (finding 2.4): a copy would share their
     // storage with the original until one side grows.
@@ -1341,8 +1340,22 @@ public struct PlanCache {
     ) {
         if (word is null)
             word = of(declaration)._address;
+        // The bridge never reads the AST, so the signature is built here,
+        // under the compiler lock and only when the bridge has no entry
+        // yet. Lock order, outermost first: the compiler lock, then the
+        // bridge's mutex. A caller may already hold the compiler lock
+        // here (`ClassRuntimeCache.build` does), so the lock is not
+        // always released before the bridge takes its mutex; the bridge
+        // never takes the compiler lock.
+        NativeSignature signature;
+        if (adjustment != 0
+                && _callbacks.reservedAdjustedEntry(word, adjustment) is null) {
+            import snakebite.frontend.compiler: withCompilerLock;
+
+            withCompilerLock({ signature = nativeSignatureOf(declaration); });
+        }
         return cast(void*) _callbacks.adjustedEntryOf(
-            word, declaration, adjustment);
+            word, signature, adjustment);
     }
 
     public CallbackBridge.GuestTarget guestTarget(const(void)* address) const {
@@ -1393,7 +1406,7 @@ public struct PlanCache {
     // own doc), and `_signatures` is a `SharedTable`, which brings its
     // own insert lock (ADR-0006) - the same reasoning `snakebite.
     // backends.interpreter.walker`'s `Cache.build` and `snakebite.
-    // backends.calls.CallSelection.decisionOf` already apply to their
+    // language.call.selection.CallSelection.decisionOf` already apply to their
     // own caches.
     public const(CallPlan)* signatureOf(
         TypeFunction type, in bool context,
@@ -1422,6 +1435,12 @@ public struct PlanCache {
         _callbacks = callbacks;
     }
 
+    // How many chunks of entries the installed bridge has.
+    version(unittest)
+    public size_t callbackChunkCount() {
+        return _callbacks is null ? 0 : _callbacks.chunkCount;
+    }
+
     // Records that `word` is what this backend stores for the guest
     // function `declaration` when guest code takes its address or makes
     // a delegate to it. Only a word a backend itself emitted is ever
@@ -1432,18 +1451,35 @@ public struct PlanCache {
         const(void)* word,
         FuncDeclaration declaration,
     ) {
+        requireCallbacks;
+        if (!_callbacks.contains(word))
+            _callbacks.register(word, nativeSignatureOf(declaration));
+    }
+
+    // As `registerGuestFunction`, for a backend that keeps the
+    // declaration itself. It does not look at `contains`: the bridge
+    // ignores a word it already holds, and the caller, which has to build
+    // `signature` from the AST, asks `isGuestWord` first to skip that work.
+    public void registerEntry(
+        const(void)* word,
+        NativeSignature signature,
+    ) {
+        requireCallbacks;
+        _callbacks.register(word, signature);
+    }
+
+    private void requireCallbacks() const {
         if (_callbacks is null)
             throw new Exception(
                 "ffi: a guest function was registered before the " ~
                     "backend installed its callback bridge",
             );
-        _callbacks.register(word, declaration);
     }
 
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
     import snakebite.ffi.abi: Register;
-    import snakebite.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
 
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); a plan is prepared once, on its first use.
@@ -1499,7 +1535,7 @@ public struct PlanCache {
     // native copy: the dependency image, or an already-loaded shared
     // object. Never the running executable's own copy of a template
     // instance snakebite itself instantiated
-    // (`snakebite.backends.calls.CallSelection.buildDecision` asks this,
+    // (`snakebite.language.call.selection.CallSelection.buildDecision` asks this,
     // never `hasNativeSymbol`, for that check). `nativeTarget` is a fixed
     // host wrapper, not a `dlsym` answer, so it counts as independent here
     // too.
@@ -1855,7 +1891,7 @@ private CallPlan prepareCommon(
             import gen.dpragma: LDCPragma;
 
             // LDC compiles this declaration inline, so the host has no symbol
-            // for it; a wrapper in `snakebite.backends.ldcintrinsics` is the
+            // for it; a wrapper in `snakebite.builtin.ldc` is the
             // way to a result, and this one has none.
             if (function_.llvmInternal != LDCPragma.LLVMnone)
                 throw new Exception(
@@ -1876,20 +1912,51 @@ private CallPlan prepareCommon(
     return plan;
 }
 
-// The plan a pool entry (ADR-0003) replays backwards when host code calls
-// the guest function `function_`: the same classification a forward call
-// to a function of this signature would get, from the function's own
-// declared linkage, with no address to resolve - the guest function has
-// none. `snakebite.ffi.callback` keeps one per slot. Reference results
-// use the same pointer return convention as a forward call.
-package CallPlan prepareCallback(
+// What a native entry (ADR-0003) needs to know about the signature it
+// serves: the linkage, the shape of each parameter and of the result, the
+// hidden context flag and the variadic flags. It is a plain record with
+// no pointer to the AST, so code that runs after compilation can
+// register an entry without a frontend.
+public struct NativeSignature {
+    import snakebite.ffi.abi: ArgumentPlan;
+
+    public struct Parameter {
+        ArgumentPlan shape;
+        // `ref`/`out`: the argument is the value's address.
+        bool indirect;
+        // A function pointer, a delegate or a `lazy` parameter: the
+        // pool-entry swap applies to it.
+        bool isCallback;
+        // A delegate or `lazy`: two words, the function word second.
+        bool isDelegate;
+    }
+
+    imported!"dmd.astenums".LINK linkage;
+    bool hasContext;
+    // The function is declared with C-style or untyped D variadics.
+    bool variadic;
+    // The plan is for a call that passes variadic arguments.
+    bool variadicCall;
+    bool returnsRef;
+    bool hiddenReturnPointer;
+    // Meaningful when neither `returnsRef` nor `hiddenReturnPointer`.
+    ArgumentPlan result;
+    // The declared parameters, then any extra arguments of a variadic
+    // call site.
+    Parameter[] parameters;
+}
+
+// The signature of the guest function `function_`, from its own declared
+// linkage. Compile-time only: it reads the AST.
+public NativeSignature nativeSignatureOf(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
     import dmd.astenums: VarArg;
+    import snakebite.frontend.dmd.delegates: hasHiddenThis;
     import snakebite.frontend.dmd.mangle: completeFunctionType;
     import std.conv: text;
 
-    // As `prepareCommon`: `shapeOf` below reads `function_.type.nextOf`
+    // As `prepareCommon`: `signatureOf` below reads `function_.type.nextOf`
     // to classify the return value, an inferred return type or attribute
     // set dmd has not resolved yet would otherwise be read incomplete.
     completeFunctionType(function_);
@@ -1900,19 +1967,31 @@ package CallPlan prepareCallback(
             text("ffi cannot make a callback entry for `",
                 function_.toString, "`: it is not a function"),
         );
-    const isVariadic = type.parameterList.varargs == VarArg.variadic;
-    auto plan = shapeOf(function_, function_.resolvedLinkage, null,
-        isVariadic);
-    plan._callbackVariadic = isVariadic;
-    plan._callbackDVariadic = isVariadic
-        && function_.resolvedLinkage == imported!"dmd.astenums".LINK.d;
+    return signatureOf(type, hasHiddenThis(function_),
+        function_.resolvedLinkage, null,
+        type.parameterList.varargs == VarArg.variadic);
+}
+
+// The plan a pool entry (ADR-0003) replays backwards when host code calls
+// a guest function of signature `signature`: the same classification a
+// forward call to a function of this signature would get, with no address
+// to resolve - the guest function has none. `snakebite.ffi.callback`
+// keeps one per slot. Reference results use the same pointer return
+// convention as a forward call.
+package CallPlan prepareCallback(in NativeSignature signature) {
+    import dmd.astenums: LINK;
+
+    auto plan = planOf(signature);
+    plan._callbackVariadic = signature.variadic;
+    plan._callbackDVariadic = signature.variadic
+        && signature.linkage == LINK.d;
     plan.buildCallbackLayout;
     return plan;
 }
 
-// Everything `prepareCommon` and `prepareCallback` share: the plan's
-// whole shape, from `function_`'s signature and `linkage` alone, with
-// `_address` left unset.
+// The plan's whole shape, from `function_`'s signature and `linkage`
+// alone, with `_address` left unset: `signatureOf` classifies it and
+// `planOf` lays it out.
 private CallPlan shapeOf(
     imported!"dmd.func".FuncDeclaration function_,
     in imported!"dmd.astenums".LINK linkage,
@@ -1931,10 +2010,20 @@ private CallPlan _shapeOf(
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
+    return planOf(signatureOf(type, hasContext, linkage, extraArgumentTypes,
+        isVariadicCall));
+}
+
+// The part of `_shapeOf` that reads the AST: classifies every parameter
+// and the result into a `NativeSignature`.
+private NativeSignature signatureOf(
+    imported!"dmd.mtype".TypeFunction type, in bool hasContext,
+    in imported!"dmd.astenums".LINK linkage,
+    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    in bool isVariadicCall,
+) {
     import snakebite.ffi.abi:
-        ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
-        dVariadicArgumentsIsSlice, needsHiddenReturnPointer,
-        reversedDParameters, supported;
+        ArgumentPlan, Register, needsHiddenReturnPointer, supported;
     import dmd.astenums: LINK, STC, Tdelegate, VarArg;
     import dmd.typesem: nextOf, toBasetype;
     import std.conv: text;
@@ -1967,7 +2056,7 @@ private CallPlan _shapeOf(
         // `classify`'s later, recursive field reads find every size it
         // touches already resolved.
         {
-            import snakebite.nativelayout: TypeFacts;
+            import snakebite.native.value: TypeFacts;
 
             auto returnType = type.nextOf;
             if (returnType !is null)
@@ -1989,7 +2078,7 @@ private CallPlan _shapeOf(
         // doc). `VarArg.typesafe` (`T t...`) needs neither: the frontend
         // has already packed a typesafe call's trailing arguments into
         // one array-typed argument by the time this ever runs
-        // (`snakebite.backends.calls.arityMismatches`'s own doc), so it
+        // (`snakebite.language.call.selection.arityMismatches`'s own doc), so it
         // classifies like any other declared parameter below, through the
         // ordinary `prepare`/`.of` path.
         const isCVariadic = type.parameterList.varargs == VarArg.variadic
@@ -2019,24 +2108,11 @@ private CallPlan _shapeOf(
                     "` without its call-site argument types"),
             );
 
-        // An `extern(D)` untyped variadic callee's own hidden `_arguments`
-        // (this function's own doc above) is one more argument, alongside
-        // `hasContext`'s hidden `this` - `addArgument` below places it
-        // right after `this` and before every declared parameter, at
-        // index `firstExplicit` (`buildMoves`'s own doc), so it falls
-        // inside the very same reversed-or-forward group as the declared
-        // parameters and the extra arguments that follow it. Its own
-        // shape depends on the host compiler (`abi.
-        // dVariadicArgumentsIsSlice`'s own doc): one pointer register on
-        // dmd, a two-register `TypeInfo[]` slice on ldc.
-        const hasVArguments = isVariadicCall && isDVariadic;
-
-        const count = type.parameterList.length;
-        const argumentCount = count + hasContext + hasVArguments
-            + extraArgumentTypes.length;
-
-        CallPlan plan;
-        plan._arguments.length = argumentCount;
+        NativeSignature signature;
+        signature.linkage = linkage;
+        signature.hasContext = hasContext;
+        signature.variadic = type.parameterList.varargs == VarArg.variadic;
+        signature.variadicCall = isVariadicCall;
         // A `ref` return hands back the *address* of the result in the
         // return register, not the result: that address is what travels,
         // whatever `type.nextOf` says, so the return is a pointer and
@@ -2044,84 +2120,17 @@ private CallPlan _shapeOf(
         // The caller gets the address and reads the value through it -
         // the call adapter in `ffi.call` applies this same convention to
         // interpreted and native callees.
-        const returnsRef = type.isRef != 0;
-        plan._hiddenReturnPointer =
-            !returnsRef && needsHiddenReturnPointer(type.nextOf);
-        plan._contextPrecedesHiddenReturnPointer =
-            contextPrecedesHiddenReturnPointer(linkage);
+        signature.returnsRef = type.isRef != 0;
+        signature.hiddenReturnPointer = !signature.returnsRef
+            && needsHiddenReturnPointer(type.nextOf);
+        if (!signature.returnsRef && !signature.hiddenReturnPointer)
+            signature.result = ArgumentPlan.ofReturn(type.nextOf);
 
-        // An `extern(D)` untyped variadic callee never reverses its
-        // argument registers, even when `reversedDParameters` reverses
-        // every other `extern(D)` call this host compiler makes: the
-        // callee's own `_argptr`/register-save-area machinery (dmd's
-        // `semantic3.d`, this function's own `isDVariadic` doc) has to
-        // walk every parameter - `_arguments`, the declared ones, and
-        // the extra ones after it - in one consistent forward order to
-        // find where the register save area and the stack overflow area
-        // begin, so dmd's own codegen keeps ordinary declaration order
-        // for any `VarArg.variadic` callee (verified: disassembling a
-        // real `extern(D) int f(int a, int b, int c, ...)` call built by
-        // this exact dmd shows `%rdi`=`_arguments`, `%rsi`=`a`, `%rdx`=
-        // `b`, `%rcx`=`c`, `%r8`/`%r9`=the two extra arguments - plain
-        // declaration order, not reversed).
-        plan._variadicCall = isVariadicCall
-            || type.parameterList.varargs == VarArg.variadic;
-        plan._reversedArguments = reversedDParameters
-            && (linkage == LINK.d || linkage == LINK.default_)
-            && !isDVariadic;
-
-        size_t argumentIndex;
-
-        // The shape of a bare pointer-sized argument - a hidden `this`,
-        // a `ref`/`out` parameter's own address, and, on dmd, (issue #334
-        // step 6) an `extern(D)` untyped variadic callee's hidden
-        // `_arguments` - all travel this same one-eightbyte-pointer way.
-        enum ArgumentPlan pointerArgument = ArgumentPlan(
-            [Register(Register.Kind.pointer, 8), Register.init], 1, false,
-        );
-
-        // On ldc, `_arguments` is a two-register `TypeInfo[]` slice
-        // instead (`abi.dVariadicArgumentsIsSlice`'s own doc) - the same
-        // shape `abi.classify`'s own `Tarray` case gives any other
-        // dynamic-array-typed argument, length then pointer, both
-        // integer-class.
-        enum ArgumentPlan sliceArgument = ArgumentPlan(
-            [Register(Register.Kind.integer, 8),
-                Register(Register.Kind.integer, 8)], 2, false,
-        );
-
-        // Places one argument's `ArgumentPlan` in `plan`, at the next
-        // available index - shared by the declared-parameter loop below
-        // and, for a variadic call site, the extra-argument loop after it,
-        // since both place an argument exactly the same way. `_arguments`
-        // and `_moves` are dynamic arrays with a heap fallback beyond the
-        // frame's inline stack area (see `CallArguments` and `Frame`), so
-        // no fixed word budget applies here any more.
-        void addArgument(in ArgumentPlan argument) {
-            plan._arguments[argumentIndex++] = argument;
-        }
-
-        if (hasContext) {
-            plan._hiddenContext = true;
-            addArgument(pointerArgument);
-        }
-
-        // An `extern(D)` untyped variadic callee's hidden `_arguments`
-        // (`hasVArguments`'s own doc above) is placed here, right after
-        // any hidden `this` and right before every declared parameter -
-        // exactly where the frontend itself puts it in `arguments[]`, and
-        // exactly `firstExplicit` in `buildMoves`, so it shares that
-        // function's reversed-or-forward group with the declared
-        // parameters and the extra arguments added after them.
-        if (hasVArguments)
-            addArgument(
-                dVariadicArgumentsIsSlice ? sliceArgument : pointerArgument);
-
-        foreach (i; 0 .. count) {
+        foreach (i; 0 .. type.parameterList.length) {
             // A `ref` parameter occupies a pointer slot in the caller's
             // frame - the address of the argument's own storage, not a
             // copy of its value (see `FrameLayout.of` in
-            // `backends/layout.d`, which lays such a slot out the
+            // `language/layout/frame.d`, which lays such a slot out the
             // same way). That address is the value that travels, so the
             // argument is one pointer register whatever
             // `parameterList[i].type` - the *pointee* type - would
@@ -2134,12 +2143,12 @@ private CallPlan _shapeOf(
                 pointer !is null && pointer.nextOf.isTypeFunction !is null;
             const isDelegate = parameterType.ty == Tdelegate
                 || (storageClass & STC.lazy_) != 0;
-            if (isFunctionPointer || isDelegate)
-                plan._callbackArguments ~= CallPlan.CallbackArgument(
-                    argumentIndex, isRef, isDelegate);
-            addArgument(isRef
-                ? pointerArgument
-                : storageClass & STC.lazy_
+            NativeSignature.Parameter parameter;
+            parameter.indirect = isRef;
+            parameter.isCallback = isFunctionPointer || isDelegate;
+            parameter.isDelegate = isDelegate;
+            if (!isRef)
+                parameter.shape = storageClass & STC.lazy_
                     ? ArgumentPlan(
                         [
                             Register(Register.Kind.pointer, 8),
@@ -2148,16 +2157,12 @@ private CallPlan _shapeOf(
                         2,
                         false,
                     )
-                : ArgumentPlan.of(type.parameterList[i].type));
+                    : ArgumentPlan.of(type.parameterList[i].type);
+            signature.parameters ~= parameter;
         }
 
         // A variadic call site's own extra arguments classify exactly
-        // like a named parameter (ADR-0010's C-variadics paragraph):
-        // registers first, then the stack, in the same declaration-order
-        // pass `buildMoves` already gives every argument above -
-        // `argumentIndex` keeps counting up from where the declared
-        // parameters left off, so `buildMoves` never has to know where
-        // one group ends and the other begins.
+        // like a named parameter (ADR-0010's C-variadics paragraph).
         //
         // A function pointer or delegate extra argument gets the same
         // pool-entry swap (`callWithCallbacks`) a declared parameter of
@@ -2169,23 +2174,123 @@ private CallPlan _shapeOf(
             const isFunctionPointer =
                 pointer !is null && pointer.nextOf.isTypeFunction !is null;
             const isDelegate = base.ty == Tdelegate;
-            if (isFunctionPointer || isDelegate)
-                plan._callbackArguments ~= CallPlan.CallbackArgument(
-                    argumentIndex, false, isDelegate);
-            addArgument(ArgumentPlan.of(extraType));
+            NativeSignature.Parameter parameter;
+            parameter.isCallback = isFunctionPointer || isDelegate;
+            parameter.isDelegate = isDelegate;
+            parameter.shape = ArgumentPlan.of(extraType);
+            signature.parameters ~= parameter;
         }
 
-        plan._parameterCount = argumentCount;
-        if (returnsRef) {
-            plan._return = ArgumentPlan(
-                [Register(Register.Kind.pointer, 8), Register.init], 1,
-                false,
-            );
-        } else if (!plan._hiddenReturnPointer)
-            plan._return = ArgumentPlan.ofReturn(type.nextOf);
-
-        plan.buildMoves;
-
-        return plan;
+        return signature;
     }
+}
+
+// The part of `_shapeOf` that needs no AST: places every argument of
+// `signature` and builds the moves.
+private CallPlan planOf(in NativeSignature signature) {
+    import snakebite.ffi.abi:
+        ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
+        dVariadicArgumentsIsSlice, reversedDParameters;
+    import dmd.astenums: LINK;
+
+    const linkage = signature.linkage;
+    const isDVariadic = signature.variadic && linkage == LINK.d;
+
+    // An `extern(D)` untyped variadic callee's own hidden `_arguments`
+    // (dmd's `functionParameters` inserts it on every such call site) is
+    // one more argument, alongside `hasContext`'s hidden `this` -
+    // `addArgument` below places it right after `this` and before every
+    // declared parameter, at index `firstExplicit` (`buildMoves`'s own
+    // doc), so it falls inside the very same reversed-or-forward group as
+    // the declared parameters and the extra arguments that follow it. Its
+    // own shape depends on the host compiler (`abi.
+    // dVariadicArgumentsIsSlice`'s own doc): one pointer register on dmd,
+    // a two-register `TypeInfo[]` slice on ldc.
+    const hasVArguments = signature.variadicCall && isDVariadic;
+
+    const argumentCount = signature.parameters.length
+        + signature.hasContext + hasVArguments;
+
+    CallPlan plan;
+    plan._arguments.length = argumentCount;
+    plan._hiddenReturnPointer = signature.hiddenReturnPointer;
+    plan._contextPrecedesHiddenReturnPointer =
+        contextPrecedesHiddenReturnPointer(linkage);
+
+    // An `extern(D)` untyped variadic callee never reverses its
+    // argument registers, even when `reversedDParameters` reverses
+    // every other `extern(D)` call this host compiler makes: the
+    // callee's own `_argptr`/register-save-area machinery has to
+    // walk every parameter - `_arguments`, the declared ones, and
+    // the extra ones after it - in one consistent forward order to
+    // find where the register save area and the stack overflow area
+    // begin, so dmd's own codegen keeps ordinary declaration order
+    // for any `VarArg.variadic` callee (verified: disassembling a
+    // real `extern(D) int f(int a, int b, int c, ...)` call built by
+    // this exact dmd shows `%rdi`=`_arguments`, `%rsi`=`a`, `%rdx`=
+    // `b`, `%rcx`=`c`, `%r8`/`%r9`=the two extra arguments - plain
+    // declaration order, not reversed).
+    plan._variadicCall = signature.variadicCall || signature.variadic;
+    plan._reversedArguments = reversedDParameters
+        && (linkage == LINK.d || linkage == LINK.default_)
+        && !isDVariadic;
+
+    size_t argumentIndex;
+
+    // The shape of a bare pointer-sized argument - a hidden `this`,
+    // a `ref`/`out` parameter's own address, and, on dmd, an
+    // `extern(D)` untyped variadic callee's hidden `_arguments` - all
+    // travel this same one-eightbyte-pointer way.
+    enum ArgumentPlan pointerArgument = ArgumentPlan(
+        [Register(Register.Kind.pointer, 8), Register.init], 1, false,
+    );
+
+    // On ldc, `_arguments` is a two-register `TypeInfo[]` slice
+    // instead (`abi.dVariadicArgumentsIsSlice`'s own doc) - the same
+    // shape `abi.classify`'s own `Tarray` case gives any other
+    // dynamic-array-typed argument, length then pointer, both
+    // integer-class.
+    enum ArgumentPlan sliceArgument = ArgumentPlan(
+        [Register(Register.Kind.integer, 8),
+            Register(Register.Kind.integer, 8)], 2, false,
+    );
+
+    // `_arguments` and `_moves` are dynamic arrays with a heap fallback
+    // beyond the frame's inline stack area (see `CallArguments` and
+    // `Frame`), so no fixed word budget applies here.
+    void addArgument(in ArgumentPlan argument) {
+        plan._arguments[argumentIndex++] = argument;
+    }
+
+    if (signature.hasContext) {
+        plan._hiddenContext = true;
+        addArgument(pointerArgument);
+    }
+
+    // Right after any hidden `this` and right before every declared
+    // parameter - exactly where the frontend itself puts it in
+    // `arguments[]`, and exactly `firstExplicit` in `buildMoves`.
+    if (hasVArguments)
+        addArgument(
+            dVariadicArgumentsIsSlice ? sliceArgument : pointerArgument);
+
+    foreach (parameter; signature.parameters) {
+        if (parameter.isCallback)
+            plan._callbackArguments ~= CallPlan.CallbackArgument(
+                argumentIndex, parameter.indirect, parameter.isDelegate);
+        addArgument(parameter.indirect ? pointerArgument : parameter.shape);
+    }
+
+    plan._parameterCount = argumentCount;
+    if (signature.returnsRef) {
+        plan._return = ArgumentPlan(
+            [Register(Register.Kind.pointer, 8), Register.init], 1,
+            false,
+        );
+    } else if (!plan._hiddenReturnPointer)
+        plan._return = signature.result;
+
+    plan.buildMoves;
+
+    return plan;
 }

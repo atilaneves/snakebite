@@ -39,7 +39,7 @@ is therefore: an arena object must not be the only reference to a GC
 object. Frontend input arrays are copied so that DMD cannot retain host
 GC memory through an input pointer. Debug checks catch DMD allocations
 that escape the frontend boundary, and `--check-arena` looks for arena
-words that point into GC blocks. [Current GC proxy](../source/snakebite/gc.d),
+words that point into GC blocks. [Current GC proxy](../source/snakebite/memory/gc.d),
 [frontend boundary](../source/snakebite/frontend/compiler.d)
 The arena does not replace native layout or druntime. Guest data still
 uses native D layout, and calls across the host/guest barrier use those
@@ -63,7 +63,7 @@ invariant and the report's classification rules. The runner's
 an unexpected retained pointer may come from any earlier frontend call.
 [Memory tests, now moved](../validation/arena/memory.d),
 [replacement validation runner](../validation/main.d),
-[arena report](../source/snakebite/gc.d)
+[arena report](../source/snakebite/memory/gc.d)
 The scan also has measurable cost when repeated. The supplied diagnosis
 measured 21 whole-arena scans in the ordinary memory test module. A
 single enum representation scan took 0.087 seconds with a small arena

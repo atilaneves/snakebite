@@ -91,26 +91,7 @@ public bool hasHiddenThis(FuncDeclaration function_) {
     return function_.isThis() !is null || function_.isNested();
 }
 
-// The nearest enclosing function `symbol` (a captured variable or a nested
-// function) is declared in, or `null` if it is declared at module scope -
-// `toParent2` already walks past any block or `Catch` scope that is not a
-// `Dsymbol` of its own, straight to the nearest enclosing function or
-// aggregate. Shared because a captured variable's owner (`VarDeclaration.
-// toParent2`) and a delegate's own target's parent (`FuncDeclaration.
-// toParent2`, see `delegateTargetOf` below) are both resolved the same way.
-public FuncDeclaration outerFunctionOf(Dsymbol symbol) {
-    auto parent = symbol.toParent2();
-    while (parent !is null) {
-        if (auto function_ = parent.isFuncDeclaration)
-            return function_;
-        // A module cannot nest in a function. Do not read package parents:
-        // scopeCreateGlobal can change them during another module's semantic.
-        if (parent.isModule !is null)
-            return null;
-        parent = parent.toParent2();
-    }
-    return null;
-}
+public import snakebite.frontend.dmd.functions: outerFunctionOf;
 
 // Whether `symbol` has two contexts: a function or aggregate template
 // instantiated with an alias to a local symbol of another function or

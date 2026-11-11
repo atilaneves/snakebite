@@ -2,10 +2,10 @@ module ut.backends.program;
 
 
 import dmd.func: FuncDeclaration;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.ctfe: Ctfe;
-import snakebite.exception: SnakebiteException;
+import snakebite.failure.report: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
     findFunction,

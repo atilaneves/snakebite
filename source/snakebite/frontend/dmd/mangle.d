@@ -4,7 +4,7 @@ module snakebite.frontend.dmd.mangle;
 private:
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 
 // A function's type is not complete until dmd has run semantic on its
@@ -146,4 +146,21 @@ private ref ThreadNames names() {
     if (_names.generation != generation)
         _names = ThreadNames(generation);
     return _names;
+}
+
+public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
+    import dmd.common.outbuffer: OutBuffer;
+    import dmd.mangle: mangleToBuffer;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    // `symbol` is never itself a function (every caller branches to
+    // `snakebite.ffi.plan.PlanCache.addressOf`/`mangledNameOf` for that -
+    // see each caller's own `isFuncDeclaration` check), but it can still
+    // be nested inside one (a native module's own `static` local variable)
+    // whose mangled name recurses through that function's own mangled
+    // signature - see `completeMangleTargets`.
+    completeMangleTargets(symbol);
+    OutBuffer name;
+    newInFrontend!mangleToBuffer(symbol, name);
+    return name[].idup;
 }

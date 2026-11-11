@@ -6,7 +6,7 @@ public import snakebite.backends.bytecode.vm: JitSetting;
 
 import core.runtime: Runtime;
 import snakebite.backends.bytecode: Bytecode;
-import snakebite.gc: lowmemHelp, selectFrontendMemory;
+import snakebite.memory.gc: lowmemHelp, selectFrontendMemory;
 import std.algorithm.iteration: filter;
 import std.algorithm.searching: canFind;
 import std.array: array;
@@ -64,4 +64,29 @@ string nativeFixture(in string name) {
     const path = buildPath(thisExePath.dirName, "fixtures", name);
     assert(path.exists, "missing " ~ path ~ ": build bin/ut with ninja");
     return path;
+}
+
+
+// Bytes of read-execute mappings this process holds that have no file, or
+// that are the callback pool's memory file: what the chunks of callback
+// entries occupy, and whatever else maps executable memory without a file.
+// It reads the whole process, so another thread that maps executable memory
+// changes it: use it only where no such thread runs (`bin/at` runs its tests
+// one at a time).
+size_t executableChunkBytes() {
+    import std.algorithm: canFind;
+    import std.conv: to;
+    import std.file: readText;
+    import std.string: lineSplitter, split;
+
+    size_t total;
+    foreach (line; readText("/proc/self/maps").lineSplitter) {
+        const fields = line.split;
+        if (fields[1][0 .. 3] != "r-x" || (fields.length > 5
+                && !fields[5].canFind("snakebite-callbacks")))
+            continue;
+        const range = fields[0].split("-");
+        total += range[1].to!size_t(16) - range[0].to!size_t(16);
+    }
+    return total;
 }

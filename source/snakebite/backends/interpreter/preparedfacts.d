@@ -9,15 +9,17 @@ import dmd.mtype: Type;
 import dmd.astenums: Tfunction, Ttuple, Terror;
 import dmd.typesem: toBasetype, baseElemOf;
 import dmd.location: Loc;
-import snakebite.backends.runtimetypes: RuntimeTypes;
-import snakebite.backends.aggregateinit: AggregateInitPlan, planStructLiteral;
-import snakebite.backends.casts: CastPlan, classify;
-import snakebite.backends.dualcontext: ContextSource, calleeContextSourceOf;
+import snakebite.language.statics.typeinfo: RuntimeTypes;
+import snakebite.language.storage.lifetime: AggregateInitPlan, planStructLiteral;
+import snakebite.language.operators.casts: CastPlan, classify;
+import snakebite.language.context.source: ContextSource, calleeContextSourceOf;
 import snakebite.frontend.compiler: gagged;
-import snakebite.nativelayout:
-    NativeData, TypeFacts, typeFacts, tryTypeFacts, bitfieldAccess;
-import snakebite.nativevalue: BitfieldAccess;
-import snakebite.sharedtable: SharedTable;
+import snakebite.frontend.typefacts: typeFacts, tryTypeFacts, bitfieldAccess;
+import snakebite.native.value: TypeFacts;
+import snakebite.language.statics.data: NativeData;
+import snakebite.native.value: BitfieldAccess;
+import snakebite.native.signature: SignatureTable;
+import snakebite.host.sharedtable: SharedTable;
 
 // Facts have one program owner. Preparation and ordinary execution use the
 // same builders, so a prepared callback reads the same immutable entries.
@@ -34,10 +36,15 @@ package struct PreparedFacts {
 
     private NativeData* _nativeData;
     private RuntimeTypes* _runtimeTypes;
+    private SignatureTable* _signatures;
 
-    package this(NativeData* nativeData, RuntimeTypes* runtimeTypes) {
+    package this(
+        NativeData* nativeData, RuntimeTypes* runtimeTypes,
+        SignatureTable* signatures,
+    ) {
         _nativeData = nativeData;
         _runtimeTypes = runtimeTypes;
+        _signatures = signatures;
     }
 
     package TypeFacts typeOf(Type type) {
@@ -162,6 +169,7 @@ package struct PreparedFacts {
             return found;
         // Inherited contracts can need a base frame even if its body never
         // runs. Callback preparation must build that context before entry.
-        return _contexts.insert(key, calleeContextSourceOf(caller, callee));
+        return _contexts.insert(key,
+            calleeContextSourceOf(caller, callee, *_signatures));
     }
 }

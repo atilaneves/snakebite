@@ -7,7 +7,8 @@ module ut.backends.run.declarations;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program, run;
+import snakebite.program: Program;
+import snakebite.run.program: run;
 import snakebite.frontend.compiler: parseSnippet;
 
 
@@ -171,7 +172,7 @@ private int programStatus(Backend)(in Sandbox sandbox, in string code) {
         ~ crtTrace ~ code;
     auto program = Program([parseSnippet(source)]);
     auto instance = ownedBackend!Backend(program);
-    return run(instance, program);
+    return run(instance);
 }
 
 

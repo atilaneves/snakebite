@@ -63,7 +63,9 @@ with inline assembly.
 ### JIT code has no frame and makes no calls
 
 JIT code uses only the scratch registers of the map. It has no stack frame.
-It does not call a function. It does not use the stack. For this reason:
+Guest calls and returns also set the activation and frame arguments for the
+function they enter. JIT code does not call a function or use the stack. For
+this reason:
 
 - It needs no unwind information. A guest exception is thrown only by a
   real handler (a bounds failure, an assert, a call), and JIT code reaches
@@ -91,13 +93,39 @@ emitter handles. The exit depends on how the VM dispatches.
 
 A branch whose target is an instruction of the same function is a relative
 jump inside the code of that function. Every other transfer is
-an absolute `mov` and `jmp rax`. No JIT code uses a relative jump or call
+an absolute jump, either to an original handler or through a live handler
+slot. No JIT code uses a relative jump or call
 across functions or across chunks of the code region, so the code region
 can have any address, and chunks can be anywhere in memory.
 
+### Guest calls and returns
+
+With chained dispatch, a direct window call has a template if its site
+has published the callee and its frame layout by the time the caller gets
+JIT code. The template uses these facts as immediates. It claims the frame,
+links the same activation as the handler, and jumps through the callee's
+first handler slot. If the frame stack must grow or the callee reaches the
+tier-up threshold, the original counting handler takes over before the
+template changes the frame or the count.
+
+An indirect window call can use the same template. The counting handler
+records the first target whose frame fits the window. The callback bridge
+keeps that entry valid for the lifetime of the bytecode that uses it. If
+the caller compiles after the handler publishes the target, the template
+checks the current entry address before using the recorded callee and
+receiver adjustment. It reads the receiver from the current window on
+every call. A different target or a site with no recorded target uses the
+original handler.
+
+A return to a guest caller with no pending cleanup releases the frame and
+jumps through the caller's resume slot. A value return can copy up to 64
+bytes to the result place. A root return, a return with cleanup, and a
+larger copy use their original handlers. Both transfers read live handler
+slots so they work between functions at different tiers.
+
 ### Tier-up
 
-A function is hot after 256 events (`jitThreshold` in `vm.d`). An event is a
+A function is hot after 256 events (`jitThreshold` in `jit.d`). An event is a
 call of the function, or one execution of one of its backward branches. A
 function that loops once for a long time gets hot at its loop, and a
 function that is short and called often gets hot at its calls.
@@ -119,38 +147,82 @@ not wait: the thread that holds the lock may be one that the GC suspended.
 The function counts another 256 events and asks again.
 
 The VM does not compile while `GC.inFinalizer` is true. A guest destructor
-that runs in a finalizer can make a function hot. The compile allocates
-from the GC, because the tables that classify handlers are associative arrays.
-It also maps memory and takes a lock. A finalizer must not allocate from the
-GC, and must not wait for a thread that a collection suspended. The function
-stays in its handlers, and compiles at a later event.
+that runs in a finalizer can make a function hot. The compile can allocate
+from the GC, because the first one builds the tables that classify handlers,
+and they are associative arrays. It also maps memory and takes a lock. A
+finalizer must not allocate from the GC, and must not wait for a thread that a
+collection suspended. The function stays in its handlers, and compiles at a
+later event.
 
 The emitter allocates nothing for each instruction. It works in buffers that
-a compile reuses, and in the code region. The cost of a compile is paid at
-run time, so it must be small.
+a compile reuses (they belong to the instance), and in the code region. The
+cost of a compile is paid at run time, so it must be small.
 
 The code of a function is made from a snapshot of its instructions. A
 counting twin is replaced by the handler it counts, so that the code
-of a backward branch does not count a second time. A call keeps its twin:
-the code of the call still counts the events of the callee.
+of a backward branch does not count a second time. A call keeps its twin as
+the fallback. A call template adds the same event to the callee's count.
 
 ### Code memory
 
-The code is in a `memfd` file. Each part of the file is mapped twice: a
-write view, which the emitter uses, and an execute view, which the handler
-words point to. No page changes protection, so a compile makes no
-`mprotect` call, and no page is both writable and executable in one view.
+Each chunk of code has a `memfd` file. The JIT maps each file twice: a write
+view for the emitter and an execute view for the handler words. The JIT
+closes the file descriptor after it maps the chunk. The mappings keep the
+file alive. No page changes protection, so a compile makes no `mprotect`
+call, and no page is both writable and executable in one view.
 
-The file starts with 1 MiB and grows on demand: `ftruncate` extends it, and
-the next chunk is mapped in both views. Old chunks stay mapped, because their
-code is in use. Functions are packed with 16-byte alignment. A function never
-spans two chunks: when the room that a function can need is more than what
-is left of the chunk, the function goes to a new chunk. Pages are made
-present with `MADV_POPULATE_*` in parts of 128 KiB, so no compile takes a
-page fault.
+The JIT adds chunks of at least 1 MiB as needed. Old chunks stay mapped
+because their code is in use. Functions are packed with 16-byte alignment.
+If the function can need more space than remains in the current chunk, it
+goes in a new chunk. Pages are made present with `MADV_POPULATE_*` in parts
+of 128 KiB, so no compile takes a page fault.
 
-Code is never freed. A function that has JIT code keeps it until the process
-ends.
+Code is never freed while guest code of its instance can run. The code region
+belongs to the `Bytecode` instance that compiled the functions, not to the
+process. The instance makes the region at its first JIT compile. Each
+`Function` points to the JIT state of its instance (`Function.jit`), so a
+tier-up finds the region, the lock and the scratch buffers of its owner. The
+lock is one word in that state, so two instances do not exclude each other.
+
+The owner gives the region back; the garbage collector does not. A `Bytecode`
+instance has no finalizer, so a collection never runs a destructor of its
+state. When the owner ends the instance (`Owned`), the instance checks
+whether host code holds a callback entry. If it does, a callback can enter
+the instance at any time, so the region stays. If it does not, the region is
+unmapped and its file is closed when the last execution state of the
+instance ends (`ExecutionStates`): an active call or a suspended fiber keeps
+its state until it returns, so no guest code of the instance, and no JIT code,
+is running or can start. A later compile on the instance fails.
+
+Two things are not instance state. The CPU check (BMI2) and the check of the
+calling convention have one answer for the process, so the first instance that
+needs them makes them. The tables that classify handlers are the same for each
+instance and nothing writes them after they are built, so they are `immutable`
+and shared. A thread that needs them builds a copy and publishes it with a
+compare-and-swap; the loser drops its copy and does not wait.
+
+With `bin/sb --jit-perf-map`, the JIT creates `/tmp/perf-<pid>.map` on the
+first successful compilation. Each line contains the hexadecimal start
+address, the hexadecimal size in bytes, and the mangled function name.
+The JIT escapes carriage returns and line feeds in the name to keep one
+record per function. Only the process owner can read or write the file.
+The JIT writes the line before it publishes the handler addresses. The map
+stays on disk after the process ends. The option is off by default. After a
+fork, the child map records functions that the child compiles.
+
+`perf report` shows raw addresses for `/memfd:snakebite-jit (deleted)`.
+Perf uses the map file only for executable mappings that it classifies as
+anonymous or without a shared object. The JIT's `memfd` mappings fall outside
+these categories. To identify JIT functions, match sample addresses against
+the ranges in the map file outside `perf report`.
+[Perf source for map selection][perf-map-lookup].
+
+[perf-map-lookup]:
+  https://github.com/torvalds/linux/blob/master/tools/perf/util/map.c#L129-L139
+
+After a fork, the child keeps the execute views that its handler words point
+to. The first JIT compile in the child opens a new file. This keeps the
+parent and child from writing code at the same offset in the inherited file.
 
 ### Independent of stored bytecode
 
@@ -177,9 +249,8 @@ JIT adds counting twins when it is on.
 
 ## Consequences
 
-- Hot code loses most of its operand loads and dispatch instructions. Calls,
-  returns and the other instructions without a template still run in
-  handlers.
+- Hot code loses most of its operand loads and dispatch instructions. An
+  instruction without a template still runs in its handler.
 - A new handler gets no JIT code until it is given a template. It keeps
   working, because every instruction has a stub.
 - A new calling convention of a compiler needs a new register map. The

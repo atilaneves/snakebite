@@ -3,9 +3,10 @@ module at.runtime.faultregistration;
 import core.memory: GC;
 import core.thread: Thread;
 import core.time: msecs;
-import snakebite.backends.backend: Program, run;
-import snakebite.backends.guestmodules: GuestModules;
-import snakebite.dependencyimage: defaultCompiler;
+import snakebite.program: Program;
+import snakebite.run.program: run;
+import snakebite.run.modules: GuestModules;
+import snakebite.image.dependency: defaultCompiler;
 import snakebite.frontend.compiler: parseSnippet;
 import std.file: exists;
 import std.process: execute;
@@ -35,38 +36,7 @@ static foreach (backend; Matrix!(
             GuestModules.held.leftToExit.should == before;
         } else {
             const readyPath = sandbox.inSandboxPath("ready");
-            const releasePath = sandbox.inSandboxPath("release");
-            const donePath = sandbox.inSandboxPath("done");
-            const code =
-                "enum readyPath = `" ~ readyPath ~ "`;\n"
-                ~ "enum releasePath = `" ~ releasePath ~ "`;\n"
-                ~ "enum donePath = `" ~ donePath ~ "`;\n"
-                ~ q{
-                    import core.thread: Thread;
-                    import core.time: msecs;
-                    import std.file: exists, write;
-
-                    shared static ~this() {
-                        auto worker = new Thread({
-                            write(readyPath, "ready");
-                            foreach (_; 0 .. 5_000) {
-                                if (exists(releasePath)) {
-                                    write(donePath, "done");
-                                    return;
-                                }
-                                Thread.sleep(1.msecs);
-                            }
-                        });
-                        worker.start;
-                        foreach (_; 0 .. 5_000) {
-                            if (exists(readyPath))
-                                return;
-                            Thread.sleep(1.msecs);
-                        }
-                    }
-
-                    void main() {}
-                };
+            const code = heldByWorkerCode(sandbox);
 
             scope(exit) {
                 sandbox.writeFile("release");
@@ -80,6 +50,74 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The registration belongs to the process, not to the thread that ran the
+// program, so another thread sees it in `held` too. The program runs on the
+// test's own thread: druntime warns at the end of the process about a DSO
+// that a joined thread registered. Only the non-Native arms
+// have a registration in the test process.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the Native arm runs no guest program in the test process, so no registration exists"),
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+)) {
+    @("registrationLeftToTheEndOfTheProcessIsHeldForOtherThreads." ~ backend.stringof)
+    @Tags(backend.stringof, "alone")
+    unittest {
+        GC.collect;
+        const sandbox = Sandbox();
+        const before = GuestModules.held.leftToExit;
+        const readyPath = sandbox.inSandboxPath("ready");
+        const code = heldByWorkerCode(sandbox);
+
+        scope(exit) {
+            sandbox.writeFile("release");
+            if (exists(readyPath))
+                waitForSandboxFile(sandbox, "done");
+        }
+
+        programStatus!backend(sandbox, code).should == 0;
+        waitForSandboxFile(sandbox, "ready");
+        ptrdiff_t seen;
+        auto reader = new Thread({ seen = GuestModules.held.leftToExit; });
+        reader.start;
+        reader.join;
+        seen.should == before + 1;
+    }
+}
+
+// Guest code whose shared destructor starts a thread that stays alive until
+// the `release` file exists, then writes `done`.
+private string heldByWorkerCode(in Sandbox sandbox) {
+    return "enum readyPath = `" ~ sandbox.inSandboxPath("ready") ~ "`;\n"
+        ~ "enum releasePath = `" ~ sandbox.inSandboxPath("release") ~ "`;\n"
+        ~ "enum donePath = `" ~ sandbox.inSandboxPath("done") ~ "`;\n"
+        ~ q{
+            import core.thread: Thread;
+            import core.time: msecs;
+            import std.file: exists, write;
+
+            shared static ~this() {
+                new Thread({
+                    write(readyPath, "ready");
+                    foreach (_; 0 .. 5_000) {
+                        if (exists(releasePath)) {
+                            write(donePath, "done");
+                            return;
+                        }
+                        Thread.sleep(1.msecs);
+                    }
+                }).start;
+                foreach (_; 0 .. 5_000) {
+                    if (exists(readyPath))
+                        return;
+                    Thread.sleep(1.msecs);
+                }
+            }
+
+            void main() {}
+        };
+}
+
 private int programStatus(Backend)(in Sandbox sandbox, in string code) {
     static if (is(Backend == Native)) {
         sandbox.writeFile("guest.d", code);
@@ -90,7 +128,7 @@ private int programStatus(Backend)(in Sandbox sandbox, in string code) {
         return execute([executable]).status;
     } else {
         auto program = Program([parseSnippet(code)]);
-        return run(new Backend(program), program);
+        return run(new Backend(program));
     }
 }
 

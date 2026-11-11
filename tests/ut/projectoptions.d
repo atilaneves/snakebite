@@ -1,7 +1,7 @@
 module ut.projectoptions;
 
 
-import snakebite.projectoptions: parseProjectOptions, ProjectOptions;
+import snakebite.driver.options: parseProjectOptions, ProjectOptions;
 import ut;
 
 

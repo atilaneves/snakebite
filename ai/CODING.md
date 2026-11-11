@@ -27,6 +27,11 @@
 * Do not use "magic literals" like `foo(true, 0, 42, "bar")`. It's
   impossible to know what those values are from the calling context.
   Either name them with a variable or add a comment.
+* Do not use `__gshared` unless absolutely necessary. Shared code
+  should be `immutable` if it can be, `shared` otherwise. All global
+  and TLS data is suspect and must have its existence justified.
+* Downcasts are a code smell - use virtual dispatch instead unless
+  justified.
 
 ## Production code (in `source`)
 
@@ -72,7 +77,8 @@ The shared layer owns every backend-independent decision: what dmd
 lowers (a `lowering` field) and what dmd decides instead in its own
 glue layer (`e2ir.d`: casts, truth, invariants, closure frames, unwind
 order, and so on). Put the decision in one shared module (for example
-`casts.d`, `aggregateinit.d`, `druntimehooks.d`); each backend only
+`language/operators/casts.d`, `language/storage/lifetime.d`,
+`language/call/druntimehook.d`); each backend only
 executes that plan. A second backend that reimplements the same
 decision is a bug, not a parallel feature.
 
@@ -100,7 +106,7 @@ This means there is no need to marshall or unmarshall when doing FFI.
   member must be a real outcome, or a `final switch` over it proves
   nothing.
 - Report host internal failures with
-  `snakebite.internalfailure.internalFailure(message)`. It prints the
+  `snakebite.failure.report.internalFailure(message)`. It prints the
   message and the call site's source location, then ends the process with
   a normal failure status. It works in `pure`, `nothrow`, and `@nogc` code,
   including release builds with assertions disabled.

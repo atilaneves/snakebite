@@ -2,7 +2,7 @@ module ut.backends.call.ffi;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -131,12 +131,23 @@ private extern(D) long snakebite_ut_dWordCombine(long first, long second) {
 public extern(C) long snakebite_ut_word_three(
     const(long)* values, int index, long scale,
 ) {
+    if (index == int.min)
+        throw new Exception("invalid index");
     return values[index] * scale;
+}
+
+
+public extern(C) ulong snakebite_ut_word_three_unsigned(
+    ulong high, uint middle, ulong low,
+) {
+    return high + 2UL * middle + 3UL * low;
 }
 
 
 // Returned in the two result registers, length first.
 public extern(C) long[] snakebite_ut_word_slice(long* values, long length) {
+    if (length < 0)
+        throw new Exception("negative slice length");
     return values[0 .. length];
 }
 
@@ -2532,9 +2543,9 @@ private extern(D) double snakebite_ut_dvariadic_mixed_sum_backend(...) {
 // type, in the test below - and returns that type's own `tsize`, read
 // off `_arguments[0]` the same way the real `_argptr`/register-save-area
 // machinery would (`object.TypeInfo_Struct.tsize`'s own druntime
-// implementation returns its `m_init.length`, which `snakebite.backends.
-// runtimetypes.RuntimeTypes.structInfo` already sets to the guest
-// struct's own real init bytes - so this test also checks that
+// implementation returns its `m_init.length`, which
+// `snakebite.language.statics.typeinfo.RuntimeTypes.structInfo` already sets
+// to the guest struct's own real init bytes - so this test also checks that
 // fabricated `TypeInfo_Struct` is the right size, not merely present).
 pragma(mangle, "snakebite_ut_dvariadic_struct_backend")
 private extern(D) size_t snakebite_ut_dvariadic_struct_backend(
@@ -2755,7 +2766,7 @@ static foreach (backend; Matrix!(
 // its `tsize` and its raw bytes back through `_arguments[0]` alone,
 // never a compile-time-known guest type - `object.TypeInfo_Struct.
 // tsize`'s own druntime implementation returns its `m_init.length`,
-// which `snakebite.backends.runtimetypes.RuntimeTypes.structInfo`
+// which `snakebite.language.statics.typeinfo.RuntimeTypes.structInfo`
 // already sets to the guest struct's own real init bytes, so this also
 // checks that fabricated `TypeInfo_Struct` is the right size, not merely
 // present.
@@ -3257,7 +3268,7 @@ static foreach (backend; Matrix!(
 @Tags("Interpreter")
 unittest {
     import core.memory: GC;
-    import snakebite.backends.backend: Program;
+    import snakebite.program: Program;
     import snakebite.backends.interpreter: Interpreter;
 
     auto module_ = parseSnippet(q{
@@ -3291,7 +3302,7 @@ unittest {
 @Tags("Bytecode")
 unittest {
     import core.memory: GC;
-    import snakebite.backends.backend: Program;
+    import snakebite.program: Program;
     import snakebite.backends.bytecode: Bytecode;
 
     auto module_ = parseSnippet(q{
@@ -4590,10 +4601,10 @@ static foreach (backend; Matrix!(
 }
 
 
-// Three word arguments: a pointer, a negative `int` and a `long`, called
-// through the same site more than once.
+// Calls with a signed or unsigned middle parameter keep the full result.
+// A thrown call leaves the destination's previous value in place.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
+    Omit!(Ctfe, Because.inexpressible, "The native callee has no CTFE body"),
 )) {
     @("directWordCall.threeArguments." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -4604,12 +4615,41 @@ static foreach (backend; Matrix!(
                 pragma(mangle, "snakebite_ut_word_three")
                 extern(C) long three(const(long)* values, int index, long scale);
 
+                pragma(mangle, "snakebite_ut_word_three_unsigned")
+                extern(C) ulong threeUnsigned(
+                    ulong high, uint middle, ulong low,
+                );
+
+                long forwardResult(const(long)* values, int index, long scale) {
+                    return three(values, index, scale);
+                }
+
                 int answer() {
                     long[3] values = [7, 8, 9];
-                    foreach (round; 0 .. 3) {
+                    long result = 0;
+                    foreach (round; 0 .. 300) {
                         if (three(&values[2], -1, 10) != 80) return 1;
                         if (three(&values[0], 2, -1) != -9) return 2;
                         if (three(&values[1], 0, 3) != 24) return 3;
+                        const uint middle = uint.max - round;
+                        if (threeUnsigned(1UL << 61, middle, 1UL << 59)
+                                != (1UL << 61) + 2UL * middle + (3UL << 59))
+                            return 4;
+                        if (forwardResult(&values[1], -1, round) != 7 * round)
+                            return 5;
+                        cast(void) three(&values[1], 1, round);
+
+                        const throwsNow = round == 1 || round == 270;
+                        const index = throwsNow ? int.min : -1;
+                        try {
+                            result = three(&values[1], index, 10 + round);
+                            if (throwsNow || result != 7L * (10 + round))
+                                return 6;
+                        } catch (Exception exception) {
+                            if (!throwsNow || result != 7L * (9 + round)
+                                    || exception.msg != "invalid index")
+                                return 7;
+                        }
                     }
                     return 0;
                 }
@@ -4653,7 +4693,8 @@ static foreach (backend; Matrix!(
 
 
 // A result of two words in the result registers, from a call with two
-// word arguments.
+// word arguments. A throw at that call must leave the previous slice
+// and the fields next to it intact.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
@@ -4665,6 +4706,18 @@ static foreach (backend; Matrix!(
             q{
                 pragma(mangle, "snakebite_ut_word_slice")
                 extern(C) long[] slice(long* values, long length);
+
+                struct GuardedSlice {
+                    long before;
+                    long[] view;
+                    long after;
+                }
+
+                void assign(GuardedSlice* destination, long* values, long length) {
+                    long[] view = slice(values, length);
+                    long[] capturedView() { return view; }
+                    destination.view = capturedView();
+                }
 
                 int answer() {
                     long[4] values = [3, 5, 7, 11];
@@ -4680,6 +4733,27 @@ static foreach (backend; Matrix!(
                         cast(void) slice(values.ptr, 2);
                         auto tail = slice(&values[2], 2);
                         if (tail.length != 2 || tail[0] != 7) return 4;
+                    }
+                    foreach (indirect; [false, true]) {
+                        GuardedSlice result = GuardedSlice(13, values[], 17);
+                        foreach (length; [3L, 2L, 1L, -1L, 0L]) {
+                            try {
+                                if (indirect)
+                                    assign(&result, &values[1], length);
+                                else
+                                    result.view = slice(&values[1], length);
+                                if (length < 0 || result.view.length != length
+                                        || result.view.ptr !is &values[1])
+                                    return 5;
+                            } catch (Exception exception) {
+                                if (length != -1 || exception.msg != "negative slice length"
+                                        || result.view.length != 1
+                                        || result.view.ptr !is &values[1])
+                                    return 6;
+                            }
+                            if (result.before != 13 || result.after != 17)
+                                return 7;
+                        }
                     }
                     return 0;
                 }

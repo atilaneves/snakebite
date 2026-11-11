@@ -2,7 +2,7 @@ module ut.backends.interpreter.cost;
 
 
 import ut;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -10,12 +10,12 @@ import dmd.dmodule: Module;
 import dmd.func: FuncDeclaration;
 import dmd.dsymbol: Dsymbol;
 import dmd.declaration: VarDeclaration;
-import snakebite.backends.declaration: forEachRuntimeVariable;
-import snakebite.nativelayout: NativeData;
+import snakebite.language.layout.variables: forEachRuntimeVariable;
+import snakebite.language.statics.data: NativeData;
 import std.conv: text;
 import core.exception: AssertError;
 import core.thread: Fiber, Thread;
-import snakebite.sharedtable: PreparedExecution, SharedTable;
+import snakebite.host.sharedtable: PreparedExecution, SharedTable;
 import ut.backends: Matrix, Omit, Because, Ctfe, shouldBeStatusOf;
 
 

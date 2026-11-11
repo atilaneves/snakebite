@@ -5,7 +5,7 @@ import ut.backends;
 import ut.threadsync: beginExplicitCollect, endExplicitCollect;
 import core.memory: GC;
 import core.thread: Fiber, Thread;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 

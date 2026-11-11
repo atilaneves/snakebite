@@ -5,10 +5,12 @@ private:
 
 
 // Runs guest code with dmd's own compile-time function evaluator.
-public final class Ctfe: imported!"snakebite.backends.backend".Backend {
+public final class Ctfe: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
-    import snakebite.backends.backend: Program;
-    import snakebite.exception: SnakebiteException;
+    import snakebite.backends.api: DeclarationHandle;
+    import snakebite.program: Program;
+    import snakebite.start.data: FunctionHandle;
+    import snakebite.failure.report: SnakebiteException;
 
     public this(const Program program) {
         super(program);
@@ -38,6 +40,11 @@ public final class Ctfe: imported!"snakebite.backends.backend".Backend {
         return null;
     }
 
+    // CTFE runs a declaration, so the declaration names it.
+    public override FunctionHandle compiledFunction(FuncDeclaration function_) {
+        return new DeclarationHandle(this, function_);
+    }
+
     public override string eval(FuncDeclaration function_) {
         // `const` would qualify the dmd AST reference inside the result.
         auto result = interpret(function_);
@@ -58,7 +65,7 @@ private void writeResult(
 ) {
     import dmd.astenums: Tvoid;
     import dmd.typesem: nextOf;
-    import snakebite.nativelayout: storeValue;
+    import snakebite.language.statics.data: storeValue;
 
     auto type = function_.type.nextOf;
 

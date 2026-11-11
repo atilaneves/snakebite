@@ -2,13 +2,13 @@ module snakebite.backends.interpreter.integeroperations;
 
 private:
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 package ulong combine(string op)(
     in long a,
     in long b,
-    in imported!"snakebite.nativelayout".TypeFacts aFacts,
-    in imported!"snakebite.nativelayout".TypeFacts bFacts,
+    in imported!"snakebite.native.value".TypeFacts aFacts,
+    in imported!"snakebite.native.value".TypeFacts bFacts,
 ) {
     static if (op == "<<" || op == ">>" || op == ">>>")
         // dmd rejects a vector shift and a shift has its own `ShiftPlan`.
@@ -27,8 +27,8 @@ package ulong combine(string op)(
 // type before the interpreter sees the node - a narrower or differently
 // signed operand arrives wrapped in a `CastExp` - so the two agree.
 private bool sharedSignedness(
-    in imported!"snakebite.nativelayout".TypeFacts a,
-    in imported!"snakebite.nativelayout".TypeFacts b,
+    in imported!"snakebite.native.value".TypeFacts a,
+    in imported!"snakebite.native.value".TypeFacts b,
 ) {
     assert(a.isUnsigned == b.isUnsigned,
         "D arithmetic conversions give both operands one signedness");
@@ -73,14 +73,14 @@ private ulong divided(string op)(
 package ulong shifted(
     in long a,
     in long count,
-    in imported!"snakebite.backends.shifts".ShiftPlan plan,
+    in imported!"snakebite.language.operators.shifts".ShiftPlan plan,
 ) {
-    import snakebite.nativevalue: shiftCount;
+    import snakebite.native.value: shiftCount;
 
     const width = plan.width * 8;
     const b = shiftCount(count, plan.width);
 
-    with (imported!"snakebite.backends.shifts".ShiftPlan.Direction)
+    with (imported!"snakebite.language.operators.shifts".ShiftPlan.Direction)
         final switch (plan.direction) {
             case left:
                 return cast(ulong) a << b;

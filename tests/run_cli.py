@@ -37,6 +37,211 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
+@pytest.mark.parametrize(
+    "backend, flags, mapped",
+    [
+        ("bytecode", [], False),
+        ("bytecode", ["--jit-perf-map"], True),
+        ("bytecode", ["--jit-perf-map", "--no-jit"], False),
+        ("interpreter", ["--jit-perf-map"], False),
+        ("ctfe", ["--jit-perf-map"], False),
+    ],
+)
+def test_jit_perf_map(
+    tmp_path: Path, backend: str, flags: list[str], mapped: bool,
+) -> None:
+    write(
+        tmp_path / "perf_map_guest.d",
+        r"""
+        module perf_map_guest;
+        version (ObserveJitPerfMap)
+            import core.stdc.stdio: fflush, getchar, puts;
+
+        T hot(T)(T count) {
+            assert(count > 0);
+            T sum;
+            foreach (i; 0 .. count)
+                sum += i;
+            return sum;
+        }
+
+        version (ObserveJitPerfMap) {
+            pragma(mangle, "lineOne\rlineTwo\n1 2 forged")
+            int named(int count) {
+                assert(count > 0);
+                int sum;
+                foreach (i; 0 .. count)
+                    sum += i;
+                return sum;
+            }
+        }
+
+        int main() {
+            version (ObserveJitPerfMap)
+                assert(getchar() == 's');
+            assert(hot(300) == 44850);
+            assert(hot(301L) == 45150);
+            assert(hot(300) == 44850);
+            version (ObserveJitPerfMap) {
+                assert(named(300) == 44850);
+                puts("ready");
+                fflush(null);
+                return getchar() == 'x' ? 0 : 1;
+            } else
+                return 0;
+        }
+        """,
+    )
+    if mapped:
+        flags = [*flags, "--version=ObserveJitPerfMap"]
+    child = subprocess.Popen(
+        [sb_path(), f"--backend={backend}", *flags, str(tmp_path)],
+        cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True,
+    )
+    path = Path(f"/tmp/perf-{child.pid}.map")
+    map_verified = False
+    try:
+        if not mapped:
+            stdout, _ = child.communicate(timeout=30)
+            assert child.returncode == 0, stdout
+            assert not os.path.lexists(path)
+            return
+
+        assert not os.path.lexists(path), f"map already exists: {path}"
+        assert child.stdin is not None
+        child.stdin.write("s")
+        child.stdin.flush()
+        # Read the map while the guest is still running.
+        assert child.stdout is not None
+        assert select.select([child.stdout], [], [], 30)[0], "guest did not start"
+        ready = child.stdout.readline()
+        assert ready.strip() == "ready", f"unexpected guest output: {ready!r}"
+        mode = path.lstat().st_mode
+        assert stat.S_ISREG(mode)
+        assert stat.S_IMODE(mode) == 0o600
+        records = [line.split(maxsplit=2) for line in path.read_text().splitlines()]
+        assert len(records) == 3
+        names = {record[2] for record in records}
+        names.remove(r"lineOne\rlineTwo\n1 2 forged")
+        assert len(names) == 2
+        assert all(name.startswith("_D14perf_map_guest") and "hot" in name
+                   for name in names)
+        map_verified = True
+        ranges = []
+        for start, size, _ in records:
+            base, length = int(start, 16), int(size, 16)
+            assert length > 0
+            ranges.append((base, base + length))
+        ranges.sort()
+        assert all(left[1] <= right[0] for left, right in zip(ranges, ranges[1:]))
+
+        mappings = Path(f"/proc/{child.pid}/maps").read_text().splitlines()
+        executable = [
+            tuple(int(address, 16) for address in line.split()[0].split("-"))
+            for line in mappings
+            if "/memfd:snakebite-jit" in line and line.split()[1].startswith("r-x")
+        ]
+        for start, end in ranges:
+            assert any(low <= start < end <= high for low, high in executable)
+
+        stdout, _ = child.communicate(input="x", timeout=30)
+        assert child.returncode == 0, stdout
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=30)
+        if map_verified:
+            path.unlink(missing_ok=True)
+
+
+def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
+    write(
+        tmp_path / "perf_map_fork.d",
+        r"""
+        module perf_map_fork;
+        import core.stdc.stdio: fflush, getchar, printf;
+        import core.sys.posix.fcntl: open, O_RDONLY;
+        import core.sys.posix.sys.wait: waitpid;
+        import core.sys.posix.unistd: _exit, dup2, fork, read;
+
+        T hot(T)(T count) {
+            assert(count > 0);
+            T sum;
+            foreach (i; 0 .. count)
+                sum += i;
+            return sum;
+        }
+
+        int main() {
+            assert(getchar() == 's');
+            assert(hot(300) == 44850);
+            const child = fork();
+            assert(child >= 0);
+            if (child == 0) {
+                if (getchar() != 'c')
+                    _exit(1);
+                const file = open("/dev/null", O_RDONLY);
+                assert(file >= 0);
+                foreach (fd; 3 .. 32)
+                    assert(dup2(file, fd) == fd);
+                assert(hot(301L) == 45150);
+                char byte_;
+                foreach (fd; 3 .. 32)
+                    assert(read(fd, &byte_, 1) == 0, "child descriptor");
+                _exit(0);
+            }
+            printf("child=%d\n", child);
+            fflush(null);
+            int status;
+            assert(waitpid(child, &status, 0) == child);
+            return status == 0 ? 0 : 1;
+        }
+        """,
+    )
+    with subprocess.Popen(
+        [sb_path(), "--jit-perf-map", str(tmp_path)],
+        cwd=tmp_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True,
+    ) as process:
+        parent_map = Path(f"/tmp/perf-{process.pid}.map")
+        verified_maps = []
+        try:
+            assert not os.path.lexists(parent_map), f"map already exists: {parent_map}"
+            assert process.stdin is not None
+            assert process.stdout is not None
+            process.stdin.write("s")
+            process.stdin.flush()
+            assert select.select([process.stdout], [], [], 30)[0], "guest did not fork"
+            ready = process.stdout.readline().strip()
+            child = re.fullmatch(r"child=(\d+)", ready)
+            assert child is not None, ready
+            child_map = Path(f"/tmp/perf-{child[1]}.map")
+            assert stat.S_ISREG(parent_map.lstat().st_mode)
+            parent_record, = parent_map.read_text().splitlines()
+            assert parent_record.split(maxsplit=2)[2].startswith(
+                "_D13perf_map_fork__T3hotTiZ"
+            )
+            verified_maps.append(parent_map)
+
+            assert not os.path.lexists(child_map), f"map already exists: {child_map}"
+            stdout, _ = process.communicate(input="c", timeout=30)
+            assert stat.S_ISREG(child_map.lstat().st_mode)
+            child_record, = child_map.read_text().splitlines()
+            assert child_record.split(maxsplit=2)[2].startswith(
+                "_D13perf_map_fork__T3hotTlZ"
+            )
+            verified_maps.append(child_map)
+            assert process.returncode == 0, stdout
+            assert parent_map.read_text().splitlines() == [parent_record]
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=30)
+            for path in verified_maps:
+                path.unlink(missing_ok=True)
+
+
 @pytest.mark.parametrize("collector", ["", "symgc", "unknown"])
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_process_collector_choice(
@@ -195,8 +400,8 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
     driver = tmp_path / "internal_failure_driver.d"
     driver.write_text(
         "module internal_failure_driver;\n"
-        "import snakebite.internalfailure: internalFailure;\n"
-        "import snakebite.nativevalue: loadIntegral;\n"
+        "import snakebite.failure.report: internalFailure;\n"
+        "import snakebite.native.value: loadIntegral;\n"
         "noreturn pureFailure() @safe pure nothrow @nogc {\n"
         '    internalFailure("pure caller failed");\n'
         "}\n"
@@ -213,8 +418,8 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
         ["ldc2", "-release", "-O", "-flto=thin", "-gcc=clang",
          "-link-defaultlib-shared", "-preview=dip1000",
          f"-I{root / 'source'}", f"-of={binary}", str(driver),
-         str(root / "source/snakebite/internalfailure.d"),
-         str(root / "source/snakebite/nativevalue.d")],
+         str(root / "source/snakebite/failure/report.d"),
+         str(root / "source/snakebite/native/value.d")],
         cwd=tmp_path, capture_output=True, text=True, check=False, timeout=120,
     )
     assert compiled.returncode == 0, output(compiled)
@@ -227,7 +432,7 @@ def test_release_internal_failure(tmp_path: Path, mode: str) -> None:
         "message": (f"{driver}:8:", "driver failed"),
         "default": (f"{driver}:9:", "internal invariant failed"),
         "pure": (f"{driver}:5:", "pure caller failed"),
-        "native": ("snakebite/nativevalue.d:", "no native layout"),
+        "native": ("snakebite/native/value.d:", "no native layout"),
     }
     location, message = expected[mode]
     assert "snakebite: internal failure at " in result.stderr, output(result)
@@ -248,7 +453,7 @@ def test_unhandled_node_internal_failure(
     assert result.returncode > 0, output(result)
     assert f"{node.capitalize()} " in result.stderr, output(result)
     assert "no `visit` override" in result.stderr, output(result)
-    assert "snakebite/backends/loweringvisitor.d:" in result.stderr, output(result)
+    assert "snakebite/language/traversal/lowering.d:" in result.stderr, output(result)
 
 # The boundary also covers data and TLS, not only function calls. Compare
 # the actual ELF table, so an omitted linker flag cannot pass this check.
@@ -2629,6 +2834,40 @@ def test_bytecode_signed_int_overflowing_division_traps(
 
     result = run_sb("--backend=bytecode", str(tmp_path / "app"), cwd=tmp_path)
 
+    assert result.returncode == -signal.SIGFPE, output(result)
+    assert result.stderr == (
+        "fatal: integer division by zero or overflow\n"
+    ), output(result)
+
+
+@pytest.mark.parametrize(
+    "operand_type,constant", [("int", False), ("long", False), ("int", True)],
+)
+@pytest.mark.parametrize("operator", ["/", "%"])
+@pytest.mark.parametrize("divisor", [0, -1])
+def test_bytecode_hot_signed_division_traps(
+    tmp_path: Path, operand_type: str, constant: bool, operator: str,
+    divisor: int,
+) -> None:
+    fault_path = f"if (divisor != 3) return value {operator} {divisor};"
+    write(
+        tmp_path / "app" / "main.d",
+        f"""
+        module main;
+        {operand_type} divide({operand_type} value, {operand_type} divisor) {{
+            assert(value != 0);
+            {fault_path if constant else ""}
+            return value {operator} divisor;
+        }}
+        int main() {{
+            foreach (_; 0 .. 300)
+                if (divide(5, 3) != {1 if operator == "/" else 2})
+                    return 1;
+            return cast(int) divide({operand_type}.min, {divisor});
+        }}
+        """,
+    )
+    result = run_sb("--backend=bytecode", str(tmp_path / "app"), cwd=tmp_path)
     assert result.returncode == -signal.SIGFPE, output(result)
     assert result.stderr == (
         "fatal: integer division by zero or overflow\n"
@@ -5768,6 +6007,86 @@ def test_unittest_configuration_settings_are_loaded(
     )
 
     assert result.returncode == 3, output(result)
+
+
+# The pipe orders the two compiles. CTFE cannot call the POSIX functions.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_fork_keeps_compiled_functions_in_both_processes(
+    tmp_path: Path, backend: str,
+) -> None:
+    source = tmp_path / "main.d"
+    write(
+        source,
+        """
+        import core.sys.posix.fcntl: open, O_RDONLY;
+        import core.sys.posix.sys.wait: waitpid;
+        import core.sys.posix.unistd: _exit, close, dup2, fork, pipe, read,
+            write;
+
+        int beforeFork(int count) {
+            assert(count > 0);
+            int sum;
+            foreach (i; 0 .. count) sum += i;
+            return sum;
+        }
+
+        int childHot(int count) {
+            assert(count > 0);
+            int sum;
+            foreach (i; 0 .. count) sum += i * 3;
+            return sum;
+        }
+
+        int parentHot(int count) {
+            assert(count > 0);
+            int sum;
+            foreach (i; 0 .. count) sum += i * 7;
+            return sum;
+        }
+
+        int main() {
+            assert(beforeFork(300) == 44850);
+            int[2] gate;
+            assert(pipe(gate) == 0);
+            const child = fork();
+            assert(child >= 0);
+            char ready;
+            if (child == 0) {
+                close(gate[1]);
+                assert(read(gate[0], &ready, 1) == 1);
+                close(gate[0]);
+                const file = open("/dev/null", O_RDONLY);
+                assert(file >= 0);
+                foreach (fd; 3 .. 32)
+                    assert(dup2(file, fd) == fd);
+                assert(childHot(300) == 134550, "child new function");
+                assert(beforeFork(300) == 44850, "child inherited function");
+                foreach (fd; 3 .. 32)
+                    assert(read(fd, &ready, 1) == 0, "child descriptor");
+                _exit(0);
+            }
+
+            close(gate[0]);
+            const firstResult = parentHot(300);
+            assert(write(gate[1], &ready, 1) == 1);
+            close(gate[1]);
+            int status;
+            assert(waitpid(child, &status, 0) == child);
+            assert(status == 0, "child exit status");
+            assert(firstResult == 313950, "parent new function");
+            assert(beforeFork(300) == 44850, "parent inherited function");
+            assert(parentHot(300) == 313950, "parent new function after child");
+            return 0;
+        }
+        """,
+    )
+    if backend == "native":
+        result = run_native(tmp_path, sources=[source.name])
+    else:
+        result = run_sb(
+            f"--backend={backend}", ".", cwd=tmp_path, timeout_seconds=20,
+        )
+    assert result.returncode == 0, output(result)
 
 
 def write(path: Path, text: str = "") -> None:

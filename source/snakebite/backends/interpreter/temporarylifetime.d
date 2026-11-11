@@ -5,13 +5,13 @@ private:
 
 import dmd.declaration: VarDeclaration;
 import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
-import snakebite.backends.temporary: TemporaryPlan;
-import snakebite.backends.temporarystack: TemporaryStack;
-import snakebite.backends.fullexpression:
+import snakebite.language.layout.temporary: TemporaryPlan;
+import snakebite.stack.temporaries: TemporaryStack;
+import snakebite.language.traversal.fullexpression:
     FullExpressionScope;
-import snakebite.framestack: FrameStack, defaultFrameCapacity;
-import snakebite.cstack: CStack;
-import snakebite.nativelayout: TypeFacts;
+import snakebite.stack.frames: FrameStack, defaultFrameCapacity;
+import snakebite.host.cstack: CStack;
+import snakebite.native.value: TypeFacts;
 
 
 // Owns the storage and lifetime rules for expression-scoped guest values.

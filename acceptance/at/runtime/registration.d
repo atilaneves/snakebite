@@ -3,14 +3,16 @@ module at.runtime.registration;
 
 import core.memory: GC;
 import ut.backends;
-import snakebite.backends.backend: Program, run;
-import snakebite.backends.guestmodules: GuestModules;
-import snakebite.ffi.callback: callbackEntriesInUse;
+import snakebite.program: Program;
+import snakebite.run.program: run;
+import snakebite.run.modules: GuestModules;
+import snakebite.ffi.callback: CallbackBridge, CallbackCall, ChunkStrategy;
 import snakebite.frontend.compiler: parseSnippet;
+import std.conv: text;
 
 
 // How many of `runs` runs of `code` leave nothing registered with druntime,
-// no registry image and no callback entry that the calling thread took. A D
+// no registry image and no chunk of callback entries mapped. A D
 // thread that starts while a program runs keeps the registration of that
 // program until the thread ends, so the count is exact only in a process in
 // which no other test starts a thread: the serial run of `bin/at`.
@@ -29,11 +31,11 @@ private size_t runsThatGiveBack(Backend)(
     size_t givenBack;
     foreach (_; 0 .. runs) {
         const held = GuestModules.held;
-        const entries = callbackEntriesInUse;
+        const mapped = executableChunkBytes;
         auto program = Program([parseSnippet(code)]);
         auto instance = Owned!Backend(program);
-        run(instance, program).should == status;
-        if (GuestModules.held == held && callbackEntriesInUse == entries)
+        run(instance).should == status;
+        if (GuestModules.held == held && executableChunkBytes == mapped)
             ++givenBack;
     }
 
@@ -70,5 +72,33 @@ static foreach (backend; Matrix!(
             shared static ~this() {}
             void main() {}
         }, 1, runs).should == runs;
+    }
+}
+
+
+private extern(C) void ignoreCallback(void*, CallbackCall*) {
+}
+
+
+// A released bridge unmaps every chunk it mapped: after many bridges with
+// two chunks each were made and released, the process holds exactly the
+// executable memory it held before. A bridge that is only dropped keeps its
+// chunks, so this fails when `release` leaves a mapping behind.
+static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
+    @("releasedBridgeUnmapsItsChunks." ~ text(strategy))
+    @Tags("alone")
+    unittest {
+        GC.collect;
+        const before = executableChunkBytes;
+
+        foreach (_; 0 .. 200) {
+            auto bridge = new CallbackBridge(&ignoreCallback, null);
+            bridge.beginChunk(ChunkStrategy.protect);
+            bridge.beginChunk(strategy);
+            (executableChunkBytes > before).should == true;
+            bridge.release;
+        }
+
+        executableChunkBytes.should == before;
     }
 }

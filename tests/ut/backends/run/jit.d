@@ -12,9 +12,8 @@ module ut.backends.run.jit;
 import ut.backends;
 
 static foreach (backend; Matrix!()) {
-    // A division keeps its handler and an add does not, so one function runs
-    // JIT code and handlers in turn. The call is an instruction without a
-    // template as well.
+    // An unsigned division keeps its handler, so one function runs JIT code
+    // and handlers in turn.
     @("jit.handlersAndJitCodeInOneFunction." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -24,7 +23,7 @@ static foreach (backend; Matrix!()) {
                 assert(n > 0);
                 long sum;
                 foreach (i; 1 .. n + 1)
-                    sum += twice(i) + 100 / i + (i << 1);
+                    sum += twice(i) + cast(long) (100UL / i) + (i << 1);
                 return sum;
             }
             int main() {
@@ -34,6 +33,63 @@ static foreach (backend; Matrix!()) {
                 return mixed(3000) == expected ? 0 : 1;
             }
         }, ["mixed"]);
+    }
+
+    @("jit.signedDivisionAndRemainder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            void checkInt(int left, int right) {
+                assert(right != 0);
+                assert(left / right == -2);
+                assert(left % right == -1);
+                assert(left / -3 == 2);
+                assert(left % -3 == -1);
+                int[2] values = [left, right];
+                int* value = &values[0];
+                *value /= values[1];
+                assert(values[0] == -2);
+                *value %= *value;
+                assert(values[0] == 0 && values[1] == right);
+            }
+            void checkLong(long left, long right) {
+                assert(right != 0);
+                const quotient = left / right;
+                const remainder = left % right;
+                assert(quotient == -(1L << 20) && remainder == -1);
+                left %= right;
+                assert(left == -1);
+            }
+            int main() {
+                foreach (_; 0 .. 300) {
+                    checkInt(-7, 3);
+                    checkLong(-((1L << 40) + 1), 1L << 20);
+                }
+                return 0;
+            }
+        }, ["checkInt", "checkLong"]);
+    }
+
+    @("jit.signedDivisionByConstants." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            enum constants = [1, 2, -2, 3, -7, 10, -10, 256, int.max, int.min];
+            void check(int dividend, int[] divisors) {
+                static foreach (index, divisor; constants) {
+                    assert(dividend / divisor == dividend / divisors[index]);
+                    assert(dividend % divisor == dividend % divisors[index]);
+                }
+            }
+            int main() {
+                auto divisors = constants.dup;
+                foreach (_; 0 .. 40)
+                    foreach (dividend; [int.min, int.min + 1, -21, -20, -19,
+                            -1, 0, 1, 19, 20, 21, int.max - 1, int.max])
+                        check(dividend, divisors);
+                return 0;
+            }
+        }, ["check"]);
     }
 
     // The loop is the only thing that makes `scan` hot: it is called once.
@@ -56,6 +112,196 @@ static foreach (backend; Matrix!()) {
                 return scan(values) == 10006 ? 0 : 1;
             }
         }, ["scan"]);
+    }
+
+    @("jit.shiftUsesValueFromTheTakenPath." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int work(int value, int count, bool reset) {
+                assert(count > 0);
+                if (reset) count = 1;
+                const shifted = value >> count;
+                const highBits = cast(uint) value >>> 28;
+                return shifted + cast(int) highBits + (count << 3);
+            }
+            int main() {
+                foreach (i; 0 .. 300) {
+                    if (work(-64, 4, true) != -9) return 1;
+                    if (work(-64, 4, false) != 43) return 2;
+                }
+                return 0;
+            }
+        }, ["work"]);
+    }
+
+    @("jit.floatingLiteralsKeepTheirValues." ~ backend.stringof)
+    @Tags(is(backend == Bytecode) ? [backend.stringof, "requires-jit-code"]
+        : [backend.stringof])
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int work(double value, float narrow) {
+                assert(value != 0.0);
+                const quotient = value / -0.0;
+                const product = narrow * 0.25f;
+                const bool equal = product == 0.75f;
+                if (quotient != -double.infinity) return 1;
+                if (value < double.nan) return 2;
+                return equal ? 0 : 3;
+            }
+            int main() {
+                foreach (i; 0 .. 300) {
+                    const status = work(2.0, 3.0f);
+                    if (status) return status;
+                }
+                return 0;
+            }
+        }, ["work"]);
+    }
+    @("jit.floatingPointSlotsFollowJumpsAndPointerWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            double update(double a, double b, bool skip) {
+                assert(b > 0);
+                double* view = &a;
+                if (skip)
+                    goto second;
+                a = a + b;
+            second:
+                b = a - b;
+                a = a + b;
+                *view = a * b;
+                b = a - b;
+                if (b > 8)
+                    return a + b;
+                return a - b;
+            }
+            int main() {
+                foreach (i; 0 .. 300) {
+                    if (update(2, 3, false) != 26)
+                        return 1;
+                    if (update(2, 3, true) != -1)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["update"]);
+    }
+
+    @("jit.hotForLoopChecksItsFirstIterationAndContinue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int countOdd(int first, int end) {
+                assert(end <= 5000);
+                int count;
+                for (int i = first; i < end;) {
+                    if ((i & 1) == 0) {
+                        ++i;
+                        continue;
+                    }
+                    ++count;
+                    ++i;
+                }
+                return count;
+            }
+            int main() {
+                if (countOdd(-5, 5000) != 2503)
+                    return 1;
+                if (countOdd(-3, -3) != 0)
+                    return 2;
+                return countOdd(-3, -2) == 1 ? 0 : 3;
+            }
+        }, ["countOdd"]);
+    }
+
+    @("jit.integerSlotsFollowJumpsAndSignedWidening." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            long scale(int n, int delta, long ceiling, bool skip) {
+                assert(delta > 0);
+                if (skip)
+                    goto convert;
+                n += delta;
+            convert:
+                const long value = n;
+                if (value >= ceiling)
+                    return value;
+                return value * delta;
+            }
+            int main() {
+                foreach (_; 0 .. 300) {
+                    if (scale(-5, 4, -3, false) != -1)
+                        return 1;
+                    if (scale(-5, 4, -3, true) != -20)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["scale"]);
+    }
+
+    @("jit.loopUpdateUsesTheNewStep." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int countVisits(int first, int end, int step) {
+                assert(end > first);
+                int count;
+                for (int i = first; i < end; i += ++step)
+                    ++count;
+                return count;
+            }
+            int main() {
+                foreach (_; 0 .. 300)
+                    if (countVisits(1, 7, 0) != 3)
+                        return 1;
+                return 0;
+            }
+        }, ["countVisits"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot reinterpret overlapped union fields"),
+)) {
+    @("jit.floatingPointSlotsFollowPartialAndAdjacentWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            union Pair {
+                double wide;
+                struct { float low; float high; }
+            }
+            struct Values {
+                Pair pair;
+                double next;
+            }
+            float update(double x, float y, bool overlap) {
+                assert(y > 0);
+                Values values = void;
+                double* view = overlap ? &values.pair.wide : &values.next;
+                values.pair.high = y + y;
+                *view = x * x;
+                return values.pair.high * y;
+            }
+            int main() {
+                version (LittleEndian)
+                    enum partialProduct = 4.5f;
+                else
+                    enum partialProduct = 0.0f;
+                foreach (i; 0 .. 300) {
+                    if (update(2, 2, true) != partialProduct)
+                        return 1;
+                    if (update(2, 2, false) != 8.0f)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["update"]);
     }
 }
 
@@ -128,4 +374,51 @@ static foreach (backend; Matrix!(
             }
         }, ["work"]);
     }
+}
+
+static foreach (backend; Matrix!()) {
+    // A backend that is gone gives back its JIT code region. Many backends
+    // that one after the other make a function hot must not keep a code
+    // file open each.
+    @("jit.backendsThatAreGoneDoNotKeepTheirCodeFiles." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.memory: GC;
+
+        enum backends = 200;
+        const before = openJitFiles;
+        foreach (_; 0 .. backends) {
+            0.shouldBeStatusOf!(backend, q{
+                long work(long n) {
+                    assert(n > 0);
+                    long sum;
+                    foreach (i; 0 .. n)
+                        sum += i % 5;
+                    return sum;
+                }
+                int main() {
+                    return work(5000) == 5000 / 5 * 10 ? 0 : 1;
+                }
+            });
+        }
+        GC.collect;
+        (openJitFiles - before).shouldBeSmallerThan(backends / 2);
+    }
+}
+
+// The number of JIT code files that this process has open.
+private long openJitFiles() {
+    import std.algorithm: canFind;
+    import std.file: dirEntries, FileException, readLink, SpanMode;
+
+    long count;
+    foreach (entry; dirEntries("/proc/self/fd", SpanMode.shallow)) {
+        try {
+            if (readLink(entry.name).canFind("snakebite-jit"))
+                ++count;
+        } catch (FileException) {
+            // The descriptor of the directory listing itself can be gone.
+        }
+    }
+    return count;
 }

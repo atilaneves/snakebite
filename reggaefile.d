@@ -58,12 +58,12 @@ Target assembledObject(in string source) {
     );
 }
 
-// The registry image of `source/snakebite/backends/guestmodules.d`: a shared
+// The registry image of `source/snakebite/run/modules.d`: a shared
 // object that the system C compiler makes from a tiny C file, and the object
 // that embeds its bytes. Linked into every target like the `.S` files above,
 // so no compiler is needed at run time to make it.
-enum registrySlotSource = "source/snakebite/backends/registry_slot.c";
-enum registryImageSource = "source/snakebite/backends/registry_image_amd64.S";
+enum registrySlotSource = "source/snakebite/run/registry_slot.c";
+enum registryImageSource = "source/snakebite/run/registry_image_amd64.S";
 
 Target registryImageObject() {
     return Target(
@@ -461,8 +461,6 @@ Build reggaeBuild() {
     // Function alignment fixes the addresses of the VM handlers.
     auto releaseFlags = CompilerFlags("-release", "-O", "-flto=thin",
         "-L-plugin-opt=-align-all-functions=6");
-    // `bin/sb` with the bytecode counter; see "Performance work" in CLAUDE.md.
-    auto countFlags = CompilerFlags(releaseFlags.value ~ "-d-version=BytecodeCount");
     // `bin/sb` for `perf record --call-graph fp`; see "Performance work" in
     // CLAUDE.md.
     // Not -g: ThinLTO in LDC 1.43 drops the full debug info of member functions.
@@ -475,7 +473,6 @@ Build reggaeBuild() {
         ~ dubTarget("dmd", "arena-validation", "arena-validation", "arena")
         ~ dubTarget("ldc2", "acceptance-test", "release", "at", releaseFlags)
         ~ dubTarget("ldc2", "sb", "release", "sb", releaseFlags)
-        ~ dubTarget("ldc2", "sb", "sb-count", "sb-count", countFlags)
         ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", releaseFlags)
         ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);
     // Optional: `ninja bin/sb-prof` builds it, a plain `ninja` does not.

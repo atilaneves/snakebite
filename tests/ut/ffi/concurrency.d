@@ -13,7 +13,7 @@ import std.conv: text;
 // wrap their whole miss path (`_shapeOf`, which classifies a callee's
 // parameter and return types for the System V AMD64 ABI, reading a
 // struct's own `.size`/`.alignsize` directly, not through `snakebite.
-// nativelayout.TypeFacts`) in the frontend compiler lock. `_shapeOf` now
+// native.value.TypeFacts`) in the frontend compiler lock. `_shapeOf` now
 // forces every dmd forward reference a struct or enum type could still
 // have up front, through `TypeFacts.of` (self-guarded, `snakebite.
 // frontend.compiler.forceIfNeeded`), before doing anything unlocked -

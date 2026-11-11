@@ -2,7 +2,7 @@ module ut.backends.bytecode.jit;
 
 
 import ut.backends;
-import snakebite.backends.backend: Program;
+import snakebite.program: Program;
 import snakebite.backends.bytecode.inspection: isJitCompiled;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;

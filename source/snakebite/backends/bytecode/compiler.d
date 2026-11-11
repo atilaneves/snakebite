@@ -3,34 +3,33 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
-import snakebite.nativelayout: typeFacts, truthFacts;
+import snakebite.start.data: FunctionHandle;
+import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
 
-import snakebite.internalfailure: internalFailure;
+import snakebite.failure.report: internalFailure;
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
-import snakebite.backends.argumentflow: Shape;
-import snakebite.backends.loweringvisitor: LoweringVisitor;
-import snakebite.backends.identity: IdentityPlan, identityPlan;
-import snakebite.backends.ifplan: IfPlan;
-import snakebite.backends.logical: LogicalPlan;
-import snakebite.backends.plaincondition:
-    isPlainCondition, isPlainPlace, isRealFloatType;
-import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
-import snakebite.backends.switchplan:
+import snakebite.native.signature: Shape, SignatureTable;
+import snakebite.language.traversal.lowering: LoweringVisitor;
+import snakebite.language.operators.comparison:
+    IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
+import snakebite.language.control.condition:
+    IfPlan, LogicalPlan, isPlainCondition, isPlainPlace, isRealFloatType;
+import snakebite.language.control.cases:
     SwitchPlan, switchPlan, gotoCaseTarget, gotoDefaultTarget;
-import snakebite.backends.fullexpression:
+import snakebite.language.traversal.fullexpression:
     FullExpressionScope;
-import snakebite.backends.controlflow:
+import snakebite.language.control.transfer:
     ScopeFrame, ScopePaths, labelTargetOf, scopePathsOf;
-import snakebite.backends.exceptionplan:
+import snakebite.language.control.unwinding:
     UnwindPlan, catchPlanOf, unwindPlanOf;
-import snakebite.backends.checkplan: BoundsCheck, hookOf;
-import snakebite.backends.druntimehooks: DruntimeHook, planOf;
-import snakebite.backends.sliceplan: planSlice;
-import snakebite.backends.exceptions: AssertFailure, CAssertCall;
+import snakebite.language.checks:
+    AssertFailure, BoundsCheck, CAssertCall, hookOf;
+import snakebite.language.call.druntimehook: DruntimeHook, planOf;
+import snakebite.language.storage.resolver: planSlice;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 import std.typecons: Flag, No, Yes;
 
@@ -39,40 +38,57 @@ import std.typecons: Flag, No, Yes;
 // computes at run time - a `ref` binding, an array element's, an
 // allocation's result - shares, whatever the value living behind it
 // eventually is.
-private imported!"snakebite.nativelayout".TypeFacts pointerFactsOf() {
-    import snakebite.nativelayout: TypeFacts;
+private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
+    import snakebite.native.value: TypeFacts;
 
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
 }
 
-public final class Bytecode: imported!"snakebite.backends.backend".Backend {
+public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import core.time: Duration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
-    import snakebite.backends.backend: CompilationStatistics, Program;
-    import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.classinfo;
+    import snakebite.backends.api: CompilationStatistics;
+    import snakebite.program: Program;
+    import snakebite.language.call.selection: CallSelection;
+    import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
-    import snakebite.backends.layout: FrameLayout;
+    import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
-    import snakebite.sharedtable: SharedTable;
-    import snakebite.exception: SnakebiteException;
-    import snakebite.framestack: defaultFrameCapacity;
-    import snakebite.hostthreads: heapNew;
-    import snakebite.executionstates: ExecutionStates;
-    import snakebite.nativelayout: NativeData, nativeSymbolName;
-    import snakebite.backends.runtimetypes: RuntimeTypes;
+    import snakebite.host.sharedtable: SharedTable;
+    import snakebite.failure.report: SnakebiteException;
+    import snakebite.stack.frames: defaultFrameCapacity;
+    import snakebite.host.threads: heapNew;
+    import snakebite.host.executionstates: ExecutionStates;
+    import snakebite.language.statics.data: NativeData;
+    import snakebite.frontend.dmd.mangle: nativeSymbolName;
+    import snakebite.language.statics.typeinfo: RuntimeTypes;
 
     // Each native stack needs its own guest frame stack. Fibers can resume
     // out of nesting order, so they cannot share one LIFO stack.
     // Entries are owned and released by their host thread (ADR-0006).
     private ExecutionStates!(Vm*) _vms;
+    private CallbackBridge* _callbacks;
+    // Set by `release` when no host code holds a callback entry, so that no
+    // guest code of this instance can run again once its states are gone.
+    private shared bool _jitCodeCanGo;
     private NativeData _nativeData;
     private PlanCache _plans;
     // What the functions of this backend do with the JIT.
     private JitSetting _jit;
+    // The JIT code region and the other JIT state of this instance. Its
+    // address never changes, and each `Function` that this instance compiles
+    // points to it. The destructor of the field frees the region.
+    static if (imported!"snakebite.backends.bytecode.jit".jitSupported) {
+        private imported!"snakebite.backends.bytecode.jit".JitInstance
+            _jitInstance;
+
+        package auto jitInstance() {
+            return &_jitInstance;
+        }
+    }
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -101,7 +117,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // real linked data - this builds the same shapes by hand instead, once
     // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
     // reuses the one already built.
-    private snakebite.backends.classinfo.ClassRuntimeCache _classRuntime;
+    private snakebite.language.statics.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
     // The number of callees that compile only so that their callers can
     // copy them, nested inside each other. Greater than zero while such a
@@ -117,6 +133,13 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // paths and host entry. Publication permits lock-free callback reads
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
+    // The interned parameter signatures of the layouts of this backend. A
+    // `Signature*` of this backend meets only others of this backend.
+    package SignatureTable signatures;
+
+    // Whether the compiler records relocs. It is off: nothing reads the
+    // relocs yet, and recording them costs compile time and memory.
+    public bool recordRelocs;
 
     public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
@@ -135,13 +158,37 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             (type, loc) => _nativeData.initialValue(type, loc));
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
-        }, () => _nativeData.release);
-        _plans.useCallbacks(
-            new CallbackBridge(&invokeCallback, cast(void*) this));
+        }, () => _nativeData.release, &releaseJitCode);
+        _callbacks = new CallbackBridge(&invokeCallback, cast(void*) this);
+        _plans.useCallbacks(_callbacks);
     }
 
+    // How many chunks of callback entries this instance's bridge has.
+    version(unittest)
+    public size_t callbackChunkCount() {
+        return _plans.callbackChunkCount;
+    }
+
+    // The owner ends the instance. The JIT code goes when no guest code can
+    // run: host code holds no callback entry, and (`ExecutionStates`) no
+    // thread has an execution state left, which is checked when the last
+    // one ends. Active calls and fibers keep a state until they return. If
+    // host code holds an entry, the callbacks keep the instance reachable
+    // for the life of the process, and its JIT code stays with it.
     protected override void release() {
+        import core.atomic: atomicStore;
+
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            atomicStore(_jitCodeCanGo, !_callbacks.hasEntries);
         _vms.end;
+    }
+
+    private void releaseJitCode() nothrow @nogc {
+        import core.atomic: atomicLoad;
+
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            if (atomicLoad(_jitCodeCanGo))
+                _jitInstance.release;
     }
 
     private void* constantSymbolAddress(
@@ -193,13 +240,33 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         void*[] args,
     ) {
         const compiled = compileFunction(function_);
-        runHostToGuest(compiled, function_, returnPlace, args);
+        runHostToGuest(compiled, returnPlace, args);
     }
 
     public override void[] staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
         return _nativeData.storageOf(variable);
+    }
+
+    // The handle is a `StartFunction` of this backend. It holds the compiled
+    // function once there is one; until then it holds the step that compiles
+    // it, so the function compiles at its first call, as with `call`. The
+    // declaration is reachable only through that step.
+    public override FunctionHandle compiledFunction(FuncDeclaration function_) {
+        return new StartFunction(() => compileFunction(function_));
+    }
+
+    private final class StartFunction: FunctionHandle {
+        FunctionCompiler.Deferred!(const(Function)*) function_;
+
+        this(const(Function)* delegate() compute) {
+            function_ = typeof(function_)(compute);
+        }
+
+        public override void call(void* returnPlace, void*[] args) {
+            runHostToGuest(function_.get(), returnPlace, args);
+        }
     }
 
     // The bytecode backend's one host-to-guest entry. The program
@@ -218,30 +285,26 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // A `ref`-returning callee hands back the result's own address, not
     // its value - the same word compiled D returns in `rax`.
     //
-    // `compiled` is already built, and `function_`'s frame layout below
-    // is read from a cache built under the compiler lock the first time
-    // any thread needs it (`layoutOf`): binding `args` into
-    // `Vm.HostArgument`s and running the compiled body touch no dmd
-    // state, so this takes no lock of its own. A thread that held the
-    // compiler lock here while it waited for another thread's callback -
-    // the way `Thread.join` waits in `otherThread`/`concurrentThreads`
-    // guest code - would never see that callback return, since the
-    // callback's own slow path (`layoutOf`'s miss branch) needs that
-    // same, recursive lock to build a layout the first time (ADR-0006).
+    // `compiled` is already built and carries the layout that binds `args`
+    // (`Function.hostCall`): binding `args` into `Vm.HostArgument`s and
+    // running the compiled body touch no dmd state, so this takes no lock
+    // of its own. A thread that held the compiler lock here while it
+    // waited for another thread's callback - the way `Thread.join` waits
+    // in `otherThread`/`concurrentThreads` guest code - would never see
+    // that callback return (ADR-0006).
     private void runHostToGuest(
         const(Function)* compiled,
-        FuncDeclaration function_,
         void* returnPlace,
         scope const(void*)[] args,
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
-        const layout = layoutOf(function_);
-        layout.checkHostArgumentCount(args.length, function_, "bytecode");
+        const layout = &compiled.hostCall;
+        layout.checkArgumentCount(args.length, "bytecode");
 
         Vm.HostArgument[16] inlineArguments = void;
         const count = layout.parameters.length
-            + (layout.hiddenThis.variable !is null)
+            + layout.hasHiddenThis
             + (variadicCursor !is null)
             + (variadicTypes !is null);
         auto arguments = count <= inlineArguments.length
@@ -249,18 +312,15 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         size_t filled;
 
         scope const(void*)[] declaredArguments = args;
-        if (layout.hiddenThis.variable !is null) {
+        if (layout.hasHiddenThis) {
             arguments[filled++] = Vm.HostArgument(
-                layout.hiddenThis.parameter.offset, args[0],
-                size_t.sizeof,
-            );
+                layout.hiddenThis.offset, args[0], layout.hiddenThis.width);
             declaredArguments = args[1 .. $];
         }
 
         foreach (i, parameter; layout.parameters)
             arguments[filled++] = Vm.HostArgument(
-                parameter.offset, declaredArguments[i],
-                parameter.facts.size);
+                parameter.offset, declaredArguments[i], parameter.width);
 
         if (variadicCursor !is null) {
             assert(layout.variadicCursor != size_t.max);
@@ -293,7 +353,8 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
             // FrameLayout.of completes body semantics before collecting
             // locals, including lowering temporaries. Publish only that
             // complete layout, owned by this backend rather than the AST.
-            result = _layouts.insert(function_, FrameLayout.of(function_));
+            result = _layouts.insert(
+                function_, FrameLayout.of(function_, signatures));
         });
         return result;
     }
@@ -325,7 +386,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         return _program.checks;
     }
 
-    package imported!"snakebite.backends.haltprocess".HaltAction
+    package imported!"snakebite.failure.halt".HaltAction
     haltAction() const {
         return _program.haltAction;
     }
@@ -337,9 +398,6 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
-        // A callback can first run during GC finalization, when allocating
-        // its argument layout is forbidden.
-        layoutOf(function_);
         _plans.registerGuestFunction(compiled, function_);
     }
 
@@ -361,7 +419,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // the host frames untouched (ADR-0004).
     private void callGuestFromHost(CallbackCall* call) {
         runHostToGuest(cast(const(Function)*) call.function_,
-            call.declaration, call.returnPlace, call.arguments,
+            call.returnPlace, call.arguments,
             call.variadicCursor, call.variadicTypes);
     }
 
@@ -390,14 +448,14 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     // The native metadata a guest class needs at run time: an instance
     // vtable, a per-interface vtable and the `.init` bytes `_d_newclassT`'s
     // real body would otherwise copy from a linked symbol this project's
-    // compiler never emits. Built by `snakebite.backends.classinfo`,
+    // compiler never emits. Built by `snakebite.language.statics.classinfo`,
     // shared with the interpreter's own version of this same question;
     // only how a vtable slot gets its callable value is this backend's
     // own.
     package TypeInfo_Class classRuntimeInfo(
         ClassDeclaration declaration,
     ) {
-        import snakebite.backends.classinfo:
+        import snakebite.language.statics.classinfo:
             classRuntimeInfo_ = classRuntimeInfo, Hooks;
 
         if (auto found = _classRuntime.find(declaration))
@@ -689,7 +747,7 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
     //
     // Locked on the frontend (compiler) lock (`snakebite.frontend.
     // compiler.withCompilerLock`), not a lock of this backend's own: a
-    // guest class's runtime info (`snakebite.backends.classinfo.
+    // guest class's runtime info (`snakebite.language.statics.classinfo.
     // ClassRuntimeCache.build`) already runs its `make` callback under
     // this same lock, and `make` can reach `callableAddress` -> here,
     // compiling a method for the first time to fill a vtable slot. A
@@ -727,10 +785,10 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
         import dmd.astenums: STC, Tvoid;
         import dmd.funcsem: needsClosure;
         import dmd.typesem: nextOf;
-        import snakebite.backends.layout: FrameLayout;
+        import snakebite.language.layout.frame: FrameLayout;
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import snakebite.nativelayout: TypeFacts;
+        import snakebite.native.value: TypeFacts;
         import std.conv: text;
 
         if (function_ is null)
@@ -805,6 +863,11 @@ public final class Bytecode: imported!"snakebite.backends.backend".Backend {
                 this, _jit, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             *placeholder = compiler.build(body_);
+            if (placeholder.jitCounts && _jit.perfMap) {
+                import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+                placeholder.jitName = function_.mangledNameOf;
+            }
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
@@ -902,27 +965,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import dmd.typesem: nextOf, toBasetype;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, outerFunctionOf;
-    import snakebite.backends.aggregateinit: InitStep, NewPlan;
-    import snakebite.nativelayout: bitfieldAccess, fieldOffset;
-    import snakebite.backends.builtins: BuiltinCall;
-    import snakebite.backends.calls: CallSelection;
-    import snakebite.backends.casts: CastPlan;
-    import snakebite.backends.closureplan: ClosurePlan;
-    import snakebite.backends.compoundassign:
+    import snakebite.language.storage.lifetime: InitStep, NewPlan;
+    import snakebite.frontend.typefacts: bitfieldAccess, fieldOffset;
+    import snakebite.builtin.call: BuiltinCall;
+    import snakebite.language.call.selection: CallSelection;
+    import snakebite.language.operators.casts: CastPlan;
+    import snakebite.language.context.chain: ClosurePlan;
+    import snakebite.language.operators.compound:
         CompoundConversion, compoundConversion;
-    import snakebite.backends.dualcontext:
-        ContextSource, PairPlan, calleeContextSourceOf, constructedObjectOffset,
-        constructsThroughPair, contextSourceOf,
+    import snakebite.language.context.pair:
+        constructedObjectOffset, constructsThroughPair;
+    import snakebite.language.context.source:
+        ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
         pairPlanOf;
     import snakebite.backends.bytecode.relocation:
-        Address, Place, Reloc, Target, recordRelocs;
-    import snakebite.backends.layout: ClosureLayout, FrameLayout;
-    import snakebite.backends.temporary: TemporaryPlan, constructTemporary;
-    import snakebite.exception: SnakebiteException;
-    import snakebite.nativelayout:
-        alignUp, initializerRunsForEffect, initializerValueOf,
-        isIntegralSize, isThreadLocalStorage, TypeFacts;
-    import snakebite.nativevalue: CastKind;
+        Address, Place, Reloc, Target;
+    import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
+    import snakebite.language.layout.temporary: TemporaryPlan, constructTemporary;
+    import snakebite.failure.report: SnakebiteException;
+    import snakebite.frontend.typefacts:
+        initializerRunsForEffect, initializerValueOf, isThreadLocalStorage;
+    import snakebite.native.value: alignUp, isIntegralSize, TypeFacts;
+    import snakebite.native.value: CastKind;
 
     alias visit = LoweringVisitor.visit;
 
@@ -1292,7 +1356,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     site.cleanupEndIndex);
             }
 
-        if (recordRelocs) {
+        if (_bytecode.recordRelocs) {
             foreach (index, ref site; _callSites)
                 recordCallSiteRelocs(_relocs, index, site);
             foreach (index, ref site; _assertSites)
@@ -1335,6 +1399,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             resultPlace,
         );
         result.inlineBody = inlineBody;
+        // No copy: this is the name of the function's identifier, which
+        // dmd interns in a table that lives, uncleared, until the process
+        // ends (`rebuildIdentifierTable` in frontend/compiler.d), or a
+        // string literal. It outlives every `Function`.
+        result.hostCall = _layout.hostCall(
+            cast(string) _function.toString);
         result.relocs = _relocs;
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
@@ -1342,6 +1412,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.fixWindowFacts();
         result.jitHeat = _jit.jitStartHeat;
         result.jitCounts = _jit.jitCounting;
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            result.jit = _bytecode.jitInstance;
         return result;
     }
 
@@ -1684,9 +1756,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // old destination until then. A function whose returns are all of that
     // kind keeps a pointer to the place in a frame slot; the callers store it
     // there. Returns the place of the function.
-    private imported!"snakebite.backends.returnplace".ReturnPlace
+    private imported!"snakebite.stack.frames".ReturnPlace
     redirectReturns() {
-        import snakebite.backends.returnplace: ReturnPlace;
+        import snakebite.stack.frames: ReturnPlace;
 
         auto place = _layout.returnPlace;
         if (_isVoidReturn || _isRefReturn)
@@ -2111,7 +2183,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (!recordRelocs)
+        if (!_bytecode.recordRelocs)
             return;
         Roles roles;
         const known = rolesOf(handler, roles);
@@ -2133,7 +2205,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t addConstant(in Address address) {
-        if (recordRelocs && !address.isNull)
+        if (_bytecode.recordRelocs && !address.isNull)
             _relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _constants.length),
@@ -3645,7 +3717,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `recordCaseTarget`) - no jump table, since nothing about this
     // compiler's `Instruction` stream supports one.
     override void visit(SwitchStatement statement) {
-        import snakebite.nativelayout: TypeFacts;
+        import snakebite.native.value: TypeFacts;
 
         if (throwIfStringSwitchInCtfeBlock(statement))
             return;
@@ -3880,7 +3952,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             = FullExpressionScope.Position.condition,
         in bool inPlace = false,
     ) {
-        import snakebite.nativelayout: TypeFacts;
+        import snakebite.native.value: TypeFacts;
 
         const truth = truthFacts(condition.type);
 
@@ -3926,7 +3998,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t conditionWidth(Expression condition) {
-        import snakebite.nativelayout: TypeFacts;
+        import snakebite.native.value: TypeFacts;
 
         const truth = truthFacts(condition.type);
         // `opFloatToBool` (in `compileCondition`) always writes a 1-byte
@@ -3943,9 +4015,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
         import dmd.typesem: toBasetype;
-        import snakebite.backends.checkplan:
-            assertPlanOf, FailurePlan, isUnanalysed;
-        import snakebite.backends.exceptions: assertFailureOf;
+        import snakebite.language.checks:
+            assertFailureOf, assertPlanOf, FailurePlan, isUnanalysed;
 
         const plan = assertPlanOf(_bytecode.checks);
         if (plan.kind == FailurePlan.Kind.ignore)
@@ -4023,8 +4094,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssertExp expression, AssertFailure failure,
     ) {
         import core.stdc.string: strlen;
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+        import snakebite.language.call.druntimehook: DruntimeHook, planOf;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         const message = compileMessage(failure.messageExpression);
         const file = expression.loc.filename;
@@ -4042,9 +4113,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // `-checkaction=C`: the C runtime aborts the process.
     private void compileCAssert(AssertExp expression) {
-        import snakebite.backends.exceptions:
+        import snakebite.language.checks:
             cAssertCallOf, cAssertionOf, messageExpressionOf;
-        import snakebite.nativelayout: arrayPointerOffset;
+        import snakebite.native.value: arrayPointerOffset;
 
         auto messageExpression = messageExpressionOf(expression);
         if (messageExpression is null) {
@@ -4062,7 +4133,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileCAssertCall(in CAssertCall call, in Arg assertion) {
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 
         // Without a function, `cAssertCallOf` names it with a literal of the
         // host.
@@ -4116,7 +4187,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileAssertInvariant(
         AssertExp expression, in size_t objectOffset,
     ) {
-        import snakebite.backends.exceptions:
+        import snakebite.language.checks:
             AssertInvariantPlan, assertInvariantPlanOf;
 
         auto plan = assertInvariantPlanOf(expression, _bytecode.checks);
@@ -4605,7 +4676,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // gave it - `int sum = 0;` is a `DeclarationExp` here, the same as in
     // the interpreter.
     private void compileDeclaration(DeclarationExp expression) {
-        import snakebite.backends.declaration: forEachRuntimeVariable;
+        import snakebite.language.layout.variables: forEachRuntimeVariable;
 
         forEachRuntimeVariable(expression.declaration, (variable) {
             compileDeclaredVariable(variable, expression);
@@ -4666,7 +4737,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const facts = typeFacts(variable.type);
         auto initializer = initializerValueOf(expInitializer);
-        import snakebite.nativelayout: isStoredLiteral;
+        import snakebite.frontend.typefacts: isStoredLiteral;
 
         const storedLiteral = isStoredLiteral(initializer);
         if (isClosureVariable(variable)) {
@@ -5091,7 +5162,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const facts = typeFacts(expression.e1.type);
-        import snakebite.backends.assignment: executeAssignment;
+        import snakebite.language.storage.lifetime: executeAssignment;
 
         const valueOffset = executeAssignment!size_t(
             expression.isConstructExp !is null,
@@ -5220,7 +5291,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expression, target, destOffset, resolvedTarget);
 
         import dmd.astenums: Tarray;
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         auto sarrayType = targetType.isTypeSArray;
         const elementFacts = typeFacts(sarrayType.next);
@@ -5251,7 +5322,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             : loadSlicePointer(resolvedTarget, typeFacts(target.type));
 
         const rightTy = expression.e2.type.toBasetype.ty;
-        import snakebite.nativelayout: isStoredLiteral;
+        import snakebite.frontend.typefacts: isStoredLiteral;
 
         if (isStoredLiteral(expression.e2)) {
             const facts = typeFacts(sarrayType);
@@ -5259,7 +5330,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e2, valueOffset, facts.size, sarrayType);
             emit(&opStoreIndirect, baseOffset, valueOffset, facts.size);
         } else {
-            import snakebite.nativelayout: arrayValueSize;
+            import snakebite.native.value: arrayValueSize;
 
             const sliceFacts = TypeFacts(
                 arrayValueSize, size_t.alignof, false, false, true,
@@ -5311,7 +5382,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t loadSlicePointer(
         in size_t address, in TypeFacts facts,
     ) {
-        import snakebite.nativelayout: arrayPointerOffset;
+        import snakebite.native.value: arrayPointerOffset;
 
         const descriptor = loadSliceDescriptor(address, facts);
         const pointer = reserveTemp(pointerFacts);
@@ -5329,7 +5400,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t resolvedTarget = size_t.max,
     ) {
         import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         const targetKind = target.e1.type.toBasetype.ty;
         assert(targetKind == Tarray || targetKind == Tpointer
@@ -5382,8 +5453,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in TypeFacts sliceFacts,
         in Loc loc,
     ) {
-        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
-        import snakebite.nativelayout: arrayValueSize;
+        import snakebite.language.checks: boundsPlanOf, FailurePlan;
+        import snakebite.native.value: arrayValueSize;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         if (plan.kind != FailurePlan.Kind.ignore) {
@@ -5415,7 +5486,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCompoundAssign(
         BinAssignExp expression, in size_t destOffset,
     ) {
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.language.operators.compound: compoundTarget;
 
         if (compileDirectCompound(expression, destOffset))
             return;
@@ -5427,10 +5498,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t targetOffset,
         in size_t destOffset = discardResult,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticKind, arithmeticPlan;
-        import snakebite.backends.shifts: shiftPlan;
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.language.operators.shifts: shiftPlan;
+        import snakebite.language.operators.compound: compoundTarget;
         import std.conv: text;
 
         auto target = compoundTarget(expression);
@@ -5530,7 +5601,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A vector target has the operation's own type: dmd promotes no lane.
     private void compileVectorCompoundAssign(
         BinAssignExp expression,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         in size_t targetOffset, in size_t destOffset,
     ) {
         auto storage = ScalarStorage(ScalarStorage.Kind.indirect, plan.facts,
@@ -5549,7 +5620,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // The complex operation for a binary, compound or postfix operator.
     private Instruction.Handler complexHandler(Expression expression) {
-        import snakebite.nativevalue: ComplexOperation;
+        import snakebite.native.value: ComplexOperation;
         import std.conv: text;
 
         with (EXP) switch (expression.op) {
@@ -5577,7 +5648,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         TypeFacts facts;
         size_t offset;
         VarDeclaration variable;
-        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind
+        imported!"snakebite.language.operators.arithmetic".ArithmeticPlan.Kind
             arithmetic;
         // Only a compound assignment sets it.
         CompoundConversion conversion;
@@ -5585,7 +5656,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // DMD reads a promoted floating or complex target before its right
         // side; integral targets keep the ordinary right-side-first order.
         bool promotesBeforeOperand() const {
-            import snakebite.backends.arithmetic: ArithmeticPlan;
+            import snakebite.language.operators.arithmetic: ArithmeticPlan;
 
             with (ArithmeticPlan.Kind) final switch (arithmetic) {
                 case floating, complex:
@@ -5597,7 +5668,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private ScalarStorage scalarStorage(Expression target) {
-        import snakebite.backends.arithmetic: arithmeticKind;
+        import snakebite.language.operators.arithmetic: arithmeticKind;
 
         const facts = typeFacts(target.type);
         const arithmetic = arithmeticKind(target.type);
@@ -5683,12 +5754,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Converts a target's value between its own width and the width of a
     // compound assignment's promoted operation.
     private void emitWidthChange(
-        imported!"snakebite.backends.arithmetic".ArithmeticPlan.Kind kind,
+        imported!"snakebite.language.operators.arithmetic".ArithmeticPlan.Kind kind,
         in TypeFacts facts, in size_t destination, in size_t source,
         in size_t width, in size_t sourceWidth,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan;
-        import snakebite.nativevalue: CastKind;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan;
+        import snakebite.native.value: CastKind;
 
         with (ArithmeticPlan.Kind) final switch (kind) {
             case floating:
@@ -5815,9 +5886,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private Instruction.Handler shiftHandler(
-        in imported!"snakebite.backends.shifts".ShiftPlan plan,
+        in imported!"snakebite.language.operators.shifts".ShiftPlan plan,
     ) {
-        with (imported!"snakebite.backends.shifts".ShiftPlan.Direction)
+        with (imported!"snakebite.language.operators.shifts".ShiftPlan.Direction)
             final switch (plan.direction) {
                 case left:
                     return &opShiftLeft;
@@ -5862,7 +5933,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // an expression - goes, captured before the target changes;
     // `discardResult` when a caller at statement level does not want it.
     private void compilePost(PostExp expression, in size_t destOffset) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan,
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan,
             pointerPostStep;
         import std.conv: text;
 
@@ -5960,7 +6031,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(D) private void emitBytes(in void[] bytes) {
         assert(bytes.length == _width);
         emit(&opStaticLoad, _destination,
-            Address(Target.Kind.staticData, bytes.ptr), bytes.length);
+            Address(Target.Kind.staticData, bytes.ptr), bytes.length,
+            Instruction.immutableSource);
     }
 
     private void compileConstant(Expression expression) {
@@ -6001,7 +6073,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(VectorExp expression) {
-        import snakebite.backends.vectorinit: planVectorInit;
+        import snakebite.language.storage.lifetime: planVectorInit;
 
         requireDestination(expression);
         const plan = planVectorInit(expression);
@@ -6053,8 +6125,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 "an initializer symbol names an aggregate");
             const initial = _bytecode._runtimeTypes.initializer(declaration);
 
-            import snakebite.nativelayout:
-                arrayLengthOffset, arrayPointerOffset;
+            import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) initial.length), size_t.sizeof);
@@ -6155,7 +6226,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileDelegateValue(
         DelegateTarget target, Expression expression,
     ) {
-        import snakebite.nativelayout:
+        import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset;
 
         if (target.function_ is null)
@@ -6205,7 +6276,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(DelegatePtrExp expression) {
         requireDestination(expression);
 
-        import snakebite.nativelayout: delegateContextOffset;
+        import snakebite.native.value: delegateContextOffset;
 
         compileDelegateWord(expression.e1, delegateContextOffset);
     }
@@ -6213,13 +6284,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(DelegateFuncptrExp expression) {
         requireDestination(expression);
 
-        import snakebite.nativelayout: delegateFunctionOffset;
+        import snakebite.native.value: delegateFunctionOffset;
 
         compileDelegateWord(expression.e1, delegateFunctionOffset);
     }
 
     private void compileDelegateWord(Expression expression, in size_t offset) {
-        import snakebite.nativelayout: delegateValueSize;
+        import snakebite.native.value: delegateValueSize;
 
         const delegateOffset = reserveTemp(TypeFacts.delegateValue);
         evalInto(expression, delegateOffset, delegateValueSize);
@@ -6278,8 +6349,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // through `ref` binding, so this is nothing more than that answer
     // copied to `_destination`.
     override void visit(AddrExp expression) {
-        import snakebite.frontend.storage: typeInfoAddressedBy;
-        import snakebite.nativelayout: isStaticStructAddress;
+        import snakebite.language.storage.resolver: typeInfoAddressedBy;
+        import snakebite.frontend.typefacts: isStaticStructAddress;
 
         if (isStaticStructAddress(expression))
             return compileConstant(expression);
@@ -6344,12 +6415,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCopy, _destination, baseOffset + field.offset, _width);
     }
 
-    // The four hooks `snakebite.backends.aggregateinit.applyStep` and
+    // The four hooks `snakebite.language.storage.lifetime.applyStep` and
     // `driveInit` drive, one per `InitStep.Kind`, each turning one step
     // into bytecode at `base`, a storage operand that preserves field
     // offsets for both frame values and allocations alike.
 
-    // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
+    // Satisfies `lifetime`'s `Hooks` contract: forwards each
     // `InitStep.Kind` to the matching `apply*Step` method below, at
     // whichever `base` its call site is compiling into. Built
     // once per call site instead of the four lambdas each used to
@@ -6434,14 +6505,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `StructLiteralExp.elements` sparseness both call for.
     override void visit(StructLiteralExp expression) {
         requireDestination(expression);
-        import snakebite.nativelayout: isStoredLiteral;
+        import snakebite.frontend.typefacts: isStoredLiteral;
 
         if (isStoredLiteral(expression))
             return compileConstant(expression);
 
         emit(&opZero, _destination, 0, _width);
 
-        import snakebite.backends.aggregateinit: applyStep, planStructLiteral;
+        import snakebite.language.storage.lifetime: applyStep, planStructLiteral;
 
         auto plan = planStructLiteral(expression);
         auto hooks = AggregateInitHooks(this, _destination);
@@ -6456,7 +6527,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // word through `arrayPointerOffset` instead of assuming it comes
     // second.
     override void visit(ArrayLengthExp expression) {
-        import snakebite.nativelayout: arrayLengthOffset;
+        import snakebite.native.value: arrayLengthOffset;
 
         requireDestination(expression);
 
@@ -6494,8 +6565,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             SliceExp expression,
             size_t sourceLengthOffset,
             size_t sourcePointerOffset) {
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         bindDollar(expression.lengthVar, sourceLengthOffset);
 
@@ -6565,7 +6635,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // The address of the elements a slice names, as a word in a temporary.
     private size_t compileSlicePointer(SliceExp expression) {
-        import snakebite.nativelayout: arrayPointerOffset, arrayValueSize;
+        import snakebite.native.value: arrayPointerOffset, arrayValueSize;
 
         const sliceFacts = TypeFacts(
             arrayValueSize, size_t.alignof, false, false, true,
@@ -6614,8 +6684,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // Semantic requires both bounds to slice a pointer.
     private void compilePointerSlice(SliceExp expression, Type sourceType) {
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         assert(expression.upr !is null);
         const facts = typeFacts(sourceType);
@@ -6663,8 +6732,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileStaticArraySlice(
         SliceExp expression, Type sourceType,
     ) {
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         const dim = cast(size_t) sourceType.isTypeSArray.dim.toInteger;
 
@@ -6698,8 +6766,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileDynamicArraySlice(
         SliceExp expression, Type sourceType,
     ) {
-        import snakebite.nativelayout:
-            arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         if (expression.lwr is null && expression.upr is null) {
             evalInto(expression.e1, _destination, _width);
@@ -6975,7 +7042,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // DMD leaves constructor and positional field initialization outside
     // the allocation lowering. Its result already occupies _destination.
-    // `driveInit` (`aggregateinit.d`) owns the order the `vthis` steps, the
+    // `driveInit` (`lifetime.d`) owns the order the `vthis` steps, the
     // constructor call, and the remaining positional field stores run in -
     // a nested struct's or nested class's `vthis` sits inside the
     // allocation the lowering just returned, at the same native offset a
@@ -6984,7 +7051,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `new Adder(2)` with a constructor and a bare `new Reader` (no
     // arguments at all) get a real context rather than `.init`'s zero.
     private void compileNew(NewExp expression) {
-        import snakebite.backends.aggregateinit:
+        import snakebite.language.storage.lifetime:
             driveInit, planClassContext, planNew, planPositionalFields;
 
         auto newPlan = planNew(expression);
@@ -7011,7 +7078,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        import snakebite.backends.deleteplan: planDelete;
+        import snakebite.language.storage.lifetime: planDelete;
 
         auto deletion = planDelete(expression);
         const object = reserveTemp(pointerFacts);
@@ -7045,7 +7112,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     override void visit(TypeidExp expression) {
         import dmd.dtemplate: isExpression, isType;
-        import snakebite.backends.classinfo: typeidLoadCount;
+        import snakebite.language.statics.classinfo: typeidLoadCount;
         import std.conv: text;
 
         requireDestination(expression);
@@ -7166,7 +7233,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the updated pair straight out of `x`'s own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
         import dmd.astenums: Tchar, Twchar;
-        import snakebite.nativelayout: arrayValueSize;
+        import snakebite.native.value: arrayValueSize;
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
@@ -7476,7 +7543,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileShiftExpression(BinExp expression) {
-        import snakebite.backends.shifts: shiftPlan;
+        import snakebite.language.operators.shifts: shiftPlan;
 
         compileBinaryExpression(
             expression, shiftHandler(shiftPlan(expression)));
@@ -7509,7 +7576,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticKind, arithmeticPlan;
         import std.conv: text;
 
@@ -7605,10 +7672,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // lane, the floating operation for a floating one.
     private Instruction.Handler laneHandler(
         BinExp expression,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         Instruction.Handler integralHandler,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan;
         import std.conv: text;
 
         with (ArithmeticPlan.Kind) final switch (plan.laneKind) {
@@ -7626,7 +7693,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // leaving the answer at `left`.
     private void emitLanes(
         Instruction.Handler handler,
-        in imported!"snakebite.backends.arithmetic".ArithmeticPlan plan,
+        in imported!"snakebite.language.operators.arithmetic".ArithmeticPlan plan,
         in size_t left, in size_t right,
     ) {
         const laneSize = plan.laneFacts.size;
@@ -7774,7 +7841,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto index = expression.isIndexExp)
             return placeOfIndex(index, inPlace);
         if (auto length = expression.isArrayLengthExp) {
-            import snakebite.nativelayout: arrayLengthOffset;
+            import snakebite.native.value: arrayLengthOffset;
 
             if (length.e1.type.toBasetype.ty != Tarray)
                 return size_t.max;
@@ -7865,8 +7932,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: Tarray, Tsarray;
         import dmd.sideeffect: hasSideEffect;
-        import snakebite.backends.checkplan: boundsPlanOf, FailurePlan;
-        import snakebite.frontend.storage: needsIndexBoundsCheck;
+        import snakebite.language.checks: boundsPlanOf, FailurePlan;
+        import snakebite.language.storage.resolver: needsIndexBoundsCheck;
 
         auto arrayType = expression.e1.type.toBasetype;
         shape.fixedLength = arrayType.ty == Tsarray;
@@ -8029,7 +8096,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t value, in size_t array,
         in Address constantValue = Address.init,
     ) {
-        import snakebite.nativelayout: arrayLengthOffset;
+        import snakebite.native.value: arrayLengthOffset;
 
         resolveIndexSlot(shape);
         const element = typeFacts(expression.type).size;
@@ -8082,9 +8149,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t placeOfStaticIndex(
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
-        import snakebite.frontend.storage:
+        import snakebite.language.storage.resolver:
             needsIndexBoundsCheck, readsIndexAfterBase;
-        import snakebite.nativelayout: arrayLengthOffset;
+        import snakebite.native.value: arrayLengthOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
         const dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
@@ -8128,9 +8195,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
         import dmd.sideeffect: hasSideEffect;
-        import snakebite.frontend.storage:
+        import snakebite.language.storage.resolver:
             needsIndexBoundsCheck, readsIndexAfterBase;
-        import snakebite.nativelayout: arrayLengthOffset, arrayPointerOffset;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
         const literal = literalIndex(expression);
@@ -8187,8 +8254,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         IndexExp expression, in size_t array, in size_t stride,
         in size_t index,
     ) {
-        import snakebite.nativelayout: arrayLengthOffset;
-        import snakebite.frontend.storage: needsIndexBoundsCheck;
+        import snakebite.native.value: arrayLengthOffset;
+        import snakebite.language.storage.resolver: needsIndexBoundsCheck;
 
         const length = placeAt(array, arrayLengthOffset);
         if (needsIndexBoundsCheck(expression))
@@ -8309,7 +8376,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // follows dmd, the host compiler of `bin/ut`.
     private size_t operandInto(
         Expression operand, Expression later,
-        in imported!"snakebite.nativelayout".TypeFacts facts,
+        in imported!"snakebite.native.value".TypeFacts facts,
         in size_t width, in bool floating, in bool destructorsFollow = false,
     ) {
         import dmd.sideeffect: hasSideEffect;
@@ -8415,7 +8482,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitBinary3(
         Instruction.Handler handler, in size_t destOffset,
         Expression left, Expression right,
-        in imported!"snakebite.nativelayout".TypeFacts facts,
+        in imported!"snakebite.native.value".TypeFacts facts,
         in size_t width, in Flag!"floating" floatingOperands,
     ) {
         const floating = floatingOperands == Yes.floating;
@@ -8437,7 +8504,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // which is evaluated here.
     private void emitWithRight(
         Instruction.Handler handler, in size_t destOffset, in size_t left,
-        Expression right, in imported!"snakebite.nativelayout".TypeFacts facts,
+        Expression right, in imported!"snakebite.native.value".TypeFacts facts,
         in size_t width, in bool floating,
     ) {
         const constant = constantOf(right, width, floating);
@@ -8475,8 +8542,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in FullExpressionScope.Position position,
         in Flag!"plain" plain,
     ) {
-        import snakebite.backends.comparison: ComparisonPlan, comparisonPlan;
-
         const logical = condition.op == EXP.andAnd
             || condition.op == EXP.orOr;
         if (logical && plain == Yes.plain) {
@@ -8548,7 +8613,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void emitCompareBranch(
         BinExp comparison, Comparison operation,
-        in imported!"snakebite.nativelayout".TypeFacts facts,
+        in imported!"snakebite.native.value".TypeFacts facts,
         in bool floating, in bool jumpWhen,
         in FullExpressionScope.Position position, ref size_t[] branches,
     ) {
@@ -8664,10 +8729,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Whether evaluating `value` into its destination writes the
     // destination once, as the last thing it does.
     private bool writesTargetLast(
-        Expression value, in imported!"snakebite.nativelayout".TypeFacts facts,
+        Expression value, in imported!"snakebite.native.value".TypeFacts facts,
         in bool floating,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticPlan;
 
         const valueFacts = typeFacts(value.type);
@@ -8713,9 +8778,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         BinAssignExp expression, in size_t destOffset,
     ) {
         import dmd.sideeffect: hasSideEffect;
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticPlan;
-        import snakebite.frontend.storage: compoundTarget;
+        import snakebite.language.operators.compound: compoundTarget;
 
         if (compoundTarget(expression) !is expression.e1)
             return false;
@@ -8776,7 +8841,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool compileDirectPost(
         PostExp expression, in size_t destOffset,
     ) {
-        import snakebite.backends.arithmetic:
+        import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticPlan;
 
         const facts = typeFacts(expression.e1.type);
@@ -9012,7 +9077,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileDelegateOrdering(
         BinExp expression, in size_t destOffset,
     ) {
-        import snakebite.nativelayout:
+        import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset;
         import std.conv: text;
 
@@ -9102,7 +9167,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         IdentityExp expression, in IdentityPlan plan, in size_t destOffset,
     ) {
         import dmd.tokens: EXP;
-        import snakebite.nativelayout: arrayValueSize;
+        import snakebite.native.value: arrayValueSize;
 
         if (plan.skipCompare) {
             emit(&opConstant, destOffset,
@@ -9126,8 +9191,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? arrayFacts
             : facts);
         if (plan.staticArray) {
-            import snakebite.nativelayout:
-                arrayLengthOffset, arrayPointerOffset;
+            import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
             const leftAddress = plan.leftStorage
                 ? compileIdentityArrayStorage(expression.e1, facts)
                 : compileAddress(expression.e1);
@@ -9170,7 +9234,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         EqualExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
         import dmd.tokens: EXP;
-        import snakebite.nativelayout: arrayValueSize;
+        import snakebite.native.value: arrayValueSize;
 
         assert(expression.lowering is null);
 
@@ -9195,7 +9259,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tarray;
         import dmd.expressionsem: toInteger;
         import dmd.typesem: toBasetype;
-        import snakebite.nativelayout:
+        import snakebite.native.value:
             arrayLengthOffset, arrayPointerOffset, arrayValueSize;
 
         auto type = operand.type.toBasetype;
@@ -9284,7 +9348,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         UnaExp expression, in size_t destOffset, in size_t width,
         Instruction.Handler handler,
     ) {
-        import snakebite.backends.arithmetic: ArithmeticPlan, arithmeticPlan;
+        import snakebite.language.operators.arithmetic: ArithmeticPlan, arithmeticPlan;
         import std.conv: text;
 
         const plan = arithmeticPlan(expression);
@@ -9471,7 +9535,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _finished = ifFinished && elseFinished;
     }
 
-    // `cast(T) x`. `snakebite.backends.casts.classify` has already turned
+    // `cast(T) x`. `snakebite.language.operators.casts.classify` has already turned
     // the source and destination types into a `Kind`; this is the
     // adapter that executes each one, with no type inspection of its
     // own. `cast(bool)` is not a narrowing: dmd classifies `bool` as an
@@ -9488,7 +9552,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCast(
         CastExp expression, in size_t destOffset, in size_t width,
     ) {
-        import snakebite.backends.casts: classify;
+        import snakebite.language.operators.casts: classify;
         import std.conv: text;
 
         auto sourceType = expression.e1.type;
@@ -9508,7 +9572,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // Every kind below is only a transformation of the operand's
         // own already-evaluated (or already-addressed) bytes into
-        // `destOffset`'s - `snakebite.nativevalue.applyCastAs`, reached
+        // `destOffset`'s - `snakebite.native.value.applyCastAs`, reached
         // here through `opCastAs`'s own instance of `plan.kind`, is the
         // one place that carries each of them out; this compiler only
         // ever decides where the operand's bytes already live and
@@ -9717,7 +9781,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
         import dmd.astenums: STC, Tvoid, VarArg;
-        import snakebite.backends.calls: arityMismatches, ValueCall;
+        import snakebite.language.call.selection: arityMismatches, ValueCall;
         import snakebite.frontend.dmd.dispatch: classReceiverOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
@@ -9740,7 +9804,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(receiver, objectOffset, size_t.sizeof);
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
-        auto valueCall = ValueCall.of(calleeType, true);
+        auto valueCall = ValueCall.of(
+            calleeType, true, _bytecode.signatures);
         const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
@@ -9849,7 +9914,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.location: Loc;
         import dmd.typesem: isZeroInit;
         import snakebite.frontend.compiler: newInFrontend;
-        import snakebite.backends.druntimehooks: DruntimeHook, planOf;
+        import snakebite.language.call.druntimehook: DruntimeHook, planOf;
         import snakebite.frontend.dmd.functions: moduleOf;
 
         if (callee.ident is null || callee.parent is null)
@@ -10003,7 +10068,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _receiverDest = size_t.max;
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
-            return contextOffsetOf(calleeContextSourceOf(_function, callee));
+            return contextOffsetOf(calleeContextSourceOf(
+                _function, callee, _bytecode.signatures));
         case classValue:
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
@@ -10085,7 +10151,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
 
         size_t receiverOffset = size_t.max;
         if (hasThis) {
@@ -10128,7 +10194,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
 
         auto type = typeFunctionOf(callee);
 
@@ -10508,7 +10574,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         scope CallSite delegate(Arg[] args, size_t returnWidth) site,
         in size_t destinationParameter = size_t.max,
     ) {
-        import snakebite.backends.calls: arityMismatches;
+        import snakebite.language.call.selection: arityMismatches;
         import snakebite.ffi.call: CallAdapter;
 
         if (arityMismatches(type.parameterList, arguments, allowExtraArguments))
@@ -10635,7 +10701,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destOffset,
         BuiltinCall entry,
     ) {
-        import snakebite.backends.builtins: variadicCopySize;
+        import snakebite.builtin.call: variadicCopySize;
 
         const size = reserveTemp(pointerFacts);
         emit(&opConstant, size, addConstant(cast(long) variadicCopySize),
@@ -10674,8 +10740,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expressions* arguments,
         in FrameLayout layout,
     ) {
-        import snakebite.backends.layout: shapeOf;
-        import snakebite.backends.variadic: FirstState, VariadicLayout;
+        import snakebite.language.layout.frame: shapeOf;
+        import snakebite.native.variadic: FirstState, VariadicLayout;
 
         const hasTypes = layout.variadicTypes != size_t.max;
         const firstExtra = hasTypes + layout.parameters.length;
@@ -10756,8 +10822,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // parameter from the argument in the same register (`ValueCall`).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
         import dmd.astenums: STC, VarArg;
-        import snakebite.backends.calls: isIndirectDelegateCall, ValueCall;
-        import snakebite.nativelayout:
+        import snakebite.language.call.selection: isIndirectDelegateCall, ValueCall;
+        import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
 
         // `super(args)`/`this(args)` constructor delegation is neither
@@ -10799,7 +10865,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             compileNullCheck(calleeOffset, expression.loc);
         }
 
-        auto valueCall = ValueCall.of(functionType, isDelegateCall);
+        auto valueCall = ValueCall.of(
+            functionType, isDelegateCall, _bytecode.signatures);
         if (valueCall.mismatches(expression.arguments))
             internalFailure("dmd rejects a call with the wrong number of arguments");
 
@@ -10975,9 +11042,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        import snakebite.backends.checkplan:
-            boundsPlanOf, cMessageOf, FailurePlan;
-        import snakebite.backends.exceptions: cAssertCallOf;
+        import snakebite.language.checks:
+            boundsPlanOf, cAssertCallOf, cMessageOf, FailurePlan;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         final switch (plan.kind) with (FailurePlan.Kind) {
@@ -11041,9 +11107,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         scope Arg delegate() lengthArgument,
         in Loc loc,
     ) {
-        import snakebite.backends.checkplan:
-            boundsPlanOf, cMessageOf, FailurePlan;
-        import snakebite.backends.exceptions: cAssertCallOf;
+        import snakebite.language.checks:
+            boundsPlanOf, cAssertCallOf, cMessageOf, FailurePlan;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         if (plan.kind == FailurePlan.Kind.ignore)
@@ -11080,9 +11145,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `_d_nullpointerp` the same way, on the pointer itself, which is
     // nonzero when it is not null. Without the flag nothing is emitted.
     private void compileNullCheck(in size_t pointerOffset, in Loc loc) {
-        import snakebite.backends.checkplan:
-            FailurePlan, nullDerefCMessage, nullDerefPlanOf;
-        import snakebite.backends.exceptions: cAssertCallOf;
+        import snakebite.language.checks:
+            cAssertCallOf, FailurePlan, nullDerefCMessage, nullDerefPlanOf;
 
         final switch (nullDerefPlanOf(_bytecode.checks).kind) with (FailurePlan.Kind) {
             case ignore:
@@ -11285,14 +11349,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageArrayLength(
             ArrayLengthExp expression, size_t base,
         ) {
-            import snakebite.nativelayout: arrayLengthOffset;
+            import snakebite.native.value: arrayLengthOffset;
             return base + arrayLengthOffset;
         }
 
         public size_t storageDynamicIndexLength(
             IndexExp expression, size_t base,
         ) {
-            import snakebite.nativelayout: arrayLengthOffset;
+            import snakebite.native.value: arrayLengthOffset;
 
             const facts = typeFacts(expression.e1.type);
             const array = compiler.reserveTemp(facts);
@@ -11355,7 +11419,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             IndexExp expression, size_t base, size_t index,
         ) {
             import dmd.typesem: toBasetype;
-            import snakebite.nativelayout: arrayPointerOffset;
+            import snakebite.native.value: arrayPointerOffset;
 
             const stride =
                 typeFacts(expression.e1.type.toBasetype.nextOf).size;
@@ -11430,7 +11494,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         FunctionCompiler compiler;
 
         public size_t symbolAddress(SymOffExp expression) {
-            import snakebite.frontend.storage: typeInfoObjectOf;
+            import snakebite.language.storage.resolver: typeInfoObjectOf;
 
             if (auto function_ = expression.var.isFuncDeclaration) {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
@@ -11472,7 +11536,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // its own address: a frame offset needs `opFrameAddress`, and memory
     // behind a pointer already has the pointer in a slot.
     private size_t compileAddress(Expression expression) {
-        import snakebite.frontend.storage: StorageResolver;
+        import snakebite.language.storage.resolver: StorageResolver;
 
         with (EXP) switch (expression.op) {
             case variable, dotVariable, star, index: {
@@ -11501,7 +11565,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t compileSymbolAddress(SymOffExp expression) {
-        import snakebite.frontend.storage: SymbolAddressResolver;
+        import snakebite.language.storage.resolver: SymbolAddressResolver;
 
         return SymbolAddressResolver!(size_t, SymbolAddressAdapter)(
             SymbolAddressAdapter(this),
@@ -11558,5 +11622,5 @@ private string expressionText(imported!"dmd.expression".Expression expression) {
 // that imports it.
 private void assertEveryNodeHandled() {
     static assert(
-        imported!"snakebite.backends.nodecoverage".AssertEveryNodeHandled!FunctionCompiler);
+        imported!"snakebite.language.traversal.coverage".AssertEveryNodeHandled!FunctionCompiler);
 }
