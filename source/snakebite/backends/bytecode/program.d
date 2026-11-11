@@ -1,4 +1,4 @@
-module snakebite.backends.bytecode.linkedmodules;
+module snakebite.backends.bytecode.program;
 
 
 private:
@@ -13,11 +13,13 @@ import snakebite.stack.tls: TlsSlots;
 import snakebite.start.data: StartData;
 
 
-// The compiled code and data of the modules of one process, bound together.
+// What one process holds of a compiled program while it runs: the compiled
+// functions, the signatures, the static storage, the call plans and the start
+// data.
 // It holds nothing of the compiler and nothing of the machinery that
 // executes. A struct that its owner holds by value: its address, and the
 // addresses of what it owns, do not change.
-public struct LinkedModules {
+public struct Program {
     @disable this(this);
 
     // `image` is the dependency image that symbols resolve in, or null. The
@@ -28,7 +30,7 @@ public struct LinkedModules {
     }
 
     // The interned parameter signatures of the layouts. A `Signature*` of
-    // one `LinkedModules` meets only others of the same one.
+    // one `Program` meets only others of the same one.
     public SignatureTable signatures;
 
     // The storage of the static data and constants. What fills it is

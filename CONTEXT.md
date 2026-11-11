@@ -44,6 +44,19 @@ the barrier: per function for an ordinary call, per call site for a
 C-variadic call, whose own extra arguments shape the plan too.
 _Avoid_: call descriptor, thunk
 
+**Program**:
+The program as source: the input of a backend. The module qualifies the
+name: this is `snakebite.program.Program`. Inside the bytecode compiler it is
+imported as `SourceProgram`. Compare **Bytecode program**.
+
+**Bytecode program**:
+What one process holds of a compiled program while it runs: the compiled
+functions, the signatures, the static storage, the call plans and the start
+data. The bytecode compiler fills it on demand. It is
+`snakebite.backends.bytecode.program.Program`, not the source `Program`.
+The module qualifies the name, and inside the bytecode compiler the source
+one is `SourceProgram`.
+
 **Resolver**:
 The single component that turns a mangled symbol name into a host
 address.

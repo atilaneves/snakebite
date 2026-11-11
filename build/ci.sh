@@ -2,11 +2,11 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-# The VM, its runner and the linked modules must compile with no DMD
+# The VM, its runner and the bytecode program must compile with no DMD
 # frontend import paths.
 "${DMD:-dmd}" -o- -i -Isource source/snakebite/backends/bytecode/vm.d \
     source/snakebite/backends/bytecode/runner.d \
-    source/snakebite/backends/bytecode/linkedmodules.d
+    source/snakebite/backends/bytecode/program.d
 
 build/reggae.sh
 ninja
