@@ -28,12 +28,14 @@ public struct RuntimeTypes {
     import object:
         TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
     import snakebite.host.sharedtable: SharedTable;
+    import snakebite.language.statics.data: NativeData;
+    import snakebite.native.value: TypeFacts;
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private void* delegate(const(char)[]) _resolve;
     private void* delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
-    private const(void)[] delegate(Type, Loc) _initialValue;
+    private NativeData* _data;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); an entry is built once, under the compiler lock.
     private SharedTable!(Type, TypeInfo) _types;
@@ -49,13 +51,13 @@ public struct RuntimeTypes {
         void* delegate(const(char)[]) resolve,
         void* delegate(FuncDeclaration, ptrdiff_t) methodAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
-        const(void)[] delegate(Type, Loc) initialValue,
+        NativeData* data,
     ) {
         _isRootOwned = isRootOwned;
         _resolve = resolve;
         _methodAddress = methodAddress;
         _classInfo = classInfo;
-        _initialValue = initialValue;
+        _data = data;
     }
 
     public const(void)[] initializer(
@@ -208,8 +210,10 @@ public struct RuntimeTypes {
         if (classType !is null) {
             auto classInfo = _classInfo(classType.sym);
             if (classType.sym.isInterfaceDeclaration !is null) {
-                auto interfaceInfo = new TypeInfo_Interface;
-                interfaceInfo.info = classInfo;
+                auto interfaceInfo =
+                    _data.newObject!TypeInfo_Interface(classType.sym);
+                _data.storeReference(cast(void*) &interfaceInfo.info,
+                    cast(void*) classInfo);
                 info = interfaceInfo;
             } else
                 info = classInfo;
@@ -219,49 +223,57 @@ public struct RuntimeTypes {
         else if (auto enumType = type.isTypeEnum)
             info = enumInfo(enumType.sym);
         else if (auto functionType = type.isTypeFunction) {
-            auto functionInfo = new TypeInfo_Function;
-            functionInfo.next = get(functionType.next);
-            functionInfo.deco = type.deco.toDString.idup;
+            auto functionInfo = _data.newObject!TypeInfo_Function;
+            reference(&functionInfo.next, get(functionType.next));
+            _data.storeString(&functionInfo.deco, type.deco.toDString);
             info = functionInfo;
         }
         else if (auto delegateType = type.isTypeDelegate) {
-            auto delegateInfo = new TypeInfo_Delegate;
-            delegateInfo.next = get(delegateType.next.nextOf);
-            delegateInfo.deco = type.deco.toDString.idup;
+            auto delegateInfo = _data.newObject!TypeInfo_Delegate;
+            reference(&delegateInfo.next, get(delegateType.next.nextOf));
+            _data.storeString(&delegateInfo.deco, type.deco.toDString);
             info = delegateInfo;
         }
         else if (auto pointer = type.isTypePointer) {
-            auto pointerInfo = new TypeInfo_Pointer;
-            pointerInfo.m_next = get(pointer.next);
+            auto pointerInfo = _data.newObject!TypeInfo_Pointer;
+            reference(&pointerInfo.m_next, get(pointer.next));
             info = pointerInfo;
         }
         else if (auto staticArray = type.isTypeSArray) {
-            auto staticArrayInfo = new TypeInfo_StaticArray;
-            staticArrayInfo.value = get(staticArray.next);
+            auto staticArrayInfo = _data.newObject!TypeInfo_StaticArray;
+            reference(&staticArrayInfo.value, get(staticArray.next));
             staticArrayInfo.len = staticArray.dim.isIntegerExp.getInteger;
             info = staticArrayInfo;
         }
         else if (auto associativeArray = type.isTypeAArray) {
-            auto associativeArrayInfo = new TypeInfo_AssociativeArray;
-            associativeArrayInfo.key = get(associativeArray.index);
-            associativeArrayInfo.value = get(associativeArray.next);
+            auto associativeArrayInfo =
+                _data.newObject!TypeInfo_AssociativeArray;
+            reference(&associativeArrayInfo.key, get(associativeArray.index));
+            reference(&associativeArrayInfo.value, get(associativeArray.next));
             info = associativeArrayInfo;
         }
         else if (auto vector = type.isTypeVector) {
-            auto vectorInfo = new TypeInfo_Vector;
-            vectorInfo.base = get(vector.basetype);
+            auto vectorInfo = _data.newObject!TypeInfo_Vector;
+            reference(&vectorInfo.base, get(vector.basetype));
             info = vectorInfo;
         }
         else if (auto tuple = type.isTypeTuple) {
-            auto tupleInfo = new TypeInfo_Tuple;
-            foreach (argument; *tuple.arguments)
-                tupleInfo.elements ~= get(argument.type);
+            auto tupleInfo = _data.newObject!TypeInfo_Tuple;
+            const count = tuple.arguments.length;
+            if (count != 0) {
+                auto elements = _data.reserve(
+                    TypeFacts(count * (void*).sizeof, (void*).alignof));
+                _data.storeSlice(&tupleInfo.elements, elements);
+                foreach (index, argument; *tuple.arguments)
+                    reference(&tupleInfo.elements[index],
+                        get(argument.type));
+            }
             info = tupleInfo;
         }
 
         if (info is null && type.ty == Tarray) {
-            auto arrayInfo = new TypeInfo_Array;
-            arrayInfo.value = get(type.nextOf);
+            auto arrayInfo = _data.newObject!TypeInfo_Array;
+            reference(&arrayInfo.value, get(type.nextOf));
             info = arrayInfo;
         }
 
@@ -343,14 +355,14 @@ public struct RuntimeTypes {
             return base;
         TypeInfo_Const wrapper;
         if (type.isShared)
-            wrapper = new TypeInfo_Shared;
+            wrapper = _data.newObject!TypeInfo_Shared;
         else if (type.isImmutable)
-            wrapper = new TypeInfo_Invariant;
+            wrapper = _data.newObject!TypeInfo_Invariant;
         else if (type.isWild)
-            wrapper = new TypeInfo_Inout;
+            wrapper = _data.newObject!TypeInfo_Inout;
         else
-            wrapper = new TypeInfo_Const;
-        wrapper.base = base;
+            wrapper = _data.newObject!TypeInfo_Const;
+        reference(&wrapper.base, base);
         return wrapper;
     }
 
@@ -380,25 +392,36 @@ public struct RuntimeTypes {
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {
         import dmd.root.string: toDString;
         import snakebite.frontend.dmd.functions: prettyNameOf;
-        auto info = new TypeInfo_Enum;
-        info.name = cast(string) prettyNameOf(declaration).toDString;
-        info.base = get(declaration.memtype);
-        info.m_init = cast(byte[]) _initialValue(
-            declaration.type, declaration.loc,
-        ).dup;
+        auto info = _data.newObject!TypeInfo_Enum(declaration);
+        _data.storeString(&info.name, prettyNameOf(declaration).toDString);
+        reference(&info.base, get(declaration.memtype));
+        _data.storeSlice(&info.m_init, _data.initialValue(
+            declaration.type, declaration.loc).bytes);
         return info;
     }
 
     // As the compiler's glue does: no bytes for an opaque struct, and a
     // null pointer with the struct length when the default is all zero.
-    private byte[] structInit(StructDeclaration declaration) {
+    private void storeStructInit(
+        TypeInfo_Struct info, StructDeclaration declaration,
+    ) {
         if (declaration.members is null)
-            return null;
+            return;
         if (declaration.zeroInit)
-            return (cast(byte*) null)[0 .. declaration.structsize];
-        return cast(byte[]) _initialValue(
-            declaration.type, declaration.loc,
-        ).dup;
+            return _data.storeSlice(&info.m_init,
+                (cast(byte*) null)[0 .. declaration.structsize]);
+        _data.storeSlice(&info.m_init, _data.initialValue(
+            declaration.type, declaration.loc).bytes);
+    }
+
+    // The word at `place` becomes a reference to `info`.
+    private void reference(void* place, in Object info) {
+        _data.storeReference(place, cast(const(void)*) info);
+    }
+
+    // The word at `place` becomes the address of a method of the program.
+    private void method(void* place, FuncDeclaration declaration) {
+        _data.storeFunction(place, _methodAddress(declaration, 0));
     }
 
     private TypeInfo_Struct structInfo(StructDeclaration declaration) {
@@ -406,10 +429,10 @@ public struct RuntimeTypes {
             return *cached;
 
         import dmd.root.string: toDString;
-        auto info = new TypeInfo_Struct;
+        auto info = _data.newObject!TypeInfo_Struct(declaration);
         _structs.insert(declaration, info);
-        info.mangledName = declaration.type.deco.toDString.idup;
-        info.m_init = structInit(declaration);
+        _data.storeString(&info.mangledName, declaration.type.deco.toDString);
+        storeStructInit(info, declaration);
         info.m_align = declaration.alignsize;
         import dmd.astenums: STC;
         import dmd.semantic3: semanticTypeInfoMembers, search_toString;
@@ -417,39 +440,33 @@ public struct RuntimeTypes {
         import snakebite.frontend.compiler: newInFrontend;
         newInFrontend!semanticTypeInfoMembers(declaration);
         if (declaration.xhash !is null)
-            info.xtoHash = cast(typeof(info.xtoHash))
-                _methodAddress(declaration.xhash, 0);
+            method(&info.xtoHash, declaration.xhash);
         if (declaration.xeq !is null)
-            info.xopEquals = cast(typeof(info.xopEquals))
-                _methodAddress(declaration.xeq, 0);
+            method(&info.xopEquals, declaration.xeq);
         if (declaration.xcmp !is null)
-            info.xopCmp = cast(typeof(info.xopCmp))
-                _methodAddress(declaration.xcmp, 0);
-        if (auto method = newInFrontend!search_toString(declaration))
-            info.xtoString = cast(typeof(info.xtoString))
-                _methodAddress(method, 0);
+            method(&info.xopCmp, declaration.xcmp);
+        if (auto toString = newInFrontend!search_toString(declaration))
+            method(&info.xtoString, toString);
         if (declaration.tidtor !is null)
-            info.xdtor = cast(typeof(info.xdtor))
-                _methodAddress(declaration.tidtor, 0);
+            method(&info.xdtor, declaration.tidtor);
         if (declaration.postblit !is null
                 && !(declaration.postblit.storage_class & STC.disable))
-            info.xpostblit = cast(typeof(info.xpostblit))
-                _methodAddress(declaration.postblit, 0);
+            method(&info.xpostblit, declaration.postblit);
         // The enum's default value is `hasPointers`, its first member, so a
         // pointer-free struct must have the flags cleared explicitly.
         const hasPointerData = declaration.type.hasPointers;
         info.m_flags = hasPointerData
             ? TypeInfo_Struct.StructFlags.hasPointers
             : cast(TypeInfo_Struct.StructFlags) 0;
-        info.m_RTInfo = rtInfo(declaration);
+        _data.storeReference(&info.m_RTInfo, rtInfo(declaration));
         import snakebite.ffi.argumentplan: supported;
         static if (supported) {
             // DMD's TypeInfo glue uses these frontend types, not the call
             // plan's registers: one vector type can span both eightbytes.
             if (auto arg = declaration.argType(0))
-                info.m_arg1 = get(arg);
+                reference(&info.m_arg1, get(arg));
             if (auto arg = declaration.argType(1))
-                info.m_arg2 = get(arg);
+                reference(&info.m_arg2, get(arg));
         }
         return info;
     }

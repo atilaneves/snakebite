@@ -127,6 +127,22 @@ public struct StaticBlocks {
         return found;
     }
 
+    // The datum that holds the byte at `address`: where it is, the address of
+    // its start, and the distance of `address` from the start.
+    public bool locateDatum(
+        in void* address, out DatumRef datum, out const(void)* start,
+        out size_t distance,
+    ) const @trusted pure nothrow @nogc {
+        const found = datumAt(address);
+        if (found.index == size_t.max)
+            return false;
+        const record = _data[found.index];
+        datum = DatumRef(&this, record.block, record.offset);
+        start = _blocks[record.block].ptr + record.offset;
+        distance = found.offset;
+        return true;
+    }
+
     // The datum that holds the byte at `address` and the offset of the byte
     // in the datum. The data are in the order of their addresses in a block.
     private auto datumAt(in void* address) const @trusted pure nothrow @nogc {

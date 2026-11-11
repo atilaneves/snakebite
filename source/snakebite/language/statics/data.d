@@ -119,9 +119,8 @@ public struct NativeData {
         storeValue(type, facts, expression, place, &placeOf, &this);
     }
 
-    // The object lives in the GC heap, in no datum of the blocks.
+    // The object is a datum of the blocks of the D module of its class.
     private Placed classValue(ClassReferenceExp value) {
-        import core.stdc.string: memcpy;
         import dmd.expressionsem: toInteger;
         import snakebite.frontend.compiler: withCompilerLock;
         version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
@@ -134,10 +133,12 @@ public struct NativeData {
             }
             version(unittest) assertCacheFillAllowed!"class constants";
             const info = _classInfo(value.originalClass);
-            auto bytes = new void[info.m_init.length]; // Must remain writable.
-            memcpy(bytes.ptr, info.m_init.ptr, bytes.length);
-            auto address = bytes.ptr;
-            placed = Placed(bytes);
+            const alignment = value.originalClass.alignsize;
+            // Must remain writable.
+            placed = reserve(TypeFacts(info.m_init.length,
+                alignment == 0 ? 1 : alignment), value.originalClass);
+            auto address = placed.ptr;
+            copyBytes(address, info.m_init);
             // Register before fields: compile-time objects can form cycles.
             _compileTimeValues[value.value] = placed;
             scope (failure) _compileTimeValues.remove(value.value);
@@ -265,7 +266,7 @@ public struct NativeData {
     // `owner` is given and there are such blocks: a variable, the constants
     // of a function and the initial bytes of a field. Any other datum (no
     // `owner`, or no blocks) goes to `_store`.
-    private Placed reserve(in TypeFacts facts, Dsymbol owner = null) {
+    public Placed reserve(in TypeFacts facts, Dsymbol owner = null) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: moduleOf;
 
@@ -313,7 +314,7 @@ public struct NativeData {
     }
 
     // Copies `source` to `place`, with the records of the addresses in it.
-    private void copyBytes(void* place, in void[] source) {
+    public void copyBytes(void* place, in void[] source) {
         import core.stdc.string: memcpy;
 
         memcpy(place, source.ptr, source.length);
@@ -322,6 +323,99 @@ public struct NativeData {
         foreach (blocks; _knownBlocks)
             foreach (link; blocks.linksIn(source.ptr, source.length))
                 recordLink(cast(ubyte*) place + link.place.index, link);
+    }
+
+
+    // Type data are real druntime objects in datums of the blocks, so that a
+    // file can hold them: an object of class `T`, with its vtable pointer a
+    // word that names the vtable of `T` in the host.
+    public T newObject(T)(Dsymbol owner = null) if (is(T == class)) {
+        import core.stdc.string: memcpy;
+
+        const initial = T.classinfo.m_init;
+        auto placed = reserve(
+            TypeFacts(initial.length, (void*).alignof), owner);
+        memcpy(placed.ptr, initial.ptr, initial.length);
+        storeAddress(&this, placed.ptr,
+            Address(Target.Kind.hostSymbol, *cast(void**) initial.ptr));
+        return cast(T) placed.ptr;
+    }
+
+    // What `object` is for a word that holds it: a datum of the blocks, with
+    // the distance into the datum, or code or data of the host. Without
+    // `recordRelocs` nothing reads the answer.
+    public Address addressOfData(
+        in void* object, out size_t distance,
+    ) {
+        distance = 0;
+        if (!recordRelocs)
+            return Address(Target.Kind.staticData, object);
+        foreach (blocks; _knownBlocks) {
+            DatumRef datum;
+            const(void)* start;
+            if (blocks.locateDatum(object, datum, start, distance))
+                return Address(Target.Kind.staticData, start, datum);
+        }
+        return Address(Target.Kind.hostSymbol, object);
+    }
+
+    // The address of the start of the datum that holds `object`, or the host
+    // symbol it is.
+    public Address addressOfData(in void* object) {
+        size_t distance;
+        const address = addressOfData(object, distance);
+        if (distance == 0)
+            return address;
+        const target = address.target;
+        return Address(target.kind,
+            cast(void*) (target.address + distance), target.datum);
+    }
+
+    // The word at `place` becomes a reference to `object`. A value below a
+    // page is no address: it is a flag, and it stays as it is.
+    public void storeReference(void* place, in void* object) {
+        if (cast(size_t) object < 4096) {
+            *cast(size_t*) place = cast(size_t) object;
+            return;
+        }
+        size_t distance;
+        const target = addressOfData(object, distance);
+        storeAddress(&this, place, target, distance);
+    }
+
+    // The word at `place` becomes the callable address `address`, of the
+    // kind that the backend gives it.
+    public void storeFunction(void* place, in void* address) {
+        if (address is null) {
+            *cast(void**) place = null;
+            return;
+        }
+        storeAddress(&this, place, functionAddress(address));
+    }
+
+    private Address functionAddress(in void* address) {
+        return Address(_functionKind is null
+            ? Target.Kind.hostSymbol : _functionKind(address), address);
+    }
+
+    // The slice at `place` becomes `data`, which is bytes of a datum.
+    public void storeSlice(void* place, in void[] data) {
+        checkedStoreIntegral(cast(ubyte*) place + arrayLengthOffset,
+            data.length, size_t.sizeof);
+        storeReference(cast(ubyte*) place + arrayPointerOffset, data.ptr);
+    }
+
+    // The string at `place` becomes a copy of `text` that the process store
+    // owns, with a terminating zero as a literal has.
+    public void storeString(void* place, in char[] text) {
+        import core.stdc.string: memcpy;
+
+        auto bytes = _store.newString(text.length + 1);
+        memcpy(bytes.ptr, text.ptr, text.length);
+        checkedStoreIntegral(cast(ubyte*) place + arrayLengthOffset,
+            text.length, size_t.sizeof);
+        storeAddress(&this, cast(ubyte*) place + arrayPointerOffset,
+            Address(Target.Kind.adoptedString, bytes.ptr));
     }
 
     public void release() {
@@ -508,11 +602,9 @@ public struct NativeData {
         auto address = _symbolAddress(symbol);
         // A function address is code: a guest function, the entry that host
         // code calls for one, or a function of the host.
-        const kind = symbol.isFuncDeclaration is null
-            ? Target.Kind.staticData
-            : _functionKind is null
-                ? Target.Kind.hostSymbol : _functionKind(address);
-        return Address(kind, address);
+        if (symbol.isFuncDeclaration !is null)
+            return functionAddress(address);
+        return Address(Target.Kind.staticData, address);
     }
 
     public void fillFields(

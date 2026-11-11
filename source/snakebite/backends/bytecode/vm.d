@@ -971,7 +971,8 @@ package struct AssertSite {
 // takes the address of an instruction from `Function.instructions` there.
 // `cleanupEndIndex` is `size_t.max` when there is no cleanup end.
 package struct ExceptionHandler {
-    @relocated(Target.Kind.typeInfo, Place.Section.exceptionHandler,
+    // A datum of the program, or a class of the host.
+    @relocated(Target.Kind.staticData, Place.Section.exceptionHandler,
         Place.Field.type)
     package TypeInfo_Class type;
     @plain package size_t catchOffset;
@@ -1147,6 +1148,7 @@ package void recordAssertSiteRelocs(
 
 package void recordExceptionHandlerRelocs(
     ref Reloc[] relocs, in size_t index, in ExceptionHandler handler,
+    in Target type,
 ) {
     import std.traits: FieldNameTuple;
 
@@ -1158,8 +1160,10 @@ package void recordExceptionHandlerRelocs(
             "ExceptionHandler." ~ name
             ~ " has to say whether it holds an address");
 
-    recordAddress(relocs, Place.Section.exceptionHandler, index,
-        Place.Field.type, Target.Kind.typeInfo, cast(size_t) cast(void*) handler.type);
+    if (type.address != 0)
+        relocs ~= Reloc(
+            Place(Place.Section.exceptionHandler, Place.Field.type, index),
+            type);
 }
 
 
