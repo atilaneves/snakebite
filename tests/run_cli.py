@@ -2125,6 +2125,110 @@ def test_saved_program_with_class_virtual_call_runs_as_the_compiled_program(
         """})
 
 
+def test_saved_program_with_new_of_struct_and_array_append_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Point {
+            int x = 1;
+            int y = 2;
+            ~this() { printf("gone %d\\n", x); }
+        }
+        int main() {
+            auto point = new Point;
+            auto numbers = new int[](3);
+            numbers ~= 4;
+            Point[] points;
+            points ~= Point(3, 4);
+            return point.x + point.y + cast(int) numbers.length
+                + cast(int) points.length;
+        }
+        """})
+
+
+def test_saved_program_with_catch_of_guest_exception_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        class Failure : Exception {
+            this(string message) { super(message); }
+        }
+        int main() {
+            int caught;
+            try
+                throw new Failure("f");
+            catch (Failure e)
+                caught = 1;
+            catch (Exception e)
+                caught = 2;
+            try
+                throw new Exception("failed");
+            catch (Exception e)
+                caught += cast(int) e.msg.length;
+            return caught;
+        }
+        """})
+
+
+def test_saved_program_with_interface_call_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        interface Shape { int area(); }
+        class Square : Shape {
+            int side;
+            this(int side) { this.side = side; }
+            int area() { return side * side; }
+            override string toString() { return "square"; }
+        }
+        int main() {
+            Shape shape = new Square(2);
+            Object object = cast(Object) shape;
+            const name = object.toString;
+            const type = typeid(object).name;
+            printf("%.*s %.*s\\n", cast(int) name.length, name.ptr,
+                cast(int) type.length, type.ptr);
+            return shape.area + (cast(Square) object is null ? 100 : 0);
+        }
+        """})
+
+
+def test_saved_program_with_class_object_in_static_initialiser_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        class Square {
+            int side;
+            this(int side) { this.side = side; }
+            int area() { return side * side; }
+        }
+        __gshared Square constant = new Square(3);
+        int main() { return constant.area; }
+        """})
+
+
+def test_saved_program_with_static_associative_array_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        immutable int[string] sizes = ["a": 1, "bb": 2];
+        __gshared int[int] counts = [7: 70];
+        int main() {
+            counts[8] = 80;
+            int[string] local = ["c": 3];
+            return sizes["bb"] + counts[7] + counts[8] + local["c"]
+                + cast(int) sizes.length + ("zz" in sizes ? 100 : 0);
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
