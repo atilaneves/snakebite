@@ -179,7 +179,7 @@ private struct Archive {
         Archive archive;
         archive._direction = Direction.writing;
         archive._program = &program;
-        program.plans.eachPlan((plan, signature, symbol) {
+        program.plans.eachPlan((plan, signature, symbol, failure) {
             archive._planIndex[plan] = archive._planIndex.length;
         });
         foreach (m, module_; program._modules) {
@@ -818,22 +818,28 @@ private void transferPlans(ref Archive archive, ref Program program) {
     NativeSignature[] signatures;
     // The index of the name of each plan in the table of host symbols.
     size_t[] symbols;
+    string[] failures;
     if (archive.isWriting)
-        program.plans.eachPlan((plan, signature, symbol) {
+        program.plans.eachPlan((plan, signature, symbol, failure) {
             signatures ~= cast() signature;
             symbols ~= archive.symbolIndexOfName(symbol);
+            failures ~= failure;
         });
     archive.transfer(signatures);
     archive.transfer(symbols);
+    archive.transfer(failures);
     if (archive.isWriting)
         return;
-    if (symbols.length != signatures.length)
+    if (symbols.length != signatures.length
+            || failures.length != signatures.length)
         throw new SnakebiteException(
             "the program file holds call plans that do not match");
     foreach (index, signature; signatures) {
         const name = archive.symbolNameAt(symbols[index]);
-        auto plan = program.plans.plan(signature, name);
-        if (plan is null)
+        auto plan = program.plans.plan(signature, name, failures[index]);
+        // A plan that the compile bound must bind in this process.
+        if (name.length != 0 && plan.address is null
+                && failures[index].length == 0)
             throw new SnakebiteException(text("the program calls `",
                 name, "`, which this process does not have"));
         archive._plans ~= plan;

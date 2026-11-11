@@ -130,23 +130,34 @@ public struct CallAdapter {
 
         // Called only when the backend has no plan for this call site.
         // A repeated interpreter call must not rebuild the extra-type list.
-        // With `mayBeAbsent`, a callee whose symbol is not in this process
-        // gets an unbound plan (`PlanCache.unboundOf`) and not a failure.
         public const(CallPlan)* prepare(
             ref PlanCache plans, FuncDeclaration callee,
-            in bool mayBeAbsent = false,
         ) {
             import dmd.astenums: VarArg;
 
             if (_type.parameterList.varargs != VarArg.variadic)
-                return mayBeAbsent ? plans.unboundOf(callee)
-                    : plans.of(callee);
+                return plans.of(callee);
+            return plans.variadicKeptOf(callee, extraTypes);
+        }
 
-            Type[] extraTypes;
+        // As `prepare`, for a callee whose symbol may not be in this process:
+        // the plan is unbound, and a call of it fails with the failure that
+        // `prepare` throws (`PlanCache.unboundOf`).
+        public const(CallPlan)* prepareUnbound(
+            ref PlanCache plans, FuncDeclaration callee,
+        ) {
+            import dmd.astenums: VarArg;
+
+            if (_type.parameterList.varargs != VarArg.variadic)
+                return plans.unboundOf(callee);
+            return plans.unboundVariadicOf(callee, extraTypes);
+        }
+
+        private Type[] extraTypes() {
+            Type[] types;
             foreach (expression; _expressions[extraOffset .. $])
-                extraTypes ~= expression.type;
-            return mayBeAbsent ? plans.unboundOf(callee, extraTypes, true)
-                : plans.variadicKeptOf(callee, extraTypes);
+                types ~= expression.type;
+            return types;
         }
 
         // A plan for one execution of a call through `address`, which the

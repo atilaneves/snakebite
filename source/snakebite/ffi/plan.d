@@ -185,6 +185,7 @@ public struct PlanCache {
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); a plan is prepared once, on its first use.
     private SharedTable!(FuncDeclaration, CallPlan*) _plans;
+    private SharedTable!(FuncDeclaration, CallPlan*) _unboundPlans;
     private SharedTable!(string, CallPlan*) _rawPlans;
     private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
     private SharedTable!(FuncDeclaration, bool) _independentNativeSymbols;
@@ -419,30 +420,63 @@ public struct PlanCache {
             extraArgumentTypes, true));
     }
 
-    // The plan of a callee whose symbol is not in this process: it is
-    // unbound, and `callplanstore.bound` fails at the call if the symbol is
-    // still absent then.
-    public const(CallPlan)* unboundOf(
+    // The plan of a callee that the compile may not be able to call: its
+    // symbol is not in this process, or `ffi` cannot lay out its signature.
+    // The plan holds the failure text that `of` throws for the callee, and
+    // `callplanstore.bound` throws it at the call if the symbol is still
+    // absent then.
+    public const(CallPlan)* unboundOf(FuncDeclaration function_) {
+        if (auto cached = function_ in _unboundPlans)
+            return *cached;
+
+        countPreparation;
+        return *_unboundPlans.insert(function_,
+            unboundPlanOf(function_, null, false));
+    }
+
+    // As `unboundOf`, for one call site of a variadic callee (`variadicKeptOf`).
+    public const(CallPlan)* unboundVariadicOf(
         FuncDeclaration function_,
-        scope Type[] extraArgumentTypes = null,
-        in bool isVariadicCall = false,
+        scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        return keptPlanOf(function_, extraArgumentTypes, isVariadicCall, true);
+        return unboundPlanOf(function_, extraArgumentTypes, true);
+    }
+
+    private CallPlan* unboundPlanOf(
+        FuncDeclaration function_,
+        scope Type[] extraArgumentTypes,
+        in bool isVariadicCall,
+    ) {
+        string symbol;
+        NativeSignature signature;
+        try
+            signature = calleeOf(function_, extraArgumentTypes,
+                isVariadicCall, symbol);
+        catch (Exception laidOutBadly)
+            return _store.plan(NativeSignature.init, null, laidOutBadly.msg);
+        auto address = resolve(symbol);
+        if (address is null)
+            return _store.plan(signature, symbol,
+                unresolved(function_, symbol).msg);
+        return _store.planAt(signature, symbol, address);
     }
 
     private CallPlan* keptPlanOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
         in bool isVariadicCall,
-        in bool mayBeAbsent = false,
     ) {
         string symbol;
         auto signature = calleeOf(function_, extraArgumentTypes,
             isVariadicCall, symbol);
-        if (!mayBeAbsent && symbol.length != 0 && resolve(symbol) is null)
-            throw unresolved(function_, symbol);
-        return _store.plan(signature, symbol);
+        void* address;
+        if (symbol.length != 0) {
+            address = resolve(symbol);
+            if (address is null)
+                throw unresolved(function_, symbol);
+        }
+        return _store.planAt(signature, symbol, address);
     }
 
     // As `.of`, but for one call site of an `extern(C)` C-style or
@@ -515,10 +549,12 @@ public struct PlanCache {
             return *cached;
         }
 
-        if (resolve(name) is null)
+        auto address = resolve(name);
+        if (address is null)
             return null;
-        auto plan = _store.plan(CallPlan.rawSignatureOf(
-            parameterRegisters, returnRegister, secondReturnRegister), name);
+        auto plan = _store.planAt(CallPlan.rawSignatureOf(
+            parameterRegisters, returnRegister, secondReturnRegister),
+            name, address);
 
         countPreparation;
         return *_rawPlans.insert(name, plan);

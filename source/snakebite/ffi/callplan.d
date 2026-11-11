@@ -21,6 +21,18 @@ import snakebite.failure.report: internalFailure;
 // next. A plan holds the answers so that a call is only loading slots into
 // registers and jumping.
 //
+// What binds a plan that the process had no code for when it was made. A
+// plan with a laid-out `symbol` binds when `resolve` has the symbol, and
+// otherwise a call fails with `failure`. A plan that could not be laid out
+// has no `symbol`, and a call of it always fails with `failure`. The text
+// is made at compile time, so a loaded program fails with the same text.
+package struct Pending {
+    string symbol;
+    string failure;
+    void* delegate(in char[]) resolve;
+}
+
+
 // A plan is immutable once built, and holds no dmd types, so calling
 // through one touches nothing the frontend owns. Its heart is a list of
 // moves: for every eightbyte of every argument, where its bytes come from
@@ -136,13 +148,18 @@ public struct CallPlan {
     private CallbackBridge* _callbacks;
 
     // Where the code is; null for a plan that has no address to call.
-    package void* address() const {
+    public void* address() const {
         return cast(void*) _address;
     }
 
-    // Sets the address of a plan that was made without code. Threads that
-    // bind the same plan write the same word.
-    package void bindAddress(void* address) {
+    // What binds a plan that the process had no code for when it was made;
+    // null for any other plan. `CallPlanStore.bound` reads it.
+    package const(Pending)* pending;
+
+    // Sets the address of a plan that was made without code. The plan is
+    // `const` to every caller of a call, and binding is the one write that
+    // they all allow: threads that bind the same plan write the same word.
+    package void bindAddress(void* address) const {
         import core.atomic: atomicStore;
 
         atomicStore(*cast(shared(void*)*) &_address, cast(shared(void*)) address);

@@ -4,7 +4,7 @@ module snakebite.ffi.callplanstore;
 private:
 
 import snakebite.ffi.callback: CallbackBridge, CallbackHandler;
-import snakebite.ffi.callplan: CallPlan, NativeSignature, planOf;
+import snakebite.ffi.callplan: CallPlan, NativeSignature, Pending, planOf;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.image.dependency: DependencyImage;
 
@@ -40,15 +40,12 @@ public struct CallPlanStore {
         callbacks = new CallbackBridge(handler, owner, prepare);
     }
 
-    // A plan with the two inputs that `plan` made it from: the file of a
+    // A plan with the inputs that `plan` made it from: the file of a
     // program holds these, and a load makes the plan again from them.
-    // `plan` is the first member: the address of a plan of this store is the
-    // address of its entry.
     private struct PlanEntry {
         CallPlan plan;
         NativeSignature signature;
-        string symbol;
-        CallPlanStore* store;
+        Pending pending;
         PlanEntry* next;
     }
     // The prepared plans, newest first. Threads that run guest code prepare
@@ -62,22 +59,37 @@ public struct CallPlanStore {
     }
 
     // A plan that lays out the call of `signature` to the code at `symbol`,
-    // kept for the life of this. When the resolver has no `symbol`, the plan
-    // is unbound: it has no code address, and `bound` binds it at the first
-    // call, as the dynamic linker binds a PLT entry. An empty `symbol` is a
-    // plan with no code to call. Every plan of this store is made here, so
-    // the plans of a load are the plans of a compile.
-    public CallPlan* plan(NativeSignature signature, string symbol = null) {
+    // kept for the life of this. An empty `symbol` is a plan with no code to
+    // call.
+    //
+    // `failure` is the text of the failure of a call that cannot be made when
+    // the compile makes the plan: the plan is unbound, and `bound` binds it
+    // at the first call, as the dynamic linker binds a PLT entry, or throws
+    // `failure`. With an empty `symbol` the plan is not laid out, and `bound`
+    // always throws `failure`. Every plan of this store is made here, so the
+    // plans of a load are the plans of a compile.
+    public CallPlan* plan(
+        NativeSignature signature, string symbol = null, string failure = null,
+    ) {
+        return planAt(signature, symbol,
+            symbol.length == 0 ? null : resolver.resolve(symbol), failure);
+    }
+
+    // As `plan`, for a caller that resolved `symbol` itself: `address` is
+    // what the resolver answered.
+    public CallPlan* planAt(
+        NativeSignature signature, string symbol, void* address,
+        string failure = null,
+    ) {
         import core.atomic: atomicLoad, cas;
 
-        void* address;
-        if (symbol.length != 0)
-            address = resolver.resolve(symbol);
         auto entry = new PlanEntry;
-        entry.plan = planOf(signature, address, callbacks);
         entry.signature = signature;
-        entry.symbol = symbol;
-        entry.store = &this;
+        entry.pending = Pending(symbol, failure, &resolver.resolve);
+        if (symbol.length != 0 || failure.length == 0)
+            entry.plan = planOf(signature, address, callbacks);
+        if (address is null && failure.length != 0)
+            entry.plan.pending = &entry.pending;
         // Plans are only pushed, never popped or reused, so a head that
         // compares equal is the same node: no ABA.
         shared(PlanEntry)* head;
@@ -88,10 +100,11 @@ public struct CallPlanStore {
         return &entry.plan;
     }
 
-    // The plans, oldest first, with the inputs of `plan` that made each.
+    // The plans, oldest first, with the symbol and the failure text of `plan`
+    // that made each.
     public void eachPlan(
         scope void delegate(
-            const(CallPlan)*, in NativeSignature, in string) visit,
+            const(CallPlan)*, in NativeSignature, in string, in string) visit,
     ) const {
         import core.atomic: atomicLoad;
         import std.algorithm: reverse;
@@ -101,31 +114,29 @@ public struct CallPlanStore {
                 entry !is null; entry = entry.next)
             entries ~= entry;
         foreach (entry; entries.reverse)
-            visit(&entry.plan, entry.signature, entry.symbol);
+            visit(&entry.plan, entry.signature, entry.pending.symbol,
+                entry.pending.failure);
     }
 
     // `plan` with its code address set, which is `plan` itself when it has
-    // one. `plan` has to be a plan of a `CallPlanStore`. The code of a symbol
-    // that the process did not have when the plan was made is bound here, at
-    // the first call of the plan: this throws if the symbol is still absent.
+    // one. The code of a symbol that the process did not have when the plan
+    // was made is bound here, at the first call of the plan: this throws the
+    // failure text of the plan if the symbol is still absent. A call of a bound
+    // plan runs the one test of its address.
     public static const(CallPlan)* bound(return const(CallPlan)* plan) {
-        if (plan.address !is null)
+        if (plan.address !is null || plan.pending is null)
             return plan;
-        return bind(cast(PlanEntry*) plan);
+        return bind(plan);
     }
 
-    // A plan with no symbol has no code to bind and stays as it is.
-    private static const(CallPlan)* bind(PlanEntry* entry) {
-        import std.conv: text;
-
-        if (entry.symbol.length == 0)
-            return &entry.plan;
-        auto address = entry.store.resolver.resolve(entry.symbol);
+    private static const(CallPlan)* bind(return const(CallPlan)* plan) {
+        const pending = plan.pending;
+        void* address;
+        if (pending.symbol.length != 0)
+            address = pending.resolve(pending.symbol);
         if (address is null)
-            throw new Exception(text(
-                "ffi cannot resolve the symbol `", entry.symbol,
-                "`: it is not in this process"));
-        entry.plan.bindAddress(address);
-        return &entry.plan;
+            throw new Exception(pending.failure);
+        plan.bindAddress(address);
+        return plan;
     }
 }

@@ -10632,8 +10632,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // execution reaches it, and fails if the symbol is still
                 // absent.
                 return CallSite.native(
-                    preparation.prepare(
-                        _bytecode._plans, callee, !hasNativeSymbol),
+                    hasNativeSymbol
+                        ? preparation.prepare(_bytecode._plans, callee)
+                        : preparation.prepareUnbound(
+                            _bytecode._plans, callee),
                     args, returnWidth);
             });
     }
