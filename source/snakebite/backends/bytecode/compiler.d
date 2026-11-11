@@ -52,7 +52,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.program: Program;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.statics.classinfo;
-    import snakebite.backends.bytecode.vm: Function, InlineBody, JitSetting, Vm;
+    import snakebite.backends.bytecode.vm: Function, JitSetting, Vm;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
@@ -122,6 +122,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // compile runs; it never exceeds `maxSpeculationDepth`.
     private size_t _speculating;
     private bool[FuncDeclaration] _rejectedForInlining;
+    // The body a caller copies in place of a call, for each compiled
+    // function that has one. Read and written under the compiler lock.
+    private const(InlineBody)*[const(Function)*] _inlineBodies;
     // A depth failure repeats at any greater depth until a function on
     // its failed chain changes state. Guarded by the compiler lock.
     private FuncDeclaration[][FuncDeclaration] _speculationBlockers;
@@ -596,6 +599,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         import snakebite.frontend.compiler: withCompilerLock;
 
         const(Function)* found;
+        const(InlineBody)* inlineBody;
         withCompilerLock({
             if (auto complete = function_ in _complete)
                 found = *complete;
@@ -635,8 +639,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                     _rejectedForInlining[function_] = true;
                 }
             }
+            if (found !is null)
+                inlineBody = _inlineBodies.get(found, null);
         });
-        return found is null ? null : found.inlineBody;
+        return inlineBody;
     }
 
     private FuncDeclaration[] unchangedSpeculationBlockers(FuncDeclaration function_) {
@@ -851,7 +857,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             scope compiler = new FunctionCompiler(
                 this, _jit, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
-            *placeholder = compiler.build(body_);
+            const(InlineBody)* builtInlineBody;
+            *placeholder = compiler.build(body_, builtInlineBody);
+            if (builtInlineBody !is null)
+                _inlineBodies[placeholder] = builtInlineBody;
             if (placeholder.jitCounts && _jit.perfMap) {
                 import snakebite.frontend.dmd.mangle: mangledNameOf;
 
@@ -865,6 +874,32 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         });
         return result;
     }
+}
+
+
+// What a caller needs to copy a small leaf function into its own
+// instruction stream: the instructions before the compiler fuses them and
+// resolves their branches, so a branch target is still an index.
+package struct InlineBody {
+    import snakebite.backends.bytecode.relocation: Reloc;
+    import snakebite.backends.bytecode.vm: CallSite, Instruction;
+
+    package Instruction[] instructions;
+    package long[] constants;
+    package size_t frameSize;
+    package uint frameAlignment;
+    // The addresses in `instructions` and `constants`.
+    package Reloc[] relocs;
+    // The sites of the `opCall` instructions of the body: only calls of
+    // druntime hooks, which a failed check makes.
+    package CallSite[] callSites;
+    package struct FrameRange {
+        package size_t offset;
+        package size_t size;
+    }
+    package FrameRange[] allocations;
+    package bool exposesFrame;
+    package FrameRange[] exposedFrames;
 }
 
 
@@ -897,7 +932,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
-        ExceptionHandler, Function, InlineBody,
+        ExceptionHandler, Function,
         Instruction, JitSetting, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
         recordCallSiteRelocs, recordExceptionHandlerRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
@@ -1268,7 +1303,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    public Function build(Statement body_) {
+    // `builtInlineBody` is the body a caller can copy in place of a call, or
+    // null. It is not in the `Function`: only the compiler reads it.
+    public Function build(Statement body_, out const(InlineBody)* builtInlineBody) {
         _scopePaths = scopePathsOf(body_);
         compileStatement(body_);
 
@@ -1387,7 +1424,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _layout.signature,
             resultPlace,
         );
-        result.inlineBody = inlineBody;
+        builtInlineBody = inlineBody;
         // No copy: this is the name of the function's identifier, which
         // dmd interns in a table that lives, uncleared, until the process
         // ends (`rebuildIdentifierTable` in frontend/compiler.d), or a
