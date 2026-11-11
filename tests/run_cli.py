@@ -2229,6 +2229,33 @@ def test_saved_program_with_static_associative_array_runs_as_the_compiled_progra
         """})
 
 
+def test_saved_program_with_type_information_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Point {
+            int x = 1;
+            int y = 2;
+            ~this() { printf("gone %d\\n", x); }
+        }
+        enum Colour { red, green }
+        int main() {
+            auto point = new Point;
+            Point[] points;
+            points ~= Point(3, 4);
+            points.length = 0;
+            const name = typeid(Point).toString;
+            printf("%.*s %.*s %d\\n", cast(int) name.length, name.ptr,
+                cast(int) typeid(Colour).toString.length,
+                typeid(Colour).toString.ptr,
+                cast(int) typeid(const(int)[]).toString.length);
+            return point.x + point.y;
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
