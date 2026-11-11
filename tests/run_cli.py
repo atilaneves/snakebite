@@ -1851,22 +1851,36 @@ def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
     })
 
 
+def test_saved_program_with_host_calls_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf, puts;
+        import core.stdc.stdlib: abs;
+        int main() {
+            puts("text");
+            printf("%d %s\\n", abs(-4), "again".ptr);
+            return 3;
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
-# that calls a function through a foreign call plan is refused, and no file is
-# left.
+# that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
     tmp_path: Path,
 ) -> None:
     write(tmp_path / "app" / "main.d", """
         module main;
-        import core.stdc.stdio: puts;
-        int main() { puts("text"); return 3; }
+        int threadLocal = 1;
+        int main() { return threadLocal + 2; }
         """)
     target = tmp_path / "program.sbc"
     saved = run_sb("--backend=bytecode", "--no-optimise-image",
                    f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
     assert saved.returncode != 0, output(saved)
-    assert "foreign call plan" in saved.stderr, output(saved)
+    assert "cannot save the program" in saved.stderr, output(saved)
     assert not target.exists()
     assert not Path(f"{target}.partial").exists()
 
