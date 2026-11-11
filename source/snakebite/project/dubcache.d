@@ -2,6 +2,33 @@ module snakebite.project.dubcache;
 
 private:
 
+// What `dub describe` says about a project, with the choices that the
+// description was made with. A build of the dependencies needs them to ask
+// dub for the same targets.
+public struct DubDescription {
+    import dub.description: ProjectDescription;
+
+    public ProjectDescription project;
+    // The configuration as asked for. `unittest` stands for dub's generated
+    // test runner configuration, which `project.configuration` names.
+    public string requestedConfiguration;
+    public string[] versions;
+}
+
+
+// The directory that dub keeps its settings, packages and build cache in.
+// dub's own function for this is not public, so this is its rule for the
+// environment. The `dubHome` setting of a settings file is not read.
+public string dubHomeDirectory() {
+    import std.path: buildPath;
+    import std.process: environment;
+
+    const dpath = environment.get("DPATH", "");
+    return environment.get("DUB_HOME", dpath.length
+        ? buildPath(dpath, "dub") : buildPath(environment.get("HOME", ""), ".dub"));
+}
+
+
 private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
     import std.json: JSONValue, JSONType;
     import std.digest.sha: sha256Of;
@@ -57,9 +84,9 @@ private bool decode(in ubyte[] bytes, out imported!"std.json".JSONValue value) {
 }
 
 // A cache miss always delegates semantics and generation to DUB.
-public imported!"snakebite.project.dub".DubDescription cachedDubDescription(
+public DubDescription cachedDubDescription(
     in string directory, in string compiler, in string[] versions,
-    scope imported!"snakebite.project.dub".DubDescription delegate() describe,
+    scope DubDescription delegate() describe,
     in string generator = imported!"snakebite.image.dependency".runningExecutable,
     in string mode = imported!"std.process".environment.get("SNAKEBITE_DUB_CACHE", "on"),
 ) {
@@ -213,7 +240,6 @@ private imported!"std.json".JSONValue collectWatches(
     import std.process: environment;
     import std.string: split;
     import std.algorithm: canFind;
-    import snakebite.project.dub: dubHomeDirectory;
     import snakebite.project.state: projectStateDirectory;
 
     string[string] watched;
@@ -451,10 +477,9 @@ public imported!"dub.description".ProjectDescription projectDescriptionFromJson(
     return withTargetLookup(fromJson!ProjectDescription(value));
 }
 
-private imported!"snakebite.project.dub".DubDescription descriptionFromJson(
+private DubDescription descriptionFromJson(
     in imported!"std.json".JSONValue value,
 ) {
-    import snakebite.project.dub: DubDescription;
 
     auto description = fromJson!DubDescription(value);
     description.project = withTargetLookup(description.project);

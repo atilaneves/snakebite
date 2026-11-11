@@ -4,7 +4,7 @@ module bench.oracle;
 import bench.capture: ProcessResult, run = captureProcess;
 import bench.report: BackendReport, updateTestCounts;
 import core.time: Duration;
-import snakebite.project.sources: SourceSet;
+import snakebite.project.dub: SourceSet;
 
 
 // Not a `Backend` (see `oracleReport`), so it needs its own entry in the

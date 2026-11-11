@@ -2,19 +2,7 @@ module snakebite.project.dub;
 
 private:
 
-// What `dub describe` says about a project, with the choices that the
-// description was made with. A build of the dependencies needs them to ask
-// dub for the same targets.
-public struct DubDescription {
-    import dub.description: ProjectDescription;
-
-    public ProjectDescription project;
-    // The configuration as asked for. `unittest` stands for dub's generated
-    // test runner configuration, which `project.configuration` names.
-    public string requestedConfiguration;
-    public string[] versions;
-}
-
+import snakebite.project.dubcache: DubDescription, dubHomeDirectory;
 
 // Guest source facts and dependency preparation share one DUB description.
 // Callers do not need its package records, target records, or cache format.
@@ -51,7 +39,28 @@ public struct DubDependencies {
 }
 
 
-public imported!"snakebite.project.sources".SourceSet dubSources(
+public struct SourceSet {
+    import snakebite.frontend.compiler: FrontendFlags;
+
+    public string[] files;
+    public string[] importPaths;
+    public string[] stringImportPaths;
+    public string[] linkerFlags;
+    public FrontendFlags flags;
+    public string[string] sourceOverrides;
+    public string[] linkerFiles;
+    public DubDependencies dependencies;
+    // Where `dub test` runs the test binary; empty when the recipe sets no
+    // `workingDirectory`, and for a bare directory.
+    public string workingDirectory;
+    // A bare directory is built as `dmd -i` builds it, which compiles a C
+    // module that a D module imports. A dub recipe names its C files in
+    // `sourceFiles`, and dub does not compile one that it does not name.
+    public bool importedCFilesAreRoots;
+}
+
+
+public SourceSet dubSources(
     in string directory, in string[] versions = null,
 ) {
     return dubSources(directory, dubDescribeProject(directory, versions));
@@ -185,18 +194,6 @@ private auto platformSettings(
     settings.buildSettings.addVersions(versions);
     settings.cache = NativePath(dubCacheDirectory);
     return settings;
-}
-
-// The directory that dub keeps its settings, packages and build cache in.
-// dub's own function for this is not public, so this is its rule for the
-// environment. The `dubHome` setting of a settings file is not read.
-public string dubHomeDirectory() {
-    import std.path: buildPath;
-    import std.process: environment;
-
-    const dpath = environment.get("DPATH", "");
-    return environment.get("DUB_HOME", dpath.length
-        ? buildPath(dpath, "dub") : buildPath(environment.get("HOME", ""), ".dub"));
 }
 
 private string dubCacheDirectory() {
@@ -495,9 +492,9 @@ private string fileFingerprint(in string[] files) {
 }
 
 
-public imported!"snakebite.project.sources".SourceSet dubSources(
+public SourceSet dubSources(
     in string directory,
-    imported!"snakebite.project.dub".DubDescription description,
+    DubDescription description,
 ) {
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
@@ -505,7 +502,6 @@ public imported!"snakebite.project.sources".SourceSet dubSources(
     import std.conv: text;
     import dub.compilers.buildsettings: BuildOption, BuildSettings;
     import dub.description: SourceFileRole;
-    import snakebite.project.sources: SourceSet;
     import std.path: buildNormalizedPath, buildPath;
     import std.traits: EnumMembers;
 
