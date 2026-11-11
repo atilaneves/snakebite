@@ -1159,9 +1159,12 @@ private void throwMissingReturnPlace() {
     );
 }
 
-// The DMD-free runtime entry point for a prepared call. Backends keep the
-// plan opaque and hand this function addresses of values already stored in
-// native layout.
+// The DMD-free runtime entry point for a prepared call. The entry functions
+// below take the plan as an opaque pointer because `CallSite.nativePlan` in
+// the bytecode VM is one, filled by the compiler from several sources. No
+// JIT code or assembly calls them, so `extern(C)` is not needed by a caller.
+// They hand this function addresses of values already stored in native
+// layout.
 public extern(C) void executeCallPlan(
     const(void)* opaquePlan,
     void* returnPlace,
