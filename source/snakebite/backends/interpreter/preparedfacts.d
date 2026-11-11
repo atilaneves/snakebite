@@ -18,7 +18,7 @@ import snakebite.frontend.typefacts: typeFacts, tryTypeFacts, bitfieldAccess;
 import snakebite.native.value: TypeFacts;
 import snakebite.language.statics.data: NativeData;
 import snakebite.native.value: BitfieldAccess;
-import snakebite.native.argumentflow: SignatureTable;
+import snakebite.native.signature: SignatureTable;
 import snakebite.host.sharedtable: SharedTable;
 
 // Facts have one program owner. Preparation and ordinary execution use the

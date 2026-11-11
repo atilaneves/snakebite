@@ -39,7 +39,7 @@ extern(C) bool executeIndirectCallPlan(
     out ptrdiff_t contextAdjustment,
 );
 
-import snakebite.native.argumentflow: ArgumentFlow, Shape, Signature;
+import snakebite.native.signature: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
 import snakebite.builtin.call: BuiltinCall;
 import snakebite.stack.hostcall: HostCallLayout;

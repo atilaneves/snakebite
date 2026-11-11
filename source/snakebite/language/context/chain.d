@@ -4,7 +4,7 @@ module snakebite.language.context.chain;
 private:
 
 
-import snakebite.native.argumentflow: SignatureTable;
+import snakebite.native.signature: SignatureTable;
 import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
 
 

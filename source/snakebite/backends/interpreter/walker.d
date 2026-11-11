@@ -264,7 +264,7 @@ import snakebite.language.layout.temporary: canRetainTemporaries;
 // lock after that, so the only thing an evaluator keeps for itself is
 // its own execution state.
 private struct Shared {
-    import snakebite.native.argumentflow: SignatureTable;
+    import snakebite.native.signature: SignatureTable;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
@@ -6904,7 +6904,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ValueCall* call, Expressions* arguments, ubyte* frameBase,
         const(FrameLayout)* slots, const(FrameLayout)* callee,
     ) {
-        import snakebite.native.argumentflow: Shape;
+        import snakebite.native.signature: Shape;
         import snakebite.language.layout.frame: shapeOf;
         import snakebite.native.variadic: VariadicLayout;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;

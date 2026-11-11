@@ -10,7 +10,7 @@ import snakebite.frontend.typefacts: typeFacts;
 import snakebite.failure.report: internalFailure;
 
 
-import snakebite.native.argumentflow: Shape, Signature, SignatureTable;
+import snakebite.native.signature: Shape, Signature, SignatureTable;
 import snakebite.stack.hostcall:
     checkArgumentCountRule, HostCallLayout;
 

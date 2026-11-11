@@ -12,7 +12,7 @@ import snakebite.failure.report: internalFailure;
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
-import snakebite.native.argumentflow: Shape, SignatureTable;
+import snakebite.native.signature: Shape, SignatureTable;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
     IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
