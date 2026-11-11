@@ -47,16 +47,21 @@ public struct LinkedModules {
     // of its callee before the callee is filled. One append per function.
     private Function*[] _functions;
 
-    // An empty function for the compiler to fill. The compiler may fail
-    // after this and then keeps the empty function here, unreachable from
-    // its own index.
-    public Function* newFunction() {
+    // An empty function for the compiler to fill. A compile that fails
+    // takes it out again with `discardFunction`.
+    public Function* newFunction() @safe nothrow pure {
         auto function_ = new Function;
         _functions ~= function_;
         return function_;
     }
 
-    public inout(Function*)[] functions() inout {
-        return _functions;
+    // Takes out the function that `newFunction` returned, for a compile that
+    // failed. Functions that were made after it stay.
+    public void discardFunction(Function* function_) @safe nothrow pure {
+        foreach_reverse (i, kept; _functions)
+            if (kept is function_) {
+                _functions = _functions[0 .. i] ~ _functions[i + 1 .. $];
+                return;
+            }
     }
 }

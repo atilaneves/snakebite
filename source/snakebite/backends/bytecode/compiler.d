@@ -858,7 +858,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             _compiled[function_] = placeholder;
             // A rejected body must not stay cached as an empty function
             // that a later call would run.
-            scope(failure) _compiled.remove(function_);
+            scope(failure) {
+                _compiled.remove(function_);
+                linked.discardFunction(placeholder);
+            }
             registerGuestWord(function_, placeholder);
 
             scope compiler = new FunctionCompiler(

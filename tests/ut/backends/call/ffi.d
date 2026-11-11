@@ -641,8 +641,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_dynamic_array` function in the guest program");
 
-    auto planStore = CallPlanStore(null);
-    auto cache = PlanCache(&planStore);
+    mixin planCache;
     ubyte[] result;
     cache.of(function_).call(&result, []);
 

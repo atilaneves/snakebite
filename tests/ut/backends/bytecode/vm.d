@@ -66,9 +66,8 @@ unittest {
 // return value simple enough to check without any FFI helper of its own.
 @("opCall.nativeSite.callsResolvedSymbol")
 unittest {
-    auto planStore = CallPlanStore(null);
-    auto plans = PlanCache(&planStore);
-    auto plan = plans.rawPlanOf(
+    mixin planCache;
+    auto plan = cache.rawPlanOf(
         "abs",
         [Register(Register.Kind.signed, 4)],
         Register(Register.Kind.signed, 4),

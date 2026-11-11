@@ -50,7 +50,7 @@ public struct CallPlanStore {
     private shared(PlanEntry)* _plans;
 
     // An empty plan for the caller to fill, kept for the life of this.
-    public CallPlan* newPlan() {
+    public CallPlan* newPlan() nothrow pure {
         import core.atomic: atomicLoad, cas;
 
         auto entry = new PlanEntry;
@@ -59,13 +59,5 @@ public struct CallPlanStore {
             entry.next = cast(PlanEntry*) head;
         while (!cas(&_plans, head, cast(shared(PlanEntry)*) entry));
         return &entry.plan;
-    }
-
-    public void eachPlan(scope void delegate(const(CallPlan)*) visit) const {
-        import core.atomic: atomicLoad;
-
-        for (auto entry = cast(const(PlanEntry)*) atomicLoad(_plans);
-                entry !is null; entry = entry.next)
-            visit(&entry.plan);
     }
 }

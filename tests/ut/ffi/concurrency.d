@@ -103,8 +103,7 @@ unittest {
         assert(function_ !is null,
             "No `snakebite_ut_concurrency_wide` in the guest program");
 
-        auto planStore = CallPlanStore(null);
-        auto cache = PlanCache(&planStore);
+        mixin planCache;
 
         shared size_t ready = 0;
         shared bool go = false;
