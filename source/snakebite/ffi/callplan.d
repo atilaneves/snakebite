@@ -1253,6 +1253,8 @@ public extern(C) const(void)* directWordCallTarget(
     return plan._address;
 }
 
+// The guest word behind `address`, or null when `address` is not an entry of
+// the backend that owns the plan, and the receiver adjustment of that entry.
 public extern(C) const(void)* guestWordOf(
     const(void)* opaquePlan, const(void)* address, out ptrdiff_t adjustment,
 ) {
@@ -1264,6 +1266,8 @@ public extern(C) const(void)* guestWordOf(
     return target.word;
 }
 
+// Calls the host function at `address` with the plan, for an `address` that
+// `guestWordOf` found not to be a guest entry.
 public extern(C) void executeHostCallPlan(
     const(void)* opaquePlan, const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
