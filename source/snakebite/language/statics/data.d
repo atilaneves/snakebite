@@ -14,6 +14,8 @@ import snakebite.native.value:
     checkedStoreIntegral, delegateContextOffset, delegateFunctionOffset,
     TypeFacts;
 
+private alias Link = StaticBlocks.Link;
+
 
 // Owns constant storage and its referenced data for the backend's lifetime.
 public struct NativeData {
@@ -278,17 +280,35 @@ public struct NativeData {
         return bytes;
     }
 
-    // Records that the word at `place` holds the address `address`, when
-    // `place` is in a datum of this: a word in other memory is not in the
+    // Records that the word at `place` holds the address `base + offset`,
+    // when `place` is in a datum of this: a word in other memory is not in the
     // data of the program, and what points to that memory gets no position.
+    // For `staticData`, `base` is the start of the datum that the address is
+    // computed from, and `offset` can reach its end. A null `base` is no
+    // address.
     private void recordAddress(
-        in void* place, in Target.Kind kind, in void* address,
+        in void* place, in Target.Kind kind, in void* base, in size_t offset = 0,
     ) {
-        if (!recordRelocs)
+        if (!recordRelocs || base is null)
             return;
-        const target = Target(kind, cast(size_t) address);
+        Link link;
+        link.kind = kind;
+        if (kind == Target.Kind.staticData) {
+            foreach (blocks; _knownBlocks) {
+                if (blocks.locate(base, link.block, link.offset)) {
+                    link.set = blocks;
+                    link.offset += offset;
+                    break;
+                }
+            }
+        } else
+            link.address = cast(size_t) base + offset;
+        recordLink(place, link);
+    }
+
+    private void recordLink(in void* place, in Link link) {
         foreach (blocks; _knownBlocks)
-            if (blocks.recordAddress(place, target))
+            if (blocks.recordAddress(place, link))
                 return;
     }
 
@@ -300,9 +320,8 @@ public struct NativeData {
         if (!recordRelocs)
             return;
         foreach (blocks; _knownBlocks)
-            foreach (reloc; blocks.relocsIn(source.ptr, source.length))
-                recordAddress(cast(ubyte*) place + reloc.place.index,
-                    reloc.target.kind, cast(void*) reloc.target.address);
+            foreach (link; blocks.linksIn(source.ptr, source.length))
+                recordLink(cast(ubyte*) place + link.place.index, link);
     }
 
     public void release() {
@@ -647,10 +666,10 @@ private void copyUnits(
 
 private void noteAddress(
     NativeData* nativeData, in void* place, in Target.Kind kind,
-    in void* address,
+    in void* base, in size_t offset = 0,
 ) {
     if (nativeData !is null)
-        nativeData.recordAddress(place, kind, address);
+        nativeData.recordAddress(place, kind, base, offset);
 }
 
 private const(void)* stringPointer(
@@ -697,9 +716,9 @@ private void storeValue(
         ulong offset;
         if (isSymbolAddress(value, symbol, offset)) {
             assert(symbolAddress !is null);
-            const address = cast(ubyte*) symbolAddress(symbol) + offset;
-            checkedStoreIntegral(place, cast(ulong) address, facts.size);
-            noteAddress(nativeData, place, Target.Kind.staticData, address);
+            const base = cast(ubyte*) symbolAddress(symbol);
+            checkedStoreIntegral(place, cast(ulong) (base + offset), facts.size);
+            noteAddress(nativeData, place, Target.Kind.staticData, base, offset);
             return;
         }
 
@@ -753,10 +772,10 @@ private void storeValue(
 
     if (auto symbol = value.isSymOffExp) {
         assert(symbolAddress !is null);
-        *cast(void**) place =
-            cast(ubyte*) symbolAddress(symbol.var) + symbol.offset;
-        noteAddress(nativeData, place, Target.Kind.staticData,
-            *cast(void**) place);
+        auto base = cast(ubyte*) symbolAddress(symbol.var);
+        *cast(void**) place = base + symbol.offset;
+        noteAddress(nativeData, place, Target.Kind.staticData, base,
+            symbol.offset);
         return;
     }
 
@@ -783,8 +802,7 @@ private void storeValue(
         int offset;
         type.isTypeClass.sym.isBaseOf(reference.originalClass, &offset);
         *cast(void**) place = cast(ubyte*) address + offset;
-        noteAddress(nativeData, place, Target.Kind.staticData,
-            *cast(void**) place);
+        noteAddress(nativeData, place, Target.Kind.staticData, address, offset);
         return;
     }
 
