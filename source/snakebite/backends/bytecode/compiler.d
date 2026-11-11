@@ -26,10 +26,10 @@ import snakebite.language.control.transfer:
     ScopeFrame, ScopePaths, labelTargetOf, scopePathsOf;
 import snakebite.language.control.unwinding:
     UnwindPlan, catchPlanOf, unwindPlanOf;
-import snakebite.language.checks: BoundsCheck, hookOf;
+import snakebite.language.checks:
+    AssertFailure, BoundsCheck, CAssertCall, hookOf;
 import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 import snakebite.language.storage.resolver: planSlice;
-import snakebite.language.checks: AssertFailure, CAssertCall;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
 import std.typecons: Flag, No, Yes;
 
@@ -4016,8 +4016,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tnoreturn;
         import dmd.typesem: toBasetype;
         import snakebite.language.checks:
-            assertPlanOf, FailurePlan, isUnanalysed;
-        import snakebite.language.checks: assertFailureOf;
+            assertFailureOf, assertPlanOf, FailurePlan, isUnanalysed;
 
         const plan = assertPlanOf(_bytecode.checks);
         if (plan.kind == FailurePlan.Kind.ignore)
@@ -11044,8 +11043,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in Loc loc,
     ) {
         import snakebite.language.checks:
-            boundsPlanOf, cMessageOf, FailurePlan;
-        import snakebite.language.checks: cAssertCallOf;
+            boundsPlanOf, cAssertCallOf, cMessageOf, FailurePlan;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         final switch (plan.kind) with (FailurePlan.Kind) {
@@ -11110,8 +11108,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in Loc loc,
     ) {
         import snakebite.language.checks:
-            boundsPlanOf, cMessageOf, FailurePlan;
-        import snakebite.language.checks: cAssertCallOf;
+            boundsPlanOf, cAssertCallOf, cMessageOf, FailurePlan;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         if (plan.kind == FailurePlan.Kind.ignore)
@@ -11149,8 +11146,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // nonzero when it is not null. Without the flag nothing is emitted.
     private void compileNullCheck(in size_t pointerOffset, in Loc loc) {
         import snakebite.language.checks:
-            FailurePlan, nullDerefCMessage, nullDerefPlanOf;
-        import snakebite.language.checks: cAssertCallOf;
+            cAssertCallOf, FailurePlan, nullDerefCMessage, nullDerefPlanOf;
 
         final switch (nullDerefPlanOf(_bytecode.checks).kind) with (FailurePlan.Kind) {
             case ignore:

@@ -7232,9 +7232,9 @@ private Node buildEffect(E)(E ev, Expression expression) {
 }
 
 private Node buildAssertion(E)(E ev, AssertExp expression) {
-    import snakebite.language.checks: assertPlanOf, FailurePlan;
     import snakebite.language.checks:
-        AssertInvariantPlan, assertInvariantPlanOf;
+        AssertInvariantPlan, assertInvariantPlanOf, assertPlanOf,
+        FailurePlan;
 
     final switch (assertPlanOf(ev._program.checks).kind) with (FailurePlan.Kind) {
         case ignore:

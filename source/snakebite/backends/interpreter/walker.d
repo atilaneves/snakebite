@@ -52,7 +52,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
                 cast(void*) this,
                 &prepareCallback,
             ));
-        import snakebite.language.checks: FailurePlan, nullDerefPlanOf;
+        import snakebite.language.checks: nullDerefPlanOf;
 
         _checksNullDeref = nullDerefPlanOf(program.checks).kind
             != FailurePlan.Kind.ignore;
@@ -233,11 +233,10 @@ private final class GuestException: Exception {
 import snakebite.backends.interpreter.preparedfacts: PreparedFacts;
 import snakebite.native.value: BitfieldAccess;
 import snakebite.language.checks:
-    BoundsCheck, FailurePlan, hookOf, isUnanalysed;
+    BoundsCheck, CAssertCall, FailurePlan, hookOf, isUnanalysed;
 import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.language.call.selection: ValueCall;
 import snakebite.failure.halt: isHalt;
-import snakebite.language.checks: CAssertCall;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
     IdentityPlan, ComparisonPlan, comparisonPlan;
@@ -4290,7 +4289,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `RangeError`.
     private void* assignSlice(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
-        import snakebite.language.checks: boundsPlanOf, FailurePlan;
+        import snakebite.language.checks: boundsPlanOf;
         import snakebite.native.value: copyUnchecked, slicesConform;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
@@ -6127,9 +6126,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // still raises the same guest-visible `AssertError` as any failed
     // assertion.
     override void visit(AssertExp expression) {
-        import snakebite.language.checks: assertPlanOf, FailurePlan;
         import snakebite.language.checks:
-            AssertInvariantPlan, assertInvariantPlanOf;
+            AssertInvariantPlan, assertInvariantPlanOf, assertPlanOf;
 
         const failure = assertPlanOf(_program.checks);
         final switch (failure.kind) with (FailurePlan.Kind) {
@@ -6216,9 +6214,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // to the guest.
     private void failAssertion(AssertExp expression) {
         import core.exception: AssertError;
-        import snakebite.language.checks: assertPlanOf, FailurePlan;
         import snakebite.language.checks:
-            assertFailureOf, cAssertCallOf, cAssertionOf;
+            assertFailureOf, assertPlanOf, cAssertCallOf, cAssertionOf;
         import std.string: toStringz;
 
         const plan = assertPlanOf(_program.checks);
