@@ -29,7 +29,8 @@ public struct NativeData {
     import dmd.location: Loc;
     import dmd.mtype: Type;
 
-        import snakebite.host.sharedtable: SharedTable;
+    import snakebite.host.sharedtable: SharedTable;
+    import snakebite.host.threads: heapNew;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
@@ -47,8 +48,7 @@ public struct NativeData {
     // The address of each literal's copy, found without a lock. A miss goes
     // to `_stringTexts`, so that nodes with equal text share one address.
     private SharedTable!(StringExp, const(void)*) _stringNodes;
-    // Under the compiler lock only. The copies are outside the GC heap, as
-    // read-only data is in compiled D, and are freed with this object.
+    // Under the compiler lock only. The copies are owned by `_store`.
     private const(void)*[StringText] _stringTexts;
     private StaticStore _store;
     // Read without a lock by every thread that runs guest code
@@ -62,9 +62,7 @@ public struct NativeData {
     private SharedTable!(Type, const(void)[]) _defaults;
     // A thread-local variable's template: the bytes its storage starts
     // with on every thread, built once under the lock like `_statics`
-    // (finding 1.3). `_tls` is this thread's own copies, made from that
-    // template on this thread's own first touch of each variable - never
-    // shared, so `TlsSlots.slotFor` takes no lock.
+    // (finding 1.3).
     private SharedTable!(VarDeclaration, TlsDescriptor) _tlsDescriptors;
 
     public this(
@@ -81,7 +79,7 @@ public struct NativeData {
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
         _callLowering = call;
-        _store = StaticStore(true);
+        _store = StaticStore(() => heapNew!TlsSlots);
     }
 
     private void callLowering(
@@ -248,10 +246,6 @@ public struct NativeData {
         return bytes;
     }
 
-    // Gives back this thread's table of thread-local variables, unless it
-    // holds a variable: a guest object that outlives the owner can still
-    // point into the storage of one, and compiled D keeps it until the
-    // thread ends too.
     public void release() {
         _store.release();
     }

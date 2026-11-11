@@ -4,7 +4,7 @@ module snakebite.native.staticstore;
 private:
 
 
-import snakebite.host.threads: heapNew, PerThread;
+import snakebite.host.threads: PerThread;
 import snakebite.native.value: TypeFacts;
 import snakebite.stack.tls: TlsSlots;
 
@@ -26,8 +26,10 @@ public struct StaticStore {
     // so `TlsSlots.slotFor` takes no lock.
     private PerThread!(TlsSlots*) _tls;
 
-    public this(bool) {
-        _tls = PerThread!(TlsSlots*)(() => heapNew!TlsSlots);
+    // `newTlsSlots` makes the table of thread-local variables that a thread
+    // gets on its first use of the store.
+    public this(TlsSlots* delegate() newTlsSlots) {
+        _tls = PerThread!(TlsSlots*)(newTlsSlots);
     }
 
     ~this() {
