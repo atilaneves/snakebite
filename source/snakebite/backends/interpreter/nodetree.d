@@ -350,6 +350,14 @@ package struct OuterVariable {
     package bool indirect;
 }
 
+package struct VariadicCallPlan {
+    import snakebite.native.variadic: VariadicLayout;
+    import snakebite.native.value: TypeFacts;
+
+    TypeFacts[] facts;
+    VariadicLayout layout;
+}
+
 package bool isScalar(E)(E ev, Type type) {
     return scalarOf(ev, type).kind != Scalar.Kind.none;
 }
@@ -2830,7 +2838,6 @@ private final class LoadChain : Node {
 // that frame and the call gives both back together. The value is the address
 // of the storage, which the cursor of the callee holds.
 private final class VariadicExtras : LongNode {
-    import snakebite.backends.interpreter.walker: VariadicCallPlan;
     import snakebite.stack.frames: FrameStack;
 
     private FrameStack* _frames;
