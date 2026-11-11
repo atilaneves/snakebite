@@ -97,7 +97,8 @@ public struct CallAdapter {
         import dmd.func: FuncDeclaration;
         import dmd.mtype: Type, TypeFunction;
         import snakebite.native.arguments: CallArguments;
-        import snakebite.ffi.plan: CallPlan, PlanCache;
+        import snakebite.ffi.callplan: CallPlan;
+        import snakebite.ffi.plan: PlanCache;
 
         private TypeFunction _type;
         private Expression[] _expressions;
