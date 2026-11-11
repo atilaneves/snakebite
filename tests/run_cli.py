@@ -2256,6 +2256,20 @@ def test_saved_program_with_type_information_runs_as_the_compiled_program(
         """})
 
 
+def test_saved_program_with_host_class_object_in_static_initialiser_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared Exception constant = new Exception("boom");
+        int main() {
+            auto object = cast(Object) constant;
+            return cast(int) constant.msg.length
+                + (typeid(object) is typeid(Exception) ? 10 : 0);
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
