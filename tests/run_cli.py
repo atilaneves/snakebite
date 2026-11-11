@@ -1794,7 +1794,6 @@ def test_saved_program_with_addresses_in_module_data_runs_as_the_compiled_progra
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
         module main;
-        import core.stdc.stdio: printf;
         __gshared int x = 7;
         __gshared int* p = &x;
         struct Holder { int n; int* q; }
@@ -1802,9 +1801,9 @@ def test_saved_program_with_addresses_in_module_data_runs_as_the_compiled_progra
         __gshared string[3] names = ["one", "two", "three"];
         int main() {
             *p += 1;
-            printf("%d %d %.*s\\n", *holder.q, holder.n,
-                cast(int) names[2].length, names[2].ptr);
-            return x + cast(int) names[1].length;
+            assert(*holder.q == 8 && holder.q is &x);
+            assert(names[2] == "three");
+            return x + cast(int) names[1].length + holder.n;
         }
         """})
 
@@ -1815,14 +1814,13 @@ def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {
         "main.d": """
         module main;
-        import core.stdc.stdio: printf;
         import other: count, otherLiteral;
         struct Defaults { int a = 5; string s = "dflt"; double d = 1.5; }
-        int variable;
+        __gshared int variable;
         static this() { variable = 40; }
         int main() {
             Defaults d;
-            printf("%d %.*s\\n", d.a, cast(int) d.s.length, d.s.ptr);
+            assert(d.s == "dflt" && d.a == 5 && d.d == 1.5);
             return variable + count
                 + ("shared literal".ptr is otherLiteral() ? 1 : 100);
         }
@@ -1830,26 +1828,27 @@ def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
         "other.d": """
         module other;
         immutable(char)* otherLiteral() { return "shared literal".ptr; }
-        int count = 1;
+        __gshared int count = 1;
         """,
     })
 
 
 # A save never writes a file that loads into a different state: a program
-# with static data that can hold an address is refused, and no file is left.
+# that calls a function through a foreign call plan is refused, and no file is
+# left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
     tmp_path: Path,
 ) -> None:
     write(tmp_path / "app" / "main.d", """
         module main;
-        __gshared int* pointer;
-        int main() { return pointer is null ? 3 : 4; }
+        import core.stdc.stdio: puts;
+        int main() { puts("text"); return 3; }
         """)
     target = tmp_path / "program.sbc"
     saved = run_sb("--backend=bytecode", "--no-optimise-image",
                    f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
     assert saved.returncode != 0, output(saved)
-    assert "static data that can hold an address" in saved.stderr, output(saved)
+    assert "foreign call plan" in saved.stderr, output(saved)
     assert not target.exists()
     assert not Path(f"{target}.partial").exists()
 

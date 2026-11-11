@@ -6,6 +6,7 @@ private:
 
 import dmd.dmodule: Module;
 import snakebite.failure.report: internalFailure;
+import snakebite.backends.bytecode.relocation: Target;
 import snakebite.frontend.typefacts;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value:
@@ -52,6 +53,13 @@ public struct NativeData {
     // the owner of this gives at construction and keeps alive longer.
     private const(void)*[StringText] _stringTexts;
     private StaticStore* _store;
+    // Whether a write of an address into a datum is recorded in the datum
+    // (`StaticBlocks.recordAddress`), so that the data can be stored in a
+    // file. Set before the first datum.
+    public bool recordRelocs;
+    // The blocks that hold a datum of this, for `recordRelocs`. Under the
+    // compiler lock only.
+    private StaticBlocks*[] _knownBlocks;
     // The blocks of the D module that defines a variable, or null when
     // every datum goes to `_store`. Called under the compiler lock.
     private StaticBlocks* delegate(Module) _blocksOf;
@@ -178,7 +186,6 @@ public struct NativeData {
     // dmd makes a new literal for each use of a manifest constant, and for
     // each instance of a template.
     public const(void)* stringData(StringExp literal) {
-        import core.stdc.stdlib: calloc;
         import snakebite.frontend.compiler: withCompilerLock;
 
         if (auto found = literal in _stringNodes)
@@ -190,13 +197,10 @@ public struct NativeData {
             if (auto found = text in _stringTexts) {
                 address = *found;
             } else {
-                auto bytes = cast(ubyte*) calloc(
-                    literal.len + 1, literal.sz);
-                assert(bytes !is null);
-                _store.adoptString(bytes);
+                auto bytes = _store.newString((literal.len + 1) * literal.sz);
                 auto units = bytes[0 .. literal.len * literal.sz];
                 copyUnits(literal, units);
-                address = bytes;
+                address = bytes.ptr;
                 // Keyed by the copy: the frontend can free its buffer.
                 _stringTexts[StringText(literal.sz, units)] = address;
             }
@@ -244,12 +248,10 @@ public struct NativeData {
         in void[] representation,
         Dsymbol owner = null,
     ) {
-        import core.stdc.string: memcpy;
-
         const facts = typeFacts(type);
         assert(representation.length == facts.size);
         auto bytes = reserve(facts, owner);
-        memcpy(bytes.ptr, representation.ptr, bytes.length);
+        copyBytes(bytes.ptr, representation);
         return bytes;
     }
 
@@ -263,15 +265,44 @@ public struct NativeData {
 
         void[] bytes;
         withCompilerLock({
-            if (owner !is null && _blocksOf !is null) {
-                if (auto module_ = moduleOf(owner)) {
-                    bytes = _blocksOf(module_).reserve(facts);
-                    return;
-                }
-            }
-            bytes = _store.reserve(facts);
+            import std.algorithm: canFind;
+
+            auto blocks = _store.blocks;
+            if (owner !is null && _blocksOf !is null)
+                if (auto module_ = moduleOf(owner))
+                    blocks = _blocksOf(module_);
+            bytes = blocks.reserve(facts);
+            if (recordRelocs && !_knownBlocks.canFind(blocks))
+                _knownBlocks ~= blocks;
         });
         return bytes;
+    }
+
+    // Records that the word at `place` holds the address `address`, when
+    // `place` is in a datum of this: a word in other memory is not in the
+    // data of the program, and what points to that memory gets no position.
+    private void recordAddress(
+        in void* place, in Target.Kind kind, in void* address,
+    ) {
+        if (!recordRelocs)
+            return;
+        const target = Target(kind, cast(size_t) address);
+        foreach (blocks; _knownBlocks)
+            if (blocks.recordAddress(place, target))
+                return;
+    }
+
+    // Copies `source` to `place`, with the records of the addresses in it.
+    private void copyBytes(void* place, in void[] source) {
+        import core.stdc.string: memcpy;
+
+        memcpy(place, source.ptr, source.length);
+        if (!recordRelocs)
+            return;
+        foreach (blocks; _knownBlocks)
+            foreach (reloc; blocks.relocsIn(source.ptr, source.length))
+                recordAddress(cast(ubyte*) place + reloc.place.index,
+                    reloc.target.kind, cast(void*) reloc.target.address);
     }
 
     public void release() {
@@ -413,7 +444,7 @@ public struct NativeData {
 
         if (variable._init is null) {
             const initial = initialValue(variable.type, variable.loc);
-            memcpy(bytes.ptr, initial.ptr, bytes.length);
+            copyBytes(bytes.ptr, initial[0 .. bytes.length]);
         } else if (variable._init.isVoidInitializer is null) {
             auto initializer = variable._init.isExpInitializer;
             auto expression = initializer is null
@@ -475,9 +506,7 @@ public struct NativeData {
                 continue;
             }
 
-            import core.stdc.string: memcpy;
-
-            memcpy(place + field.offset, bytes.ptr, bytes.length);
+            copyBytes(place + field.offset, bytes);
         }
     }
 }
@@ -616,6 +645,14 @@ private void copyUnits(
     memcpy(destination.ptr, literal.peekData.ptr, destination.length);
 }
 
+private void noteAddress(
+    NativeData* nativeData, in void* place, in Target.Kind kind,
+    in void* address,
+) {
+    if (nativeData !is null)
+        nativeData.recordAddress(place, kind, address);
+}
+
 private const(void)* stringPointer(
     NativeData* nativeData,
     imported!"dmd.expression".StringExp literal,
@@ -660,8 +697,9 @@ private void storeValue(
         ulong offset;
         if (isSymbolAddress(value, symbol, offset)) {
             assert(symbolAddress !is null);
-            checkedStoreIntegral(place,
-                cast(ulong) symbolAddress(symbol) + offset, facts.size);
+            const address = cast(ubyte*) symbolAddress(symbol) + offset;
+            checkedStoreIntegral(place, cast(ulong) address, facts.size);
+            noteAddress(nativeData, place, Target.Kind.staticData, address);
             return;
         }
 
@@ -717,6 +755,8 @@ private void storeValue(
         assert(symbolAddress !is null);
         *cast(void**) place =
             cast(ubyte*) symbolAddress(symbol.var) + symbol.offset;
+        noteAddress(nativeData, place, Target.Kind.staticData,
+            *cast(void**) place);
         return;
     }
 
@@ -726,8 +766,14 @@ private void storeValue(
             *cast(void**) (bytes + delegateContextOffset) = null;
             *cast(void**) (bytes + delegateFunctionOffset) =
                 symbolAddress(literal.fd);
-        } else
+            noteAddress(nativeData, bytes + delegateFunctionOffset,
+                Target.Kind.hostSymbol,
+                *cast(void**) (bytes + delegateFunctionOffset));
+        } else {
             *cast(void**) place = symbolAddress(literal.fd);
+            noteAddress(nativeData, place, Target.Kind.hostSymbol,
+                *cast(void**) place);
+        }
         return;
     }
 
@@ -737,6 +783,8 @@ private void storeValue(
         int offset;
         type.isTypeClass.sym.isBaseOf(reference.originalClass, &offset);
         *cast(void**) place = cast(ubyte*) address + offset;
+        noteAddress(nativeData, place, Target.Kind.staticData,
+            *cast(void**) place);
         return;
     }
 
@@ -746,6 +794,8 @@ private void storeValue(
             assert(nativeData !is null);
             *cast(void**) place =
                 nativeData.structValue(address.e1.isStructLiteralExp);
+            noteAddress(nativeData, place, Target.Kind.staticData,
+                *cast(void**) place);
             return;
         }
     }
@@ -758,11 +808,16 @@ private void storeValue(
             memcpy(place, literal.peekData.ptr, facts.size);
         } else if (type.ty == Tpointer) {
             *cast(const(void)**) place = stringPointer(nativeData, literal);
+            noteAddress(nativeData, place, Target.Kind.adoptedString,
+                *cast(const(void)**) place);
         } else {
             assert(type.ty == Tarray);
             checkedStoreIntegral(bytes + arrayLengthOffset, literal.len, size_t.sizeof);
             *cast(const(void)**) (bytes + arrayPointerOffset) =
                 stringPointer(nativeData, literal);
+            noteAddress(nativeData, bytes + arrayPointerOffset,
+                Target.Kind.adoptedString,
+                *cast(const(void)**) (bytes + arrayPointerOffset));
         }
         return;
     }
@@ -778,11 +833,14 @@ private void storeValue(
         // to a pointer to its own static storage.
         if (type.ty == Tpointer) {
             *cast(void**) place = data.ptr;
+            noteAddress(nativeData, place, Target.Kind.staticData, data.ptr);
             return;
         }
         checkedStoreIntegral(bytes + arrayLengthOffset, literal.elements.length,
             size_t.sizeof);
         *cast(void**) (bytes + arrayPointerOffset) = data.ptr;
+        noteAddress(nativeData, bytes + arrayPointerOffset,
+            Target.Kind.staticData, data.ptr);
         return;
     }
 
@@ -910,6 +968,8 @@ private void storeValue(
             void*[2] arguments =
                 [keysArgument.ptr, valuesArgument.ptr];
             nativeData.callLowering(constructor.f, place, arguments[]);
+            noteAddress(nativeData, place, Target.Kind.staticData,
+                *cast(void**) place);
             return;
         }
 

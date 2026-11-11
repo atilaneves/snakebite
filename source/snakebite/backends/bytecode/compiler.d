@@ -199,7 +199,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
         if (_compiled.length != 0)
             internalFailure("a save starts with nothing compiled");
+        bool holdsData = !compiledProgram.store.isEmpty;
+        foreach (module_; compiledProgram._modules)
+            holdsData = holdsData || !module_.blocks.isEmpty;
+        if (holdsData)
+            internalFailure("a save starts with no static data, which has "
+                ~ "no records of its addresses otherwise");
         recordRelocs = true;
+        _nativeData.recordRelocs = true;
 
         scope collector = new EagerCompileCollector(this);
         foreach (module_; _program.rootModules)
@@ -2096,7 +2103,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 case constant:
                     reloc.place.index += constantBase;
                     break;
-                case function_, callSite, assertSite, exceptionHandler:
+                case function_, callSite, assertSite, exceptionHandler, datum:
                     internalFailure("a copied body has no call, assertion or "
                         ~ "catch site");
             }

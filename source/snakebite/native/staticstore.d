@@ -4,6 +4,7 @@ module snakebite.native.staticstore;
 private:
 
 
+import snakebite.backends.bytecode.relocation: Place, Reloc, Target;
 import snakebite.host.threads: PerThread;
 import snakebite.native.value: TypeFacts;
 import snakebite.stack.tls: TlsSlots;
@@ -26,6 +27,10 @@ public struct StaticBlocks {
         public size_t size;
         public uint alignment;
         public bool canHoldAddress;
+        // The words of the datum that hold an address, when the compiler
+        // records them (`recordAddress`). The offset of a word is the `index`
+        // of its place.
+        public Reloc[] relocs;
     }
 
     // Written under the compiler lock only, like every miss that fills
@@ -66,17 +71,69 @@ public struct StaticBlocks {
         return _blocks[block].ptr + offset;
     }
 
+    // Records that the word at `place` holds `target`. False when `place` is
+    // in no datum.
+    public bool recordAddress(in void* place, in Target target)
+            @trusted pure nothrow {
+        const found = datumAt(place);
+        if (found.index == size_t.max)
+            return false;
+        _data[found.index].relocs ~= Reloc(
+            Place(Place.Section.datum, Place.Field.word, found.offset), target);
+        return true;
+    }
+
+    // The records of the words in the `length` bytes from `start`, as places
+    // relative to `start`.
+    public Reloc[] relocsIn(in void* start, in size_t length)
+            const @trusted pure nothrow {
+        Reloc[] found;
+        const owner = datumAt(start);
+        if (owner.index == size_t.max)
+            return found;
+        foreach (recorded; _data[owner.index].relocs) {
+            Reloc reloc = recorded;
+            const offset = reloc.place.index;
+            if (offset >= owner.offset && offset - owner.offset < length) {
+                reloc.place.index = offset - owner.offset;
+                found ~= reloc;
+            }
+        }
+        return found;
+    }
+
+    // The datum that holds the byte at `address` and the offset of the byte
+    // in the datum. The data are in the order of their addresses in a block.
+    private auto datumAt(in void* address) const @trusted pure nothrow @nogc {
+        static struct Found {
+            size_t index = size_t.max;
+            size_t offset;
+        }
+
+        size_t block, offset;
+        if (!locate(address, block, offset))
+            return Found();
+        size_t low, high = _data.length;
+        while (low < high) {
+            const middle = (low + high) / 2;
+            const datum = _data[middle];
+            if (datum.block < block
+                    || (datum.block == block && datum.offset <= offset))
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        if (low == 0)
+            return Found();
+        const datum = _data[low - 1];
+        if (datum.block != block || offset >= datum.offset + datum.size)
+            return Found();
+        return Found(low - 1, offset - datum.offset);
+    }
+
     // Whether nothing has reserved a byte.
     public bool isEmpty() const @safe pure nothrow @nogc {
         return _blocks.length == 0;
-    }
-
-    // Whether the type of a datum can hold an address.
-    public bool holdsAddressData() const @safe pure nothrow @nogc {
-        foreach (datum; _data)
-            if (datum.canHoldAddress)
-                return true;
-        return false;
     }
 
     // The caller holds the compiler lock.
@@ -111,7 +168,7 @@ public struct StaticStore {
     private StaticBlocks _blocks;
     // The copies are outside the GC heap, as read-only data is in compiled
     // D, and are freed with this object.
-    private void*[] _stringBlocks;
+    private ubyte[][] _strings;
     // This thread's own copies of the thread-local variables, never shared,
     // so `TlsSlots.slotFor` takes no lock.
     private PerThread!(TlsSlots*) _tls;
@@ -125,18 +182,47 @@ public struct StaticStore {
     ~this() {
         import core.stdc.stdlib: free;
 
-        foreach (block; _stringBlocks)
-            free(block);
+        foreach (string_; _strings)
+            free(string_.ptr);
     }
 
-    // Whether a datum can hold an address, or a string is adopted.
-    public bool holdsAddressData() const @safe pure nothrow @nogc {
-        return _blocks.holdsAddressData || _stringBlocks.length != 0;
+    // The blocks of the data that no D module owns.
+    public inout(StaticBlocks)* blocks() inout @trusted pure nothrow @nogc {
+        return &_blocks;
     }
 
-    // Whether nothing has reserved a byte or adopted a string.
+    // The copies of string literals, in the order of `newString`.
+    public const(ubyte[])[] strings() const @safe pure nothrow @nogc {
+        return _strings;
+    }
+
+    // Whether nothing has reserved a byte or made a string.
     public bool isEmpty() const @safe pure nothrow @nogc {
-        return _blocks.isEmpty && _stringBlocks.length == 0;
+        return _blocks.isEmpty && _strings.length == 0;
+    }
+
+    // The index of the string that holds `address` and the offset of the
+    // byte in it, or false.
+    public bool locateString(
+        in void* address, out size_t index, out size_t offset,
+    ) const @trusted pure nothrow @nogc {
+        foreach (candidate, string_; _strings) {
+            const distance = cast(size_t) address - cast(size_t) string_.ptr;
+            if (distance < string_.length) {
+                index = candidate;
+                offset = distance;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The address `offset` bytes into string `index`, or null.
+    public void* addressInString(in size_t index, in size_t offset)
+            @trusted pure nothrow @nogc {
+        if (index >= _strings.length || offset > _strings[index].length)
+            return null;
+        return _strings[index].ptr + offset;
     }
 
     // The caller holds the compiler lock.
@@ -144,10 +230,15 @@ public struct StaticStore {
         return _blocks.reserve(facts);
     }
 
-    // Takes ownership of a `malloc`ed block. The caller holds the compiler
-    // lock.
-    public void adoptString(void* block) {
-        _stringBlocks ~= block;
+    // A zeroed block of `size` bytes outside the GC heap that this owns and
+    // frees. The caller holds the compiler lock.
+    public ubyte[] newString(in size_t size) {
+        import core.stdc.stdlib: calloc;
+
+        auto block = cast(ubyte*) calloc(size, 1);
+        assert(block !is null);
+        _strings ~= block[0 .. size];
+        return _strings[$ - 1];
     }
 
     // Gives back this thread's table of thread-local variables, unless it

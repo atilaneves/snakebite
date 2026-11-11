@@ -27,6 +27,8 @@ public struct Target {
         functionWord,
         // A string that the frontend owns, such as a file name.
         frontendString,
+        // A copy of a string literal that the process store owns.
+        adoptedString,
         // A value in the native constant pool.
         constantPool,
         // A prepared foreign call.
@@ -76,7 +78,8 @@ public struct Address {
 }
 
 
-// Where a word that holds an address sits in a `Function`.
+// Where a word that holds an address sits: in a `Function`, or in a datum of
+// static data.
 public struct Place {
     public enum Section : ubyte {
         // The `Function` itself.
@@ -86,6 +89,9 @@ public struct Place {
         callSite,
         assertSite,
         exceptionHandler,
+        // The bytes of a datum of a `StaticBlocks`. The `index` is the
+        // offset in the datum.
+        datum,
     }
 
     public enum Field : ubyte {

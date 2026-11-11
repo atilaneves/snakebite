@@ -23,7 +23,7 @@ import snakebite.backends.bytecode.vm:
 import snakebite.failure.report: SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: NativeSignature;
-import snakebite.native.staticstore: StaticBlocks;
+import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
 import snakebite.start.data:
@@ -141,10 +141,6 @@ private void transferHeader(ref Archive archive, ref Header header) {
 // What a program that a save writes must not have yet: these need relocations
 // that the file cannot hold.
 private void refuseWhatIsNotSupported(ref const Program program) {
-    if (!program.store.isEmpty)
-        throw refusal(program.store.holdsAddressData
-            ? "the program has static data that can hold an address"
-            : "the program has static data of the process store");
     if (!program.plans.isEmpty)
         throw refusal("the program calls a function with a foreign call plan");
 }
@@ -266,23 +262,49 @@ private struct Archive {
         throw refusal("a function points at a function that no module holds");
     }
 
-    // Module, block and offset of an address in the blocks of a module.
+    // The blocks of module `index`, or the blocks of the process store for the
+    // index that follows the last module; null for any other.
+    StaticBlocks* blocksAt(in size_t index) {
+        if (index < _program._modules.length)
+            return &_program._modules[index].blocks;
+        if (index == _program._modules.length)
+            return _program.store.blocks;
+        return null;
+    }
+
+    // Module, block and offset of an address in the blocks of a module or of
+    // the process store.
     size_t[3] dataPosition(const(void)* address) {
-        foreach (m, module_; _program._modules) {
+        foreach (m; 0 .. _program._modules.length + 1) {
             size_t block, offset;
-            if (module_.blocks.locate(address, block, offset))
+            if (blocksAt(m).locate(address, block, offset))
                 return [m, block, offset];
         }
-        throw refusal("an instruction points at data that no module holds");
+        throw refusal("a word points at data that the program does not hold");
     }
 
     void* dataAt(in size_t[3] position) {
-        if (position[0] < _program._modules.length)
-            if (auto address = _program._modules[position[0]].blocks.addressOf(
-                    position[1], position[2]))
+        if (auto blocks = blocksAt(position[0]))
+            if (auto address = blocks.addressOf(position[1], position[2]))
                 return address;
         throw new SnakebiteException(
             "the program file names data that it does not hold");
+    }
+
+    // String and offset of an address in a string of the process store.
+    size_t[3] stringPosition(const(void)* address) {
+        size_t index, offset;
+        if (_program.store.locateString(address, index, offset))
+            return [index, offset, 0];
+        throw refusal("a word points at a string that the program does not hold");
+    }
+
+    void* stringAt(in size_t[3] position) {
+        if (auto address = _program.store.addressInString(
+                position[0], position[1]))
+            return address;
+        throw new SnakebiteException(
+            "the program file names a string that it does not hold");
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
@@ -465,6 +487,8 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
         case staticData:
         case constantPool:
             return archive.dataPosition(cast(const(void)*) target.address);
+        case adoptedString:
+            return archive.stringPosition(cast(const(void)*) target.address);
         case handler:
         case tlsDescriptor:
         case typeInfo:
@@ -473,7 +497,7 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
         case nativePlan:
         case callbackEntry:
         case callback:
-            throw refusal(text("a function needs a relocation of kind ",
+            throw refusal(text("a word needs a relocation of kind ",
                 target.kind));
     }
 }
@@ -489,6 +513,8 @@ private size_t addressOf(
         case staticData:
         case constantPool:
             return cast(size_t) archive.dataAt(reference);
+        case adoptedString:
+            return cast(size_t) archive.stringAt(reference);
         case handler:
         case tlsDescriptor:
         case typeInfo:
@@ -620,6 +646,7 @@ private void applyReloc(ref Function target, in Reloc reloc) {
             break;
         case assertSite:
         case exceptionHandler:
+        case datum:
             break;
     }
     if (!done)
@@ -697,39 +724,54 @@ private void transferBody(
     }
     transferStartData(archive, program);
     // All data before any function: a function can point into any module.
+    // The bytes of all data come before the addresses in them: a datum can
+    // point into any block or string.
     foreach (m; 0 .. moduleCount)
         transferBlocks(archive, program._modules[m].blocks);
+    transferBlocks(archive, *program.store.blocks);
+    transferStrings(archive, program.store);
+    foreach (m; 0 .. moduleCount)
+        transferAddresses(archive, program._modules[m].blocks);
+    transferAddresses(archive, *program.store.blocks);
     foreach (m; 0 .. moduleCount)
         transferModule(archive, program, *program._modules[m]);
 }
 
 
-// The data of a module as bytes. A load reserves each datum through the same
-// code as a compile, so the blocks come out the same, and checks that. A
-// datum whose type can hold an address has no relocation records yet, and a
-// save refuses it.
+// The data of a module, or of the process store, as bytes, with each word that
+// holds an address set to zero: `transferAddresses` has them. A load reserves
+// each datum through the same code as a compile, so the blocks come out the
+// same, and checks that.
 private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
     const count = archive.length(blocks.data.length);
     foreach (index; 0 .. count) {
         StaticBlocks.Datum datum;
+        ubyte[] contents;
         if (archive.isWriting) {
-            datum = blocks.data[index];
-            if (datum.canHoldAddress)
-                throw refusal("a module has static data that can hold an "
-                    ~ "address");
+            const source = blocks.data[index];
+            datum.block = source.block;
+            datum.offset = source.offset;
+            datum.size = source.size;
+            datum.alignment = source.alignment;
+            datum.canHoldAddress = source.canHoldAddress;
+            contents = cast(ubyte[]) blocks.bytesOf(source).dup;
+            foreach (reloc; source.relocs)
+                contents[reloc.place.index
+                    .. reloc.place.index + size_t.sizeof] = 0;
         }
         archive.scalar(datum.block);
         archive.scalar(datum.offset);
         archive.scalar(datum.size);
         archive.scalar(datum.alignment);
+        archive.scalar(datum.canHoldAddress);
         if (archive.isWriting) {
-            archive.bytes(cast(void[]) blocks.bytesOf(datum));
+            archive.bytes(contents);
             continue;
         }
         TypeFacts facts;
         facts.size = datum.size;
         facts.alignment = datum.alignment;
-        facts.canHoldAddress = false;
+        facts.canHoldAddress = datum.canHoldAddress;
         auto bytes = blocks.reserve(facts);
         const placed = blocks.data[$ - 1];
         if (placed.block != datum.block || placed.offset != datum.offset)
@@ -740,11 +782,50 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
 }
 
 
+// The copies of string literals of the process store, in the order that a
+// compile made them.
+private void transferStrings(ref Archive archive, ref StaticStore store) {
+    const count = archive.length(store.strings.length);
+    foreach (index; 0 .. count) {
+        const size = archive.length(
+            archive.isWriting ? store.strings[index].length : 0);
+        if (archive.isWriting)
+            archive.bytes(cast(void[]) store.strings[index]);
+        else
+            archive.bytes(store.newString(size));
+    }
+}
+
+
+// The words of the data of `blocks` that hold an address, as relocations.
+private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
+    foreach (index; 0 .. blocks.data.length) {
+        Reloc[] relocs;
+        if (archive.isWriting)
+            relocs = blocks.data[index].relocs.dup;
+        archive.transfer(relocs);
+        if (archive.isWriting)
+            continue;
+        auto bytes = cast(ubyte[]) blocks.bytesOf(blocks.data[index]);
+        foreach (reloc; relocs) {
+            const place = reloc.place;
+            if (place.section != Place.Section.datum
+                    || place.index > bytes.length
+                    || bytes.length - place.index < size_t.sizeof)
+                throw new SnakebiteException(
+                    "the program file holds a relocation with no place");
+            const address = reloc.target.address;
+            bytes[place.index .. place.index + size_t.sizeof] =
+                (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
+        }
+    }
+}
+
+
 private void transferModule(
     ref Archive archive, ref Program program, ref Module module_,
 ) {
-    // The fields of `Module`: the start record, the blocks (empty: a save
-    // refuses a module with data), and the functions.
+    // The fields of `Module`: the start record, the blocks and the functions.
     static assert(FieldNameTuple!Module == AliasSeq!("start", "blocks", "_functions"));
     // `blocks` is set by `transferBlocks`, before the functions.
     transferStart(archive, module_.start);
