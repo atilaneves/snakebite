@@ -1851,6 +1851,17 @@ def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
     })
 
 
+def test_saved_program_with_empty_array_literal_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int[] numbers = [];
+        int main() { return numbers.length == 0 ? 3 : 1; }
+        """})
+
+
+
 # A save never writes a file that loads into a different state: a program
 # that calls a function through a foreign call plan is refused, and no file is
 # left.
