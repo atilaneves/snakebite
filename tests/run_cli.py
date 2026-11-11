@@ -1894,6 +1894,24 @@ def test_saved_program_with_bounds_failure_runs_as_the_compiled_program(
         """})
 
 
+def test_saved_program_with_c_bounds_failure_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": f'name "{dub_name("c-bounds")}"\n'
+                   'targetType "library"\n'
+                   'dflags "-checkaction=C"\n',
+        "source/app.d": """
+        module app;
+        __gshared int[] numbers = [1, 2, 3];
+        unittest {
+            const index = numbers.length + 2;
+            cast(void) numbers[index];
+        }
+        """,
+    })
+
+
 def test_saved_program_with_allocation_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
