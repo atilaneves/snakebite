@@ -38,7 +38,6 @@ import snakebite.failure.report: internalFailure, SnakebiteException;
 // the tests, the REPL) ends the phases itself with `finish`.
 public struct GuestModules {
     import core.time: Duration;
-    import snakebite.backends.statistics: CompilationStatistics;
 
     // Whether the records also name the unit tests of each module, for the
     // runner that druntime starts.
@@ -101,9 +100,9 @@ public struct GuestModules {
         }
     }
 
-    // Registers the root modules of the program of `start`. A startup that fails ends
-    // the way druntime's `rt_init` ends: the throwable is printed and
-    // `failed` is true. A program with no constructor, no destructor and,
+    // Registers the root modules of the program of `start`. A startup that
+    // fails ends the way druntime's `rt_init` ends: the throwable is printed
+    // and `failed` is true. A program with no constructor, no destructor and,
     // for `Tests.no`, no unit test, needs no registration.
     public static GuestModules start(
         ref StartData start,

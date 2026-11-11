@@ -4,7 +4,6 @@ module snakebite.run.program;
 private:
 
 
-import snakebite.backends.statistics: CompilationStatistics;
 import snakebite.start.data: StartData;
 import snakebite.ffi.abi: ArgumentPlan, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
@@ -19,7 +18,8 @@ import snakebite.ffi.plan: NativeSignature;
 // what a destructor throws.
 public int run(
     ref StartData start,
-    ref const CompilationStatistics compilation,
+    ref const imported!"snakebite.backends.statistics".CompilationStatistics
+        compilation,
     in string[] hostArguments = null,
 ) {
     import snakebite.run.modules: GuestModules;
@@ -138,7 +138,8 @@ public struct StartupReport {
 // this returns.
 public StartupReport runDruntimeMain(
     ref StartData start,
-    ref const CompilationStatistics compilation,
+    ref const imported!"snakebite.backends.statistics".CompilationStatistics
+        compilation,
     in imported!"snakebite.image.dependency".TestHooks testHooks,
     in string[] arguments,
     in bool endsProcess = false,
