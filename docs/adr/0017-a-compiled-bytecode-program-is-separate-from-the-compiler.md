@@ -124,7 +124,8 @@ through `NativeData.value` with an owner.
   site, or a start handle, of a function that is not compiled) holds a
   delegate that the compiler gave, which fills the slot at its first use.
   After that the slot holds the compiled function, and the delegate is
-  dropped.
+  dropped. A start handle that is filled holds the compiled function and the
+  address of the `Runner` that runs it, and nothing else of the compiler.
 - A `Program` that came from a file needs only the parts of the list above
   to be in the file. The parts that are not yet in a `Module` must move
   there, or have a stable form, before a `.sbc` file can hold a module.

@@ -330,3 +330,53 @@ unittest {
         throw failure;
     completed.should == true;
 }
+
+
+// Several threads make the first call of one start handle, whose function is
+// not compiled yet. Each must get the result of the function.
+@("startHandle.firstCallFromSeveralThreadsAgrees")
+unittest {
+    import core.atomic: atomicLoad, atomicOp, atomicStore;
+    import snakebite.start.data: FunctionHandle;
+
+    enum threads = 8;
+    foreach (round; 0 .. 6) {
+        auto program = Program([parseSnippet(text(
+            "int main() { int sum = 0; foreach (i; 0 .. 10) sum += i; ",
+            "return sum + ", round, "; }"))], "snakebite");
+        auto backend = ownedBackend!Bytecode(program);
+        FunctionHandle handle = backend.startData.main.function_;
+
+        shared size_t ready = 0;
+        shared bool go = false;
+        int[threads] results;
+        Throwable[threads] failures;
+
+        Thread worker(in size_t index) {
+            return new Thread({
+                atomicOp!"+="(ready, 1);
+                while (!atomicLoad(go)) {}
+                try
+                    handle.call(&results[index], []);
+                catch (Throwable error)
+                    failures[index] = error;
+            });
+        }
+
+        Thread[threads] workers;
+        foreach (t; 0 .. threads) {
+            workers[t] = worker(t);
+            workers[t].start;
+        }
+        while (atomicLoad(ready) < threads) {}
+        atomicStore(go, true);
+        foreach (thread; workers)
+            thread.join;
+
+        foreach (t; 0 .. threads) {
+            if (failures[t] !is null)
+                throw failures[t];
+            results[t].should == 45 + cast(int) round;
+        }
+    }
+}
