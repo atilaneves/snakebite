@@ -2073,6 +2073,31 @@ def test_saved_program_with_host_function_address_in_static_data_runs_as_the_com
 
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
+ABSENT_FUNCTION_PROGRAM = """
+    module main;
+    extern(C) int snakebite_test_no_such_function(int);
+    int main(string[] args) {
+        if (args.length > COUNT)
+            return snakebite_test_no_such_function(1);
+        return 4;
+    }
+    """
+
+
+def test_saved_program_that_never_calls_an_absent_function_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(
+        tmp_path, {"main.d": ABSENT_FUNCTION_PROGRAM.replace("COUNT", "5")})
+
+
+def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(
+        tmp_path, {"main.d": ABSENT_FUNCTION_PROGRAM.replace("COUNT", "0")})
+
+
 def test_save_of_unsupported_program_fails_and_writes_no_file(
     tmp_path: Path,
 ) -> None:
