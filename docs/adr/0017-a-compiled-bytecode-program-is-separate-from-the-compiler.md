@@ -103,15 +103,18 @@ These are not yet owned by the `Module` of the D module that defines them:
   `language/statics/data.d:70`). An instruction holds a pointer to one.
   The initial bytes that a descriptor points to are in the blocks of the
   `Module`, but the descriptor is not.
-- The type data: the `TypeInfo_Class` of a guest class, and the class
-  runtime data around it. The compiler holds them (`_runtimeTypes` at
-  `backends/bytecode/compiler.d:107`, `_classRuntime` at
-  `backends/bytecode/compiler.d:113`). The class info is a GC object
-  (`language/statics/classinfo.d:137`).
-- The constants on the GC heap. A class object constant is a GC block
-  (`language/statics/data.d:123`). The data of an array literal is a GC
-  block (`language/statics/data.d:773`), and so are the keys and values of
-  an associative array literal (`language/statics/data.d:887` and `:889`).
+
+The type data are in the blocks. A `TypeInfo` object of a declared type
+(struct, class, interface, enum), the class information of a guest class
+with its vtable, its `.init` image and its `Interface` records, and a class
+object of a static initialiser are data of the `Module` of the D module of
+the declaration. The `TypeInfo` objects of derived types (pointer, array,
+qualifier, tuple, function) are data of the process store. They are real
+druntime objects: the vtable pointer of each is the address of a symbol of
+the host. The `TypeInfo` of a type that druntime has is a symbol of the
+host. Names are strings that the process store owns. An associative array of
+a static initialiser is the struct literal that the frontend made, stored as
+data; no code runs to make it.
 
 A constant with a place in the blocks of a `Module` is only one that goes
 through `NativeData.value` with an owner.

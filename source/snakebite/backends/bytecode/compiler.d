@@ -171,12 +171,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callLowering,
+            &classRuntimeInfo, (type) => _runtimeTypes.get(type),
             (module_) => &moduleForD(module_).blocks, &callableKind);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
-            &classRuntimeInfo,
-            (type, loc) => _nativeData.initialValue(type, loc).bytes);
+            &classRuntimeInfo, &_nativeData);
         wire(compiledProgram, _runner, jit);
     }
 
@@ -286,17 +285,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
-    }
-
-    private void callLowering(
-        FuncDeclaration function_,
-        void* returnPlace,
-        scope void*[] arguments,
-    ) {
-        _callSelection.callLowering(function_, returnPlace, arguments,
-            &isGuestFunction, hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_), &call,
-            (callee, place, args) => _plans.of(callee).call(place, args));
     }
 
     version(unittest)
@@ -448,9 +436,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             _classRuntime,
             Hooks(
                 &callableAddress,
-                &fillFieldInits,
                 &_runtimeTypes.linkedClassInfo,
                 (decl) => _runtimeTypes.rtInfo(decl),
+                null,
+                &_nativeData,
             ),
         ));
     }
@@ -591,12 +580,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             foreach (root; roots)
                 prepare(root);
         }
-    }
-
-    private void fillFieldInits(
-        ClassDeclaration declaration, ubyte* base,
-    ) {
-        _nativeData.fillFields(declaration, base);
     }
 
     // The body of `function_` for a caller to copy in place of a call, or
@@ -1406,7 +1389,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             foreach (index, ref site; _assertSites)
                 recordAssertSiteRelocs(_relocs, index, site);
             foreach (index, ref handler; exceptionHandlers)
-                recordExceptionHandlerRelocs(_relocs, index, handler);
+                recordExceptionHandlerRelocs(_relocs, index, handler,
+                    _bytecode._nativeData.addressOfData(
+                        cast(const(void)*) handler.type).target);
         }
 
         ClosureSlot[] closureSlots;
@@ -6126,7 +6111,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) initial.length), size_t.sizeof);
             emit(&opConstant, _destination + arrayPointerOffset,
-                addConstant(Address(Target.Kind.staticData, initial.ptr)),
+                addConstant(_bytecode._nativeData.addressOfData(initial.ptr)),
                 size_t.sizeof);
             return;
         }
@@ -6991,7 +6976,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const object = reserveTemp(
                 TypeFacts(declaration.structsize, alignment));
             emit(&opStaticLoad, object,
-                Address(Target.Kind.staticData, runtime.m_init.ptr),
+                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opFrameAddress, _destination, object, size_t.sizeof);
         }
@@ -7006,7 +6991,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 runtime.m_init.length, declaration.alignsize == 0
                     ? 1 : declaration.alignsize));
             emit(&opStaticLoad, image,
-                Address(Target.Kind.staticData, runtime.m_init.ptr),
+                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opStoreIndirect, _destination, image,
                 runtime.m_init.length);
@@ -7141,11 +7126,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination = size_t.max,
         in size_t width = size_t.max,
     ) {
-        auto address = cast(void*) info;
-
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
-            addConstant(Address(Target.Kind.typeInfo, address)),
+            addConstant(_bytecode._nativeData.addressOfData(
+                cast(const(void)*) info)),
             width == size_t.max ? _width : width);
     }
 

@@ -580,8 +580,6 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             throw refusal("a word needs a relocation of kind handler");
         case tlsDescriptor:
             throw refusal("a word needs a relocation of kind tlsDescriptor");
-        case typeInfo:
-            throw refusal("a word needs a relocation of kind typeInfo");
         case frontendString:
             throw refusal("a word needs a relocation of kind frontendString");
         case callback:
@@ -614,9 +612,6 @@ private size_t addressOf(
         case tlsDescriptor:
             throw new SnakebiteException(
                 "the program file holds a relocation of kind tlsDescriptor");
-        case typeInfo:
-            throw new SnakebiteException(
-                "the program file holds a relocation of kind typeInfo");
         case frontendString:
             throw new SnakebiteException(
                 "the program file holds a relocation of kind frontendString");
@@ -745,8 +740,12 @@ private void applyReloc(ref Function target, in Reloc reloc) {
                 done = assignRelocated(target.callSites[place.index],
                     place.field, address);
             break;
-        case assertSite:
         case exceptionHandler:
+            if (place.index < target.exceptionHandlers.length)
+                done = assignRelocated(target.exceptionHandlers[place.index],
+                    place.field, address);
+            break;
+        case assertSite:
         case datum:
             break;
     }
@@ -790,9 +789,9 @@ private bool assignRelocated(T)(ref T record, in Place.Field field, in size_t wo
         enum classification = classificationOf!(T, index);
         alias Field = typeof(T.tupleof[index]);
         static if (is(typeof(classification) == Relocated)) {
-            static if (is(Field == U*, U)) {
+            static if (is(Field == U*, U) || is(Field == class)) {
                 if (classification.field == field) {
-                    record.tupleof[index] = cast(Field) word;
+                    record.tupleof[index] = cast(Field) cast(void*) word;
                     return true;
                 }
             }

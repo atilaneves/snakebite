@@ -9,6 +9,8 @@ import dmd.dclass: ClassDeclaration;
 import dmd.expression: Expression;
 import dmd.func: FuncDeclaration;
 import object: Interface, TypeInfo_Class;
+import snakebite.language.statics.data: NativeData;
+import snakebite.native.value: TypeFacts;
 
 
 // Callable addresses and field initializers differ between backends.
@@ -16,13 +18,14 @@ import object: Interface, TypeInfo_Class;
 public struct Hooks {
     public void* delegate(FuncDeclaration method, ptrdiff_t adjustment)
         methodAddress;
-    public void delegate(ClassDeclaration declaration, ubyte* base)
-        fillFieldInits;
     public TypeInfo_Class delegate(ClassDeclaration declaration)
         linkedClassInfo;
     public immutable(void)* delegate(AggregateDeclaration declaration) rtInfo;
     public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
         registerGenerated;
+    // The type data are data of the program: this reserves them and writes
+    // each address in them.
+    public NativeData* data;
 }
 
 // How many pointers `typeid(object)` follows from the object reference
@@ -134,7 +137,8 @@ public TypeInfo_Class classRuntimeInfo(
         return linked;
     }
 
-    auto info = new TypeInfo_Class;
+    auto data = hooks.data;
+    auto info = data.newObject!TypeInfo_Class(declaration);
     import dmd.astenums: STC;
     import dmd.dsymbolsem: hasPointers, isAbstract;
 
@@ -155,7 +159,7 @@ public TypeInfo_Class classRuntimeInfo(
                 info.m_flags |= isAbstract;
         }
     }
-    info.name = cast(string) prettyNameOf(declaration).toDString;
+    data.storeString(&info.name, prettyNameOf(declaration).toDString);
     info.nameSig = *cast(uint[4]*) blake3(
         cast(const(ubyte)[]) info.name,
     )[0 .. 16].ptr;
@@ -171,7 +175,7 @@ public TypeInfo_Class classRuntimeInfo(
         if (!hasPointerData)
             info.m_flags |= TypeInfo_Class.ClassFlags.noPointers;
     }
-    info.m_RTInfo = hooks.rtInfo(declaration);
+    data.storeReference(&info.m_RTInfo, hooks.rtInfo(declaration));
     for (auto parent = declaration; parent !is null;
             parent = parent.baseClass)
         if (parent.dtor !is null) {
@@ -180,9 +184,11 @@ public TypeInfo_Class classRuntimeInfo(
         }
     // Compiling a method can read this class's initializer recursively.
     // Reserve its final storage before publishing the incomplete metadata.
-    if (declaration.isInterfaceDeclaration is null) {
-        info.m_init = cast(byte[]) new void[declaration.structsize];
-        info.m_init[] = 0;
+    if (declaration.isInterfaceDeclaration is null && declaration.structsize != 0) {
+        const alignment = declaration.alignsize == 0
+            ? 1 : declaration.alignsize;
+        data.storeSlice(&info.m_init, data.reserve(
+            TypeFacts(declaration.structsize, alignment), declaration));
     }
     // Register before resolving methods: their bodies can refer to this
     // same class while its metadata is being built.
@@ -191,7 +197,8 @@ public TypeInfo_Class classRuntimeInfo(
         hooks.registerGenerated(declaration, info);
 
     if (!isInterface && declaration.baseClass !is null)
-        info.base = classRuntimeInfo(declaration.baseClass, cache, hooks);
+        data.storeReference(cast(void*) &info.base,
+            cast(void*) classRuntimeInfo(declaration.baseClass, cache, hooks));
 
     // An interface's methods live in the `Interface` tables of the classes
     // that implement it, not in its own `TypeInfo_Class`.
@@ -199,22 +206,26 @@ public TypeInfo_Class classRuntimeInfo(
     const length = isInterface ? 0
         : declaration.vtbl.length > baseLength
             ? declaration.vtbl.length : baseLength;
-    info.vtbl = new void*[length];
-    if (info.base !is null)
-        info.vtbl[0 .. baseLength] = info.base.vtbl[];
+    if (length != 0)
+        data.storeSlice(&info.vtbl, data.reserve(
+            TypeFacts(length * (void*).sizeof, (void*).alignof),
+            declaration), (void*).sizeof);
     // An `extern(C++)` class has no classinfo slot: its first virtual
     // method is at index 0.
     const firstMethod = declaration.vtblOffset;
+    foreach (i; firstMethod .. baseLength)
+        data.storeFunction(&info.vtbl[i], info.base.vtbl[i]);
     if (firstMethod && !isInterface)
-        info.vtbl[0] = cast(void*) info;
+        data.storeReference(&info.vtbl[0], cast(void*) info);
 
     if (!isInterface) {
         if (declaration.defaultCtor !is null
                 && !(declaration.defaultCtor.storage_class & STC.disable))
-            info.defaultConstructor = cast(void function(Object))
-                hooks.methodAddress(declaration.defaultCtor, 0);
+            data.storeFunction(&info.defaultConstructor,
+                hooks.methodAddress(declaration.defaultCtor, 0));
         if (declaration.tidtor !is null)
-            info.destructor = hooks.methodAddress(declaration.tidtor, 0);
+            data.storeFunction(&info.destructor,
+                hooks.methodAddress(declaration.tidtor, 0));
         // Real compiled D (`glue/toobj.d`'s `ClassInfoToDt`) sets this
         // class's own `classInvariant` slot to `cd.inv`'s own compiled
         // address directly - the merged invariant `funcsem.addInvariant`
@@ -224,8 +235,8 @@ public TypeInfo_Class classRuntimeInfo(
         // class in the hierarchy's own slot in turn; this only fills the
         // one level `declaration` itself owns.
         if (declaration.inv !is null)
-            info.classInvariant = cast(void function(Object))
-                hooks.methodAddress(declaration.inv, 0);
+            data.storeFunction(&info.classInvariant,
+                hooks.methodAddress(declaration.inv, 0));
         foreach (i; firstMethod .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
             import dmd.dsymbolsem: isAbstract;
@@ -234,33 +245,44 @@ public TypeInfo_Class classRuntimeInfo(
             // even when the method itself has no abstract attribute.
             if (method !is null && method.fbody is null
                     && declaration.isAbstract) {
-                info.vtbl[i] = null;
+                data.storeFunction(&info.vtbl[i], null);
                 continue;
             }
             if (method !is null)
-                info.vtbl[i] = hooks.methodAddress(method, 0);
+                data.storeFunction(&info.vtbl[i],
+                    hooks.methodAddress(method, 0));
         }
         // An opaque class has no size, so its initialiser has no slots.
         if (info.m_init.length != 0) {
-            if (info.base !is null)
-                info.m_init[0 .. info.base.m_init.length] =
-                    info.base.m_init[];
-            *cast(void**) info.m_init.ptr = info.vtbl.ptr;
-            hooks.fillFieldInits(declaration, cast(ubyte*) info.m_init.ptr);
+            if (info.base !is null) {
+                data.copyClassImage(info.m_init.ptr, info.base);
+                // The fields of a base of the host take their values from the
+                // declarations, as the fields of this class do.
+                if (data.isHostClass(info.base))
+                    for (auto parent = declaration.baseClass;
+                            parent !is null; parent = parent.baseClass)
+                        data.fillFields(parent, cast(ubyte*) info.m_init.ptr);
+            }
+            data.storeReference(info.m_init.ptr, info.vtbl.ptr);
+            data.fillFields(declaration, cast(ubyte*) info.m_init.ptr);
         }
     }
 
-    info.interfaces = new Interface[declaration.vtblInterfaces.length];
-    foreach (i; 0 .. declaration.vtblInterfaces.length) {
+    const interfaceCount = declaration.vtblInterfaces.length;
+    if (interfaceCount != 0)
+        data.storeSlice(&info.interfaces, data.reserve(
+            TypeFacts(interfaceCount * Interface.sizeof, (void*).alignof),
+            declaration), Interface.sizeof);
+    foreach (i; 0 .. interfaceCount) {
         auto base = (*declaration.vtblInterfaces)[i];
-        info.interfaces[i] = Interface(
-            classRuntimeInfo(base.sym, cache, hooks), null, base.offset,
-        );
+        data.storeReference(cast(void*) &info.interfaces[i].classinfo,
+            cast(void*) classRuntimeInfo(base.sym, cache, hooks));
+        info.interfaces[i].offset = base.offset;
         if (!isInterface) {
             auto table = _interfaceVtable(
                 declaration, base, &info.interfaces[i], hooks);
-            info.interfaces[i].vtbl = table;
-            *cast(void**)(info.m_init.ptr + base.offset) = table.ptr;
+            data.storeSlice(&info.interfaces[i].vtbl, table, (void*).sizeof);
+            data.storeReference(info.m_init.ptr + base.offset, table.ptr);
         }
     }
 
@@ -277,7 +299,7 @@ public TypeInfo_Class classRuntimeInfo(
                     continue;
                 auto table = _interfaceVtable(
                     declaration, base, &parentInfo.interfaces[i], hooks);
-                *cast(void**)(info.m_init.ptr + base.offset) = table.ptr;
+                data.storeReference(info.m_init.ptr + base.offset, table.ptr);
             }
         }
     return info;
@@ -293,10 +315,15 @@ private void*[] _interfaceVtable(
 
     FuncDeclarations methods;
     base.fillVtbl(declaration, &methods, 0);
-    auto table = new void*[methods.length];
+    if (methods.length == 0)
+        return null;
+    auto data = hooks.data;
+    auto table = cast(void*[]) data.reserve(
+        TypeFacts(methods.length * (void*).sizeof, (void*).alignof),
+        declaration).bytes;
     const first = base.sym.vtblOffset;
     if (first)
-        table[0] = descriptor;
+        data.storeReference(&table[0], descriptor);
     foreach (i; first .. methods.length) {
         auto method = methods[i];
         if (method is null)
@@ -304,7 +331,7 @@ private void*[] _interfaceVtable(
         const adjustment = -cast(ptrdiff_t) base.offset
             + (method.interfaceVirtual is null
                 ? 0 : method.interfaceVirtual.offset);
-        table[i] = hooks.methodAddress(method, adjustment);
+        data.storeFunction(&table[i], hooks.methodAddress(method, adjustment));
     }
     return table;
 }

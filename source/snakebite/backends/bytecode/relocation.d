@@ -19,8 +19,6 @@ public struct Target {
         staticData,
         // The `TlsDescriptor` of a thread-local variable.
         tlsDescriptor,
-        // A `TypeInfo` object.
-        typeInfo,
         // Code of the host process.
         hostSymbol,
         // A compiled function, as a function pointer or a delegate holds it.
