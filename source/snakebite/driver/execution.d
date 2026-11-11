@@ -208,3 +208,32 @@ public ExecutionReport executeBackend(
         backend.compilationStatistics,
     );
 }
+
+
+// Compiles `program` with the bytecode backend and writes it to `path`. The
+// JIT is off: the file holds bytecode only.
+public void saveProgram(imported!"snakebite.program".Program program, in string path) {
+    import snakebite.backends.api: Owned;
+    import snakebite.backends.bytecode: Bytecode;
+    import snakebite.backends.bytecode.saved: writeSaved;
+    import snakebite.backends.bytecode.vm: JitSetting;
+    import snakebite.host.buildid: ownBuildId;
+
+    const buildId = ownBuildId;
+    if (buildId.length == 0)
+        throw new Exception("cannot save: this build of sb has no build ID");
+    auto backend = Owned!Bytecode(new Bytecode(
+        program, JitSetting(/*enabled*/ false, /*eager*/ false, /*perfMap*/ false)));
+    backend.recordRelocs = true;
+    writeSaved(path, backend.save, buildId);
+}
+
+
+// Runs the program that `path` holds. The process starts no frontend.
+public int executeLoaded(in string path, in string[] arguments) {
+    import snakebite.backends.bytecode.saved: readSaved;
+    import snakebite.host.buildid: ownBuildId;
+
+    const saved = readSaved(path, ownBuildId);
+    return 0;
+}

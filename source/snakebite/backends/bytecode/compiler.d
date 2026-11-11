@@ -141,6 +141,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // relocs yet, and recording them costs compile time and memory.
     public bool recordRelocs;
 
+    // The compiled program as plain records, for a file.
+    public imported!"snakebite.backends.bytecode.saved".SavedProgram save() {
+        imported!"snakebite.backends.bytecode.saved".SavedProgram result;
+        result.programName = startData.programName;
+        return result;
+    }
+
     public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
         _jit = jit;
@@ -299,42 +306,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
-        const layout = &compiled.hostCall;
-        layout.checkArgumentCount(args.length, "bytecode");
-
-        Vm.HostArgument[16] inlineArguments = void;
-        const count = layout.parameters.length
-            + layout.hasHiddenThis
-            + (variadicCursor !is null)
-            + (variadicTypes !is null);
-        auto arguments = count <= inlineArguments.length
-            ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
-        size_t filled;
-
-        scope const(void*)[] declaredArguments = args;
-        if (layout.hasHiddenThis) {
-            arguments[filled++] = Vm.HostArgument(
-                layout.hiddenThis.offset, args[0], layout.hiddenThis.width);
-            declaredArguments = args[1 .. $];
-        }
-
-        foreach (i, parameter; layout.parameters)
-            arguments[filled++] = Vm.HostArgument(
-                parameter.offset, declaredArguments[i], parameter.width);
-
-        if (variadicCursor !is null) {
-            assert(layout.variadicCursor != size_t.max);
-            arguments[filled++] = Vm.HostArgument(
-                layout.variadicCursor, &variadicCursor, size_t.sizeof);
-        }
-        if (variadicTypes !is null) {
-            assert(layout.variadicTypes != size_t.max);
-            arguments[filled++] = Vm.HostArgument(
-                layout.variadicTypes, &variadicTypes, size_t.sizeof);
-        }
-
         auto active = _vms.enter;
-        active.state.call(*compiled, returnPlace, arguments[0 .. filled]);
+        active.state.callFromHost(
+            compiled, returnPlace, args, variadicCursor, variadicTypes);
     }
 
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {

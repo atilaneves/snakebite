@@ -19,6 +19,10 @@ public struct Options {
     // run time, not just its build time. This flag trades that away for
     // faster image builds, for a caller that only checks behaviour.
     public bool noOptimiseImage;
+    // `--save=<file>` compiles the project to a file and runs nothing.
+    // `--load=<file>` runs a saved file and takes no project directory.
+    public string savePath;
+    public string loadPath;
 }
 
 
@@ -28,7 +32,7 @@ public int run(string[] args) {
     import snakebite.image.dependency: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, prepareSources, runProject;
+        executeBackend, executeLoaded, prepareSources, runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
@@ -41,6 +45,15 @@ public int run(string[] args) {
             .write(parsed.diagnostic);
     if (parsed.status != 0 || parsed.options.showHelp)
         return parsed.status;
+    // A saved program starts no frontend.
+    if (parsed.options.loadPath.length)
+        try
+            return executeLoaded(
+                parsed.options.loadPath, parsed.options.programArguments);
+        catch (Exception exception) {
+            stderr.write("snakebite: ", exception.msg, "\n");
+            return 1;
+        }
     selectFrontendMemory(parsed.options.lowmem);
 
     try {
@@ -62,6 +75,11 @@ public int run(string[] args) {
                     parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
                 );
                 enterWorkingDirectory();
+                if (parsed.options.savePath.length) {
+                    saveProgram(
+                        preparation.project.program, parsed.options.savePath);
+                    return 0;
+                }
                 const report = executeBackend(
                     parsed.options.backend,
                     preparation.project.program,
@@ -166,7 +184,8 @@ public struct CliResult {
 
 
 public CliResult parseArgs(string[] args) {
-    import snakebite.backends: parseBackendName, validBackendNames;
+    import snakebite.backends: BackendName, parseBackendName,
+        validBackendNames;
     import snakebite.driver.options: backendOption, parseProjectOptions;
     import std.getopt: GetOptException;
 
@@ -182,6 +201,8 @@ public CliResult parseArgs(string[] args) {
             "jit-perf-map", jitPerfMapHelp, &result.options.jitPerfMap,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
+            "save", saveHelp, &result.options.savePath,
+            "load", loadHelp, &result.options.loadPath,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);
@@ -193,6 +214,13 @@ public CliResult parseArgs(string[] args) {
         return result;
     }
 
+    if (result.options.loadPath.length) {
+        if (args.length != 1 || result.options.savePath.length)
+            return CliResult(
+                1, "--load takes no project directory and no --save\n"
+                    ~ helpText);
+        return result;
+    }
     if (args.length != 2)
         return CliResult(1, "expected one project directory\n" ~ helpText);
 
@@ -204,10 +232,16 @@ public CliResult parseArgs(string[] args) {
                 "valid backends: " ~ validBackendNames,
         );
 
+    if (result.options.savePath.length
+            && result.options.backend != BackendName.bytecode)
+        return CliResult(1, "--save needs the bytecode backend\n");
+
     return result;
 }
 
 
+private enum saveHelp = "Compile the project to <file> and run nothing.";
+private enum loadHelp = "Run a program saved with --save; no project directory.";
 private enum jitPerfMapHelp = "Write JIT symbols to /tmp/perf-<pid>.map.";
 
 private enum helpText =
@@ -232,4 +266,6 @@ private enum helpText =
     "  --no-jit                  "
         ~ imported!"snakebite.driver.options".noJitHelp ~ "\n" ~
     "  --jit-perf-map            " ~ jitPerfMapHelp ~ "\n" ~
+    "  --save <file>             " ~ saveHelp ~ "\n" ~
+    "  --load <file>             " ~ loadHelp ~ "\n" ~
     "  -h, --help                Show this help\n";

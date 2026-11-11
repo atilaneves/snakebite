@@ -6259,9 +6259,9 @@ def test_load_refuses_a_file_from_another_build(tmp_path: Path) -> None:
     save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
     assert save.returncode == 0, output(save)
     data = bytearray(saved.read_bytes())
-    # The header is an 8-byte magic, a 4-byte version and a 4-byte length,
+    # The header is an 8-byte magic, an 8-byte version and an 8-byte length,
     # then the build ID.
-    first_build_id_byte = 16
+    first_build_id_byte = 24
     data[first_build_id_byte] ^= 0xFF
     saved.write_bytes(bytes(data))
     load = run_sb(f"--load={saved}", cwd=tmp_path)
