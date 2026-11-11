@@ -226,10 +226,14 @@ public ExecutionReport executeLoaded(
         throw new SnakebiteException(
             "the program file was written by another build of snakebite");
 
-    DependencyImage image;
-    if (header.imagePath.length)
-        image = loadImage(header.imagePath);
-    const imageAddress = header.imagePath.length ? &image : null;
+    // On the GC heap, as the image of a compile is: the program and its call
+    // plans and tables of thread-local variables refer to it until the
+    // module destructors have run, after this function returns.
+    DependencyImage* image;
+    if (header.imagePath.length) {
+        image = new DependencyImage;
+        *image = loadImage(header.imagePath);
+    }
     scope entered = ProjectDirectory(
         header.workingDirectory, header.workingDirectory, EndsProcess.yes);
     entered.enterWorking;
@@ -246,17 +250,17 @@ public ExecutionReport executeLoaded(
     // On the GC heap, as the backend of a compile is: the module destructors
     // run when the process ends, after this function returns, and callback
     // entries reach the program and the runner until then.
-    auto program = new Program(imageAddress);
+    auto program = new Program(image);
     auto runner = cast(Runner*) GC.calloc(Runner.sizeof);
     wire(*program, *runner, jit);
     scope(exit) runner.end;
-    loadProgram(contents, *program, *runner, imageAddress);
+    loadProgram(contents, *program, *runner, image);
 
     CompilationStatistics compilation;
     const running = ExecutionClock.start(compilation);
     return runStartData(
         program.startData, compilation, running, stopWatch,
-        imageAddress is null ? TestHooks.init : image.testHooks, true,
+        image is null ? TestHooks.init : image.testHooks, true,
         [program.startData.programName] ~ programArguments, false, true);
 }
 
