@@ -137,11 +137,27 @@ public struct CallAdapter {
 
             if (_type.parameterList.varargs != VarArg.variadic)
                 return plans.of(callee);
-
-            Type[] extraTypes;
-            foreach (expression; _expressions[extraOffset .. $])
-                extraTypes ~= expression.type;
             return plans.variadicKeptOf(callee, extraTypes);
+        }
+
+        // As `prepare`, for a callee whose symbol may not be in this process:
+        // the plan is unbound, and a call of it fails with the failure that
+        // `prepare` throws (`PlanCache.unboundOf`).
+        public const(CallPlan)* prepareUnbound(
+            ref PlanCache plans, FuncDeclaration callee,
+        ) {
+            import dmd.astenums: VarArg;
+
+            if (_type.parameterList.varargs != VarArg.variadic)
+                return plans.unboundOf(callee);
+            return plans.unboundVariadicOf(callee, extraTypes);
+        }
+
+        private Type[] extraTypes() {
+            Type[] types;
+            foreach (expression; _expressions[extraOffset .. $])
+                types ~= expression.type;
+            return types;
         }
 
         // A plan for one execution of a call through `address`, which the

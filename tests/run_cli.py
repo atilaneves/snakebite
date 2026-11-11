@@ -2160,6 +2160,72 @@ def test_saved_program_with_host_variable_address_plus_offset_in_data_runs_as_co
         """})
 
 
+# A saved program fails at a call of an absent function as the compiled
+# program does.
+ABSENT_FUNCTION_PROGRAM = """
+    module main;
+    extern(C) int snakebite_test_no_such_function(int);
+    int main(string[] args) {
+        if (args.length > COUNT)
+            return snakebite_test_no_such_function(1);
+        return 4;
+    }
+    """
+
+
+def test_saved_program_that_never_calls_an_absent_function_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(
+        tmp_path, {"main.d": ABSENT_FUNCTION_PROGRAM.replace("COUNT", "5")})
+
+
+def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(
+        tmp_path, {"main.d": ABSENT_FUNCTION_PROGRAM.replace("COUNT", "0")})
+    from_ram = run_sb("--backend=bytecode", "--no-optimise-image",
+                      str(tmp_path / "app"), cwd=tmp_path)
+    assert from_ram.returncode != 0, output(from_ram)
+    assert "declared by `snakebite_test_no_such_function`" in from_ram.stderr, (
+        output(from_ram))
+
+
+def test_call_of_an_absent_function_names_its_declaration_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int absentFunction(int);
+        int main() { return absentFunction(1); }
+        """)
+    for backend in ("interpreter", "bytecode"):
+        result = run_sb(f"--backend={backend}", str(tmp_path / "app"),
+                        cwd=tmp_path)
+        assert result.returncode != 0, output(result)
+        assert "declared by `absentFunction`" in result.stderr, (
+            backend, output(result))
+
+
+def test_never_called_absent_function_that_ffi_cannot_call_runs_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        extern(Windows) int absentFunction(int, ...);
+        int main(string[] args) {
+            if (args.length > 5)
+                return absentFunction(1, 2);
+            return 4;
+        }
+        """)
+    for backend in ("interpreter", "bytecode"):
+        result = run_sb(f"--backend={backend}", str(tmp_path / "app"),
+                        cwd=tmp_path)
+        assert result.returncode == 4, (backend, output(result))
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(

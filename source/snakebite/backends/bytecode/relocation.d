@@ -122,7 +122,6 @@ public struct Place {
         callee,
         prepareGuest,
         nativePlan,
-        prepareNativePlan,
         builtinEntry,
         valueSignature,
         // `AssertSite`.
