@@ -14,7 +14,7 @@ private:
 
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.backends.bytecode.relocation:
-    Place, Plain, Reloc, Relocated, SetBy, Target;
+    DatumRef, Place, Plain, Reloc, Relocated, SetBy, Target;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
 import snakebite.backends.bytecode.vm:
     AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
@@ -290,16 +290,14 @@ private struct Archive {
     }
 
     // What a gate (storage of a variable of the program, as `GateStorage`
-    // holds) is: a place in the blocks of the program, or a host symbol.
-    Target.Kind gateTarget(in void* address, out size_t[3] reference) {
-        foreach (m; 0 .. _program._modules.length + 1) {
-            size_t block, offset;
-            if (blocksAt(m).locate(address, block, offset)) {
-                reference = [m, block, offset];
-                return Target.Kind.staticData;
-            }
+    // holds) is: its datum in the blocks of the program, or a host symbol.
+    Target.Kind gateTarget(in GateStorage gate, out size_t[3] reference) {
+        if (gate.where.set !is null) {
+            reference = blocksPosition(
+                gate.where.set, gate.where.block, gate.where.offset);
+            return Target.Kind.staticData;
         }
-        const position = symbolPosition(address);
+        const position = symbolPosition(gate.ptr);
         reference = [position[0], position[1], 0];
         return Target.Kind.hostSymbol;
     }
@@ -1080,13 +1078,17 @@ private void transferGates(ref Archive archive, ref GateStorage[] gates) {
         size_t length;
         if (archive.isWriting) {
             length = gate.length;
-            kind = archive.gateTarget(gate.ptr, reference);
+            kind = archive.gateTarget(gate, reference);
         }
         archive.transfer(kind);
         archive.scalar(reference);
         archive.scalar(length);
-        if (!archive.isWriting)
-            gate = (cast(ubyte*) addressOf(archive, kind, reference))[0 .. length];
+        if (!archive.isWriting) {
+            gate.bytes = (cast(ubyte*) addressOf(archive, kind, reference))[0 .. length];
+            if (kind == Target.Kind.staticData)
+                gate.where = DatumRef(archive.blocksAt(reference[0]),
+                    reference[1], reference[2]);
+        }
     }
 }
 

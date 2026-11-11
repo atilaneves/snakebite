@@ -28,10 +28,12 @@ public struct Program {
     @disable this(this);
 
     // `image` is the dependency image that symbols resolve in, or null. The
-    // owner must outlive this.
+    // owner must outlive this, and must construct it in place: the tables of
+    // thread-local variables keep the address of the resolver of `plans`.
     public this(const(DependencyImage)* image) {
-        store = StaticStore(() => heapNew!TlsSlots(image));
         plans = CallPlanStore(image);
+        const resolver = &plans.resolver;
+        store = StaticStore(() => heapNew!TlsSlots(resolver));
     }
 
     // The interned parameter signatures of the layouts. A `Signature*` of

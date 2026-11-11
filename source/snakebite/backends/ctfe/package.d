@@ -41,10 +41,10 @@ public final class Ctfe: imported!"snakebite.backends.api".Backend {
         writeResult(function_, result.value, returnPlace);
     }
 
-    public override void[] staticStorage(
+    public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration,
     ) {
-        return null;
+        return imported!"snakebite.native.staticstore".Placed.init;
     }
 
     // CTFE runs a declaration, so the declaration names it.

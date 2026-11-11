@@ -94,24 +94,14 @@ public struct Resolver {
     // loader answers `dlsym` on a thread-local symbol with the calling
     // thread's own copy, so one thread's answer is wrong for every other.
     public void* resolveThreadLocal(in char[] name) const {
-        return threadLocalAddress(_image, name);
+        auto address = _image is null ? null : _image.resolve(name);
+        return address is null ? symbolAddress(name) : address;
     }
 
     version(unittest)
     public size_t lookups() @safe @nogc nothrow pure const scope {
         return _lookups;
     }
-}
-
-
-// This thread's address of the thread-local symbol `name` of the dependency
-// image `image`, or of the process when `image` is null or has no such symbol.
-public void* threadLocalAddress(
-    const(imported!"snakebite.image.dependency".DependencyImage)* image,
-    in char[] name,
-) {
-    auto address = image is null ? null : image.resolve(name);
-    return address is null ? symbolAddress(name) : address;
 }
 
 

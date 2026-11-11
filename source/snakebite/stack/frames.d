@@ -9,7 +9,6 @@ import snakebite.failure.report: internalFailure;
 import snakebite.stack.temporaries: TemporaryStack;
 import snakebite.host.cstack: CStack;
 import snakebite.host.threads: heapDelete, heapNew;
-import snakebite.image.dependency: DependencyImage;
 import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
 
@@ -68,10 +67,10 @@ public struct FrameStack {
     // goes out of scope.
     private CStack!(ubyte*) _registeredRanges;
     private TemporaryStack _cleanups;
-    // Fiber frame stacks on one thread share these variable slots. A frame
-    // stack used alone creates its own slots on first access.
+    // Fiber frame stacks on one thread share these variable slots. The program
+    // that runs on the frame stack owns them. Null for a frame stack that
+    // never runs a thread-local access.
     private TlsSlots* _tls;
-    private bool _ownsTls;
 
     package(snakebite) enum baseOffset = _base.offsetof;
     package(snakebite) enum fastEndOffset = _fastEnd.offsetof;
@@ -146,8 +145,6 @@ public struct FrameStack {
 
         foreach (registered; _registeredRanges[])
             GC.removeRange(registered);
-        if (_ownsTls)
-            heapDelete(_tls);
         if (_base !is null) {
             const unmapped = munmap(_base, _reservation + pageSize);
             // `internalFailure()` still halts under `-release`; the call must not
@@ -351,10 +348,7 @@ public struct FrameStack {
     // touch of it (finding 1.3). No lock: this `FrameStack`, like the
     // `Vm` that owns it, belongs to exactly one thread.
     public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
-        if (_tls is null) {
-            _tls = heapNew!TlsSlots(cast(const(DependencyImage)*) null);
-            _ownsTls = true;
-        }
+        assert(_tls !is null, "a frame stack that runs guest code has the slots of its program");
         return _tls.slotFor(descriptor);
     }
 
