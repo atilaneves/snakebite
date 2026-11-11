@@ -2029,6 +2029,48 @@ def test_saved_program_with_empty_datum_at_the_end_of_a_block_runs_as_the_compil
         """})
 
 
+def test_saved_program_with_function_literal_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int function(int) f = (int x) => x + 1;
+        int main() { return f(2); }
+        """})
+
+
+def test_saved_program_with_delegate_literal_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int delegate(int) d = (int x) => x + 1;
+        int main() { return d(2); }
+        """})
+
+
+def test_saved_program_with_guest_function_address_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int twice(int n) { return 2 * n; }
+        __gshared int function(int) f = &twice;
+        int main() { return f(4); }
+        """})
+
+
+def test_saved_program_with_host_function_address_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdlib: abs;
+        extern(C) __gshared int function(int) f = &abs;
+        int main() { return f(-4); }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
