@@ -287,7 +287,7 @@ private import snakebite.backends.statistics: CompilationStatistics;
 private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
-private import snakebite.ffi.plan: NativeSignature;
+private import snakebite.ffi.callplan: NativeSignature;
 private import snakebite.ffi.argumentplan: Linkage;
 
 

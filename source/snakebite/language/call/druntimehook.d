@@ -218,7 +218,7 @@ public DruntimeHookSpec specOf(in DruntimeHook hook) @safe @nogc nothrow pure {
 // is reported through the FFI resolver as a host/link failure. Every
 // backend reaches a druntime hook through this, instead of hand-writing
 // the hook's own register shape at the call site.
-public const(imported!"snakebite.ffi.plan".CallPlan)* planOf(
+public const(imported!"snakebite.ffi.callplan".CallPlan)* planOf(
     ref imported!"snakebite.ffi.plan".PlanCache plans,
     in DruntimeHook hook,
 ) {

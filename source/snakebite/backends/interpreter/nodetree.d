@@ -280,7 +280,7 @@ package enum CalleeResult : ubyte { value, aggregate, reference }
 package struct TreeCallee {
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.layout.frame: FrameLayout;
-    import snakebite.ffi.plan: CallPlan;
+    import snakebite.ffi.callplan: CallPlan;
 
     package FuncDeclaration function_;
     package CallSelection.Decision decision;
@@ -807,7 +807,7 @@ private final class LoadSlice : SliceNode {
 // the address of the array, after the druntime hook that encodes the value
 // appended it.
 private final class DcharAppend(E) : Node {
-    import snakebite.ffi.plan : CallPlan;
+    import snakebite.ffi.callplan: CallPlan;
 
     private E _ev;
     private const(CallPlan)* _plan;
@@ -3717,11 +3717,11 @@ private struct DirectWordCall {
     // `resultWidth` of the plan, or temporaries that the callee keeps make
     // it not one. The context and a `ref` parameter are an address.
     public void decide(
-        const(imported!"snakebite.ffi.plan".CallPlan)* plan,
+        const(imported!"snakebite.ffi.callplan".CallPlan)* plan,
         in TreeCallee* callee,
     ) {
         import snakebite.ffi.load: Load, loadWidth;
-        import snakebite.ffi.plan: directWordCallTarget;
+        import snakebite.ffi.callplan: directWordCallTarget;
 
         state = State.other;
         const layout = callee.layout;
@@ -3822,7 +3822,7 @@ private struct DirectWordCall {
 // The direct word call of `callee`, which `plan` runs, or null when the
 // callee has none.
 private const(DirectWordCall)* directWordCallOf(
-    TreeCallee* callee, const(imported!"snakebite.ffi.plan".CallPlan)* plan,
+    TreeCallee* callee, const(imported!"snakebite.ffi.callplan".CallPlan)* plan,
 ) {
     auto direct = &callee.direct;
     if (direct.state == DirectWordCall.State.unexamined)
@@ -3837,7 +3837,7 @@ private const(DirectWordCall)* directWordCallOf(
 private struct Selection {
     public TreeCallee* callee;
     public imported!"snakebite.language.call.selection".CallSelection.Route route;
-    public const(imported!"snakebite.ffi.plan".CallPlan)* plan;
+    public const(imported!"snakebite.ffi.callplan".CallPlan)* plan;
     // Set when the call is a direct word call.
     public const(DirectWordCall)* direct;
     // How this site evaluates its arguments into the slots of the callee.

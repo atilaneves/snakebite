@@ -7,7 +7,7 @@ private:
 import snakebite.start.data: StartData;
 import snakebite.ffi.argumentplan: ArgumentPlan, Linkage, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
-import snakebite.ffi.plan: NativeSignature;
+import snakebite.ffi.callplan: NativeSignature;
 
 
 // "Run on this project": do what a compiled build of it does, implemented
