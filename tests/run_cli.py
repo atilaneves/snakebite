@@ -1727,6 +1727,34 @@ def guest_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
     ]
 
 
+# A program that is saved and then loaded behaves as the same program
+# compiled and run from RAM. The file does not depend on the JIT setting.
+def test_saved_program_runs_as_the_compiled_program(tmp_path: Path) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int main() { return 3; }
+        """)
+    app = str(tmp_path / "app")
+    common = ("--backend=bytecode", "--no-optimise-image")
+
+    from_ram = run_sb(*common, app, cwd=tmp_path)
+    assert from_ram.returncode == 3, output(from_ram)
+
+    files = {}
+    for name, flags in [("jit", []), ("no-jit", ["--no-jit"])]:
+        files[name] = tmp_path / f"{name}.sbc"
+        saved = run_sb(*common, *flags, f"--save={files[name]}", app,
+                       cwd=tmp_path)
+        assert saved.returncode == 0, output(saved)
+    assert files["jit"].read_bytes() == files["no-jit"].read_bytes()
+
+    for flags in ([], ["--no-jit"]):
+        loaded = run_sb(*flags, f"--load={files['jit']}", cwd=tmp_path)
+        assert loaded.returncode == from_ram.returncode, output(loaded)
+        assert guest_lines(loaded) == guest_lines(from_ram)
+        assert loaded.stderr == from_ram.stderr
+
+
 # A long run of guest instructions in one function, with asserts and
 # exceptions between them, finishes within a small native stack. A VM that
 # grows the native stack for each guest instruction overflows it.

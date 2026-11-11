@@ -19,6 +19,10 @@ public struct Options {
     // run time, not just its build time. This flag trades that away for
     // faster image builds, for a caller that only checks behaviour.
     public bool noOptimiseImage;
+    // The file that `--save` writes the compiled program to, or empty.
+    public string save;
+    // The file that `--load` reads the compiled program from, or empty.
+    public string load;
 }
 
 
@@ -182,6 +186,8 @@ public CliResult parseArgs(string[] args) {
             "jit-perf-map", jitPerfMapHelp, &result.options.jitPerfMap,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
+            "save", saveHelp, &result.options.save,
+            "load", loadHelp, &result.options.load,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);
@@ -193,10 +199,6 @@ public CliResult parseArgs(string[] args) {
         return result;
     }
 
-    if (args.length != 2)
-        return CliResult(1, "expected one project directory\n" ~ helpText);
-
-    result.options.projectDirectory = args[1];
     if (!parseBackendName(backendName, result.options.backend))
         return CliResult(
             1,
@@ -204,9 +206,41 @@ public CliResult parseArgs(string[] args) {
                 "valid backends: " ~ validBackendNames,
         );
 
+    if (const diagnostic = optionConflict(result.options, args.length))
+        return CliResult(1, diagnostic ~ "\n" ~ helpText);
+
+    if (result.options.load.length == 0)
+        result.options.projectDirectory = args[1];
     return result;
 }
 
+
+// Why the options cannot be used together, or null. A loaded program is
+// already compiled, so the options that describe a compile have no meaning
+// with `--load`, and only the bytecode backend has a compiled program to
+// save or load.
+private string optionConflict(in Options options, in size_t argumentCount) {
+    import snakebite.backends: BackendName;
+
+    const saves = options.save.length != 0;
+    const loads = options.load.length != 0;
+    if (saves && loads)
+        return "--save and --load cannot be used together";
+    if ((saves || loads) && options.backend != BackendName.bytecode)
+        return "--save and --load work with the bytecode backend only";
+    if (!loads)
+        return argumentCount == 2 ? null : "expected one project directory";
+    if (argumentCount != 1)
+        return "--load takes no project directory";
+    if (options.importPaths.length || options.stringImportPaths.length
+            || options.versions.length || options.noOptimiseImage)
+        return "--load takes none of the options that describe a compile";
+    return null;
+}
+
+
+private enum saveHelp = "Compile the program and write it to FILE; do not run it.";
+private enum loadHelp = "Run the program that FILE holds; no project directory.";
 
 private enum jitPerfMapHelp = "Write JIT symbols to /tmp/perf-<pid>.map.";
 
@@ -227,6 +261,8 @@ private enum helpText =
     "  --version=<identifier>    Define a version identifier (repeatable)\n" ~
     "  --no-optimise-image       Build the dependency image without\n" ~
     "                            optimisation (faster build, slower run)\n" ~
+    "  --save=FILE               " ~ saveHelp ~ "\n" ~
+    "  --load=FILE               " ~ loadHelp ~ "\n" ~
     "  --lowmem                  "
         ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
     "  --no-jit                  "
