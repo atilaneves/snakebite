@@ -2270,6 +2270,23 @@ def test_saved_program_with_host_class_object_in_static_initialiser_runs_as_the_
         """})
 
 
+def test_saved_program_with_guest_class_of_host_base_with_interface_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.sync.mutex: Mutex;
+        class Guarded : Mutex {}
+        int main() {
+            auto guarded = new Guarded;
+            Object.Monitor monitor = guarded;
+            monitor.lock();
+            monitor.unlock();
+            return 3;
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
