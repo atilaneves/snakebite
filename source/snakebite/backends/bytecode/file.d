@@ -276,14 +276,15 @@ private struct Archive {
         return null;
     }
 
-    // Module, block and offset of an address in the blocks of a module or of
-    // the process store.
-    size_t[3] dataPosition(const(void)* address) {
-        foreach (m; 0 .. _program._modules.length + 1) {
-            size_t block, offset;
-            if (blocksAt(m).locate(address, block, offset))
-                return [m, block, offset];
-        }
+    // The module, block and offset of a place in the blocks `set`, when the
+    // program holds them.
+    size_t[3] blocksPosition(
+        in const(void)* set, in size_t block, in size_t offset,
+    ) {
+        if (set !is null)
+            foreach (m; 0 .. _program._modules.length + 1)
+                if (blocksAt(m) is set)
+                    return [m, block, offset];
         throw refusal("a word points at data that the program does not hold");
     }
 
@@ -543,7 +544,8 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
                 cast(const(CallPlan)*) target.address), 0, 0];
         case staticData:
         case constantPool:
-            return archive.dataPosition(cast(const(void)*) target.address);
+            return archive.blocksPosition(
+                target.datum.set, target.datum.block, target.datum.offset);
         case adoptedString:
             return archive.stringPosition(cast(const(void)*) target.address);
         case hostSymbol:
@@ -865,9 +867,9 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
             datum.alignment = source.alignment;
             datum.canHoldAddress = source.canHoldAddress;
             contents = cast(ubyte[]) blocks.bytesOf(source).dup;
-            foreach (reloc; source.relocs)
-                contents[reloc.place.index
-                    .. reloc.place.index + size_t.sizeof] = 0;
+            foreach (link; source.links)
+                contents[link.place.index
+                    .. link.place.index + size_t.sizeof] = 0;
         }
         archive.scalar(datum.block);
         archive.scalar(datum.offset);
@@ -882,7 +884,7 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
         facts.size = datum.size;
         facts.alignment = datum.alignment;
         facts.canHoldAddress = datum.canHoldAddress;
-        auto bytes = blocks.reserve(facts);
+        auto bytes = blocks.reserve(facts).bytes;
         const placed = blocks.data[$ - 1];
         if (placed.block != datum.block || placed.offset != datum.offset)
             throw new SnakebiteException(
@@ -907,28 +909,41 @@ private void transferStrings(ref Archive archive, ref StaticStore store) {
 }
 
 
-// The words of the data of `blocks` that hold an address, as relocations.
+// The words of the data of `blocks` that hold an address, as links.
 private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
     foreach (index; 0 .. blocks.data.length) {
-        Reloc[] relocs;
-        if (archive.isWriting)
-            relocs = blocks.data[index].relocs.dup;
-        archive.transfer(relocs);
-        if (archive.isWriting)
-            continue;
-        auto bytes = cast(ubyte[]) blocks.bytesOf(blocks.data[index]);
-        foreach (reloc; relocs) {
-            const place = reloc.place;
+        auto links = archive.isWriting ? blocks.data[index].links.dup : null;
+        const count = archive.length(links.length);
+        foreach (linkIndex; 0 .. count) {
+            StaticBlocks.Link link;
+            if (archive.isWriting)
+                link = links[linkIndex];
+            archive.transfer(link.place);
+            archive.transfer(link.kind);
+            size_t[3] reference;
+            if (archive.isWriting)
+                reference = linkReference(archive, link);
+            archive.scalar(reference);
+            if (archive.isWriting)
+                continue;
+            auto bytes = cast(ubyte[]) blocks.bytesOf(blocks.data[index]);
+            const place = link.place;
             if (place.section != Place.Section.datum
                     || place.index > bytes.length
                     || bytes.length - place.index < size_t.sizeof)
                 throw new SnakebiteException(
                     "the program file holds a relocation with no place");
-            const address = reloc.target.address;
+            const address = addressOf(archive, link.kind, reference);
             bytes[place.index .. place.index + size_t.sizeof] =
                 (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
         }
     }
+}
+
+private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) {
+    if (link.kind != Target.Kind.staticData)
+        return referenceOf(archive, Target(link.kind, link.address));
+    return archive.blocksPosition(link.set, link.block, link.offset);
 }
 
 

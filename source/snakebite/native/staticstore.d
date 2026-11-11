@@ -4,10 +4,18 @@ module snakebite.native.staticstore;
 private:
 
 
-import snakebite.backends.bytecode.relocation: Place, Reloc, Target;
+import snakebite.backends.bytecode.relocation: DatumRef, Place, Reloc, Target;
 import snakebite.host.threads: PerThread;
 import snakebite.native.value: TypeFacts;
 import snakebite.stack.tls: TlsSlots;
+
+
+// The bytes of a datum and the datum they belong to. It converts to the bytes.
+public struct Placed {
+    public void[] bytes;
+    public DatumRef where;
+    alias bytes this;
+}
 
 
 // The blocks that hold static data, and the free space in them. A block
@@ -30,7 +38,22 @@ public struct StaticBlocks {
         // The words of the datum that hold an address, when the compiler
         // records them (`recordAddress`). The offset of a word is the `index`
         // of its place.
-        public Reloc[] relocs;
+        public Link[] links;
+    }
+
+    // What a word of a datum points at. The word in the bytes of the datum
+    // holds the address; this names the thing, so that a file can hold it.
+    // For `staticData` the target is the offset `offset` in block `block` of
+    // the blocks `set`, with `set` null when no known blocks hold the datum
+    // that the address was computed from. An offset can be the end of the
+    // datum. For any other kind it is `address`.
+    public struct Link {
+        public Place place;
+        public Target.Kind kind;
+        public const(StaticBlocks)* set;
+        public size_t block;
+        public size_t offset;
+        public size_t address;
     }
 
     // Written under the compiler lock only, like every miss that fills
@@ -73,30 +96,31 @@ public struct StaticBlocks {
 
     // Records that the word at `place` holds `target`. False when `place` is
     // in no datum.
-    public bool recordAddress(in void* place, in Target target)
+    public bool recordAddress(in void* place, Link link)
             @trusted pure nothrow {
         const found = datumAt(place);
         if (found.index == size_t.max)
             return false;
-        _data[found.index].relocs ~= Reloc(
-            Place(Place.Section.datum, Place.Field.word, found.offset), target);
+        link.place =
+            Place(Place.Section.datum, Place.Field.word, found.offset);
+        _data[found.index].links ~= link;
         return true;
     }
 
     // The records of the words in the `length` bytes from `start`, as places
     // relative to `start`.
-    public Reloc[] relocsIn(in void* start, in size_t length)
+    public Link[] linksIn(in void* start, in size_t length)
             const @trusted pure nothrow {
-        Reloc[] found;
+        Link[] found;
         const owner = datumAt(start);
         if (owner.index == size_t.max)
             return found;
-        foreach (recorded; _data[owner.index].relocs) {
-            Reloc reloc = recorded;
-            const offset = reloc.place.index;
+        foreach (recorded; _data[owner.index].links) {
+            Link link = recorded;
+            const offset = link.place.index;
             if (offset >= owner.offset && offset - owner.offset < length) {
-                reloc.place.index = offset - owner.offset;
-                found ~= reloc;
+                link.place.index = offset - owner.offset;
+                found ~= link;
             }
         }
         return found;
@@ -137,7 +161,7 @@ public struct StaticBlocks {
     }
 
     // The caller holds the compiler lock.
-    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
+    public Placed reserve(in TypeFacts facts) @trusted pure nothrow {
         // Slots cannot move: constants can hold addresses of other slots.
         const needed = facts.size + facts.alignment - 1;
         if (_available.length < needed) {
@@ -152,7 +176,8 @@ public struct StaticBlocks {
             _blocks[$ - 1].length - _available.length + start, facts.size,
             facts.alignment, facts.canHoldAddress);
         _available = _available[start + facts.size .. $];
-        return bytes;
+        return Placed(bytes, DatumRef(&this, _data[$ - 1].block,
+            _data[$ - 1].offset));
     }
 }
 
@@ -226,7 +251,7 @@ public struct StaticStore {
     }
 
     // The caller holds the compiler lock.
-    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
+    public Placed reserve(in TypeFacts facts) @safe pure nothrow {
         return _blocks.reserve(facts);
     }
 

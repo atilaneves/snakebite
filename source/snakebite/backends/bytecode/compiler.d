@@ -13,6 +13,7 @@ import snakebite.failure.report: internalFailure;
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.signature: Shape;
+import snakebite.native.staticstore: Placed;
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
@@ -175,7 +176,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
-            (type, loc) => _nativeData.initialValue(type, loc));
+            (type, loc) => _nativeData.initialValue(type, loc).bytes);
         wire(compiledProgram, _runner, jit);
     }
 
@@ -325,7 +326,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     public override void[] staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
-        return _nativeData.storageOf(variable);
+        return _nativeData.storageOf(variable).bytes;
     }
 
     // The handle is a `StartFunction`. Until its function is compiled it
@@ -4787,8 +4788,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (variable.isThreadLocalStorage)
             return Address(Target.Kind.tlsDescriptor,
                 _bytecode._nativeData.tlsDescriptorOf(variable));
-        return Address(Target.Kind.staticData,
-            _bytecode._nativeData.storageOf(variable).ptr);
+        const placed = _bytecode._nativeData.storageOf(variable);
+        return Address(Target.Kind.staticData, placed.ptr, placed.where);
     }
 
     private Instruction.Handler staticLoadHandler(VarDeclaration variable) {
@@ -6023,10 +6024,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileDeclaration(expression);
     }
 
-    extern(D) private void emitBytes(in void[] bytes) {
-        assert(bytes.length == _width);
+    extern(D) private void emitBytes(in Placed placed) {
+        assert(placed.length == _width);
         emit(&opStaticLoad, _destination,
-            Address(Target.Kind.staticData, bytes.ptr), bytes.length,
+            Address(Target.Kind.staticData, placed.ptr, placed.where),
+            placed.length,
             Instruction.immutableSource);
     }
 
@@ -8314,8 +8316,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // The address in the native constant pool of `value`.
     private Address constantWord(in size_t value) {
-        return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function).ptr);
+        const placed =
+            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function);
+        return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
     // A frame slot that holds the value of `pointer`. A plain local is that
@@ -8402,11 +8405,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return Address(Target.Kind.constantPool, size_t(0));
         if (operand.op == EXP.null_) {
             const size_t zero;
-            return Address(Target.Kind.constantPool,
-                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function).ptr);
+            const placed =
+                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function);
+            return Address(Target.Kind.constantPool, placed.ptr, placed.where);
         }
-        return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(type, operand, _function).ptr);
+        const placed = _bytecode._nativeData.value(type, operand, _function);
+        return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
     private bool isConstantOperand(

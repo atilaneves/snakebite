@@ -8,11 +8,13 @@ import dmd.dmodule: Module;
 import snakebite.failure.report: internalFailure;
 import snakebite.backends.bytecode.relocation: Target;
 import snakebite.frontend.typefacts;
-import snakebite.native.staticstore: StaticBlocks, StaticStore;
+import snakebite.native.staticstore: Placed, StaticBlocks, StaticStore;
 import snakebite.native.value:
     arrayLengthOffset, arrayPointerOffset, arrayValueSize, checkedLoadIntegral,
     checkedStoreIntegral, delegateContextOffset, delegateFunctionOffset,
     TypeFacts;
+
+private alias Link = StaticBlocks.Link;
 
 
 // Owns constant storage and its referenced data for the backend's lifetime.
@@ -69,9 +71,9 @@ public struct NativeData {
     // `_pendingStatics`, which the initialising thread alone reads,
     // knows it, so an initializer that refers to its own variable finds
     // the storage.
-    private SharedTable!(VarDeclaration, void[]) _statics;
-    private void[][VarDeclaration] _pendingStatics;
-    private SharedTable!(Type, const(void)[]) _defaults;
+    private SharedTable!(VarDeclaration, Placed) _statics;
+    private Placed[VarDeclaration] _pendingStatics;
+    private SharedTable!(Type, Placed) _defaults;
     // A thread-local variable's template: the bytes its storage starts
     // with on every thread, built once under the lock like `_statics`
     // (finding 1.3).
@@ -209,7 +211,7 @@ public struct NativeData {
         return address;
     }
 
-    public const(void)[] initialValue(
+    public Placed initialValue(
         Type type,
         in Loc loc,
     ) {
@@ -218,7 +220,7 @@ public struct NativeData {
 
         import snakebite.frontend.compiler: withCompilerLock;
 
-        const(void)[] bytes;
+        Placed bytes;
         withCompilerLock({
             if (auto found = type in _defaults)
                 bytes = *found;
@@ -232,7 +234,7 @@ public struct NativeData {
     // The constant goes to the blocks of the D module of `owner`, when there
     // is one: the function whose instructions refer to it, or the field it
     // initializes. Without `owner` it goes to `_store`.
-    public const(void)[] value(
+    public Placed value(
         Type type,
         Expression expression,
         Dsymbol owner = null,
@@ -243,7 +245,7 @@ public struct NativeData {
         return bytes;
     }
 
-    public const(void)[] value(
+    public Placed value(
         Type type,
         in void[] representation,
         Dsymbol owner = null,
@@ -259,11 +261,11 @@ public struct NativeData {
     // `owner` is given and there are such blocks: a variable, the constants
     // of a function and the initial bytes of a field. Any other datum (no
     // `owner`, or no blocks) goes to `_store`.
-    private void[] reserve(in TypeFacts facts, Dsymbol owner = null) {
+    private Placed reserve(in TypeFacts facts, Dsymbol owner = null) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: moduleOf;
 
-        void[] bytes;
+        Placed bytes;
         withCompilerLock({
             import std.algorithm: canFind;
 
@@ -278,17 +280,35 @@ public struct NativeData {
         return bytes;
     }
 
-    // Records that the word at `place` holds the address `address`, when
-    // `place` is in a datum of this: a word in other memory is not in the
+    // Records that the word at `place` holds the address `base + offset`,
+    // when `place` is in a datum of this: a word in other memory is not in the
     // data of the program, and what points to that memory gets no position.
+    // For `staticData`, `base` is the start of the datum that the address is
+    // computed from, and `offset` can reach its end. A null `base` is no
+    // address.
     private void recordAddress(
-        in void* place, in Target.Kind kind, in void* address,
+        in void* place, in Target.Kind kind, in void* base, in size_t offset = 0,
     ) {
-        if (!recordRelocs)
+        if (!recordRelocs || base is null)
             return;
-        const target = Target(kind, cast(size_t) address);
+        Link link;
+        link.kind = kind;
+        if (kind == Target.Kind.staticData) {
+            foreach (blocks; _knownBlocks) {
+                if (blocks.locate(base, link.block, link.offset)) {
+                    link.set = blocks;
+                    link.offset += offset;
+                    break;
+                }
+            }
+        } else
+            link.address = cast(size_t) base + offset;
+        recordLink(place, link);
+    }
+
+    private void recordLink(in void* place, in Link link) {
         foreach (blocks; _knownBlocks)
-            if (blocks.recordAddress(place, target))
+            if (blocks.recordAddress(place, link))
                 return;
     }
 
@@ -300,9 +320,8 @@ public struct NativeData {
         if (!recordRelocs)
             return;
         foreach (blocks; _knownBlocks)
-            foreach (reloc; blocks.relocsIn(source.ptr, source.length))
-                recordAddress(cast(ubyte*) place + reloc.place.index,
-                    reloc.target.kind, cast(void*) reloc.target.address);
+            foreach (link; blocks.linksIn(source.ptr, source.length))
+                recordLink(cast(ubyte*) place + link.place.index, link);
     }
 
     public void release() {
@@ -319,7 +338,7 @@ public struct NativeData {
     // otherwise the one copy every thread shares. Native storage when
     // the variable has it (`hasNativeStorage`); this program's own
     // otherwise.
-    public void[] storageOf(VarDeclaration declaration) {
+    public Placed storageOf(VarDeclaration declaration) {
         import std.string: fromStringz;
 
         auto variable = definitionOf(declaration);
@@ -328,19 +347,20 @@ public struct NativeData {
 
         const facts = typeFacts(variable.type);
         if (variable.isThreadLocalStorage)
-            return _store.tlsSlots.slotFor(tlsDescriptorOf(variable));
+            return Placed(_store.tlsSlots.slotFor(tlsDescriptorOf(variable)));
 
         if (hasNativeStorage(variable)) {
             // const would also make the referenced storage read-only here.
             auto address = _symbolAddress(variable);
             if (address !is null)
-                return *_statics.insert(variable, address[0 .. facts.size]);
+                return *_statics.insert(
+                    variable, Placed(address[0 .. facts.size]));
             assert(!isExtern(variable), variable.toChars.fromStringz);
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
 
-        void[] bytes;
+        Placed bytes;
         withCompilerLock({
             if (auto found = variable in _statics) {
                 bytes = *found;
@@ -430,7 +450,7 @@ public struct NativeData {
     // recursive call for the same variable - its own initializer refers
     // to it - finds the reservation `_pendingStatics` is already holding
     // for it, rather than reserving a second time.
-    private void[] buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
+    private Placed buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: getConstInitializer;
         import snakebite.frontend.compiler: newInFrontend;
@@ -647,10 +667,10 @@ private void copyUnits(
 
 private void noteAddress(
     NativeData* nativeData, in void* place, in Target.Kind kind,
-    in void* address,
+    in void* base, in size_t offset = 0,
 ) {
     if (nativeData !is null)
-        nativeData.recordAddress(place, kind, address);
+        nativeData.recordAddress(place, kind, base, offset);
 }
 
 private const(void)* stringPointer(
@@ -697,9 +717,9 @@ private void storeValue(
         ulong offset;
         if (isSymbolAddress(value, symbol, offset)) {
             assert(symbolAddress !is null);
-            const address = cast(ubyte*) symbolAddress(symbol) + offset;
-            checkedStoreIntegral(place, cast(ulong) address, facts.size);
-            noteAddress(nativeData, place, Target.Kind.staticData, address);
+            const base = cast(ubyte*) symbolAddress(symbol);
+            checkedStoreIntegral(place, cast(ulong) (base + offset), facts.size);
+            noteAddress(nativeData, place, Target.Kind.staticData, base, offset);
             return;
         }
 
@@ -753,10 +773,10 @@ private void storeValue(
 
     if (auto symbol = value.isSymOffExp) {
         assert(symbolAddress !is null);
-        *cast(void**) place =
-            cast(ubyte*) symbolAddress(symbol.var) + symbol.offset;
-        noteAddress(nativeData, place, Target.Kind.staticData,
-            *cast(void**) place);
+        auto base = cast(ubyte*) symbolAddress(symbol.var);
+        *cast(void**) place = base + symbol.offset;
+        noteAddress(nativeData, place, Target.Kind.staticData, base,
+            symbol.offset);
         return;
     }
 
@@ -783,8 +803,7 @@ private void storeValue(
         int offset;
         type.isTypeClass.sym.isBaseOf(reference.originalClass, &offset);
         *cast(void**) place = cast(ubyte*) address + offset;
-        noteAddress(nativeData, place, Target.Kind.staticData,
-            *cast(void**) place);
+        noteAddress(nativeData, place, Target.Kind.staticData, address, offset);
         return;
     }
 

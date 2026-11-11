@@ -42,10 +42,21 @@ public struct Target {
     }
 
     public Kind kind;
-    // The address in this process. It is the only thing a target keeps
-    // besides its kind: what the address points at is described by later
-    // steps.
+    // The address in this process.
     public size_t address;
+    // For `staticData` and `constantPool`: the datum that the address is the
+    // start of. The compiler knows it where it makes the address, so a save
+    // never searches for it by the value of the address.
+    public DatumRef datum;
+}
+
+// A datum of static data: the blocks that hold it (a `StaticBlocks`, opaque
+// here) and where it starts in them. `set` is null when no blocks hold the
+// datum, as for the image of a class, which the GC heap holds.
+public struct DatumRef {
+    public const(void)* set;
+    public size_t block;
+    public size_t offset;
 }
 
 
@@ -61,6 +72,12 @@ public struct Address {
 
     public this(in Target.Kind kind, in void* address) @safe pure nothrow @nogc {
         _target = Target(kind, cast(size_t) address);
+    }
+
+    public this(
+        in Target.Kind kind, in void* address, in DatumRef datum,
+    ) @safe pure nothrow @nogc {
+        _target = Target(kind, cast(size_t) address, datum);
     }
 
     public Target target() const @safe pure nothrow @nogc {
@@ -131,7 +148,7 @@ public struct Reloc {
     public Target target;
 }
 
-static assert(Reloc.sizeof == 32, "a function keeps one Reloc for each address");
+static assert(Reloc.sizeof == 56, "a function keeps one Reloc for each address");
 
 
 // How each field of a compiled program reaches a file. Every field of a type
