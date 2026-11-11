@@ -2144,6 +2144,98 @@ def test_saved_program_with_host_thread_local_variables_runs_as_compiled(
         """})
 
 
+def test_saved_program_with_module_constructors_and_destructors_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import other: Other;
+        int perThread;
+        shared int shared_;
+        shared static this() { shared_ = 3; printf("shared start\\n"); }
+        static this() { perThread = 5; printf("thread start\\n"); }
+        static ~this() { printf("thread end %d\\n", perThread); }
+        shared static ~this() { printf("shared end %d\\n", shared_); }
+        int main() { return perThread + shared_ + Other.value; }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        struct Other { static int value; }
+        shared static this() { printf("other shared start\\n"); }
+        static this() { Other.value = 1; printf("other thread start\\n"); }
+        static ~this() { printf("other thread end\\n"); }
+        shared static ~this() { printf("other shared end\\n"); }
+        """,
+    })
+
+
+def test_saved_program_with_unit_tests_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        unittest { printf("first test\\n"); }
+        unittest { printf("second test\\n"); }
+        int main() { return 4; }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        unittest { printf("other test\\n"); }
+        """,
+    })
+
+
+def test_saved_program_with_destructor_gates_of_a_template_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import other: Counted;
+        int main() {
+            Counted!int counted;
+            Counted!long other;
+            return counted.live + other.live;
+        }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        struct Counted(T) {
+            static int live = 1;
+            static ~this() { printf("gated thread end\\n"); }
+            shared static ~this() { printf("gated shared end\\n"); }
+        }
+        """,
+    })
+
+
+def test_saved_program_with_a_second_thread_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.thread: Thread;
+        int perThread;
+        static this() { perThread += 5; printf("thread start %d\\n", perThread); }
+        static ~this() { printf("thread end %d\\n", perThread); }
+        void work() { perThread += 1; printf("work %d\\n", perThread); }
+        int main() {
+            auto thread = new Thread(&work);
+            thread.start;
+            thread.join;
+            return perThread;
+        }
+        """})
+
+
 # A save never writes a file for a program that does not compile: it fails,
 # and no file is left.
 def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
