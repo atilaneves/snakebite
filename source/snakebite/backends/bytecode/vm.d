@@ -5625,6 +5625,44 @@ static if (jitSupported) {
         tables.twins.uncountedOf[counted] = original;
     }
 
+    // What the process does with the JIT for `function_`, whose
+    // instructions are plain: the counting twins at the counted events
+    // `indices`, and the fields that tier-up reads. A compile and a load both
+    // end with this call. `jitInstance` is the `JitInstance` of the owner of
+    // the function. `name` is the symbol of the function in the perf map; it
+    // is evaluated only when the map is on.
+    package void armJit(ref Function function_, in JitSetting setting,
+        void* jitInstance, const(size_t)[] indices, lazy const(char)[] name)
+    {
+        jitCountEvents(function_.instructions, indices);
+        function_.jitHeat = setting.jitStartHeat;
+        function_.jitCounts = setting.jitCounting;
+        function_.jit = cast(
+            imported!"snakebite.backends.bytecode.jit".JitInstance*)
+            jitInstance;
+        if (function_.jitCounts && setting.perfMap)
+            function_.jitName = name;
+    }
+
+    // The instruction indices at which a loaded function counts events under
+    // `setting`. A saved function has no branch, so only calls count.
+    package size_t[] countedEventsOf(in JitSetting setting,
+        in Instruction[] instructions)
+    {
+        size_t[] result;
+        foreach (index, instruction; instructions)
+            if (setting.jitCountsEvent(instruction, index, null))
+                result ~= index;
+        return result;
+    }
+
+    // The handler that `handler` is the counting twin of, or `handler`.
+    package Instruction.Handler uncounted(Instruction.Handler handler) {
+        if (const original = handler in _countingTwins.uncountedOf)
+            return cast(Instruction.Handler) *original;
+        return handler;
+    }
+
     // Replaces the handler of each of `instructions[indices]` by its counting
     // twin. `indices` are the backward branches and the calls. A handler with
     // no twin stays: that instruction does not count.
@@ -6169,6 +6207,21 @@ static if (jitSupported) {
 
     package void jitCountEvents(Instruction[], const(size_t)[])
         pure nothrow @nogc @safe {}
+
+    package void armJit(ref Function, in JitSetting, void*,
+        const(size_t)[], lazy const(char)[]) pure nothrow @nogc @safe {}
+
+    package size_t[] countedEventsOf(in JitSetting, in Instruction[])
+        pure nothrow @nogc @safe
+    {
+        return null;
+    }
+
+    package Instruction.Handler uncounted(Instruction.Handler handler)
+        pure nothrow @nogc @safe
+    {
+        return handler;
+    }
 
     private void countCall(const(Function)*) pure nothrow @nogc @safe {}
 

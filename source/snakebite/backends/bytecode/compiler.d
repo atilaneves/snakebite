@@ -84,11 +84,16 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     static if (imported!"snakebite.backends.bytecode.jit".jitSupported) {
         private imported!"snakebite.backends.bytecode.jit".JitInstance
             _jitInstance;
-
-        package auto jitInstance() {
-            return &_jitInstance;
-        }
     }
+
+    // The address of the JIT state for `armJit`, null where there is none.
+    package void* jitInstanceAddress() {
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            return &_jitInstance;
+        else
+            return null;
+    }
+
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -150,6 +155,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             SavedModule, SavedProgram, SavedTarget, SaveRefusal;
         import snakebite.backends.bytecode.relocation: Target;
         import snakebite.ffi.plan: CallPlan, NativeSignature, originOf;
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
         import std.conv: text;
 
         assert(recordRelocs);
@@ -238,8 +244,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             result.parameterCount = start.main.parameterCount;
             auto handle = cast(StartFunction) start.main.function_;
             result.main = result.functions.length;
-            result.functions ~=
-                describe(handle.function_.get, &targetOf, &planIndexOf);
+            result.functions ~= describe(
+                handle.function_.get, handle.declaration.mangledNameOf.idup,
+                &targetOf, &planIndexOf);
         }
         return result;
     }
@@ -357,13 +364,15 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // it, so the function compiles at its first call, as with `call`. The
     // declaration is reachable only through that step.
     public override FunctionHandle compiledFunction(FuncDeclaration function_) {
-        return new StartFunction(() => compileFunction(function_));
+        return new StartFunction(function_, () => compileFunction(function_));
     }
 
     private final class StartFunction: FunctionHandle {
         FunctionCompiler.Deferred!(const(Function)*) function_;
+        FuncDeclaration declaration;
 
-        this(const(Function)* delegate() compute) {
+        this(FuncDeclaration declaration, const(Function)* delegate() compute) {
+            this.declaration = declaration;
             function_ = typeof(function_)(compute);
         }
 
@@ -933,11 +942,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 this, _jit, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             *placeholder = compiler.build(body_);
-            if (placeholder.jitCounts && _jit.perfMap) {
-                import snakebite.frontend.dmd.mangle: mangledNameOf;
-
-                placeholder.jitName = function_.mangledNameOf;
-            }
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
@@ -998,8 +1002,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers, jitCountEvents,
-        jitCounting, jitCountsEvent, jitStartHeat, RegisterFamily, registerFamily,
+        armJit, decodesIndirect, isFusedBranch, specialiseHandlers,
+        jitCountsEvent, RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -1416,7 +1420,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         fuseLoadCopies;
         assignRegisters;
         specialiseHandlers(_instructions);
-        jitCountEvents(_instructions, _countedEvents);
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -1480,10 +1483,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
-        result.jitHeat = _jit.jitStartHeat;
-        result.jitCounts = _jit.jitCounting;
-        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            result.jit = _bytecode.jitInstance;
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+        armJit(result, _jit, _bytecode.jitInstanceAddress, _countedEvents,
+            _function.mangledNameOf);
         return result;
     }
 

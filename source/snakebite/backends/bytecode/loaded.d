@@ -6,7 +6,7 @@ private:
 
 import snakebite.backends.api: Backend;
 import snakebite.backends.bytecode.saved: SavedProgram, SavedTarget;
-import snakebite.backends.bytecode.vm: Function, Vm;
+import snakebite.backends.bytecode.vm: Function, JitSetting, Vm;
 import snakebite.start.data: FunctionHandle;
 
 
@@ -24,6 +24,13 @@ public final class LoadedBytecode: Backend {
     import snakebite.start.data: ModuleStart, StartData;
 
     private ExecutionStates!(Vm*) _vms;
+    // What the functions of this backend do with the JIT, from the options
+    // of this process as with `Bytecode`.
+    private JitSetting _jit;
+    private shared bool _jitCodeCanGo;
+    static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+        private imported!"snakebite.backends.bytecode.jit".JitInstance
+            _jitInstance;
     private SignatureTable _signatures;
     private Resolver _resolver;
     // The memory that the functions point into. The garbage collector keeps
@@ -33,18 +40,23 @@ public final class LoadedBytecode: Backend {
     private const(void)*[] _plans;
     private const(Function)*[] _functions;
 
-    public this(in SavedProgram saved) {
+    public this(in SavedProgram saved, in JitSetting jit) {
         super(Program.init);
+        _jit = jit;
         _resolver = Resolver(null);
         _vms = ExecutionStates!(Vm*)(
-            () => heapNew!Vm(defaultFrameCapacity), () {});
+            () => heapNew!Vm(defaultFrameCapacity), () {}, &releaseJitCode);
         loadData(saved);
         loadPlans(saved);
         foreach (function_; saved.functions) {
             import snakebite.backends.bytecode.saved: instantiate;
+            import snakebite.backends.bytecode.vm: armJit, countedEventsOf;
 
-            _functions ~= instantiate(
+            auto loaded = instantiate(
                 function_, &addressOf, _plans, _signatures);
+            armJit(*loaded, _jit, jitInstanceAddress,
+                countedEventsOf(_jit, loaded.instructions), function_.jitName);
+            _functions ~= loaded;
         }
         startWith(startDataOf(saved));
     }
@@ -56,8 +68,28 @@ public final class LoadedBytecode: Backend {
             free(text);
     }
 
+    // As `Bytecode.release`: a loaded program holds no callback entry, so
+    // the JIT code goes when the last execution state ends.
     protected override void release() {
+        import core.atomic: atomicStore;
+
+        atomicStore(_jitCodeCanGo, true);
         _vms.end;
+    }
+
+    private void releaseJitCode() nothrow @nogc {
+        import core.atomic: atomicLoad;
+
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            if (atomicLoad(_jitCodeCanGo))
+                _jitInstance.release;
+    }
+
+    private void* jitInstanceAddress() {
+        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
+            return &_jitInstance;
+        else
+            return null;
     }
 
     private void loadData(in SavedProgram saved) {

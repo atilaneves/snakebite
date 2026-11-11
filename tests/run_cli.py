@@ -6285,7 +6285,46 @@ def test_load_rejects_an_unknown_backend_name(tmp_path: Path) -> None:
     assert "valid backends" in load.stderr, output(load)
 
 
-@pytest.mark.parametrize("option", ["--backend=interpreter", "--no-jit"])
+def test_save_file_does_not_depend_on_the_jit_option(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        import core.stdc.stdio: printf;
+        int main() { printf("hello\n"); return 0; }
+        """)
+    with_jit = tmp_path / "with-jit.sbc"
+    without_jit = tmp_path / "without-jit.sbc"
+    first = run_sb(
+        "--no-optimise-image", f"--save={with_jit}", str(app), cwd=tmp_path)
+    second = run_sb(
+        "--no-optimise-image", "--no-jit", f"--save={without_jit}", str(app),
+        cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+    assert second.returncode == 0, output(second)
+    assert with_jit.read_bytes() == without_jit.read_bytes()
+
+
+@pytest.mark.parametrize("option", [None, "--no-jit"])
+def test_load_runs_as_from_ram_with_any_jit_option(
+    tmp_path: Path, option: str | None
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        import core.stdc.stdio: printf;
+        int main() { printf("saved and loaded\n"); return 3; }
+        """)
+    saved = tmp_path / "main.sbc"
+    ram = run_backend("bytecode", app, tmp_path)
+    save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
+    assert save.returncode == 0, output(save)
+    options = [option] if option else []
+    load = run_sb(*options, f"--load={saved}", cwd=tmp_path)
+    assert (load.returncode, guest_lines(load), load.stderr) == (
+        ram.returncode, guest_lines(ram), ram.stderr), output(load)
+
+
+@pytest.mark.parametrize("option", ["--backend=interpreter"])
 def test_load_refuses_an_option_that_it_cannot_honour(
     tmp_path: Path, option: str
 ) -> None:

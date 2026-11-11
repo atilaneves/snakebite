@@ -46,11 +46,13 @@ public int run(string[] args) {
             .write(parsed.diagnostic);
     if (parsed.status != 0 || parsed.options.showHelp)
         return parsed.status;
+    const jit = JitSetting(!parsed.options.noJit,
+        /*eager*/ false, parsed.options.jitPerfMap);
     // A saved program starts no frontend.
     if (parsed.options.loadPath.length)
         try
             return executeLoaded(
-                parsed.options.loadPath, parsed.options.programArguments);
+                parsed.options.loadPath, parsed.options.programArguments, jit);
         catch (Exception exception) {
             stderr.write("snakebite: ", exception.msg, "\n");
             return 1;
@@ -81,7 +83,7 @@ public int run(string[] args) {
                 );
                 enterWorkingDirectory();
                 if (savePath.length) {
-                    saveProgram(preparation.project.program, savePath);
+                    saveProgram(preparation.project.program, savePath, jit);
                     return 0;
                 }
                 const report = executeBackend(
@@ -91,8 +93,7 @@ public int run(string[] args) {
                         ~ parsed.options.programArguments,
                     false,
                     true,
-                    JitSetting(!parsed.options.noJit,
-                        /*eager*/ false, parsed.options.jitPerfMap),
+                    jit,
                 );
                 _statistics = Statistics(true, preparation, report);
                 return report.status;
@@ -264,10 +265,6 @@ private string optionIgnoredByLoad(in Options options) {
         return "--version";
     if (options.lowmem)
         return "--lowmem";
-    if (options.noJit)
-        return "--no-jit";
-    if (options.jitPerfMap)
-        return "--jit-perf-map";
     if (options.noOptimiseImage)
         return "--no-optimise-image";
     return "";

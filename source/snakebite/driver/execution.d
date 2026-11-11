@@ -229,19 +229,21 @@ private ExecutionReport execute(
 
 
 // Compiles `program` with the bytecode backend and writes it to `path`. The
-// JIT is off: the file holds bytecode only.
-public void saveProgram(imported!"snakebite.program".Program program, in string path) {
+// file holds bytecode only: it is the same for every `jit`.
+public void saveProgram(
+    imported!"snakebite.program".Program program,
+    in string path,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.backends.bytecode.saved: writeSaved;
-    import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.host.buildid: ownBuildId;
 
     const buildId = ownBuildId;
     if (buildId.length == 0)
         throw new Exception("cannot save: this build of sb has no build ID");
-    auto backend = Owned!Bytecode(new Bytecode(
-        program, JitSetting(/*enabled*/ false, /*eager*/ false, /*perfMap*/ false)));
+    auto backend = Owned!Bytecode(new Bytecode(program, jit));
     backend.recordRelocs = true;
     writeSaved(path, backend.save, buildId);
 }
@@ -249,7 +251,11 @@ public void saveProgram(imported!"snakebite.program".Program program, in string 
 
 // Runs the program that `path` holds the way `bin/sb` runs a project. The
 // process starts no frontend.
-public int executeLoaded(in string path, in string[] arguments) {
+public int executeLoaded(
+    in string path,
+    in string[] arguments,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
     import snakebite.backends.api: Backend, Owned;
     import snakebite.backends.bytecode.loaded: LoadedBytecode;
     import snakebite.backends.bytecode.saved: readSaved;
@@ -259,7 +265,7 @@ public int executeLoaded(in string path, in string[] arguments) {
 
     const saved = readSaved(path, ownBuildId);
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto backend = Owned!Backend(new LoadedBytecode(saved));
+    auto backend = Owned!Backend(new LoadedBytecode(saved, jit));
     return execute(
         backend, stopWatch, /*startsAsProject*/ true, TestHooks.init,
         [saved.programName] ~ arguments, /*collectGarbage*/ false,

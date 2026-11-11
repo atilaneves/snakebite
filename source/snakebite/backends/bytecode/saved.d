@@ -32,7 +32,7 @@ public class SaveRefusal: Exception {
 
 import snakebite.backends.bytecode.relocation: Place, Reloc, Target;
 import snakebite.backends.bytecode.vm: Arg, CallSite, Function, Instruction,
-    opReturnVoid, Role, Roles, rolesOf;
+    opReturnVoid, Role, Roles, rolesOf, uncounted;
 import snakebite.native.signature: Shape, Signature, SignatureTable;
 import snakebite.stack.frames: ReturnPlace;
 import snakebite.stack.hostcall: HostCallLayout;
@@ -115,6 +115,8 @@ public struct SavedFunction {
     public size_t windowSlot;
     public size_t windowBytes;
     public bool windowCallable;
+    // The symbol of the function in a JIT perf map.
+    public string jitName;
 }
 
 
@@ -276,11 +278,15 @@ private void append(T)(ref ubyte[] bytes, in T value) {
 }
 
 
-// The record of `function_`, or a refusal that says what it holds that a
-// stored program cannot hold yet. `targetOf` names what a static address
-// points at, and `planIndexOf` the position of a foreign call's plan.
+// The record of `function_` with plain handlers, so that it does not depend
+// on the JIT setting of the process that made it, or a refusal that says what
+// it holds that a stored program cannot hold yet. `targetOf` names what a
+// static address points at, and `planIndexOf` the position of a foreign
+// call's plan.
+// `jitName` is the symbol of the function for a JIT perf map.
 package SavedFunction describe(
     const(Function)* function_,
+    string jitName,
     scope SavedTarget delegate(in Target) targetOf,
     scope size_t delegate(const(void)*) planIndexOf,
 ) {
@@ -296,7 +302,9 @@ package SavedFunction describe(
         "windowSlot", "windowBytes", "windowCallable",
     );
     // Stored as nothing because the function holds none, or because the
-    // loader sets it: the checks below refuse a function that holds one.
+    // loader sets it: the checks below refuse a function that holds one. The
+    // JIT fields come from the JIT setting of the process that runs the
+    // function, never from the file.
     enum absentFields = AliasSeq!(
         "assertSites", "exceptionHandlers", "closureOffset", "closureSize",
         "closureAlignment", "closureSlots", "inlineBody", "activationAlignment",
@@ -317,14 +325,15 @@ package SavedFunction describe(
     SavedFunction result;
     result.constants = function_.constants.dup;
     foreach (instruction; function_.instructions) {
+        const handler = uncounted(instruction.handler);
         Roles roles;
-        if (rolesOf(instruction.handler, roles)
+        if (rolesOf(handler, roles)
                 && (roles.destination == Role.instruction
                     || roles.source == Role.instruction
                     || roles.sourceWidth == Role.instruction))
             throw new SaveRefusal("a function has a branch");
         result.instructions ~= SavedInstruction(
-            cast(long) instruction.handler - cast(long) &opReturnVoid,
+            cast(long) handler - cast(long) &opReturnVoid,
             instruction.destination, instruction.source, instruction.width,
             instruction.sourceWidth,
         );
@@ -393,11 +402,13 @@ package SavedFunction describe(
     result.windowSlot = function_.windowSlot;
     result.windowBytes = function_.windowBytes;
     result.windowCallable = function_.windowCallable;
+    result.jitName = jitName;
     return result;
 }
 
 
-// The function that `saved` describes in this process. `addressOf` gives the
+// The function that `saved` describes in this process, with plain handlers;
+// the caller arms it for the JIT. `addressOf` gives the
 // address of a datum or a text, and `plans` the foreign calls in the order
 // of `SavedProgram.plans`.
 package Function* instantiate(
