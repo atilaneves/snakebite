@@ -55,7 +55,7 @@ package struct JitOp {
         fpcmp3, index, checked, castFixed, sliceToPointer, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
         callWindow, returnValue, returnVoid, arrayEqual, signedDivide,
-        temporaryTransition,
+        temporaryTransition, sliceFill,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -1245,6 +1245,8 @@ private struct Asm {
     void jmpRax() { b(0xFF); b(0xE0); }
 
     void jmpM(in Mem target) { memOp(4, byteReg: false, 4, target, 0xFF); }
+
+    void repStosb() { b(0xF3); b(0xAA); }
 }
 
 private struct FpSlots {
@@ -2090,6 +2092,9 @@ private struct Gen {
 
         case arrayEqual:
             return emitArrayEqual(i, ins, original);
+
+        case sliceFill:
+            return emitSliceFill(ins);
         }
     }
 
@@ -2161,6 +2166,33 @@ private struct Gen {
 
         patchHere(multipleElements);
         jumpToHandler(i, original);
+        return true;
+    }
+
+    bool emitSliceFill(in Instruction ins) {
+        if (ins.width != 1)
+            return false;
+        Mem dest, value;
+        if (!opnd(ins.destination, R9, dest) || !opnd(ins.source, R10, value))
+            return false;
+
+        a.ld(8, R11, Mem(dest.base, dest.disp + cast(int) arrayLengthOffset));
+        a.ld(8, R9, Mem(dest.base, dest.disp + cast(int) arrayPointerOffset));
+        a.aluRI(Alu.cmp, 8, R11, 0);
+        const empty = jccLocal(CC_E);
+        a.ld(1, RAX, value);
+
+        // REP STOSB uses RCX and RDI, which can hold live handler arguments.
+        a.movRR64(R10, RCX);
+        static if (REG0 == RDI)
+            a.movRR64(SC2, RDI);
+        a.movRR64(RCX, R11);
+        a.movRR64(RDI, R9);
+        a.repStosb;
+        static if (REG0 == RDI)
+            a.movRR64(RDI, SC2);
+        a.movRR64(RCX, R10);
+        patchHere(empty);
         return true;
     }
 
