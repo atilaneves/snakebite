@@ -6358,7 +6358,14 @@ def test_save_refuses_program_arguments(tmp_path: Path) -> None:
     assert not saved.exists()
 
 
-@pytest.mark.parametrize("option", ["--backend=interpreter"])
+@pytest.mark.parametrize("option", [
+    "--backend=interpreter",
+    "--import-path=/nonexistent",
+    "--string-import-path=/nonexistent",
+    "--version=Foo",
+    "--lowmem",
+    "--no-optimise-image",
+])
 def test_load_refuses_an_option_that_it_cannot_honour(
     tmp_path: Path, option: str
 ) -> None:
