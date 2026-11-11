@@ -13,7 +13,7 @@ import snakebite.failure.report: internalFailure;
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.signature: Shape;
-import snakebite.backends.bytecode.linkedmodules: LinkedModules;
+import snakebite.backends.bytecode.program: Program;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
     IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
@@ -51,7 +51,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
-    import snakebite.program: Program;
+    import snakebite.program: SourceProgram = Program;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm:
@@ -68,17 +68,17 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // Declared before what points into it, so that it is destroyed after.
     // What the compiler fills: the signatures of the layouts, and the rest of
     // the compiled code and data of the program.
-    package LinkedModules linked;
+    package Program compiledProgram;
     private NativeData _nativeData;
     private PlanCache _plans;
     // The machinery that runs the compiled functions. A `Function` points
     // to its JIT instance, so the address of this field must never change.
-    // Declared after `linked`, `_nativeData` and `_plans`, so that it is
+    // Declared after `compiledProgram`, `_nativeData` and `_plans`, so that it is
     // destroyed before them: its states release through `_nativeData`, and
-    // its callback entry reads `linked.plans`.
+    // its callback entry reads `compiledProgram.plans`.
     private Runner _runner;
     private CallSelection _callSelection;
-    // The index from a declaration to its function, which `linked` owns.
+    // The index from a declaration to its function, which `compiledProgram` owns.
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
     // recursion - embeds this pointer in its `CallSite` before the body
@@ -128,14 +128,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // relocs yet, and recording them costs compile time and memory.
     public bool recordRelocs;
 
-    public this(const Program program, in JitSetting jit = JitSetting.init) {
+    public this(const SourceProgram program, in JitSetting jit = JitSetting.init) {
         super(program);
-        linked = LinkedModules(program.dependencyImage);
+        compiledProgram = Program(program.dependencyImage);
         _compilation.hasCompiler = true;
-        _plans = PlanCache(&linked.plans,
+        _plans = PlanCache(&compiledProgram.plans,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
-        _nativeData = NativeData(&linked.store, &_program.isRootOwned,
+        _nativeData = NativeData(&compiledProgram.store, &_program.isRootOwned,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
@@ -146,12 +146,12 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (type, loc) => _nativeData.initialValue(type, loc));
         _runner = Runner(jit, () => _nativeData.tlsSlots,
             () => _nativeData.release,
-            () => linked.plans.callbacks.hasEntries);
-        linked.plans.bindCallbacks(&Runner.invokeCallback, &_runner);
+            () => compiledProgram.plans.callbacks.hasEntries);
+        compiledProgram.plans.bindCallbacks(&Runner.invokeCallback, &_runner);
     }
 
     protected override ref StartData startDataStorage() {
-        return linked.startData;
+        return compiledProgram.startData;
     }
 
     // How many chunks of callback entries this instance's bridge has.
@@ -254,7 +254,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // locals, including lowering temporaries. Publish only that
             // complete layout, owned by this backend rather than the AST.
             result = _layouts.insert(
-                function_, FrameLayout.of(function_, linked.signatures));
+                function_, FrameLayout.of(function_, compiledProgram.signatures));
         });
         return result;
     }
@@ -732,13 +732,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // callee is only ever dereferenced when the VM actually runs
             // the call, which cannot happen before `compile`/`call` returns
             // from the top-level compile that reached here.
-            auto placeholder = linked.newFunction;
+            auto placeholder = compiledProgram.newFunction;
             _compiled[function_] = placeholder;
             // A rejected body must not stay cached as an empty function
             // that a later call would run.
             scope(failure) {
                 _compiled.remove(function_);
-                linked.discardFunction(placeholder);
+                compiledProgram.discardFunction(placeholder);
             }
             registerGuestWord(function_, placeholder);
 
@@ -9705,7 +9705,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
         auto valueCall = ValueCall.of(
-            calleeType, true, _bytecode.linked.signatures);
+            calleeType, true, _bytecode.compiledProgram.signatures);
         const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
@@ -9969,7 +9969,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
             return contextOffsetOf(calleeContextSourceOf(
-                _function, callee, _bytecode.linked.signatures));
+                _function, callee, _bytecode.compiledProgram.signatures));
         case classValue:
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
@@ -10766,7 +10766,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto valueCall = ValueCall.of(
-            functionType, isDelegateCall, _bytecode.linked.signatures);
+            functionType, isDelegateCall, _bytecode.compiledProgram.signatures);
         if (valueCall.mismatches(expression.arguments))
             internalFailure("dmd rejects a call with the wrong number of arguments");
 
