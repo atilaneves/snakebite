@@ -1914,10 +1914,15 @@ private CallPlan prepareCommon(
     }
 
     plan._address = address;
-    if (target.address is null)
+    if (recordOrigins && target.address is null)
         plan._symbol = name.idup;
     return plan;
 }
+
+// Whether a plan keeps its origin. It is off: keeping it costs memory, and
+// only a program that is saved reads it. Set it before any plan is made.
+public __gshared bool recordOrigins;
+
 
 // The signature and the symbol that `plan` was made from, or false when its
 // address did not come from a symbol that a later process can find by name.
@@ -2041,7 +2046,8 @@ private CallPlan _shapeOf(
     auto signature = signatureOf(type, hasContext, linkage,
         extraArgumentTypes, isVariadicCall);
     auto plan = planOf(signature);
-    plan._signature = signature;
+    if (recordOrigins)
+        plan._signature = signature;
     return plan;
 }
 

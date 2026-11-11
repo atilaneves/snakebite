@@ -239,9 +239,11 @@ public void saveProgram(
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode: Bytecode;
     import snakebite.backends.bytecode.saved: writeSaved;
+    import snakebite.ffi.plan: recordOrigins;
     import snakebite.host.buildid: ownBuildId;
 
     const buildId = ownBuildId;
+    recordOrigins = true;
     if (buildId.length == 0)
         throw new Exception("cannot save: this build of sb has no build ID");
     auto backend = Owned!Bytecode(new Bytecode(program, jit));
