@@ -9,6 +9,7 @@ import snakebite.failure.report: internalFailure;
 import snakebite.stack.temporaries: TemporaryStack;
 import snakebite.host.cstack: CStack;
 import snakebite.host.threads: heapDelete, heapNew;
+import snakebite.image.dependency: DependencyImage;
 import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
 
@@ -351,7 +352,7 @@ public struct FrameStack {
     // `Vm` that owns it, belongs to exactly one thread.
     public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
         if (_tls is null) {
-            _tls = heapNew!TlsSlots(null);
+            _tls = heapNew!TlsSlots(cast(const(DependencyImage)*) null);
             _ownsTls = true;
         }
         return _tls.slotFor(descriptor);

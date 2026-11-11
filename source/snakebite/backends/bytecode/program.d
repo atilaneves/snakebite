@@ -6,7 +6,6 @@ private:
 import snakebite.backends.bytecode.relocation: plain, setBy;
 import snakebite.backends.bytecode.vm: Function;
 import snakebite.ffi.callplanstore: CallPlanStore;
-import snakebite.ffi.symbol: threadLocalAddress;
 import snakebite.host.threads: heapNew;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.native.signature: SignatureTable;
@@ -31,7 +30,7 @@ public struct Program {
     // `image` is the dependency image that symbols resolve in, or null. The
     // owner must outlive this.
     public this(const(DependencyImage)* image) {
-        store = StaticStore(() => newTlsSlots(image));
+        store = StaticStore(() => heapNew!TlsSlots(image));
         plans = CallPlanStore(image);
     }
 
@@ -64,14 +63,6 @@ public struct Program {
         _modules ~= module_;
         return module_;
     }
-}
-
-
-// The table of thread-local variables of a thread, which resolves a native
-// variable in `image` (or in the process) on that thread.
-private TlsSlots* newTlsSlots(const(DependencyImage)* image) {
-    return heapNew!TlsSlots(
-        (in char[] name) => threadLocalAddress(image, name));
 }
 
 

@@ -5,6 +5,8 @@ private:
 
 
 import snakebite.failure.report: internalFailure;
+import snakebite.ffi.symbol: threadLocalAddress;
+import snakebite.image.dependency: DependencyImage;
 
 
 // A thread-local guest variable's compile-time-constant description
@@ -57,15 +59,15 @@ public struct TlsSlots {
 
     private Entry[] _table;
     private size_t _count;
-    // This thread's address of a thread-local symbol, by linker name: what
-    // a descriptor with a `nativeName` resolves with. The same function for
-    // every table of a program.
-    private void* delegate(in char[] name) _nativeAddress;
+    // The dependency image that a descriptor with a `nativeName` resolves
+    // its symbol in, on this thread, or null for the process alone. The same
+    // for every table of a program.
+    private const(DependencyImage)* _image;
 
     @disable this(this);
 
-    public this(void* delegate(in char[] name) nativeAddress) {
-        _nativeAddress = nativeAddress;
+    public this(const(DependencyImage)* image) {
+        _image = image;
     }
 
     ~this() {
@@ -101,7 +103,7 @@ public struct TlsSlots {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
             // would be that thread's copy.
-            entry.bytes = _nativeAddress(descriptor.nativeName);
+            entry.bytes = threadLocalAddress(_image, descriptor.nativeName);
             assert(entry.bytes !is null, descriptor.nativeName);
         } else {
             import core.memory: GC;
