@@ -1406,6 +1406,11 @@ public struct PlanCache {
     // indirect call.
     private SharedTable!(Signature, CallPlan*) _signatures;
 
+    // Whether a plan keeps its origin. It is off: keeping it costs memory,
+    // and only a program that is saved reads it. Set it before any plan is
+    // made.
+    public bool recordOrigins;
+
     // No frontend lock: `_shapeOf` forces every dmd forward reference it
     // could still need itself, up front, through `typeFacts` (its
     // own doc), and `_signatures` is a `SharedTable`, which brings its
@@ -1427,7 +1432,7 @@ public struct PlanCache {
         // A C variadic call with no extra arguments still needs its
         // variadic ABI plan (including the SSE register count).
         *plan = _shapeOf(type, context, type.linkage, null,
-            type.parameterList.varargs == VarArg.variadic);
+            type.parameterList.varargs == VarArg.variadic, recordOrigins);
         plan._callbacks = _callbacks;
         return *_signatures.insert(key, plan);
     }
@@ -1700,7 +1705,7 @@ public struct PlanCache {
 
         countPreparation;
         auto plan = new CallPlan;
-        *plan = prepare(function_, _resolver);
+        *plan = prepare(function_, _resolver, recordOrigins);
         plan._callbacks = _callbacks;
         return *_plans.insert(function_, plan);
     }
@@ -1728,7 +1733,8 @@ public struct PlanCache {
     ) {
         countPreparation;
         auto plan = new CallPlan;
-        *plan = prepareVariadic(function_, _resolver, extraArgumentTypes);
+        *plan = prepareVariadic(function_, _resolver, extraArgumentTypes,
+            recordOrigins);
         plan._callbacks = _callbacks;
         return plan;
     }
@@ -1740,7 +1746,7 @@ public struct PlanCache {
         countPreparation;
         auto plan = new CallPlan;
         *plan = prepareVariadicAtAddress(type, hasContext, address,
-            extraArgumentTypes);
+            extraArgumentTypes, recordOrigins);
         plan._callbacks = _callbacks;
         return plan;
     }
@@ -1815,8 +1821,9 @@ public struct PlanCache {
 private CallPlan prepare(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
+    in bool recordOrigins,
 ) {
-    return prepareCommon(function_, resolver, null, false);
+    return prepareCommon(function_, resolver, null, false, recordOrigins);
 }
 
 // As `prepare`, for one call site of an `extern(C)` C-style or
@@ -1842,8 +1849,10 @@ package CallPlan prepareVariadic(
     imported!"dmd.func".FuncDeclaration function_,
     ref Resolver resolver,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    in bool recordOrigins,
 ) {
-    return prepareCommon(function_, resolver, extraArgumentTypes, true);
+    return prepareCommon(function_, resolver, extraArgumentTypes, true,
+        recordOrigins);
 }
 
 private CallPlan prepareVariadicAtAddress(
@@ -1851,9 +1860,10 @@ private CallPlan prepareVariadicAtAddress(
     bool hasContext,
     const(void)* address,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    in bool recordOrigins,
 ) {
     auto plan = _shapeOf(type, hasContext, type.linkage,
-        extraArgumentTypes, true);
+        extraArgumentTypes, true, recordOrigins);
     plan._address = cast(void*) address;
     return plan;
 }
@@ -1863,6 +1873,7 @@ private CallPlan prepareCommon(
     ref Resolver resolver,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
+    in bool recordOrigins,
 ) {
     import snakebite.druntime.constructoratomic: nativeTarget;
     import snakebite.frontend.dmd.mangle: mangledNameOf;
@@ -1886,7 +1897,7 @@ private CallPlan prepareCommon(
         ? function_.resolvedLinkage : target.linkage;
 
     auto plan = shapeOf(function_, linkage, extraArgumentTypes,
-        isVariadicCall);
+        isVariadicCall, recordOrigins);
 
     void* address = target.address;
     if (address is null)
@@ -1918,10 +1929,6 @@ private CallPlan prepareCommon(
         plan._symbol = name.idup;
     return plan;
 }
-
-// Whether a plan keeps its origin. It is off: keeping it costs memory, and
-// only a program that is saved reads it. Set it before any plan is made.
-public __gshared bool recordOrigins;
 
 
 // The signature and the symbol that `plan` was made from, or false when its
@@ -2030,11 +2037,12 @@ private CallPlan shapeOf(
     in imported!"dmd.astenums".LINK linkage,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
+    in bool recordOrigins,
 ) {
     import snakebite.frontend.dmd.delegates: hasHiddenThis;
     return _shapeOf(function_.type.isTypeFunction,
         hasHiddenThis(function_), linkage, extraArgumentTypes,
-        isVariadicCall);
+        isVariadicCall, recordOrigins);
 }
 
 private CallPlan _shapeOf(
@@ -2042,6 +2050,7 @@ private CallPlan _shapeOf(
     in imported!"dmd.astenums".LINK linkage,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
+    in bool recordOrigins,
 ) {
     auto signature = signatureOf(type, hasContext, linkage,
         extraArgumentTypes, isVariadicCall);

@@ -146,6 +146,12 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // relocs yet, and recording them costs compile time and memory.
     public bool recordRelocs;
 
+    // Whether the call plans keep their origin. It is off: only a saved
+    // program reads it. Set it before any guest code is compiled.
+    public void recordOrigins(in bool value) {
+        _plans.recordOrigins = value;
+    }
+
     // The compiled program as plain records, for a file. It refuses a
     // program that a stored file cannot run the way this process runs it, and
     // says why. `recordRelocs` has to be on, and no guest code has run.
