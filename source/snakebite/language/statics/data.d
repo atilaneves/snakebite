@@ -4,6 +4,7 @@ module snakebite.language.statics.data;
 private:
 
 
+import dmd.dmodule: Module;
 import snakebite.failure.report: internalFailure;
 import snakebite.frontend.typefacts;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
@@ -53,7 +54,7 @@ public struct NativeData {
     private StaticStore* _store;
     // The blocks of the D module that defines a variable, or null when
     // every datum goes to `_store`. Called under the compiler lock.
-    private StaticBlocks* delegate(imported!"dmd.dmodule".Module) _blocksOf;
+    private StaticBlocks* delegate(Module) _blocksOf;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006). A `shared`/`__gshared`/`immutable` variable's storage
     // is published once it is resolved or initialised; until then only
@@ -76,7 +77,7 @@ public struct NativeData {
         ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         LoweringCall call,
-        StaticBlocks* delegate(imported!"dmd.dmodule".Module) blocksOf = null,
+        StaticBlocks* delegate(Module) blocksOf = null,
     ) {
         _isRootOwned = isRootOwned;
         _linkedVariable = linkedVariable;
@@ -224,8 +225,9 @@ public struct NativeData {
         return bytes;
     }
 
-    // The constant is data of `owner`, when there is one: the function whose
-    // instructions refer to it, or the field it initializes.
+    // The constant goes to the blocks of the D module of `owner`, when there
+    // is one: the function whose instructions refer to it, or the field it
+    // initializes. Without `owner` it goes to `_store`.
     public const(void)[] value(
         Type type,
         Expression expression,
@@ -251,9 +253,10 @@ public struct NativeData {
         return bytes;
     }
 
-    // Space for a datum that `owner` defines goes to the blocks of the D
-    // module of `owner`, when there are such blocks. A datum that no
-    // declaration defines (a constant, a `.init` image) goes to `_store`.
+    // Space for a datum goes to the blocks of the D module of `owner`, when
+    // `owner` is given and there are such blocks: a variable, the constants
+    // of a function and the initial bytes of a field. Any other datum (no
+    // `owner`, or no blocks) goes to `_store`.
     private void[] reserve(in TypeFacts facts, Dsymbol owner = null) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: moduleOf;

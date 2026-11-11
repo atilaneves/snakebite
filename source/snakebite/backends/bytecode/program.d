@@ -49,9 +49,9 @@ public struct Program {
     // code point to a `Module`. One append per module.
     private Module*[] _modules;
 
-    // An empty module for the compiler to fill, which `name` names.
-    public Module* newModule(string name) @safe nothrow pure {
-        auto module_ = new Module(name);
+    // An empty module for the compiler to fill.
+    public Module* newModule() @safe nothrow pure {
+        auto module_ = new Module;
         _modules ~= module_;
         return module_;
     }
@@ -63,9 +63,6 @@ public struct Program {
 public struct Module {
     @disable this(this);
 
-    // The name of the D module.
-    public string name;
-
     // The static data that the D module defines: its variables and their
     // initial bytes. The addresses in instructions point into the blocks.
     public StaticBlocks blocks;
@@ -73,10 +70,6 @@ public struct Module {
     // Each is a heap block that never moves: a call site embeds the address
     // of its callee before the callee is filled. One append per function.
     private Function*[] _functions;
-
-    public this(string name) @safe nothrow pure {
-        this.name = name;
-    }
 
     // An empty function for the compiler to fill. A compile that fails
     // takes it out again with `discardFunction`.

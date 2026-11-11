@@ -49,6 +49,7 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
+    import dmd.dmodule: SourceModule = Module;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
     import snakebite.program: SourceProgram = Program;
@@ -88,9 +89,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // relocates, unlike an associative array's own storage, which can
     // rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
-    // The module of `compiledProgram` that each D module of a compiled
-    // function has. Under the compiler lock.
-    private Module*[imported!"dmd.dmodule".Module] _modules;
+    // The module of `compiledProgram` that each D module has which defines
+    // a compiled function or a datum. Under the compiler lock.
+    private Module*[SourceModule] _modules;
     // The functions in `_compiled` whose body is complete, read without a
     // lock: the first guest call of a thread can be the one that a GC
     // finalizer makes, and it cannot wait for a lock that another thread
@@ -780,15 +781,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     // The module of `compiledProgram` for the D module `owner`, made at its
     // first use. Under the compiler lock.
-    private Module* moduleForD(imported!"dmd.dmodule".Module owner) {
-        import snakebite.frontend.dmd.functions: prettyNameOf;
-        import std.string: fromStringz;
-
+    private Module* moduleForD(SourceModule owner) {
         if (auto found = owner in _modules)
             return *found;
 
-        auto created = compiledProgram.newModule(
-            prettyNameOf(owner).fromStringz.idup);
+        auto created = compiledProgram.newModule();
         _modules[owner] = created;
         return created;
     }

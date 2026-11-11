@@ -23,7 +23,7 @@ public struct StaticBlocks {
     private void[] _available;
 
     // The caller holds the compiler lock.
-    public void[] reserve(in TypeFacts facts) {
+    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
         // Slots cannot move: constants can hold addresses of other slots.
         const needed = facts.size + facts.alignment - 1;
         if (_available.length < needed) {
@@ -70,7 +70,7 @@ public struct StaticStore {
     }
 
     // The caller holds the compiler lock.
-    public void[] reserve(in TypeFacts facts) {
+    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
         return _blocks.reserve(facts);
     }
 
