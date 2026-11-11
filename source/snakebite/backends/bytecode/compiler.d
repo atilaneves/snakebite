@@ -73,13 +73,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     private PlanCache _plans;
     // The machinery that runs the compiled functions. A `Function` points
     // to its JIT instance, so the address of this field must never change.
-    // Declared after `compiledProgram`, `_nativeData` and `_plans`, so that it is
-    // destroyed before them: its states release through `_nativeData`, and
-    // its callback entry reads `compiledProgram.plans`.
+    // Declared after `compiledProgram`, `_nativeData` and `_plans`, so that it
+    // is destroyed before them: its states release through `_nativeData`,
+    // and its callback entry reads `compiledProgram.plans`.
     private Runner _runner;
     private CallSelection _callSelection;
-    // The index from a declaration to its function, which `compiledProgram` owns.
-    // Keyed by pointer, not by value: a call site compiled while
+    // The index from a declaration to its function, which `compiledProgram`
+    // owns. Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
     // recursion - embeds this pointer in its `CallSite` before the body
     // this AA slot points at has been filled in. The slot's address must
