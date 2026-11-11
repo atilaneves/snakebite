@@ -504,6 +504,27 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return Address(callableKind(address), address);
     }
 
+    // The address of a copy of the C string `text` that the process store owns.
+    // The frontend frees its own strings, and a file holds the bytes of this
+    // one. The caller holds the compiler lock.
+    private imported!"snakebite.backends.bytecode.relocation".Address
+    adoptedString(const(char)* text) {
+        import core.stdc.string: memcpy, strlen;
+        import snakebite.backends.bytecode.relocation: Address, Target;
+
+        const length = strlen(text);
+        if (auto found = text[0 .. length] in _adoptedStrings)
+            return *found;
+        auto copy = compiledProgram.store.newString(length + 1);
+        memcpy(copy.ptr, text, length);
+        const address = Address(Target.Kind.adoptedString, copy.ptr);
+        _adoptedStrings[text[0 .. length].idup] = address;
+        return address;
+    }
+
+    private imported!"snakebite.backends.bytecode.relocation".Address[string]
+        _adoptedStrings;
+
     // What `callableAddress` returned: a guest function, the callback entry
     // that host code calls for one, or code of the host.
     private imported!"snakebite.backends.bytecode.relocation".Target.Kind
@@ -4081,7 +4102,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(message + arrayLengthOffset, 0, size_t.sizeof),
             Arg(message + arrayPointerOffset, 0, size_t.sizeof),
             constantArgument(strlen(file), size_t.sizeof),
-            constantArgument(Address(Target.Kind.frontendString, file), size_t.sizeof),
+            constantArgument(_bytecode.adoptedString(file), size_t.sizeof),
             constantArgument(expression.loc.linnum, uint.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.assertMessage);
@@ -4100,8 +4121,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const call = cAssertCallOf(
                 cAssertionOf(expression), expression.loc, _function);
             compileCAssertCall(call, constantArgument(
-                Address(Target.Kind.frontendString, call.assertion),
-                size_t.sizeof));
+                _bytecode.adoptedString(call.assertion), size_t.sizeof));
         } else {
             const call = cAssertCallOf(null, expression.loc, _function);
             const message = compileMessage(messageExpression);
@@ -4113,16 +4133,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCAssertCall(in CAssertCall call, in Arg assertion) {
         import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 
-        // Without a function, `cAssertCallOf` names it with a literal of the
-        // host.
-        const functionKind = call.function_[0] == 0
-            ? Target.Kind.hostSymbol : Target.Kind.frontendString;
         Arg[] args = [
             assertion,
-            constantArgument(Address(Target.Kind.frontendString, call.file), size_t.sizeof),
+            constantArgument(_bytecode.adoptedString(call.file), size_t.sizeof),
             constantArgument(call.line, uint.sizeof),
             constantArgument(
-                Address(functionKind, call.function_), size_t.sizeof),
+                _bytecode.adoptedString(call.function_), size_t.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
         _callSites ~= CallSite.native(plan, args, 0);
@@ -11036,7 +11052,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     cMessageOf(check).ptr, loc, _function);
                 compileUnlessHolds(inBoundsOffset, 1, false, () =>
                     compileCAssertCall(call, constantArgument(
-                        Address(Target.Kind.hostSymbol, call.assertion),
+                        _bytecode.adoptedString(call.assertion),
                         size_t.sizeof)));
                 break;
             }
@@ -11138,7 +11154,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     nullDerefCMessage.ptr, loc, _function);
                 compileUnlessHolds(pointerOffset, size_t.sizeof, false, () =>
                     compileCAssertCall(call, constantArgument(
-                        Address(Target.Kind.hostSymbol, call.assertion),
+                        _bytecode.adoptedString(call.assertion),
                         size_t.sizeof)));
                 break;
             }
@@ -11160,7 +11176,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,
-            addConstant(Address(Target.Kind.frontendString, loc.filename)),
+            addConstant(_bytecode.adoptedString(loc.filename)),
             size_t.sizeof);
 
         const lineOffset = reserveTemp(pointerFacts);
