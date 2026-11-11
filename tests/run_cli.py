@@ -1872,6 +1872,21 @@ def test_saved_program_with_pointer_past_the_end_of_data_runs_as_the_compiled_pr
         """})
 
 
+def test_saved_program_with_empty_datum_at_the_end_of_a_block_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    # `big` fills a block, so the empty array is a datum at the end of it.
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared ubyte[4096] big;
+        int main() {
+            auto p = big.ptr;
+            ubyte[0] empty = [];
+            return empty.length == 0 && p !is null ? 3 : 1;
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that calls a function through a foreign call plan is refused, and no file is
 # left.
