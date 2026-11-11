@@ -316,20 +316,31 @@ private struct Archive {
         const name = _program.plans.resolver.nameOf(address);
         if (name is null)
             throw refusal("a word points at host code that has no symbol name");
+        return symbolIndexOfName(name);
+    }
+
+    // The index of `name` in the table of names of host code, which the
+    // call plans and the words that name host code share.
+    size_t symbolIndexOfName(in string name) {
         if (auto found = name in _symbolIndex)
             return *found;
         _symbols ~= name;
         return _symbolIndex[name] = _symbols.length - 1;
     }
 
-    void* symbolAt(in size_t index) {
+    string symbolNameAt(in size_t index) {
         if (index >= _symbols.length)
             throw new SnakebiteException(
                 "the program file names a symbol that it does not hold");
-        if (auto address = _program.plans.resolver.resolve(_symbols[index]))
+        return _symbols[index];
+    }
+
+    void* symbolAt(in size_t index) {
+        const name = symbolNameAt(index);
+        if (auto address = _program.plans.resolver.resolve(name))
             return address;
         throw new SnakebiteException(.text("the program calls `",
-            _symbols[index], "`, which this process does not have"));
+            name, "`, which this process does not have"));
     }
 
     size_t planIndexOf(const(CallPlan)* plan) {
@@ -806,11 +817,12 @@ private void transferBody(
 // each one again, with the function that makes it after a compile.
 private void transferPlans(ref Archive archive, ref Program program) {
     NativeSignature[] signatures;
-    string[] symbols;
+    // The index of the name of each plan in the table of host symbols.
+    size_t[] symbols;
     if (archive.isWriting)
         program.plans.eachPlan((plan, signature, symbol) {
             signatures ~= cast() signature;
-            symbols ~= symbol;
+            symbols ~= archive.symbolIndexOfName(symbol);
         });
     archive.transfer(signatures);
     archive.transfer(symbols);
@@ -820,10 +832,11 @@ private void transferPlans(ref Archive archive, ref Program program) {
         throw new SnakebiteException(
             "the program file holds call plans that do not match");
     foreach (index, signature; signatures) {
-        auto plan = program.plans.plan(signature, symbols[index]);
+        const name = archive.symbolNameAt(symbols[index]);
+        auto plan = program.plans.plan(signature, name);
         if (plan is null)
             throw new SnakebiteException(text("the program calls `",
-                symbols[index], "`, which this process does not have"));
+                name, "`, which this process does not have"));
         archive._plans ~= plan;
     }
 }

@@ -97,13 +97,7 @@ public struct PlanCache {
     }
 
     public void* addressOf(FuncDeclaration function_) {
-        import snakebite.druntime.constructoratomic: nativeTarget;
-        import snakebite.frontend.dmd.mangle: mangledNameOf;
-
-        auto target = nativeTarget(function_);
-        if (target.address !is null)
-            return target.address;
-        return _store.resolver.resolve(mangledNameOf(function_));
+        return _store.resolver.resolve(hostSymbolOf(function_));
     }
 
     // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
@@ -589,19 +583,15 @@ private NativeSignature calleeOf(
     in bool isVariadicCall,
     out string symbol,
 ) {
-    import snakebite.druntime.constructoratomic:
-        atomicAddSymbol, nativeTarget;
-    import snakebite.frontend.dmd.mangle: mangledNameOf;
+    import snakebite.druntime.constructoratomic: nativeTarget;
 
     // Mangling forces `function_`'s type complete first (`mangledNameOf`'s
     // own doc) - done before `shapeOf` reads `function_.type.nextOf` to
     // classify the return value below, an inferred return type dmd has
     // not resolved yet would otherwise be read as `null`.
-    symbol = mangledNameOf(function_).idup;
+    symbol = hostSymbolOf(function_);
 
     auto target = nativeTarget(function_);
-    if (target.address !is null)
-        symbol = atomicAddSymbol;
 
     // The symbol's calling convention comes from its declared linkage,
     // and `extern(D)` code built by the host's own compiler can read
@@ -614,6 +604,18 @@ private NativeSignature calleeOf(
 
     return signatureOfFunction(function_, linkage, extraArgumentTypes,
         isVariadicCall);
+}
+
+// The name of the host symbol that serves `function_`: its mangled name, or
+// the name of the host wrapper when `nativeTarget` names one. The resolver
+// turns the name into an address, for a call and for a function address alike.
+private string hostSymbolOf(imported!"dmd.func".FuncDeclaration function_) {
+    import snakebite.druntime.constructoratomic:
+        atomicAddSymbol, nativeTarget;
+    import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+    const symbol = mangledNameOf(function_).idup;
+    return nativeTarget(function_).address !is null ? atomicAddSymbol : symbol;
 }
 
 // The failure for a `function_` whose code `symbol` is not in this process.

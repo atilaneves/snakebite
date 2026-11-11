@@ -197,7 +197,7 @@ public struct CallPlan {
     }
 
     // Calls another function with this plan's prepared ABI shape: fills a
-    // `Frame` by replaying the moves `planOf` computesd,
+    // `Frame` by replaying the moves `planOf` computed,
     // calls the System V stub's `_entry` once, and writes the result back.
     // Every step is an argument-count check, a loop of plain loads and
     // stores, the stub call, and at most two result stores - no `final
