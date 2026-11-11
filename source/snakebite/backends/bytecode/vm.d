@@ -5855,6 +5855,7 @@ static if (jitSupported) {
         put(&opShiftRightArithmetic,
             twoAddressShift(ShiftKind.arithmeticRight));
         put(&opArrayEqual, JitOp.plain(Kind.arrayEqual));
+        put(&opSliceFill, JitOp.plain(Kind.sliceFill));
         put(&opDivideSigned, JitOp.make!(Kind.signedDivide)(
             JitOp.SignedDivide(twoAddress: true, widenInt: true)));
         put(&opModuloSigned, JitOp.make!(Kind.signedDivide)(
