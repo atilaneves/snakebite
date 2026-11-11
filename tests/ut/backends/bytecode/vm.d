@@ -5,7 +5,7 @@ import ut;
 import snakebite.backends.bytecode.vm:
     Arg, CallSite, Function, Instruction, opAdd, opCall, opConstant,
     opLoadIndirect, opReturn, Vm;
-import snakebite.backends.bytecode.linkedmodules: LinkedModules;
+import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi: PlanCache;
 import snakebite.ffi.argumentplan: Register;
 import snakebite.stack.frames: defaultFrameCapacity;
@@ -66,8 +66,8 @@ unittest {
 // return value simple enough to check without any FFI helper of its own.
 @("opCall.nativeSite.callsResolvedSymbol")
 unittest {
-    auto linked = LinkedModules(null);
-    auto plans = PlanCache(&linked);
+    auto planStore = CallPlanStore(null);
+    auto plans = PlanCache(&planStore);
     auto plan = plans.rawPlanOf(
         "abs",
         [Register(Register.Kind.signed, 4)],

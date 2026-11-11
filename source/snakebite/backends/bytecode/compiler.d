@@ -148,7 +148,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         linked = LinkedModules(program.dependencyImage);
         _compilation.hasCompiler = true;
         _jit = jit;
-        _plans = PlanCache(&linked,
+        _plans = PlanCache(&linked.plans,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
         _nativeData = NativeData(&linked.store, &_program.isRootOwned,
@@ -163,7 +163,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
         }, () => _nativeData.release, &releaseJitCode);
-        linked.bindCallbacks(&invokeCallback, cast(void*) this);
+        linked.plans.bindCallbacks(&invokeCallback, cast(void*) this);
     }
 
     protected override LinkedModules* linkedModules() {
@@ -186,7 +186,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         import core.atomic: atomicStore;
 
         static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            atomicStore(_jitCodeCanGo, !linked.callbacks.hasEntries);
+            atomicStore(_jitCodeCanGo, !linked.plans.callbacks.hasEntries);
         _vms.end;
     }
 

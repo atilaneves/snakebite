@@ -3,7 +3,7 @@ module ut.backends.call.ffi;
 
 import ut.backends;
 import snakebite.program: Program;
-import snakebite.backends.bytecode.linkedmodules: LinkedModules;
+import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -641,8 +641,8 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_dynamic_array` function in the guest program");
 
-    auto linked = LinkedModules(null);
-    auto cache = PlanCache(&linked);
+    auto planStore = CallPlanStore(null);
+    auto cache = PlanCache(&planStore);
     ubyte[] result;
     cache.of(function_).call(&result, []);
 

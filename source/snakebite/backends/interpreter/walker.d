@@ -48,7 +48,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     public this(const Program program) {
         super(program);
         _shared = new Shared(program, &call);
-        _shared.linked.bindCallbacks(
+        _shared.planStore.bindCallbacks(
             &invokeCallback,
             cast(void*) this,
             &prepareCallback,
@@ -270,6 +270,7 @@ import snakebite.language.layout.temporary: canRetainTemporaries;
 private struct Shared {
     import snakebite.native.signature: SignatureTable;
     import snakebite.backends.bytecode.linkedmodules: LinkedModules;
+    import snakebite.ffi.callplanstore: CallPlanStore;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
@@ -299,6 +300,7 @@ private struct Shared {
     // The interpreter keeps its own signatures, and uses this for the store
     // of its static data, its plans and its callback bridge.
     LinkedModules linked;
+    CallPlanStore planStore;
     NativeData nativeData;
     RuntimeTypes runtimeTypes;
     // How to reach each already-compiled function this guest calls,
@@ -389,7 +391,8 @@ private struct Shared {
     this(const Program program, typeof(callGuest) callGuest) {
         this.program = program;
         this.callGuest = callGuest;
-        plans = PlanCache(&linked,
+        planStore = CallPlanStore(program.dependencyImage);
+        plans = PlanCache(&planStore,
             &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
         linked = LinkedModules(program.dependencyImage);
