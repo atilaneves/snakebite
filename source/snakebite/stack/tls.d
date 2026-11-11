@@ -8,8 +8,7 @@ import snakebite.failure.report: internalFailure;
 
 
 // A thread-local guest variable's compile-time-constant description
-// (issue #40, ADR-0006, finding 1.3): the identity `TlsSlots.slotFor`
-// keys this thread's own copy by, and the bytes every thread's copy
+// (issue #40, ADR-0006, finding 1.3): the bytes every thread's copy
 // starts from. Built once, under the compiler lock, by
 // `snakebite.language.statics.data.NativeData.tlsDescriptorOf`; read here with no
 // lock, since nothing ever changes a `TlsDescriptor` after that.
@@ -27,7 +26,6 @@ import snakebite.failure.report: internalFailure;
 // project's coding guideline forbids from importing dmd - can resolve an
 // `opTls*` operand without doing so.
 public struct TlsDescriptor {
-    public const(void)* key;
     public const(void)* templateBytes;
     public size_t size;
     // Set when the variable's storage is native (a dependency image's
@@ -84,11 +82,14 @@ public struct TlsSlots {
         return _count == 0;
     }
 
+    // A descriptor is stored once and never moves, so its own address
+    // identifies the variable.
     public void[] slotFor(const(TlsDescriptor)* descriptor) {
-        if (auto found = find(descriptor.key))
+        const key = cast(const(void)*) descriptor;
+        if (auto found = find(key))
             return found.bytes[0 .. found.size];
 
-        Entry entry = Entry(descriptor.key);
+        Entry entry = Entry(key);
         if (descriptor.nativeName.length) {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
