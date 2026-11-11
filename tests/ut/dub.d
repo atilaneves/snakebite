@@ -1,9 +1,9 @@
 module ut.dub;
 
 
-import snakebite.project.dub: DubDescription, dependencyFingerprint, dubSources;
+import snakebite.project.dub: dependencyFingerprint, dubSources;
 import snakebite.project.dubcache:
-    cachedDubDescription, projectDescriptionFromJson;
+    DubDescription, cachedDubDescription, projectDescriptionFromJson;
 import snakebite.image.dependency: defaultCompiler, generatorKey;
 import snakebite.project.state: projectStateDirectory;
 import dub.description: ProjectDescription;

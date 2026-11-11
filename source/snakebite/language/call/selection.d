@@ -1195,7 +1195,7 @@ public bool arityMismatches(
 // has the parameters of `withoutContext`.
 public struct ValueCall {
     import dmd.mtype: TypeFunction;
-    import snakebite.native.argumentflow:
+    import snakebite.native.signature:
         ArgumentFlow, Shape, Signature, SignatureTable;
     import snakebite.language.layout.frame: FrameLayout;
 

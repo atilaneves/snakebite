@@ -3,7 +3,7 @@ module snakebite.project.loading;
 
 private:
 
-import snakebite.project.sources: SourceSet;
+import snakebite.project.dub: SourceSet;
 
 
 public struct Project {

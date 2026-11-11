@@ -10,7 +10,7 @@ import dmd.astenums: Tfunction, Ttuple, Terror;
 import dmd.typesem: toBasetype, baseElemOf;
 import dmd.location: Loc;
 import snakebite.language.statics.typeinfo: RuntimeTypes;
-import snakebite.language.storage.aggregateinit: AggregateInitPlan, planStructLiteral;
+import snakebite.language.storage.lifetime: AggregateInitPlan, planStructLiteral;
 import snakebite.language.operators.casts: CastPlan, classify;
 import snakebite.language.context.source: ContextSource, calleeContextSourceOf;
 import snakebite.frontend.compiler: gagged;
@@ -18,7 +18,7 @@ import snakebite.frontend.typefacts: typeFacts, tryTypeFacts, bitfieldAccess;
 import snakebite.native.value: TypeFacts;
 import snakebite.language.statics.data: NativeData;
 import snakebite.native.value: BitfieldAccess;
-import snakebite.native.argumentflow: SignatureTable;
+import snakebite.native.signature: SignatureTable;
 import snakebite.host.sharedtable: SharedTable;
 
 // Facts have one program owner. Preparation and ordinary execution use the

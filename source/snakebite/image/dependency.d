@@ -471,7 +471,7 @@ private void runCompiler(
 
     const result = execute(command, null, Config.none, size_t.max, directory);
     if (result.status != 0) {
-        import snakebite.failure.exception: SnakebiteException;
+        import snakebite.failure.report: SnakebiteException;
 
         throw new SnakebiteException(text("Dependency image ", phase,
             " failed\nCommand: ", command, "\n", result.output));
@@ -501,7 +501,7 @@ private string compilerPath(in string compiler) {
 
 
 private void require(in bool condition, in string message) {
-    import snakebite.failure.exception: SnakebiteException;
+    import snakebite.failure.report: SnakebiteException;
 
     if (!condition)
         throw new SnakebiteException(message);

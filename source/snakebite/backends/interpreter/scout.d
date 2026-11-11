@@ -212,7 +212,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     // information is made when the program first needs it: the first
     // object of a class that a destructor makes is that one.
     private extern(D) void handle(NewExp expression) {
-        import snakebite.language.storage.aggregateinit: NewPlan, planNew;
+        import snakebite.language.storage.lifetime: NewPlan, planNew;
 
         if (expression.member !is null)
             _preparation.constructor(expression);

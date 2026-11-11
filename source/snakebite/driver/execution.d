@@ -65,7 +65,7 @@ public int runProject(
     in imported!"snakebite.project.loading".EndsProcess endsProcess,
     in int delegate(
         string,
-        imported!"snakebite.project.sources".SourceSet,
+        imported!"snakebite.project.dub".SourceSet,
         imported!"core.time".Duration,
         void delegate(),
     ) body,
@@ -118,7 +118,7 @@ public PreparationReport prepareProject(
 
 public PreparationReport prepareSources(
     in string directory,
-    imported!"snakebite.project.sources".SourceSet sources,
+    imported!"snakebite.project.dub".SourceSet sources,
     in imported!"core.time".Duration discovery,
     in bool nativeDependencies = true,
     in imported!"snakebite.image.dependency".Optimise optimise
@@ -157,7 +157,7 @@ public ExecutionReport executeBackend(
 ) {
     import snakebite.backends: makeBackend;
     import snakebite.run.program: run;
-    import snakebite.run.druntime: StartupReport, runDruntimeMain;
+    import snakebite.run.program: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;
 

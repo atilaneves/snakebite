@@ -2,7 +2,7 @@ module at.process;
 
 
 // Every snakebite executable sets up the one process runtime
-// (`snakebite.memory.process`): the guest shares its druntime, so a guest reads
+// (`snakebite.memory.gc`): the guest shares its druntime, so a guest reads
 // the same GC configuration the host set. `--lowmem` puts the frontend's
 // memory back in the GC heap, where a guest sees the AST as used bytes.
 

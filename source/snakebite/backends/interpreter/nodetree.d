@@ -17,8 +17,8 @@ import dmd.func: FuncDeclaration;
 import dmd.location: Loc;
 import dmd.mtype: Type;
 import dmd.statement: Statement;
-import snakebite.language.storage.aggregateinit: InitStep;
-import snakebite.language.checks.failure: BoundsCheck;
+import snakebite.language.storage.lifetime: InitStep;
+import snakebite.language.checks: BoundsCheck;
 import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
 import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
@@ -348,6 +348,14 @@ package struct OuterVariable {
     package const(imported!"snakebite.language.context.chain".Hop)[] hops;
     package size_t offset;
     package bool indirect;
+}
+
+package struct VariadicCallPlan {
+    import snakebite.native.variadic: VariadicLayout;
+    import snakebite.native.value: TypeFacts;
+
+    TypeFacts[] facts;
+    VariadicLayout layout;
 }
 
 package bool isScalar(E)(E ev, Type type) {
@@ -1051,7 +1059,7 @@ private final class SliceCopy : SliceNode {
     }
     pragma(inline, true)
     private SliceValue copy(ubyte* frame) {
-        import snakebite.native.slicecopy: copyUnchecked, slicesConform;
+        import snakebite.native.value: copyUnchecked, slicesConform;
 
         SliceValue to = void, from = void;
         _to.executeInto(frame, cast(ubyte*) &to);
@@ -2594,7 +2602,7 @@ private final class AggregateStore : Node {
     }
     private ubyte* store(ubyte* frame) {
         import core.stdc.string: memcpy;
-        import snakebite.language.storage.assignment: executeAssignment;
+        import snakebite.language.storage.lifetime: executeAssignment;
 
         auto target = _target.executeAddr(frame);
         auto storage = FrameGuard(_frames);
@@ -2830,7 +2838,6 @@ private final class LoadChain : Node {
 // that frame and the call gives both back together. The value is the address
 // of the storage, which the cursor of the callee holds.
 private final class VariadicExtras : LongNode {
-    import snakebite.backends.interpreter.walker: VariadicCallPlan;
     import snakebite.stack.frames: FrameStack;
 
     private FrameStack* _frames;
@@ -2872,7 +2879,7 @@ private final class Assertion(E) : Node {
 // an invariant: the object is read once, and a null one fails before the
 // invariant runs, as dmd's glue layer has it.
 private final class InvariantAssertion(E) : Node {
-    import snakebite.language.checks.assertion: AssertInvariantPlan;
+    import snakebite.language.checks: AssertInvariantPlan;
 
     private E _ev;
     private Node _object;
@@ -6985,7 +6992,7 @@ private Node buildZeroPair(E)(E ev, Expression operand) {
 private Node buildNew(E)(E ev, NewExp expression) {
     import dmd.astenums: TY;
     import dmd.typesem: toBasetype;
-    import snakebite.language.storage.aggregateinit: AggregateInitPlan, driveInit,
+    import snakebite.language.storage.lifetime: AggregateInitPlan, driveInit,
         NewPlan, planClassContext, planNew, planPositionalFields;
 
     auto plan = planNew(expression);
@@ -7039,8 +7046,6 @@ private Node buildNew(E)(E ev, NewExp expression) {
 // The tree hooks of `driveInit`: each step appends its node, and a step that
 // the tree does not build, where the evaluator falls back, is recorded.
 private struct NewInitHooks(E) {
-    import snakebite.language.storage.aggregateinit: InitStep;
-
     E ev;
     Node[] steps;
     bool failed;
@@ -7072,10 +7077,10 @@ private struct NewInitHooks(E) {
 // The storage of the object that `new` makes, before `driveInit`.
 private Node buildNewStorage(E)(
     E ev, NewExp expression,
-    imported!"snakebite.language.storage.aggregateinit".NewPlan plan,
+    imported!"snakebite.language.storage.lifetime".NewPlan plan,
 ) {
     import dmd.typesem: toBasetype;
-    import snakebite.language.storage.aggregateinit: NewPlan;
+    import snakebite.language.storage.lifetime: NewPlan;
 
     final switch (plan.destination) with (NewPlan.Destination) {
         case lowering:
@@ -7234,9 +7239,9 @@ private Node buildEffect(E)(E ev, Expression expression) {
 }
 
 private Node buildAssertion(E)(E ev, AssertExp expression) {
-    import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
-    import snakebite.language.checks.assertion:
-        AssertInvariantPlan, assertInvariantPlanOf;
+    import snakebite.language.checks:
+        AssertInvariantPlan, assertInvariantPlanOf, assertPlanOf,
+        FailurePlan;
 
     final switch (assertPlanOf(ev._program.checks).kind) with (FailurePlan.Kind) {
         case ignore:
@@ -7263,7 +7268,7 @@ private Node buildAssertion(E)(E ev, AssertExp expression) {
 // The node that tests the truth of `expression`, as a condition does.
 private Node buildTruth(E)(E ev, Expression expression) {
     import dmd.tokens: EXP;
-    import snakebite.language.control.plaincondition: isPlainCondition;
+    import snakebite.language.control.condition: isPlainCondition;
 
     if (expression.op == EXP.comma)
         return buildComma(ev, expression.isCommaExp, &buildTruth!E);
@@ -7345,7 +7350,7 @@ private Node buildTruthAfterEnd(E)(
 // `&&` or `||` as its plan says (`logicalPlan`): a right operand with a
 // value is a test, and one without runs for its effect.
 private Node buildLogical(E)(E ev, imported!"dmd.expression".LogicalExp logical) {
-    import snakebite.language.control.logical: LogicalPlan, logicalPlan;
+    import snakebite.language.control.condition: LogicalPlan, logicalPlan;
 
     const plan = logicalPlan(logical);
     auto left = buildTruth(ev, logical.e1);
@@ -7662,7 +7667,7 @@ private Node buildTypeidOf(E)(E ev, Expression object, in Scalar scalar) {
 }
 
 private Node buildIdentity(bool negate, E)(E ev, IdentityExp e) {
-    import snakebite.language.operators.identity: identityPlan;
+    import snakebite.language.operators.comparison: identityPlan;
 
     // `is` compares bits: the plan says how many, and which operands need
     // no compare. The nodes below serve the widths they can carry.
@@ -8632,7 +8637,7 @@ private Node buildReferenceBinding(E)(
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
     import dmd.astenums: STMT;
     import dmd.tokens: EXP;
-    import snakebite.language.control.ifplan: IfPlan, ifPlan;
+    import snakebite.language.control.condition: IfPlan, ifPlan;
     import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
 
     Node generic() {

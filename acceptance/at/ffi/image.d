@@ -3,7 +3,7 @@ module at.ffi.image;
 
 import ut;
 import snakebite.image.dependency: Optimise, defaultCompiler, prepareImage;
-import snakebite.failure.exception: SnakebiteException;
+import snakebite.failure.report: SnakebiteException;
 import std.array: array;
 import std.conv: text;
 import std.file: SpanMode, dirEntries, exists, rmdirRecurse, thisExePath;

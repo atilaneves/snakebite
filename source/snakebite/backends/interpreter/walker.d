@@ -6,14 +6,15 @@ private:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
-    hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
+    VariadicCallPlan, hasNoResult, isAggregate, isPair, isScalar, resultWordFor,
+    rootOf;
 import snakebite.backends.api: DeclarationHandle;
 import snakebite.start.data: FunctionHandle;
 import snakebite.frontend.typefacts: tryTypeFacts, truthFacts;
 
 
 
-import snakebite.failure.report: internalFailure;
+import snakebite.failure.report: internalFailure, SnakebiteException;
 
 import std.conv: text;
 import snakebite.native.arguments: CallArguments;
@@ -52,7 +53,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
                 cast(void*) this,
                 &prepareCallback,
             ));
-        import snakebite.language.checks.failure: FailurePlan, nullDerefPlanOf;
+        import snakebite.language.checks: nullDerefPlanOf;
 
         _checksNullDeref = nullDerefPlanOf(program.checks).kind
             != FailurePlan.Kind.ignore;
@@ -177,7 +178,6 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
 
 }
 
-import snakebite.failure.exception: SnakebiteException;
 import snakebite.failure.fault: GuestPosition, GuestRun, register, unregister;
 
 // Runs `action` on the evaluator of the calling thread: made on its first
@@ -233,21 +233,19 @@ private final class GuestException: Exception {
 
 import snakebite.backends.interpreter.preparedfacts: PreparedFacts;
 import snakebite.native.value: BitfieldAccess;
-import snakebite.language.checks.failure:
-    BoundsCheck, FailurePlan, hookOf, isUnanalysed;
+import snakebite.language.checks:
+    BoundsCheck, CAssertCall, FailurePlan, hookOf, isUnanalysed;
 import snakebite.frontend.dmd.dispatch: classReceiverOf, readsVtable;
 import snakebite.language.call.selection: ValueCall;
 import snakebite.failure.halt: isHalt;
-import snakebite.language.checks.assertion: CAssertCall;
 import snakebite.language.traversal.lowering: LoweringVisitor;
-import snakebite.language.operators.identity: IdentityPlan;
-import snakebite.language.control.ifplan: IfPlan;
-import snakebite.language.control.logical: LogicalPlan;
-import snakebite.language.operators.comparison: ComparisonPlan;
+import snakebite.language.operators.comparison:
+    IdentityPlan, ComparisonPlan, comparisonPlan;
+import snakebite.language.control.condition: IfPlan, LogicalPlan;
 import snakebite.language.control.transfer: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.language.control.unwinding: CatchPlan, catchPlanOf;
-import snakebite.language.storage.aggregateinit: AggregateInitPlan;
+import snakebite.language.storage.lifetime: AggregateInitPlan;
 import snakebite.failure.unwind:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
 import snakebite.language.control.cases: SwitchPlan, switchPlan, selectCase,
@@ -266,7 +264,7 @@ import snakebite.language.layout.temporary: canRetainTemporaries;
 // lock after that, so the only thing an evaluator keeps for itself is
 // its own execution state.
 private struct Shared {
-    import snakebite.native.argumentflow: SignatureTable;
+    import snakebite.native.signature: SignatureTable;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
@@ -544,14 +542,6 @@ private struct FinallyKey {
     Exit exit;
 }
 
-package struct VariadicCallPlan {
-    import snakebite.native.variadic: VariadicLayout;
-    import snakebite.native.value: TypeFacts;
-
-    TypeFacts[] facts;
-    VariadicLayout layout;
-}
-
 private struct CallSiteKey {
     const(void)* callSite;
     const(void)* function_;
@@ -590,7 +580,7 @@ private struct CallShape {
 // state, and reads every per-function answer from the `Shared` tables
 // the program's evaluators fill together.
 extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
-    import snakebite.language.storage.aggregateinit: InitStep, NewPlan;
+    import snakebite.language.storage.lifetime: InitStep, NewPlan;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.program: Program;
     import snakebite.frontend.dmd.delegates:
@@ -2058,7 +2048,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         in Loc loc,
         scope const(void*)[] extraArguments,
     ) {
-        import snakebite.language.checks.failure: boundsPlanOf, cMessageOf;
+        import snakebite.language.checks: boundsPlanOf, cMessageOf;
 
         failWithHook(
             boundsPlanOf(_program.checks, _function), cMessageOf(check),
@@ -2075,7 +2065,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         scope const(void*)[] extraArguments,
     ) {
         import snakebite.language.call.druntimehook: planOf;
-        import snakebite.language.checks.assertion: cAssertCallOf;
+        import snakebite.language.checks: cAssertCallOf;
 
         final switch (failure.kind) with (FailurePlan.Kind) {
             case ignore:
@@ -2115,7 +2105,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         private void failNullDeref(in Loc loc) {
-            import snakebite.language.checks.failure:
+            import snakebite.language.checks:
                 nullDerefCMessage, nullDerefPlanOf;
 
             failWithHook(
@@ -2236,7 +2226,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             (variable) => attempt({ prepareVariable(variable); }),
             (declaration) => attempt({ classRuntimeInfo(declaration); }),
             (expression) => attempt({
-                import snakebite.language.storage.deletion: planDelete;
+                import snakebite.language.storage.lifetime: planDelete;
                 import snakebite.language.call.druntimehook: planOf;
 
                 planOf(*_plans, planDelete(expression).hook);
@@ -2896,7 +2886,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         TreeFlow flow;
         try {
-            import snakebite.language.checks.assertion: unwindFinally;
+            import snakebite.language.checks: unwindFinally;
 
             unwindFinally(pendingException, {
                 try
@@ -3639,7 +3629,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     override void visit(VectorExp expression) {
         import core.stdc.string: memcpy;
-        import snakebite.language.storage.vectorinit: planVectorInit;
+        import snakebite.language.storage.lifetime: planVectorInit;
 
         const plan = planVectorInit(expression);
         evaluate(expression.e1, expression.e1.type, plan.sourceFacts, _place);
@@ -4218,7 +4208,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     private void* assignAt(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
-        import snakebite.language.storage.assignment: executeAssignment;
+        import snakebite.language.storage.lifetime: executeAssignment;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
 
         const isConstruct = expression.isConstructExp !is null;
@@ -4292,8 +4282,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `RangeError`.
     private void* assignSlice(AssignExp expression, void* target) {
         import core.stdc.string: memcpy;
-        import snakebite.language.checks.failure: boundsPlanOf, FailurePlan;
-        import snakebite.native.slicecopy: copyUnchecked, slicesConform;
+        import snakebite.language.checks: boundsPlanOf;
+        import snakebite.native.value: copyUnchecked, slicesConform;
 
         auto destination = _frames.push(_facts.size, _facts.alignment);
         // `addressOf` has already evaluated the slice bounds and left its
@@ -5258,7 +5248,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // zero have different representations but compare equal in D.
     protected override void visitUnloweredEqual(EqualExp expression) {
         import core.stdc.string: memcmp;
-        import snakebite.language.operators.comparison: comparisonPlan;
         import snakebite.native.value: checkedStoreIntegral;
 
         const plan = comparisonPlan(expression);
@@ -6130,9 +6119,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // still raises the same guest-visible `AssertError` as any failed
     // assertion.
     override void visit(AssertExp expression) {
-        import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
-        import snakebite.language.checks.assertion:
-            AssertInvariantPlan, assertInvariantPlanOf;
+        import snakebite.language.checks:
+            AssertInvariantPlan, assertInvariantPlanOf, assertPlanOf;
 
         const failure = assertPlanOf(_program.checks);
         final switch (failure.kind) with (FailurePlan.Kind) {
@@ -6181,10 +6169,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
     // The invariant of the object of a passing `assert(object)`.
     private void runAssertInvariant(
-        in imported!"snakebite.language.checks.assertion".AssertInvariantPlan plan,
+        in imported!"snakebite.language.checks".AssertInvariantPlan plan,
         void* object,
     ) {
-        import snakebite.language.checks.assertion: AssertInvariantPlan;
+        import snakebite.language.checks: AssertInvariantPlan;
 
         final switch (plan.kind) with (AssertInvariantPlan.Kind) {
             case none:
@@ -6208,7 +6196,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // The invariant of the object of an assertion that a tree node passed.
     extern(D) package void runTreeAssertInvariant(
         TreeRoot* root, ubyte* frame,
-        in imported!"snakebite.language.checks.assertion".AssertInvariantPlan plan,
+        in imported!"snakebite.language.checks".AssertInvariantPlan plan,
         void* object,
     ) {
         handOver(root, frame, { runAssertInvariant(plan, object); });
@@ -6219,9 +6207,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // to the guest.
     private void failAssertion(AssertExp expression) {
         import core.exception: AssertError;
-        import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
-        import snakebite.language.checks.assertion:
-            assertFailureOf, cAssertCallOf, cAssertionOf;
+        import snakebite.language.checks:
+            assertFailureOf, assertPlanOf, cAssertCallOf, cAssertionOf;
         import std.string: toStringz;
 
         const plan = assertPlanOf(_program.checks);
@@ -6720,13 +6707,13 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         visitLoweredNew(expression);
     }
 
-    // `driveInit` (`aggregateinit.d`) owns the order `vthis` steps, a
+    // `driveInit` (`lifetime.d`) owns the order `vthis` steps, a
     // constructor call, and the remaining fields run in; a nested class's
     // `vthis` sits inside the allocation at the same native offset a
     // value of that class type would use, so it lands before the
     // constructor call the same way a nested struct's own `vthis` does.
     private void finishNew(NewExp expression, ubyte* object) {
-        import snakebite.language.storage.aggregateinit:
+        import snakebite.language.storage.lifetime:
             driveInit, planClassContext, planPositionalFields;
 
         auto structType = expression.newtype.toBasetype.isTypeStruct;
@@ -6741,7 +6728,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(DeleteExp expression) {
-        import snakebite.language.storage.deletion: planDelete;
+        import snakebite.language.storage.lifetime: planDelete;
         import snakebite.language.call.druntimehook: planOf;
 
         auto deletion = planDelete(expression);
@@ -6784,7 +6771,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // slot in their own `FrameLayout`, so nothing here needs to know
     // which aggregate kind `expression.newtype` names.
     private void constructAggregate(NewExp expression, ubyte* object) {
-        import snakebite.language.storage.aggregateinit: planNew;
+        import snakebite.language.storage.lifetime: planNew;
 
         auto constructor = expression.member;
         auto layout = layoutOf(constructor);
@@ -6907,7 +6894,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ValueCall* call, Expressions* arguments, ubyte* frameBase,
         const(FrameLayout)* slots, const(FrameLayout)* callee,
     ) {
-        import snakebite.native.argumentflow: Shape;
+        import snakebite.native.signature: Shape;
         import snakebite.language.layout.frame: shapeOf;
         import snakebite.native.variadic: VariadicLayout;
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
@@ -6995,7 +6982,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         memcpy(place, bytes.ptr, bytes.length);
     }
 
-    // The four hooks `snakebite.language.storage.aggregateinit.applyStep` and
+    // The four hooks `snakebite.language.storage.lifetime.applyStep` and
     // `driveInit` drive, one per `InitStep.Kind`, each run at `base`, the
     // aggregate's own bytes directly - `visit(StructLiteralExp)` passes
     // `_place`, `finishNew` the fresh allocation, both already plain
@@ -7003,7 +6990,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // place from a pointer the way the bytecode compiler's frame offsets
     // do.
 
-    // Satisfies `aggregateinit`'s `Hooks` contract: forwards each
+    // Satisfies `lifetime`'s `Hooks` contract: forwards each
     // `InitStep.Kind` to the matching `apply*Step` method below, at
     // whichever `base` its call site is writing into. Built once per
     // call site instead of the four lambdas each used to build.
@@ -7028,7 +7015,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // A nested class's `vthis` reads `NewExp.thisexp` directly
     // (`step.source`), then adds `sourceAdjustment` if `thisexp`'s static
     // type is a base-class view narrower than the nested class's actual
-    // lexical parent - see `classVthisStep`'s own doc (`aggregateinit.d`).
+    // lexical parent - see `classVthisStep`'s own doc (`lifetime.d`).
     package void applyVthisStep(InitStep step, ubyte* base) {
         import snakebite.native.value: checkedLoadIntegral, checkedStoreIntegral;
 
@@ -7096,7 +7083,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         assert(structType !is null && structType.sym == expression.sd,
             "a struct literal destination has the same struct type");
 
-        import snakebite.language.storage.aggregateinit: applyStep;
+        import snakebite.language.storage.lifetime: applyStep;
 
         auto plan = _shared.facts.structLiteralOf(expression);
         if (plan.zeroFill)

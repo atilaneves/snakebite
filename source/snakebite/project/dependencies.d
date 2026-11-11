@@ -3,7 +3,7 @@ module snakebite.project.dependencies;
 
 private:
 
-import snakebite.project.sources: SourceSet;
+import snakebite.project.dub: SourceSet;
 
 
 // Collects image data from a live program without resetting the frontend.

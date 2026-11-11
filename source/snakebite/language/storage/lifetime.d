@@ -1,15 +1,13 @@
-module snakebite.language.storage.aggregateinit;
+module snakebite.language.storage.lifetime;
 
 
 private:
 
-import snakebite.frontend.typefacts: typeFacts;
 
-
-
+import snakebite.frontend.typefacts: typeFacts, fieldOffset;
 import snakebite.native.value: TypeFacts;
-import snakebite.frontend.typefacts: fieldOffset;
 import dmd.typesem: toBasetype;
+import snakebite.language.call.druntimehook: DruntimeHook;
 
 
 // The single decision both backends use for a `NewExp`'s storage. A heap
@@ -370,4 +368,84 @@ private InitStep fieldStep(
     auto step = InitStep(InitStep.Kind.value, field.offset, facts, field.type);
     step.source = source;
     return step;
+}
+
+
+// Evaluate the source once, then copy its native bytes `count` times. An
+// equal-size static array is one copy; a scalar is converted by DMD to the
+// lane type before VectorExp is made, and fills every lane.
+package(snakebite) struct VectorInitPlan {
+    TypeFacts sourceFacts;
+    size_t count;
+}
+
+package(snakebite) VectorInitPlan planVectorInit(
+    imported!"dmd.expression".VectorExp expression,
+) {
+    import dmd.astenums: Tsarray;
+
+    const sourceFacts = typeFacts(expression.e1.type);
+    if (expression.e1.type.toBasetype.ty == Tsarray)
+        return VectorInitPlan(sourceFacts, 1);
+
+    // `dim` counts destination lanes, not source units: an array conversion
+    // can have a different element width. Use native sizes for repetition,
+    // as DMD's glue does, including scalar default initialization.
+    return VectorInitPlan(sourceFacts,
+        typeFacts(expression.type).size / sourceFacts.size);
+}
+
+
+// D assignment evaluates its value before it publishes bytes to the target.
+// Backends provide the storage and byte operations because their execution
+// mechanisms are different, but the ordering is one shared rule. The
+// callbacks are `scope`, so a backend that passes lambdas allocates no
+// closure for them: an assignment can run where the host cannot allocate.
+public auto executeAssignment(Target)(
+    in bool construction,
+    Target target,
+    size_t size,
+    size_t alignment,
+    scope Target delegate(size_t, size_t) reserve,
+    scope void delegate(Target) evaluate,
+    scope void delegate(Target) publish,
+) {
+    if (construction) {
+        evaluate(target);
+        return target;
+    }
+    auto value = reserve(size, alignment);
+    evaluate(value);
+    publish(value);
+    return value;
+}
+
+
+// The single decision both backends use for a `DeleteExp`. The frontend
+// rejects `delete` in user code, so the only `DeleteExp` that reaches a
+// backend is the scope-exit destruction of a `scope` class variable
+// (`dsymbolsem.d`, `callScopeDtor`), and `expressionsem.d` has already
+// rejected every operand that is not a class or an interface. An
+// interface operand points at the interface's own slot inside the
+// object, so druntime's `_d_callinterfacefinalizer` finds the object
+// from the slot's offset while `_d_callfinalizer` takes the object
+// itself.
+public struct DeletePlan {
+    import dmd.expression: Expression;
+
+    public DruntimeHook hook;
+    public Expression object;
+}
+
+public DeletePlan planDelete(imported!"dmd.expression".DeleteExp expression) {
+    auto classType = expression.e1.type.toBasetype.isTypeClass;
+    assert(classType !is null,
+        "the frontend only deletes class and interface operands");
+
+    return DeletePlan(
+        classType.sym.isInterfaceDeclaration is null
+            ? DruntimeHook.callFinalizer
+            : DruntimeHook.callInterfaceFinalizer,
+        expression.e1,
+    );
 }
