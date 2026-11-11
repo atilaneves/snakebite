@@ -29,23 +29,23 @@ private enum ValueClass {
 }
 
 // The `Linkage` of dmd's `linkage`.
-public Linkage linkageOf(in imported!"dmd.astenums".LINK linkage) {
+public Linkage linkageOf(in imported!"dmd.astenums".LINK linkage) @safe @nogc nothrow pure {
     import dmd.astenums: LINK;
 
-    final switch (linkage) {
-        case LINK.default_:
+    final switch (linkage) with (LINK) {
+        case default_:
             return Linkage.default_;
-        case LINK.d:
+        case d:
             return Linkage.d;
-        case LINK.c:
+        case c:
             return Linkage.c;
-        case LINK.cpp:
+        case cpp:
             return Linkage.cpp;
-        case LINK.windows:
+        case windows:
             return Linkage.windows;
-        case LINK.objc:
+        case objc:
             return Linkage.objc;
-        case LINK.system:
+        case system:
             return Linkage.system;
     }
 }
@@ -581,4 +581,3 @@ private void merge(
         }
     }
 }
-

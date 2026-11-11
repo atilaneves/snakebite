@@ -2727,7 +2727,7 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     // The same callee at two call sites in one guest function, one
-    // passing seven `int`s (more than `abi.maxIntegerArguments` once
+    // passing seven `int`s (more than `shape.maxIntegerArguments` once
     // `_arguments` itself claims a register too, so the integer file
     // spills) and the other nine `double`s (more than `abi.
     // maxFloatingArguments`, so the SSE file spills) - `ut.ffi.plan`'s

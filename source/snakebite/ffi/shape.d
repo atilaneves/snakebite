@@ -1,6 +1,9 @@
 module snakebite.ffi.shape;
 
 
+private:
+
+
 // The plain data of a ready call plan: how one value travels in System V
 // AMD64 registers (`Register`, `ArgumentPlan`), the host-compiler switches
 // a plan reads to interpret that shape, and the calling convention
@@ -8,8 +11,8 @@ module snakebite.ffi.shape;
 // executes a plan needs nothing from it. `snakebite.ffi.abi` classifies dmd
 // types into these shapes.
 
-// The calling convention of a function, as far as a plan cares. It mirrors
-// the members of dmd's `LINK` that the plan code distinguishes;
+// The calling convention of a function, as far as a plan cares. It has one
+// member for each member of dmd's `LINK`;
 // `snakebite.ffi.abi.linkageOf` converts one.
 public enum Linkage {
     default_,
@@ -60,7 +63,7 @@ public enum reversedDParameters = () {
 // parameter-list nesting makes the *first* argument register, ahead of
 // `this` (verified against dmd's own `callfunc`, the comment "ehidden
 // goes last on Linux/OSX C++" marking exactly this branch).
-public bool contextPrecedesHiddenReturnPointer(in Linkage linkage) {
+public bool contextPrecedesHiddenReturnPointer(in Linkage linkage) @safe @nogc nothrow pure {
     version (DigitalMars)
         return linkage == Linkage.d || linkage == Linkage.default_;
     else
@@ -68,7 +71,7 @@ public bool contextPrecedesHiddenReturnPointer(in Linkage linkage) {
 }
 
 // Whether an `extern(D)` untyped variadic call site's hidden `_arguments`
-// argument (issue #334 step 6) travels as a two-register `TypeInfo[]`
+// argument travels as a two-register `TypeInfo[]`
 // slice instead of dmd's own single pointer to the `TypeInfo_Tuple` the
 // frontend's leading `typeid` expression evaluates to. Both host
 // compilers' frontends insert that same `typeid` expression - this is a
@@ -123,7 +126,7 @@ public struct Register {
     // In bytes, 1..8 for anything but `none` - not just 1, 2, 4 or 8: a
     // partial register-class eightbyte (a struct field straddling one)
     // can be any width in between, and so can a MEMORY-class argument's
-    // last eightbyte (issue #334 step 3).
+    // last eightbyte.
     public ubyte size;
 }
 
@@ -131,8 +134,8 @@ public struct Register {
 // the SysV cleanup rule; bare `creal` returns use two x87 registers. A
 // MEMORY value - larger than two eightbytes, or
 // with an unaligned field - travels as `memoryWords` whole eightbytes on
-// the stack, in declaration position, a plain "copy bytes" load each
-// (issue #334 step 3): `registers`/`count` above are meaningless for it.
+// the stack, in declaration position, a plain "copy bytes" load each:
+// `registers`/`count` above are meaningless for it.
 // A hidden-pointer return (`needsHiddenReturnPointer`) still bypasses this
 // entirely and never builds a MEMORY `ArgumentPlan` for the return value.
 public struct ArgumentPlan {

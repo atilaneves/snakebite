@@ -108,7 +108,7 @@ public struct CallPlan {
     // parameters. The caller's first argument slot holds that pointer.
     private bool _hiddenContext;
     // dmd and ldc use different orders when both invisible arguments are
-    // present. See `abi.contextPrecedesHiddenReturnPointer`.
+    // present. See `shape.contextPrecedesHiddenReturnPointer`.
     private bool _contextPrecedesHiddenReturnPointer;
     // Whether the callee reads its parameters out of the registers in
     // reverse declaration order - see `shape.reversedDParameters`.
@@ -907,7 +907,7 @@ public struct CallPlan {
 
             // A MEMORY-class argument never reaches a register - the
             // SysV ABI classifies it onto the stack outright, skipping
-            // register classification entirely (`abi.ArgumentPlan`'s own
+            // register classification entirely (`shape.ArgumentPlan`'s own
             // doc) - so it always defers to the spilled pass below,
             // whatever room either register file has left.
             if (plan.memory) {
@@ -953,7 +953,7 @@ public struct CallPlan {
 
             // A MEMORY-class argument's eightbytes were never classified
             // into `plan.registers` (there is no register shape to read -
-            // see `abi.ArgumentPlan`'s own doc), so each one is built here
+            // see `shape.ArgumentPlan`'s own doc), so each one is built here
             // instead, straight from its byte size: a whole `word64` load
             // for every full eightbyte, and for a size that does not end
             // on an eightbyte boundary, one final `copy` load - `loadOf`/
@@ -2045,8 +2045,8 @@ private NativeSignature signatureOf(
         // front, through the one mechanism every other backend and cache
         // already forces one through (`snakebite.frontend.compiler.
         // forceIfNeeded`, reached here via `typeFacts`), each only
-        // while dmd has not already resolved it. `classify`/`ArgumentPlan.
-        // of` (`snakebite.ffi.abi`) read a struct's own `.size`/
+        // while dmd has not already resolved it. `classify`/`argumentPlanOf`
+        // (`snakebite.ffi.abi`) read a struct's own `.size`/
         // `.alignsize` directly, not through `TypeFacts`, so without this
         // they would be the one place left in this whole call reading a
         // forward reference dmd might still need to resolve, unlocked -

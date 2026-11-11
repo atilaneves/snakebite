@@ -1403,7 +1403,7 @@ private struct ContextHiddenPointer {
 
 // A method returning a MEMORY-class struct: the hidden context (`this`)
 // and the hidden return pointer travel together, in whichever order
-// `abi.contextPrecedesHiddenReturnPointer` says this host compiler uses
+// `shape.contextPrecedesHiddenReturnPointer` says this host compiler uses
 // (dmd puts `this` first). No existing test named both hidden arguments
 // together - `called.refResult`/`called.refReturn` cover a hidden
 // context alone (through `CallAdapter`, not a plan directly) and
@@ -1545,7 +1545,7 @@ private extern(C) size_t snakebite_ut_memory_after_six(
 // A 32-byte MEMORY-class argument declared after six plain `int`s, which
 // already fill the integer register file, with one more `int` declared
 // after it. `value` always spills - a MEMORY-class value never reaches a
-// register (`abi.ArgumentPlan`'s own doc) - and `g` spills too, since no
+// register (`shape.ArgumentPlan`'s own doc) - and `g` spills too, since no
 // integer register is left for it either; both land on the stack in
 // declaration order, `value`'s four eightbytes first and then `g`, the
 // same order a native `extern(C)` call would use. `g`'s weight (`1`)
@@ -1648,7 +1648,7 @@ private extern(D) void snakebite_ut_memoryTwoSpill(
 
 
 // `value` - a MEMORY-class argument - never reaches an integer register,
-// whatever room is left (`abi.ArgumentPlan`'s own doc), so dmd's reversed
+// whatever room is left (`shape.ArgumentPlan`'s own doc), so dmd's reversed
 // `extern(D)` convention (`_reversedArguments`'s own doc) assigns the six
 // integer registers to the eight scalars alone, in reversed declaration
 // order: `b1`, `b0`, `a5`, `a4`, `a3`, `a2` take them, leaving `a1` and
@@ -2037,7 +2037,7 @@ private struct ContextMemoryParam {
 // A method with a MEMORY-class parameter: the hidden context (`this`)
 // and the hidden return pointer - this method returns a MEMORY-class
 // `ThreeWords` too - travel together, in dmd's order (`this` first,
-// `abi.contextPrecedesHiddenReturnPointer`'s own doc;
+// `shape.contextPrecedesHiddenReturnPointer`'s own doc;
 // `called.contextPrecedesHiddenReturnPointer` above checks the pair
 // alone). `value` spills to the stack after both, the only spilled
 // parameter here.
@@ -2373,7 +2373,7 @@ private struct MemoryTriple {
 }
 
 // Six plain `int`s fill the integer register file. `m` - a MEMORY-class
-// argument - always spills, whatever room is left (`abi.ArgumentPlan`'s
+// argument - always spills, whatever room is left (`shape.ArgumentPlan`'s
 // own doc), and `value` - a mixed INTEGER/SSE pair whose INTEGER lane
 // has no register left either - spills too. Step 3 (MEMORY) and step 4
 // (mixed) both route through the same `addSpilled`/`spilled[]`
