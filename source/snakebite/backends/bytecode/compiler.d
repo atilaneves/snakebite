@@ -171,7 +171,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callLowering,
+            &classRuntimeInfo, (type) => _runtimeTypes.get(type),
             (module_) => &moduleForD(module_).blocks, &callableKind);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
@@ -285,17 +285,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
-    }
-
-    private void callLowering(
-        FuncDeclaration function_,
-        void* returnPlace,
-        scope void*[] arguments,
-    ) {
-        _callSelection.callLowering(function_, returnPlace, arguments,
-            &isGuestFunction, hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_), &call,
-            (callee, place, args) => _plans.of(callee).call(place, args));
     }
 
     version(unittest)

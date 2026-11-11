@@ -44,7 +44,7 @@ public struct NativeData {
     private FunctionKind _functionKind;
     private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
-    private LoweringCall _callLowering;
+    private TypeInfoOf _typeInfo;
     // Read and written only under the compiler lock. Class objects and
     // struct values are keyed by their own literal, not by a reference
     // or address expression, to preserve aliases and cycles.
@@ -87,7 +87,7 @@ public struct NativeData {
         SymbolAddress symbolAddress,
         ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
-        LoweringCall call,
+        TypeInfoOf typeInfo,
         StaticBlocks* delegate(Module) blocksOf = null,
         FunctionKind functionKind = null,
     ) {
@@ -96,18 +96,10 @@ public struct NativeData {
         _symbolAddress = symbolAddress;
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
-        _callLowering = call;
+        _typeInfo = typeInfo;
         _store = store;
         _blocksOf = blocksOf;
         _functionKind = functionKind;
-    }
-
-    private void callLowering(
-        imported!"dmd.func".FuncDeclaration function_,
-        void* returnPlace,
-        scope void*[] arguments,
-    ) {
-        _callLowering(function_, returnPlace, arguments);
     }
 
     public void write(
@@ -669,14 +661,8 @@ private alias SymbolPlaceOf =
 private alias FunctionKind = Target.Kind delegate(in void* address);
 // This thread's address of a thread-local symbol, by linker name.
 private alias ThreadLocalAddress = void* delegate(in char[] name);
-// Calls the function that a lowering names, as guest or native code:
-// `arguments[i]` is the address of parameter `i`'s bytes, and the result
-// goes to `returnPlace`.
-private alias LoweringCall = void delegate(
-    imported!"dmd.func".FuncDeclaration function_,
-    void* returnPlace,
-    scope void*[] arguments,
-);
+// The `TypeInfo` object of a type.
+private alias TypeInfoOf = TypeInfo delegate(imported!"dmd.mtype".Type);
 
 // Whether two element types are the same type once their qualifiers are
 // dropped. `mutableOf` mutates the type's own cache unless the type has no
@@ -908,6 +894,16 @@ private void storeValue(
         return;
     }
 
+    if (auto typeId = value.isTypeidExp) {
+        import dmd.dtemplate: isType;
+
+        auto objectType = isType(typeId.obj);
+        assert(nativeData !is null && objectType !is null);
+        nativeData.storeReference(place,
+            cast(const(void)*) nativeData._typeInfo(objectType));
+        return;
+    }
+
     if (auto reference = value.isClassReferenceExp) {
         assert(nativeData !is null);
         auto object = nativeData.classValue(reference);
@@ -1054,8 +1050,10 @@ private void storeValue(
             return;
         }
 
-        // An associative array's layout is druntime's: its literal's
-        // lowering, `_d_assocarrayliteralTX`, builds it.
+        // An associative array's layout is druntime's. The frontend has
+        // interpreted the lowering of the literal for a static initialiser,
+        // as it does for compiled code: the result is a pointer to a
+        // struct literal of the implementation, which is data as any other.
         case Taarray: {
             auto literal = value.isAssocArrayLiteralExp;
             assert(literal !is null, text("no native layout for the ",
@@ -1063,46 +1061,14 @@ private void storeValue(
                 type.toString, "`: an associative-array-typed constant ",
                 "is always an associative-array literal"));
 
-            auto constructor = literal.lowering !is null
-                ? literal.lowering.isCallExp : null;
-            assert(constructor !is null && constructor.f !is null,
-                text("no native layout for the constant `",
-                    value.toString, "` of type `", type.toString,
-                    "`: dmd left it without a static-initializer lowering"));
+            auto lowered = literal.loweringCtfe;
+            assert(lowered !is null, text("no native layout for the constant `",
+                value.toString, "` of type `", type.toString,
+                "`: dmd left it without a static-initializer lowering"));
             assert(nativeData !is null);
 
-            auto aaType = type.isTypeAArray;
-            const keyElementSize = aaType.index.size;
-            const valueElementSize = aaType.next.size;
-
-            auto keyBytes = new void[literal.keys.length * keyElementSize];
-            auto valueBytes =
-                new void[literal.values.length * valueElementSize];
-            foreach (i, key; *literal.keys)
-                storeValue(aaType.index, key,
-                    cast(ubyte*) keyBytes.ptr + i * keyElementSize,
-                    symbolAddress, nativeData);
-            foreach (i, element; *literal.values)
-                storeValue(aaType.next, element,
-                    cast(ubyte*) valueBytes.ptr + i * valueElementSize,
-                    symbolAddress, nativeData);
-
-            ubyte[size_t.sizeof * 2] keysArgument = void;
-            ubyte[size_t.sizeof * 2] valuesArgument = void;
-            checkedStoreIntegral(keysArgument.ptr + arrayLengthOffset,
-                literal.keys.length, size_t.sizeof);
-            *cast(void**) (keysArgument.ptr + arrayPointerOffset) =
-                keyBytes.ptr;
-            checkedStoreIntegral(valuesArgument.ptr + arrayLengthOffset,
-                literal.values.length, size_t.sizeof);
-            *cast(void**) (valuesArgument.ptr + arrayPointerOffset) =
-                valueBytes.ptr;
-
-            void*[2] arguments =
-                [keysArgument.ptr, valuesArgument.ptr];
-            nativeData.callLowering(constructor.f, place, arguments[]);
-            storeAddress(nativeData, place, Address(Target.Kind.staticData,
-                *cast(void**) place));
+            storeValue(lowered.type, typeFacts(lowered.type), lowered, place,
+                symbolAddress, nativeData);
             return;
         }
 

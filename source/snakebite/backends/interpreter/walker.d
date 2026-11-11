@@ -403,7 +403,7 @@ private struct Shared {
             (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callLowering);
+            &classRuntimeInfo, (type) => runtimeTypes.get(type));
         runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
             (name) => plans.resolve(name),
             &callableAddress,
@@ -434,18 +434,6 @@ private struct Shared {
             return callableAddress(function_, 0);
 
         return plans.resolve(nativeSymbolName(symbol));
-    }
-
-    private void callLowering(
-        FuncDeclaration function_,
-        void* returnPlace,
-        scope void*[] arguments,
-    ) {
-        callSelection.callLowering(function_, returnPlace, arguments,
-            (callee) => program.isInterpreted(callee),
-            plans.hasNativeSymbol(function_),
-            plans.hasIndependentNativeSymbol(function_), callGuest,
-            (callee, place, args) => plans.of(callee).call(place, args));
     }
 
     // A guest class's native metadata. This vtable is real native layout
