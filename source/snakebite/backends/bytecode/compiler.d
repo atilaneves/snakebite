@@ -868,9 +868,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             scope compiler = new FunctionCompiler(
                 this, _jit, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
-            *placeholder = compiler.build(body_);
-            if (compiler.builtInlineBody !is null)
-                _inlineBodies[placeholder] = compiler.builtInlineBody;
+            const(InlineBody)* builtInlineBody;
+            *placeholder = compiler.build(body_, builtInlineBody);
+            if (builtInlineBody !is null)
+                _inlineBodies[placeholder] = builtInlineBody;
             if (placeholder.jitCounts && _jit.perfMap) {
                 import snakebite.frontend.dmd.mangle: mangledNameOf;
 
@@ -1085,8 +1086,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
-    // Set by `build`: the body a caller can copy in place of a call, or null.
-    package const(InlineBody)* builtInlineBody;
     private CompileBuffer!(InlineBody.FrameRange) _allocations;
     private bool _exposesFrame;
     private CompileBuffer!(InlineBody.FrameRange) _exposedFrames;
@@ -1315,7 +1314,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
-    public Function build(Statement body_) {
+    // `builtInlineBody` is the body a caller can copy in place of a call, or
+    // null. It is not in the `Function`: only the compiler reads it.
+    public Function build(Statement body_, out const(InlineBody)* builtInlineBody) {
         _scopePaths = scopePathsOf(body_);
         compileStatement(body_);
 
