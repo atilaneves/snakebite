@@ -8,6 +8,7 @@ module snakebite.backends.bytecode.runner;
 private:
 
 import snakebite.backends.bytecode.vm: Function, JitSetting, Vm;
+import snakebite.ffi.callback: CallbackCall;
 import snakebite.host.executionstates: ExecutionStates;
 import snakebite.stack.tls: TlsSlots;
 
@@ -157,5 +158,28 @@ public struct Runner {
 
         auto active = _vms.enter;
         active.state.call(*compiled, returnPlace, arguments[0 .. filled]);
+    }
+
+    // What a `CallbackBridge` calls when host code calls a callback entry
+    // (ADR-0003). `context` is the address of the `Runner`.
+    public extern(C) static void invokeCallback(
+        void* context,
+        scope CallbackCall* call,
+    ) {
+        (cast(Runner*) context).callGuestFromHost(call);
+    }
+
+    // The re-entry a pool entry (ADR-0003) reaches when host code calls a
+    // guest function pointer or delegate. It shares `call` with the
+    // program runner's top-level call: neither binds arguments on its
+    // own, and `call.function_` - the word the backend recorded when the
+    // callee was first compiled - is already built, so this takes no
+    // compiler lock of its own, on whichever thread's VM is calling
+    // (ADR-0006). A `Throwable` the body throws unwinds through the host
+    // frames untouched (ADR-0004).
+    private void callGuestFromHost(scope CallbackCall* call) {
+        this.call(cast(const(Function)*) call.function_,
+            call.returnPlace, call.arguments,
+            call.variadicCursor, call.variadicTypes);
     }
 }

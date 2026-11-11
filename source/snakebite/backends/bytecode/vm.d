@@ -9,7 +9,7 @@ import snakebite.backends.bytecode.jit: jitSupported;
 
 
 import snakebite.ffi.callplan:
-    directWordCallTarget, executeCallPlan, executeHostCallPlan,
+    CallPlan, directWordCallTarget, executeCallPlan, executeHostCallPlan,
     executeIndirectCallPlan, guestWordOf;
 import snakebite.native.signature: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
@@ -56,8 +56,8 @@ public struct CallSite {
         // `callee` names a compiled function, or `prepareGuest` compiles
         // and caches it when the call first executes.
         guest,
-        // `nativePlan` is a `snakebite.ffi.plan.CallPlan`, opaque to this
-        // module, run through `executeCallPlan` - prepared either for a
+        // `nativePlan` is a `snakebite.ffi.callplan.CallPlan`, run
+        // through `executeCallPlan` - prepared either for a
         // guest-declared `extern(C)` function or for a druntime hook the
         // compiler resolved by linker symbol (an allocation, a `~=`
         // dchar append, a bounds check): the same shape either way, so
@@ -174,7 +174,7 @@ public struct CallSite {
     // A prepared FFI plan for a native symbol, called through
     // `executeCallPlan`.
     public static CallSite native(
-        const(void)* nativePlan, Arg[] args, size_t returnWidth,
+        const(CallPlan)* nativePlan, Arg[] args, size_t returnWidth,
     ) {
         CallSite site;
         site.kind = Kind.native;
@@ -185,9 +185,9 @@ public struct CallSite {
     }
 
     public static CallSite native(
-        const(void)* delegate() prepare, Arg[] args, size_t returnWidth,
+        const(CallPlan)* delegate() prepare, Arg[] args, size_t returnWidth,
     ) {
-        auto site = native(cast(const(void)*) null, args, returnWidth);
+        auto site = native(cast(const(CallPlan)*) null, args, returnWidth);
         site.prepareNativePlan = prepare;
         return site;
     }
@@ -198,7 +198,7 @@ public struct CallSite {
     public static CallSite indirect(
         size_t calleeSlotOffset, Arg[] args, Arg[] nativeArgs,
         size_t returnWidth,
-        const(void)* nativePlan = null,
+        const(CallPlan)* nativePlan = null,
         bool hasContext = false,
     ) {
         CallSite site;
@@ -410,8 +410,8 @@ public struct CallSite {
         return true;
     }
 
-    package const(void)* nativePlan;
-    package const(void)* delegate() prepareNativePlan;
+    package const(CallPlan)* nativePlan;
+    package const(CallPlan)* delegate() prepareNativePlan;
 
     // A `native` site whose plan is zero to three word arguments and no
     // result or an integer result of one or two words called directly.
