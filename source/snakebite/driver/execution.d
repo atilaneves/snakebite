@@ -206,6 +206,7 @@ public ExecutionReport executeLoaded(
     in string[] programArguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
+    import core.memory: GC;
     import snakebite.backends.bytecode.file: loadProgram, readHeader;
     import snakebite.backends.bytecode.program: Program;
     import snakebite.backends.bytecode.runner: Runner, wire;
@@ -242,11 +243,14 @@ public ExecutionReport executeLoaded(
         stderr = savedError;
     }
 
-    auto program = Program(imageAddress);
-    Runner runner = void;
-    wire(program, runner, jit);
+    // On the GC heap, as the backend of a compile is: the module destructors
+    // run when the process ends, after this function returns, and callback
+    // entries reach the program and the runner until then.
+    auto program = new Program(imageAddress);
+    auto runner = cast(Runner*) GC.calloc(Runner.sizeof);
+    wire(*program, *runner, jit);
     scope(exit) runner.end;
-    loadProgram(contents, program, runner, imageAddress);
+    loadProgram(contents, *program, *runner, imageAddress);
 
     CompilationStatistics compilation;
     const running = ExecutionClock.start(compilation);
