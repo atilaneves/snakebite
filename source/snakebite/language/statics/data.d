@@ -222,10 +222,22 @@ public struct NativeData {
             if (auto found = type in _defaults)
                 bytes = *found;
             else
-                bytes = *_defaults.insert(
-                    type, value(type, initialExpression(type, loc)));
+                bytes = *_defaults.insert(type, value(type,
+                    initialExpression(type, loc), declarationOf(type)));
         });
         return bytes;
+    }
+
+    // The struct or enum that declares `type`, or null for any other type: the
+    // `.init` image of a declared type is data of the module of the declaration.
+    private static Dsymbol declarationOf(Type type) {
+        import dmd.typesem: toBasetype;
+
+        if (auto struct_ = type.isTypeStruct)
+            return struct_.sym;
+        if (auto enum_ = type.isTypeEnum)
+            return enum_.sym;
+        return null;
     }
 
     // The constant goes to the blocks of the D module of `owner`, when there
