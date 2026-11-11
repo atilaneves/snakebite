@@ -6,7 +6,7 @@ import core.time: msecs;
 import snakebite.program: Program;
 import snakebite.run.program: run;
 import snakebite.run.modules: GuestModules;
-import snakebite.image.dependency: defaultCompiler;
+import snakebite.image.preparation: defaultCompiler;
 import snakebite.frontend.compiler: parseSnippet;
 import std.file: exists;
 import std.process: execute;

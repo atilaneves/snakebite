@@ -11,7 +11,7 @@ int sum_point(Point p) { return p.x + p.y; }
 // limit. A method that returns this must use the hidden return
 // pointer (`abi.needsHiddenReturnPointer`) - and for `extern(C++)`,
 // unlike `extern(D)`, `this` follows that pointer instead of coming
-// before it (`abi.contextPrecedesHiddenReturnPointer`). That order is
+// before it (`argumentplan.contextPrecedesHiddenReturnPointer`). That order is
 // the one ABI fact that `extern(C++)` changes.
 struct Big {
     unsigned long a;

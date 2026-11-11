@@ -8,37 +8,9 @@ import snakebite.failure.report: internalFailure;
 import snakebite.backends.bytecode.jit: jitSupported;
 
 
-extern(C) const(void)* directWordCallTarget(
-    const(void)* opaquePlan, out ubyte[3] order, out Load[3] loads,
-    out size_t resultWidth, out size_t parameterCount,
-);
-
-extern(C) void executeCallPlan(
-    const(void)* opaquePlan,
-    void* returnPlace,
-    scope const(void*)* arguments,
-    size_t argumentCount,
-);
-
-// The guest word behind `address`, or null when `address` is not an entry of
-// the backend that owns the plan, and the receiver adjustment of that entry.
-extern(C) const(void)* guestWordOf(
-    const(void)* opaquePlan, const(void)* address, out ptrdiff_t adjustment,
-);
-
-// Calls the host function at `address` with the plan, for an `address` that
-// `guestWordOf` found not to be a guest entry.
-extern(C) void executeHostCallPlan(
-    const(void)* opaquePlan, const(void)* address, void* returnPlace,
-    scope const(void*)* arguments, size_t argumentCount,
-);
-
-extern(C) bool executeIndirectCallPlan(
-    const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
-    scope const(void*)* arguments, size_t argumentCount,
-    out ptrdiff_t contextAdjustment,
-);
-
+import snakebite.ffi.callplan:
+    directWordCallTarget, executeCallPlan, executeHostCallPlan,
+    executeIndirectCallPlan, guestWordOf;
 import snakebite.native.signature: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
 import snakebite.builtin.call: BuiltinCall;

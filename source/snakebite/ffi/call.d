@@ -97,7 +97,8 @@ public struct CallAdapter {
         import dmd.func: FuncDeclaration;
         import dmd.mtype: Type, TypeFunction;
         import snakebite.native.arguments: CallArguments;
-        import snakebite.ffi.plan: CallPlan, PlanCache;
+        import snakebite.ffi.callplan: CallPlan;
+        import snakebite.ffi.plan: PlanCache;
 
         private TypeFunction _type;
         private Expression[] _expressions;
@@ -264,7 +265,7 @@ public struct CallAdapter {
         }
 
         public Value hiddenArgument() {
-            import snakebite.ffi.abi: dVariadicArgumentsIsSlice;
+            import snakebite.ffi.argumentplan: dVariadicArgumentsIsSlice;
 
             auto expression = _expressions[0];
             auto value = Value(expression, typeFacts(expression.type));

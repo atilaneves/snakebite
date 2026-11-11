@@ -283,7 +283,8 @@ private import snakebite.backends.api: Backend;
 private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
-private import snakebite.ffi.plan: NativeSignature;
+private import snakebite.ffi.callplan: NativeSignature;
+private import snakebite.ffi.argumentplan: Linkage;
 
 
 // What `endAtExit` needs, in memory that the GC does not own: after a normal
@@ -811,7 +812,7 @@ private FunctionHandle[] reversed(FunctionHandle[] functions) {
 
 // The type of every phase entry: `extern(D) void()`, the type of the
 // compiler's own module constructors and destructors.
-private enum phaseSignature = NativeSignature(imported!"dmd.astenums".LINK.d);
+private enum phaseSignature = NativeSignature(Linkage.d);
 
 
 // The phase of a module that runs `functions`, or null when there is

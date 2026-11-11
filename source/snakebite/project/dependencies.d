@@ -13,8 +13,8 @@ public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDepe
     in string directory,
     in SourceSet sources,
     scope imported!"snakebite.program".Program delegate() program,
-    in imported!"snakebite.image.dependency".Optimise optimise
-        = imported!"snakebite.image.dependency".Optimise.yes,
+    in imported!"snakebite.image.preparation".Optimise optimise
+        = imported!"snakebite.image.preparation".Optimise.yes,
     in bool projectEntry = true,
 ) {
     return Preparation(directory, sources, optimise, projectEntry
@@ -31,8 +31,8 @@ public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDepe
 public const(imported!"snakebite.image.dependency".DependencyImage)* prepareStartupDependencies(
     in string directory,
     SourceSet sources,
-    in imported!"snakebite.image.dependency".Optimise optimise
-        = imported!"snakebite.image.dependency".Optimise.yes,
+    in imported!"snakebite.image.preparation".Optimise optimise
+        = imported!"snakebite.image.preparation".Optimise.yes,
 ) {
     import snakebite.project.loading: loadProject;
 
@@ -69,7 +69,8 @@ private enum Mode { live, projectEntry, startup }
 
 private struct Preparation {
     import snakebite.program: Program;
-    import snakebite.image.dependency: DependencyImage, Optimise;
+    import snakebite.image.dependency: DependencyImage;
+    import snakebite.image.preparation: Optimise;
 
     private const(SourceSet) _sources;
     private Optimise _optimise;
@@ -89,7 +90,7 @@ private struct Preparation {
     }
 
     private const(DependencyImage)* run(scope Program delegate() program) {
-        import snakebite.image.dependency: ProjectImageCache;
+        import snakebite.image.preparation: ProjectImageCache;
         import snakebite.frontend.compiler: withScratchFrontend;
         import std.path: buildPath;
 
@@ -143,7 +144,7 @@ private struct Preparation {
     private DependencyImage buildImage(in string source,
         in DependencyAnalysis analysis,
     ) const {
-        import snakebite.image.dependency: defaultCompiler, prepareImage;
+        import snakebite.image.preparation: defaultCompiler, prepareImage;
 
         return prepareImage(source, _imageDirectory, defaultCompiler,
             analysis.inputs, _sources.importPaths, _sources.stringImportPaths,

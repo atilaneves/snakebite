@@ -1,6 +1,6 @@
 # Dependency image preparation
 
-`snakebite.image.dependency.prepareImage` compiles generated D source into a
+`snakebite.image.preparation.prepareImage` compiles generated D source into a
 position-independent object, links a shared library, and loads it through
 druntime. It supports the Linux DMD and LDC builds used by Snakebite.
 
@@ -69,7 +69,7 @@ frontend and execution time.
 Callers can also prepare an image explicitly:
 
 ```d
-import snakebite.image.dependency: prepareImage;
+import snakebite.image.preparation: prepareImage;
 
 auto image = prepareImage(q{
     module image;

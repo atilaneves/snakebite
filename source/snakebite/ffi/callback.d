@@ -11,7 +11,7 @@ import core.sync.mutex: Mutex;
 import core.sys.posix.sys.mman:
     MAP_ANON, MAP_FAILED, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC,
     PROT_NONE, PROT_READ, PROT_WRITE, mmap, mprotect, munmap;
-import snakebite.ffi.plan: CallPlan, NativeSignature, prepareCallback;
+import snakebite.ffi.callplan: CallPlan, NativeSignature, prepareCallback;
 import snakebite.ffi.sysv:
     CallbackTrailer, CallFrame, callbackEntriesPerChunk, callbackEntryBytes,
     snakebite_ffi_callback_chunk, snakebite_ffi_callback_chunk_end,
@@ -515,7 +515,7 @@ private void invoke(ref Slot slot, CallFrame* frame) {
     const(void)* variadicTypes;
     void*[] guestAddresses = addresses;
     if (typesIndex != size_t.max) {
-        import snakebite.ffi.abi: callbackVariadicTypes;
+        import snakebite.ffi.argumentplan: callbackVariadicTypes;
 
         variadicTypes = callbackVariadicTypes(addresses[typesIndex]);
         guestAddresses = new void*[count - 1];
