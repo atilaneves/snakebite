@@ -17,23 +17,8 @@ __gshared Compiler compiler;
 // registered module from DMD's tables.
 private shared uint _moduleCounter;
 
-// Thread-owned metadata belongs to one set of frontend declarations.
-// Reset and shutdown require exclusive access with no live frontend users;
-// the next read on each thread must discard its previous snapshots.
-private shared size_t _metadataGeneration;
-
-public size_t metadataGeneration() @safe nothrow @nogc {
-    import core.atomic: atomicLoad, MemoryOrder;
-
-    return atomicLoad!(MemoryOrder.acq)(_metadataGeneration);
-}
-
-private void discardMetadata() @safe nothrow @nogc {
-    import core.atomic: atomicOp;
-
-    atomicOp!"+="(_metadataGeneration, size_t(1));
-}
-
+public import snakebite.frontend.lock: metadataGeneration, withCompilerQuery;
+import snakebite.frontend.lock: discardMetadata, frontendMutex;
 
 shared static this() {
     compiler = new Compiler;
@@ -136,23 +121,6 @@ public void withCompilerLock(
     compiler.withLock(action, flags);
 }
 
-// Metadata queries can run inside an unfinished diagnostic pass. They must
-// exclude semantic writers without clearing that pass's errors or flags.
-public void withCompilerQuery(scope void delegate() query) {
-    import snakebite.memory.gc: resumeFrontend, suspendFrontend;
-
-    version(unittest) {
-        import snakebite.host.sharedtable: assertCacheFillAllowed;
-        assertCacheFillAllowed!"frontend metadata query";
-    }
-    compiler.mutex.lock;
-    scope(exit) compiler.mutex.unlock;
-
-    const depth = suspendFrontend;
-    scope(exit) resumeFrontend(depth);
-    query();
-}
-
 // Runs `action` with dmd's diagnostics gagged, for a caller that holds the
 // frontend lock: a question that the frontend cannot answer prints nothing,
 // and dmd does not keep the error it found on the declaration
@@ -180,8 +148,8 @@ public bool gagged(scope void delegate() action) {
 // particular, build and load dependency images only after this call returns.
 // Successful analysis output is discarded; failure output is replayed.
 public T withScratchFrontend(T)(scope T delegate() action) {
-    compiler.mutex.lock;
-    scope(exit) compiler.mutex.unlock;
+    frontendMutex.lock;
+    scope(exit) frontendMutex.unlock;
     auto captured = capturedStderr;
     scope(failure) captured.replay;
     scope(exit) compiler.reset;
@@ -492,14 +460,9 @@ public void forceIfNeeded(alias dmdFunction, Args...)(
 }
 
 final class Compiler {
-    import core.sync.mutex: Mutex;
     import dmd.dmodule: Module;
 
     private bool initialized;
-    // The one lock around dmd's process-global state. It only excludes
-    // other threads: code that holds it allocates from the GC. dmd code
-    // runs inside the frontend (`inside`).
-    private Mutex mutex;
     // Keyed by source content; prevents re-registering the same root module
     // in DMD's process-global table.
     private Module[string] sourceCache;
@@ -513,13 +476,12 @@ final class Compiler {
         // rod) depends on whether this process compiles snippets or a whole
         // program, which getopt has not seen yet at module-ctor time, so the
         // entry point calls initialize() once it knows.
-        mutex = new Mutex;
     }
 
     void initialize(in Snippets snippets) {
         // The lock is recursive: `inside` takes it again.
-        mutex.lock;
-        scope(exit) mutex.unlock;
+        frontendMutex.lock;
+        scope(exit) frontendMutex.unlock;
 
         if (initialized)
             return;
@@ -558,8 +520,8 @@ final class Compiler {
     T inside(T)(scope T delegate() work) {
         import snakebite.memory.gc: enterFrontend, leaveFrontend;
 
-        mutex.lock;
-        scope(exit) mutex.unlock;
+        frontendMutex.lock;
+        scope(exit) frontendMutex.unlock;
 
         Exception thrown;
         {
@@ -578,8 +540,8 @@ final class Compiler {
     void reset() {
         import dmd.frontend: deinitializeDMD;
 
-        mutex.lock;
-        scope(exit) mutex.unlock;
+        frontendMutex.lock;
+        scope(exit) frontendMutex.unlock;
         requireInitialized;
 
         if (Module.amodules.length == initialModuleCount)
@@ -805,8 +767,8 @@ final class Compiler {
         import snakebite.memory.gc:
             enterFrontend, leaveFrontend, resumeFrontend, suspendFrontend;
 
-        mutex.lock;
-        scope(exit) mutex.unlock;
+        frontendMutex.lock;
+        scope(exit) frontendMutex.unlock;
 
         enterFrontend;
         scope(exit) leaveFrontend;
