@@ -7,7 +7,9 @@ import dmd.mtype: Type;
 import dmd.statement: ReturnStatement, Statement;
 import dmd.typesem: nextOf;
 import snakebite.ffi: CallAdapter, PlanCache;
-import snakebite.ffi.abi: ArgumentPlan, Register, needsHiddenReturnPointer;
+import snakebite.ffi.abi:
+    argumentPlanOf, needsHiddenReturnPointer;
+import snakebite.ffi.argumentplan: ArgumentPlan, Register;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions:
     findFunction, findStruct, typeFunctionOf;
@@ -547,7 +549,7 @@ unittest {
 
 // The same dmd rule applies to a fieldless struct passed by value, not
 // only a returned one - `classify` is the shared walk both
-// `ArgumentPlan.of`'s parameter path and `aggregatePlan`'s return path
+// `argumentPlanOf`'s parameter path and `aggregatePlan`'s return path
 // read.
 @("abi.fieldlessStructParameterIsMemoryClass")
 unittest {
@@ -561,7 +563,7 @@ unittest {
         "No `snakebite_ut_fieldless_param` in the guest program");
 
     auto parameterType = typeFunctionOf(function_).parameterList[0].type;
-    const plan = ArgumentPlan.of(parameterType);
+    const plan = argumentPlanOf(parameterType);
 
     plan.memory.should == true;
 }
@@ -579,7 +581,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_integer128` in the guest program");
 
-    const plan = ArgumentPlan.of(
+    const plan = argumentPlanOf(
         typeFunctionOf(function_).parameterList[0].type);
 
     plan.memory.should == false;
@@ -624,7 +626,7 @@ unittest {
         "No `snakebite_ut_union_conflict_param` in the guest program");
 
     auto parameterType = typeFunctionOf(function_).parameterList[0].type;
-    const plan = ArgumentPlan.of(parameterType);
+    const plan = argumentPlanOf(parameterType);
 
     plan.memory.should == true;
     plan.memoryBytes.should == 16;
@@ -1295,7 +1297,7 @@ unittest {
 // eightbytes (issue #334 step 3) - `ThreeWords` is exactly the 24-byte,
 // three-`size_t` shape `called.hiddenPointerReturn` above already uses for
 // a MEMORY-class *return*; this is the same shape as an explicit
-// *parameter*, the case `abi.ArgumentPlan.of` used to refuse outright.
+// *parameter*, the case `abi.argumentPlanOf` used to refuse outright.
 // `snakebite_ut_memory_param` weights each field differently - a plain
 // sum would return the same answer for any permutation of `value`'s own
 // three eightbytes, so it could not catch a wrong move order.
@@ -1401,7 +1403,7 @@ private struct ContextHiddenPointer {
 
 // A method returning a MEMORY-class struct: the hidden context (`this`)
 // and the hidden return pointer travel together, in whichever order
-// `abi.contextPrecedesHiddenReturnPointer` says this host compiler uses
+// `argumentplan.contextPrecedesHiddenReturnPointer` says this host compiler uses
 // (dmd puts `this` first). No existing test named both hidden arguments
 // together - `called.refResult`/`called.refReturn` cover a hidden
 // context alone (through `CallAdapter`, not a plan directly) and
@@ -1543,7 +1545,7 @@ private extern(C) size_t snakebite_ut_memory_after_six(
 // A 32-byte MEMORY-class argument declared after six plain `int`s, which
 // already fill the integer register file, with one more `int` declared
 // after it. `value` always spills - a MEMORY-class value never reaches a
-// register (`abi.ArgumentPlan`'s own doc) - and `g` spills too, since no
+// register (`argumentplan.ArgumentPlan`'s own doc) - and `g` spills too, since no
 // integer register is left for it either; both land on the stack in
 // declaration order, `value`'s four eightbytes first and then `g`, the
 // same order a native `extern(C)` call would use. `g`'s weight (`1`)
@@ -1646,7 +1648,7 @@ private extern(D) void snakebite_ut_memoryTwoSpill(
 
 
 // `value` - a MEMORY-class argument - never reaches an integer register,
-// whatever room is left (`abi.ArgumentPlan`'s own doc), so dmd's reversed
+// whatever room is left (`argumentplan.ArgumentPlan`'s own doc), so dmd's reversed
 // `extern(D)` convention (`_reversedArguments`'s own doc) assigns the six
 // integer registers to the eight scalars alone, in reversed declaration
 // order: `b1`, `b0`, `a5`, `a4`, `a3`, `a2` take them, leaving `a1` and
@@ -2035,7 +2037,7 @@ private struct ContextMemoryParam {
 // A method with a MEMORY-class parameter: the hidden context (`this`)
 // and the hidden return pointer - this method returns a MEMORY-class
 // `ThreeWords` too - travel together, in dmd's order (`this` first,
-// `abi.contextPrecedesHiddenReturnPointer`'s own doc;
+// `argumentplan.contextPrecedesHiddenReturnPointer`'s own doc;
 // `called.contextPrecedesHiddenReturnPointer` above checks the pair
 // alone). `value` spills to the stack after both, the only spilled
 // parameter here.
@@ -2371,7 +2373,7 @@ private struct MemoryTriple {
 }
 
 // Six plain `int`s fill the integer register file. `m` - a MEMORY-class
-// argument - always spills, whatever room is left (`abi.ArgumentPlan`'s
+// argument - always spills, whatever room is left (`argumentplan.ArgumentPlan`'s
 // own doc), and `value` - a mixed INTEGER/SSE pair whose INTEGER lane
 // has no register left either - spills too. Step 3 (MEMORY) and step 4
 // (mixed) both route through the same `addSpilled`/`spilled[]`
@@ -2649,7 +2651,7 @@ unittest {
 // against dmd directly: `-vcg-ast` on this exact shape shows `cast
 // (double)x` in the lowered call). `site.extraArgumentTypes` already
 // reads `double`, not `float`, so the classification this plan uses
-// (`ArgumentPlan.of`) never even sees the narrower type.
+// (`argumentPlanOf`) never even sees the narrower type.
 @("called.variadic.floatLiteralPromotedToDouble")
 unittest {
     auto site = variadicCallSite(q{

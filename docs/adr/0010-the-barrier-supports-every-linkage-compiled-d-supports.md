@@ -28,7 +28,7 @@ the call's own extra-argument types as the literal first element of
 the call's argument list, whose value at run time is a `TypeInfo_Tuple`
 reference, not a `TypeInfo[]` slice itself. What actually reaches the
 callee's own hidden `_arguments` argument then depends on the host
-compiler's own codegen, not the frontend (`snakebite.ffi.abi.
+compiler's own codegen, not the frontend (`snakebite.ffi.argumentplan.
 dVariadicArgumentsIsSlice`): on dmd, one hidden pointer to that
 `TypeInfo_Tuple` reference - the callee's own prologue builds the slice
 itself, by reading the tuple's `elements` field, before its body ever
@@ -68,7 +68,7 @@ the Itanium mangling the frontend already produces. Non-virtual member
 functions, with `this` as the first argument - except when the method
 also returns a MEMORY-class or non-trivially-copyable value, where
 `this` follows the hidden return pointer instead, as issue #336 itself
-found and `abi.contextPrecedesHiddenReturnPointer` encodes. Virtual
+found and `argumentplan.contextPrecedesHiddenReturnPointer` encodes. Virtual
 member functions, called through the C++ vtable the frontend models.
 Non-trivially-copyable classes, passed by hidden reference, as the
 Itanium ABI requires. A C++ exception that crosses the barrier

@@ -39,7 +39,7 @@ import snakebite.failure.report: internalFailure;
 // keeps its address. `callAt` only replays the moves: read a word, write
 // it into the frame, call that one entry once, and read the result back.
 public struct CallPlan {
-    import snakebite.ffi.abi: ArgumentPlan, Register;
+    import snakebite.ffi.argumentplan: ArgumentPlan, Register;
     import snakebite.ffi.sysv:
         CallEntry, CallFrame, snakebite_ffi_call_sysv_amd64,
         snakebite_ffi_call_sysv_amd64_integer;
@@ -108,10 +108,10 @@ public struct CallPlan {
     // parameters. The caller's first argument slot holds that pointer.
     private bool _hiddenContext;
     // dmd and ldc use different orders when both invisible arguments are
-    // present. See `abi.contextPrecedesHiddenReturnPointer`.
+    // present. See `argumentplan.contextPrecedesHiddenReturnPointer`.
     private bool _contextPrecedesHiddenReturnPointer;
     // Whether the callee reads its parameters out of the registers in
-    // reverse declaration order - see `abi.reversedDParameters`.
+    // reverse declaration order - see `argumentplan.reversedDParameters`.
     private bool _reversedArguments;
     // The moves `callAt` replays - see the module comment.
     private Move[] _moves;
@@ -385,7 +385,7 @@ public struct CallPlan {
             return null;
         import snakebite.native.variadic:
             initializeNativeCursor;
-        import snakebite.ffi.abi:
+        import snakebite.ffi.argumentplan:
             maxFloatingArguments, maxIntegerArguments;
         import std.algorithm.comparison: min;
 
@@ -790,7 +790,8 @@ public struct CallPlan {
     // shape alone - see the module comment. Called once, from `prepare`
     // and `ofRawAddress`, after every other field is set.
     private void buildMoves() {
-        import snakebite.ffi.abi: maxFloatingArguments, maxIntegerArguments;
+        import snakebite.ffi.argumentplan:
+            maxFloatingArguments, maxIntegerArguments;
         import std.algorithm: sort;
 
         size_t integerCount;
@@ -907,7 +908,7 @@ public struct CallPlan {
 
             // A MEMORY-class argument never reaches a register - the
             // SysV ABI classifies it onto the stack outright, skipping
-            // register classification entirely (`abi.ArgumentPlan`'s own
+            // register classification entirely (`argumentplan.ArgumentPlan`'s own
             // doc) - so it always defers to the spilled pass below,
             // whatever room either register file has left.
             if (plan.memory) {
@@ -953,7 +954,7 @@ public struct CallPlan {
 
             // A MEMORY-class argument's eightbytes were never classified
             // into `plan.registers` (there is no register shape to read -
-            // see `abi.ArgumentPlan`'s own doc), so each one is built here
+            // see `argumentplan.ArgumentPlan`'s own doc), so each one is built here
             // instead, straight from its byte size: a whole `word64` load
             // for every full eightbyte, and for a size that does not end
             // on an eightbyte boundary, one final `copy` load - `loadOf`/
@@ -1134,13 +1135,13 @@ public struct CallPlan {
         imported!"dmd.mtype".TypeFunction type,
     ) {
         import dmd.typesem: nextOf;
-        import snakebite.ffi.abi: needsHiddenReturnPointer;
+        import snakebite.ffi.abi: needsHiddenReturnPointer, returnPlanOf;
 
         if (type.isRef || type.nextOf is null
                 || needsHiddenReturnPointer(type.nextOf))
             return true;
 
-        const result = ArgumentPlan.ofReturn(type.nextOf);
+        const result = returnPlanOf(type.nextOf);
         foreach (register; result.registers[0 .. result.count])
             if (register.kind != Register.Kind.x87
                     && (register.size == 0
@@ -1478,7 +1479,7 @@ public struct PlanCache {
 
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
-    import snakebite.ffi.abi: Register;
+    import snakebite.ffi.argumentplan: Register;
     import snakebite.host.sharedtable: SharedTable;
 
     // Read without a lock by every thread that runs guest code
@@ -1918,7 +1919,7 @@ private CallPlan prepareCommon(
 // no pointer to the AST, so code that runs after compilation can
 // register an entry without a frontend.
 public struct NativeSignature {
-    import snakebite.ffi.abi: ArgumentPlan;
+    import snakebite.ffi.argumentplan: ArgumentPlan, Linkage;
 
     public struct Parameter {
         ArgumentPlan shape;
@@ -1931,7 +1932,7 @@ public struct NativeSignature {
         bool isDelegate;
     }
 
-    imported!"dmd.astenums".LINK linkage;
+    Linkage linkage;
     bool hasContext;
     // The function is declared with C-style or untyped D variadics.
     bool variadic;
@@ -1979,12 +1980,12 @@ public NativeSignature nativeSignatureOf(
 // keeps one per slot. Reference results use the same pointer return
 // convention as a forward call.
 package CallPlan prepareCallback(in NativeSignature signature) {
-    import dmd.astenums: LINK;
+    import snakebite.ffi.argumentplan: Linkage;
 
     auto plan = planOf(signature);
     plan._callbackVariadic = signature.variadic;
     plan._callbackDVariadic = signature.variadic
-        && signature.linkage == LINK.d;
+        && signature.linkage == Linkage.d;
     plan.buildCallbackLayout;
     return plan;
 }
@@ -2023,7 +2024,8 @@ private NativeSignature signatureOf(
     in bool isVariadicCall,
 ) {
     import snakebite.ffi.abi:
-        ArgumentPlan, Register, needsHiddenReturnPointer, supported;
+        argumentPlanOf, linkageOf, needsHiddenReturnPointer, returnPlanOf;
+    import snakebite.ffi.argumentplan: ArgumentPlan, Register, supported;
     import dmd.astenums: LINK, STC, Tdelegate, VarArg;
     import dmd.typesem: nextOf, toBasetype;
     import std.conv: text;
@@ -2044,8 +2046,8 @@ private NativeSignature signatureOf(
         // front, through the one mechanism every other backend and cache
         // already forces one through (`snakebite.frontend.compiler.
         // forceIfNeeded`, reached here via `typeFacts`), each only
-        // while dmd has not already resolved it. `classify`/`ArgumentPlan.
-        // of` (`snakebite.ffi.abi`) read a struct's own `.size`/
+        // while dmd has not already resolved it. `classify`/`argumentPlanOf`
+        // (`snakebite.ffi.abi`) read a struct's own `.size`/
         // `.alignsize` directly, not through `TypeFacts`, so without this
         // they would be the one place left in this whole call reading a
         // forward reference dmd might still need to resolve, unlocked -
@@ -2109,7 +2111,7 @@ private NativeSignature signatureOf(
             );
 
         NativeSignature signature;
-        signature.linkage = linkage;
+        signature.linkage = linkageOf(linkage);
         signature.hasContext = hasContext;
         signature.variadic = type.parameterList.varargs == VarArg.variadic;
         signature.variadicCall = isVariadicCall;
@@ -2124,7 +2126,7 @@ private NativeSignature signatureOf(
         signature.hiddenReturnPointer = !signature.returnsRef
             && needsHiddenReturnPointer(type.nextOf);
         if (!signature.returnsRef && !signature.hiddenReturnPointer)
-            signature.result = ArgumentPlan.ofReturn(type.nextOf);
+            signature.result = returnPlanOf(type.nextOf);
 
         foreach (i; 0 .. type.parameterList.length) {
             // A `ref` parameter occupies a pointer slot in the caller's
@@ -2157,7 +2159,7 @@ private NativeSignature signatureOf(
                         2,
                         false,
                     )
-                    : ArgumentPlan.of(type.parameterList[i].type);
+                    : argumentPlanOf(type.parameterList[i].type);
             signature.parameters ~= parameter;
         }
 
@@ -2177,7 +2179,7 @@ private NativeSignature signatureOf(
             NativeSignature.Parameter parameter;
             parameter.isCallback = isFunctionPointer || isDelegate;
             parameter.isDelegate = isDelegate;
-            parameter.shape = ArgumentPlan.of(extraType);
+            parameter.shape = argumentPlanOf(extraType);
             signature.parameters ~= parameter;
         }
 
@@ -2188,13 +2190,12 @@ private NativeSignature signatureOf(
 // The part of `_shapeOf` that needs no AST: places every argument of
 // `signature` and builds the moves.
 private CallPlan planOf(in NativeSignature signature) {
-    import snakebite.ffi.abi:
-        ArgumentPlan, Register, contextPrecedesHiddenReturnPointer,
+    import snakebite.ffi.argumentplan:
+        ArgumentPlan, Linkage, Register, contextPrecedesHiddenReturnPointer,
         dVariadicArgumentsIsSlice, reversedDParameters;
-    import dmd.astenums: LINK;
 
     const linkage = signature.linkage;
-    const isDVariadic = signature.variadic && linkage == LINK.d;
+    const isDVariadic = signature.variadic && linkage == Linkage.d;
 
     // An `extern(D)` untyped variadic callee's own hidden `_arguments`
     // (dmd's `functionParameters` inserts it on every such call site) is
@@ -2232,7 +2233,7 @@ private CallPlan planOf(in NativeSignature signature) {
     // declaration order, not reversed).
     plan._variadicCall = signature.variadicCall || signature.variadic;
     plan._reversedArguments = reversedDParameters
-        && (linkage == LINK.d || linkage == LINK.default_)
+        && (linkage == Linkage.d || linkage == Linkage.default_)
         && !isDVariadic;
 
     size_t argumentIndex;
@@ -2246,7 +2247,7 @@ private CallPlan planOf(in NativeSignature signature) {
     );
 
     // On ldc, `_arguments` is a two-register `TypeInfo[]` slice
-    // instead (`abi.dVariadicArgumentsIsSlice`'s own doc) - the same
+    // instead (`argumentplan.dVariadicArgumentsIsSlice`'s own doc) - the same
     // shape `abi.classify`'s own `Tarray` case gives any other
     // dynamic-array-typed argument, length then pointer, both
     // integer-class.

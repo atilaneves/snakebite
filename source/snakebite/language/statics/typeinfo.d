@@ -442,7 +442,7 @@ public struct RuntimeTypes {
             ? TypeInfo_Struct.StructFlags.hasPointers
             : cast(TypeInfo_Struct.StructFlags) 0;
         info.m_RTInfo = rtInfo(declaration);
-        import snakebite.ffi.abi: supported;
+        import snakebite.ffi.argumentplan: supported;
         static if (supported) {
             // DMD's TypeInfo glue uses these frontend types, not the call
             // plan's registers: one vector type can span both eightbytes.
