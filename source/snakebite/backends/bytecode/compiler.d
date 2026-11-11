@@ -172,7 +172,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
             &classRuntimeInfo, &callLowering,
-            (module_) => &moduleForD(module_).blocks);
+            (module_) => &moduleForD(module_).blocks, &callableKind);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,

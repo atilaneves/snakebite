@@ -6,7 +6,7 @@ private:
 
 import dmd.dmodule: Module;
 import snakebite.failure.report: internalFailure;
-import snakebite.backends.bytecode.relocation: Target;
+import snakebite.backends.bytecode.relocation: DatumRef, Target;
 import snakebite.frontend.typefacts;
 import snakebite.native.staticstore: Placed, StaticBlocks, StaticStore;
 import snakebite.native.value:
@@ -41,13 +41,14 @@ public struct NativeData {
     // An `extern` variable's definition, found once for each variable.
     private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
     private SymbolAddress _symbolAddress;
+    private FunctionKind _functionKind;
     private ThreadLocalAddress _threadLocalAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     private LoweringCall _callLowering;
     // Read and written only under the compiler lock. Class objects and
     // struct values are keyed by their own literal, not by a reference
     // or address expression, to preserve aliases and cycles.
-    private void*[StructLiteralExp] _compileTimeValues;
+    private Placed[StructLiteralExp] _compileTimeValues;
     // The address of each literal's copy, found without a lock. A miss goes
     // to `_stringTexts`, so that nodes with equal text share one address.
     private SharedTable!(StringExp, const(void)*) _stringNodes;
@@ -88,6 +89,7 @@ public struct NativeData {
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         LoweringCall call,
         StaticBlocks* delegate(Module) blocksOf = null,
+        FunctionKind functionKind = null,
     ) {
         _isRootOwned = isRootOwned;
         _linkedVariable = linkedVariable;
@@ -97,6 +99,7 @@ public struct NativeData {
         _callLowering = call;
         _store = store;
         _blocksOf = blocksOf;
+        _functionKind = functionKind;
     }
 
     private void callLowering(
@@ -113,28 +116,30 @@ public struct NativeData {
         Expression expression,
         void* place,
     ) {
-        storeValue(type, facts, expression, place, &addressOf, &this);
+        storeValue(type, facts, expression, place, &placeOf, &this);
     }
 
-    private void* classValue(ClassReferenceExp value) {
+    // The object lives in the GC heap, in no datum of the blocks.
+    private Placed classValue(ClassReferenceExp value) {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: toInteger;
         import snakebite.frontend.compiler: withCompilerLock;
         version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
 
-        void* address;
+        Placed placed;
         withCompilerLock({
             if (auto found = value.value in _compileTimeValues) {
-                address = *found;
+                placed = *found;
                 return;
             }
             version(unittest) assertCacheFillAllowed!"class constants";
             const info = _classInfo(value.originalClass);
             auto bytes = new void[info.m_init.length]; // Must remain writable.
             memcpy(bytes.ptr, info.m_init.ptr, bytes.length);
-            address = bytes.ptr;
+            auto address = bytes.ptr;
+            placed = Placed(bytes);
             // Register before fields: compile-time objects can form cycles.
-            _compileTimeValues[value.value] = address;
+            _compileTimeValues[value.value] = placed;
             scope (failure) _compileTimeValues.remove(value.value);
             for (auto declaration = value.originalClass;
                     declaration !is null; declaration = declaration.baseClass) {
@@ -158,30 +163,29 @@ public struct NativeData {
                 }
             }
         });
-        return address;
+        return placed;
     }
 
     // The one static struct value for a compile-time `&literal`.
-    private void* structValue(StructLiteralExp literal) {
+    private Placed structValue(StructLiteralExp literal) {
         import snakebite.frontend.compiler: withCompilerLock;
         version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
 
-        void* address;
+        Placed value;
         withCompilerLock({
             if (auto found = literal in _compileTimeValues) {
-                address = *found;
+                value = *found;
                 return;
             }
             version(unittest) assertCacheFillAllowed!"struct constants";
             const facts = typeFacts(literal.type);
-            auto bytes = reserve(facts);
-            address = bytes.ptr;
+            value = reserve(facts);
             // Register before fields: compile-time values can form cycles.
-            _compileTimeValues[literal] = address;
+            _compileTimeValues[literal] = value;
             scope (failure) _compileTimeValues.remove(literal);
-            write(literal.type, facts, literal, address);
+            write(literal.type, facts, literal, value.ptr);
         });
-        return address;
+        return value;
     }
 
     // Equal text has one address, as the object file gives in compiled D:
@@ -283,24 +287,21 @@ public struct NativeData {
     // Records that the word at `place` holds the address `base + offset`,
     // when `place` is in a datum of this: a word in other memory is not in the
     // data of the program, and what points to that memory gets no position.
-    // For `staticData`, `base` is the start of the datum that the address is
-    // computed from, and `offset` can reach its end. A null `base` is no
-    // address.
+    // For `staticData`, `base` is the start of the datum `datum` and `offset`
+    // can reach its end; `datum` has no blocks when no known blocks hold it.
+    // A null `base` is no address.
     private void recordAddress(
-        in void* place, in Target.Kind kind, in void* base, in size_t offset = 0,
+        in void* place, in Target.Kind kind, in void* base,
+        in DatumRef datum, in size_t offset = 0,
     ) {
         if (!recordRelocs || base is null)
             return;
         Link link;
         link.kind = kind;
         if (kind == Target.Kind.staticData) {
-            foreach (blocks; _knownBlocks) {
-                if (blocks.locate(base, link.block, link.offset)) {
-                    link.set = blocks;
-                    link.offset += offset;
-                    break;
-                }
-            }
+            link.set = cast(const(StaticBlocks)*) datum.set;
+            link.block = datum.block;
+            link.offset = datum.offset + offset;
         } else
             link.address = cast(size_t) base + offset;
         recordLink(place, link);
@@ -485,7 +486,7 @@ public struct NativeData {
     // with a thread-local variable (its address is not a compile-time
     // constant there either), so this is a clear failure instead of a
     // silent one for whatever is left.
-    private void* addressOf(Declaration symbol) {
+    private SymbolPlace placeOf(Declaration symbol) {
         import std.conv: text;
 
         if (auto variable = symbol.isVarDeclaration) {
@@ -493,9 +494,18 @@ public struct NativeData {
                 throw new Exception(text(
                     "cannot bake the address of thread-local variable `",
                     variable.toChars, "` into a constant initializer"));
-            return storageOf(variable).ptr;
+            auto placed = storageOf(variable);
+            return SymbolPlace(placed.ptr, Target.Kind.staticData,
+                placed.where);
         }
-        return _symbolAddress(symbol);
+        auto address = _symbolAddress(symbol);
+        // A function address is code: a guest function, the entry that host
+        // code calls for one, or a function of the host.
+        const kind = symbol.isFuncDeclaration is null
+            ? Target.Kind.staticData
+            : _functionKind is null
+                ? Target.Kind.hostSymbol : _functionKind(address);
+        return SymbolPlace(address, kind, DatumRef());
     }
 
     public void fillFields(
@@ -551,6 +561,16 @@ private bool fieldImageIncludes(
 
 private alias SymbolAddress =
     void* delegate(imported!"dmd.declaration".Declaration);
+// What a symbol's address points at: for `staticData`, the datum.
+private struct SymbolPlace {
+    void* address;
+    Target.Kind kind;
+    DatumRef datum;
+}
+private alias SymbolPlaceOf =
+    SymbolPlace delegate(imported!"dmd.declaration".Declaration);
+// What kind of target a function address is (`Target.Kind`).
+private alias FunctionKind = Target.Kind delegate(in void* address);
 // This thread's address of a thread-local symbol, by linker name.
 private alias ThreadLocalAddress = void* delegate(in char[] name);
 // Calls the function that a lowering names, as guest or native code:
@@ -627,7 +647,7 @@ private void storeValue(
     imported!"dmd.mtype".Type type,
     imported!"dmd.expression".Expression value,
     void* place,
-    scope SymbolAddress symbolAddress,
+    scope SymbolPlaceOf symbolAddress,
     NativeData* nativeData = null,
 ) {
     storeValue(type, typeFacts(type), value, place, symbolAddress, nativeData);
@@ -667,10 +687,10 @@ private void copyUnits(
 
 private void noteAddress(
     NativeData* nativeData, in void* place, in Target.Kind kind,
-    in void* base, in size_t offset = 0,
+    in void* base, in DatumRef datum = DatumRef(), in size_t offset = 0,
 ) {
     if (nativeData !is null)
-        nativeData.recordAddress(place, kind, base, offset);
+        nativeData.recordAddress(place, kind, base, datum, offset);
 }
 
 private const(void)* stringPointer(
@@ -696,7 +716,7 @@ private void storeValue(
     in TypeFacts facts,
     imported!"dmd.expression".Expression value,
     void* place,
-    scope SymbolAddress symbolAddress,
+    scope SymbolPlaceOf symbolAddress,
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
@@ -717,9 +737,11 @@ private void storeValue(
         ulong offset;
         if (isSymbolAddress(value, symbol, offset)) {
             assert(symbolAddress !is null);
-            const base = cast(ubyte*) symbolAddress(symbol);
+            const target = symbolAddress(symbol);
+            const base = cast(ubyte*) target.address;
             checkedStoreIntegral(place, cast(ulong) (base + offset), facts.size);
-            noteAddress(nativeData, place, Target.Kind.staticData, base, offset);
+            noteAddress(nativeData, place, target.kind, base, target.datum,
+                offset);
             return;
         }
 
@@ -773,9 +795,10 @@ private void storeValue(
 
     if (auto symbol = value.isSymOffExp) {
         assert(symbolAddress !is null);
-        auto base = cast(ubyte*) symbolAddress(symbol.var);
+        const target = symbolAddress(symbol.var);
+        auto base = cast(ubyte*) target.address;
         *cast(void**) place = base + symbol.offset;
-        noteAddress(nativeData, place, Target.Kind.staticData, base,
+        noteAddress(nativeData, place, target.kind, base, target.datum,
             symbol.offset);
         return;
     }
@@ -784,26 +807,26 @@ private void storeValue(
         assert(symbolAddress !is null);
         if (type.ty == Tdelegate) {
             *cast(void**) (bytes + delegateContextOffset) = null;
-            *cast(void**) (bytes + delegateFunctionOffset) =
-                symbolAddress(literal.fd);
+            auto target = symbolAddress(literal.fd);
+            *cast(void**) (bytes + delegateFunctionOffset) = target.address;
             noteAddress(nativeData, bytes + delegateFunctionOffset,
-                Target.Kind.hostSymbol,
-                *cast(void**) (bytes + delegateFunctionOffset));
+                target.kind, target.address);
         } else {
-            *cast(void**) place = symbolAddress(literal.fd);
-            noteAddress(nativeData, place, Target.Kind.hostSymbol,
-                *cast(void**) place);
+            auto target = symbolAddress(literal.fd);
+            *cast(void**) place = target.address;
+            noteAddress(nativeData, place, target.kind, target.address);
         }
         return;
     }
 
     if (auto reference = value.isClassReferenceExp) {
         assert(nativeData !is null);
-        const address = nativeData.classValue(reference);
+        auto object = nativeData.classValue(reference);
         int offset;
         type.isTypeClass.sym.isBaseOf(reference.originalClass, &offset);
-        *cast(void**) place = cast(ubyte*) address + offset;
-        noteAddress(nativeData, place, Target.Kind.staticData, address, offset);
+        *cast(void**) place = cast(ubyte*) object.ptr + offset;
+        noteAddress(nativeData, place, Target.Kind.staticData, object.ptr,
+            object.where, offset);
         return;
     }
 
@@ -811,10 +834,10 @@ private void storeValue(
     if (auto address = value.isAddrExp) {
         if (isStaticStructAddress(address)) {
             assert(nativeData !is null);
-            *cast(void**) place =
-                nativeData.structValue(address.e1.isStructLiteralExp);
-            noteAddress(nativeData, place, Target.Kind.staticData,
-                *cast(void**) place);
+            auto struct_ = nativeData.structValue(address.e1.isStructLiteralExp);
+            *cast(void**) place = struct_.ptr;
+            noteAddress(nativeData, place, Target.Kind.staticData, struct_.ptr,
+                struct_.where);
             return;
         }
     }
@@ -846,13 +869,13 @@ private void storeValue(
         const elementSize = type.nextOf.size;
         // The data of the process store when there is one, so that a file can
         // hold them.
-        void[] data;
+        Placed data;
         if (nativeData !is null && literal.elements.length != 0) {
             auto arrayFacts = typeFacts(type.nextOf);
             arrayFacts.size = literal.elements.length * elementSize;
             data = nativeData.reserve(arrayFacts);
         } else
-            data = new void[literal.elements.length * elementSize];
+            data = Placed(new void[literal.elements.length * elementSize]);
         foreach (i; 0 .. literal.elements.length)
             storeValue(type.nextOf, literal[i],
                 cast(ubyte*) data.ptr + i * elementSize, symbolAddress, nativeData);
@@ -860,14 +883,15 @@ private void storeValue(
         // to a pointer to its own static storage.
         if (type.ty == Tpointer) {
             *cast(void**) place = data.ptr;
-            noteAddress(nativeData, place, Target.Kind.staticData, data.ptr);
+            noteAddress(nativeData, place, Target.Kind.staticData, data.ptr,
+                data.where);
             return;
         }
         checkedStoreIntegral(bytes + arrayLengthOffset, literal.elements.length,
             size_t.sizeof);
         *cast(void**) (bytes + arrayPointerOffset) = data.ptr;
         noteAddress(nativeData, bytes + arrayPointerOffset,
-            Target.Kind.staticData, data.ptr);
+            Target.Kind.staticData, data.ptr, data.where);
         return;
     }
 

@@ -71,8 +71,9 @@ public struct StaticBlocks {
         return _blocks[datum.block][datum.offset .. datum.offset + datum.size];
     }
 
-    // Where an address of this process lies in the blocks, or false.
-    public bool locate(
+    // Where an address of this process lies in the blocks, or false. Only the
+    // places of words use it: a datum is named by its `DatumRef`.
+    private bool locate(
         in void* address, out size_t block, out size_t offset,
     ) const @trusted pure nothrow @nogc {
         foreach (index, candidate; _blocks) {
