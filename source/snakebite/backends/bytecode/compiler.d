@@ -146,12 +146,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
+        linked = LinkedModules(program.dependencyImage);
         _compilation.hasCompiler = true;
         _jit = jit;
         _plans = PlanCache(program.dependencyImage,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
-        _nativeData = NativeData(&_program.isRootOwned,
+        _nativeData = NativeData(&linked.store, &_program.isRootOwned,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),

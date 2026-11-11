@@ -4,7 +4,12 @@ module snakebite.backends.bytecode.linkedmodules;
 private:
 
 import snakebite.backends.bytecode.vm: Function;
+import snakebite.ffi.symbol: Resolver;
+import snakebite.host.threads: heapNew;
+import snakebite.image.dependency: DependencyImage;
 import snakebite.native.signature: SignatureTable;
+import snakebite.native.staticstore: StaticStore;
+import snakebite.stack.tls: TlsSlots;
 
 
 // The compiled code and data of the modules of one process, bound together.
@@ -14,9 +19,23 @@ import snakebite.native.signature: SignatureTable;
 public struct LinkedModules {
     @disable this(this);
 
+    // `image` is the dependency image that symbols resolve in, or null. The
+    // owner must outlive this.
+    public this(const(DependencyImage)* image) {
+        store = StaticStore(() => heapNew!TlsSlots);
+        resolver = Resolver(image);
+    }
+
     // The interned parameter signatures of the layouts. A `Signature*` of
     // one `LinkedModules` meets only others of the same one.
     public SignatureTable signatures;
+
+    // The storage of the static data and constants. What fills it is
+    // elsewhere: it holds no frontend type.
+    public StaticStore store;
+
+    // The resolver of the symbols that the call plans bind to.
+    public Resolver resolver;
 
     // Each is a heap block that never moves: a call site embeds the address
     // of its callee before the callee is filled. One append per function.

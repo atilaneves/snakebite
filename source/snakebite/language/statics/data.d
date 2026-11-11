@@ -30,7 +30,6 @@ public struct NativeData {
     import dmd.mtype: Type;
 
     import snakebite.host.sharedtable: SharedTable;
-    import snakebite.host.threads: heapNew;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
@@ -48,9 +47,10 @@ public struct NativeData {
     // The address of each literal's copy, found without a lock. A miss goes
     // to `_stringTexts`, so that nodes with equal text share one address.
     private SharedTable!(StringExp, const(void)*) _stringNodes;
-    // Under the compiler lock only. The copies are owned by `_store`.
+    // Under the compiler lock only. The copies are owned by `_store`, which
+    // the owner of this gives at construction and keeps alive longer.
     private const(void)*[StringText] _stringTexts;
-    private StaticStore _store;
+    private StaticStore* _store;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006). A `shared`/`__gshared`/`immutable` variable's storage
     // is published once it is resolved or initialised; until then only
@@ -66,6 +66,7 @@ public struct NativeData {
     private SharedTable!(VarDeclaration, TlsDescriptor) _tlsDescriptors;
 
     public this(
+        StaticStore* store,
         bool delegate(Dsymbol) const isRootOwned,
         VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
@@ -79,7 +80,7 @@ public struct NativeData {
         _threadLocalAddress = threadLocalAddress;
         _classInfo = classInfo;
         _callLowering = call;
-        _store = StaticStore(() => heapNew!TlsSlots);
+        _store = store;
     }
 
     private void callLowering(

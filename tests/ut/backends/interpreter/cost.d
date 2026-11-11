@@ -11,6 +11,7 @@ import dmd.func: FuncDeclaration;
 import dmd.dsymbol: Dsymbol;
 import dmd.declaration: VarDeclaration;
 import snakebite.language.layout.variables: forEachRuntimeVariable;
+import snakebite.backends.bytecode.linkedmodules: LinkedModules;
 import snakebite.language.statics.data: NativeData;
 import std.conv: text;
 import core.exception: AssertError;
@@ -39,7 +40,9 @@ static foreach (rootOwned; [true, false]) {
             });
         assert(variable !is null);
         int nativeValue = 7;
+        auto linked = LinkedModules(null);
         auto data = NativeData(
+            &linked.store,
             &ownership.isRootOwned,
             (declaration) => declaration,
             (declaration) => cast(void*) &nativeValue,
