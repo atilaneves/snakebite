@@ -12,7 +12,8 @@ import snakebite.failure.report: internalFailure;
 
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
-import snakebite.native.signature: Shape, SignatureTable;
+import snakebite.native.signature: Shape;
+import snakebite.backends.bytecode.linkedmodules: LinkedModules;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
     IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
@@ -63,6 +64,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.language.statics.data: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
     import snakebite.language.statics.typeinfo: RuntimeTypes;
+
+    // Declared before what points into it, so that it is destroyed after.
+    // What the compiler fills: the signatures of the layouts, and the rest of
+    // the compiled code and data of the program.
+    package LinkedModules linked;
 
     // Each native stack needs its own guest frame stack. Fibers can resume
     // out of nesting order, so they cannot share one LIFO stack.
@@ -132,9 +138,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // paths and host entry. Publication permits lock-free callback reads
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
-    // The interned parameter signatures of the layouts of this backend. A
-    // `Signature*` of this backend meets only others of this backend.
-    package SignatureTable signatures;
 
     // Whether the compiler records relocs. It is off: nothing reads the
     // relocs yet, and recording them costs compile time and memory.
@@ -346,7 +349,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // locals, including lowering temporaries. Publish only that
             // complete layout, owned by this backend rather than the AST.
             result = _layouts.insert(
-                function_, FrameLayout.of(function_, signatures));
+                function_, FrameLayout.of(function_, linked.signatures));
         });
         return result;
     }
@@ -9831,7 +9834,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const calleeSlotOffset = reserveTemp(pointerFacts);
         auto valueCall = ValueCall.of(
-            calleeType, true, _bytecode.signatures);
+            calleeType, true, _bytecode.linked.signatures);
         const calleeLayout = valueCall.layout;
         Arg[] args;
         args ~= Arg(
@@ -10095,7 +10098,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         final switch (receiver.kind) with (CallReceiver.Kind) {
         case enclosing:
             return contextOffsetOf(calleeContextSourceOf(
-                _function, callee, _bytecode.signatures));
+                _function, callee, _bytecode.linked.signatures));
         case classValue:
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
@@ -10892,7 +10895,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         auto valueCall = ValueCall.of(
-            functionType, isDelegateCall, _bytecode.signatures);
+            functionType, isDelegateCall, _bytecode.linked.signatures);
         if (valueCall.mismatches(expression.arguments))
             internalFailure("dmd rejects a call with the wrong number of arguments");
 
