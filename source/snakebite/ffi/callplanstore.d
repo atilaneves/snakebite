@@ -4,7 +4,7 @@ module snakebite.ffi.callplanstore;
 private:
 
 import snakebite.ffi.callback: CallbackBridge, CallbackHandler;
-import snakebite.ffi.callplan: CallPlan;
+import snakebite.ffi.callplan: CallPlan, NativeSignature, planOf;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.image.dependency: DependencyImage;
 
@@ -40,8 +40,12 @@ public struct CallPlanStore {
         callbacks = new CallbackBridge(handler, owner, prepare);
     }
 
+    // A plan with the two inputs that `plan` made it from: the file of a
+    // program holds these, and a load makes the plan again from them.
     private struct PlanEntry {
         CallPlan plan;
+        NativeSignature signature;
+        string symbol;
         PlanEntry* next;
     }
     // The prepared plans, newest first. Threads that run guest code prepare
@@ -54,11 +58,23 @@ public struct CallPlanStore {
         return _plans is null;
     }
 
-    // An empty plan for the caller to fill, kept for the life of this.
-    public CallPlan* newPlan() nothrow pure {
+    // A plan that lays out the call of `signature` to the code at `symbol`,
+    // kept for the life of this, or null when the resolver has no `symbol`.
+    // An empty `symbol` is a plan with no code to call. Every plan of this
+    // store is made here, so the plans of a load are the plans of a compile.
+    public CallPlan* plan(NativeSignature signature, string symbol = null) {
         import core.atomic: atomicLoad, cas;
 
+        void* address;
+        if (symbol.length != 0) {
+            address = resolver.resolve(symbol);
+            if (address is null)
+                return null;
+        }
         auto entry = new PlanEntry;
+        entry.plan = planOf(signature, address, callbacks);
+        entry.signature = signature;
+        entry.symbol = symbol;
         // Plans are only pushed, never popped or reused, so a head that
         // compares equal is the same node: no ABA.
         shared(PlanEntry)* head;
@@ -67,5 +83,21 @@ public struct CallPlanStore {
             entry.next = cast(PlanEntry*) head;
         } while (!cas(&_plans, head, cast(shared(PlanEntry)*) entry));
         return &entry.plan;
+    }
+
+    // The plans, oldest first, with the inputs of `plan` that made each.
+    public void eachPlan(
+        scope void delegate(
+            const(CallPlan)*, in NativeSignature, in string) visit,
+    ) const {
+        import core.atomic: atomicLoad;
+        import std.algorithm: reverse;
+
+        const(PlanEntry)*[] entries;
+        for (auto entry = cast(const(PlanEntry)*) atomicLoad(_plans);
+                entry !is null; entry = entry.next)
+            entries ~= entry;
+        foreach (entry; entries.reverse)
+            visit(&entry.plan, entry.signature, entry.symbol);
     }
 }

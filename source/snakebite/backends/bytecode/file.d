@@ -22,7 +22,7 @@ import snakebite.backends.bytecode.vm:
     prepareForExecution, Role, Roles, rolesOf, withoutCount;
 import snakebite.failure.report: SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
-import snakebite.ffi.callplan: NativeSignature;
+import snakebite.ffi.callplan: CallPlan, NativeSignature;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
@@ -54,7 +54,6 @@ public void saveProgram(
 ) {
     import std.file: remove, rename, write;
 
-    refuseWhatIsNotSupported(program);
     auto body_ = Archive.writing(program);
     transferBody(body_, program, null);
 
@@ -138,14 +137,6 @@ private void transferHeader(ref Archive archive, ref Header header) {
 }
 
 
-// What a program that a save writes must not have yet: these need relocations
-// that the file cannot hold.
-private void refuseWhatIsNotSupported(ref const Program program) {
-    if (!program.plans.isEmpty)
-        throw refusal("the program calls a function with a foreign call plan");
-}
-
-
 private SnakebiteException refusal(in string reason) {
     return new SnakebiteException(
         "cannot save the program: " ~ reason ~ ", which a program file "
@@ -170,6 +161,10 @@ private struct Archive {
     // Writing: the place of each function. Reading: the function at a place.
     private size_t[2][const(Function)*] _positionOf;
     private size_t[const(ModuleStart)*] _moduleOfStart;
+    // Writing: the place of each plan of the store. Reading: the plan at a
+    // place.
+    private size_t[const(CallPlan)*] _planIndex;
+    private CallPlan*[] _plans;
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
@@ -178,6 +173,9 @@ private struct Archive {
         Archive archive;
         archive._direction = Direction.writing;
         archive._program = &program;
+        program.plans.eachPlan((plan, signature, symbol) {
+            archive._planIndex[plan] = archive._planIndex.length;
+        });
         foreach (m, module_; program._modules) {
             archive._moduleOfStart[&module_.start] = m;
             foreach (f, function_; module_._functions)
@@ -305,6 +303,19 @@ private struct Archive {
             return address;
         throw new SnakebiteException(
             "the program file names a string that it does not hold");
+    }
+
+    size_t planIndexOf(const(CallPlan)* plan) {
+        if (auto found = plan in _planIndex)
+            return *found;
+        throw refusal("a call site names a call plan that the store does not hold");
+    }
+
+    const(CallPlan)* planAt(in size_t index) {
+        if (index >= _plans.length)
+            throw new SnakebiteException(
+                "the program file names a call plan that it does not hold");
+        return _plans[index];
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
@@ -484,6 +495,9 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             const position =
                 archive.positionOf(cast(const(Function)*) target.address);
             return [position[0], position[1], 0];
+        case nativePlan:
+            return [archive.planIndexOf(
+                cast(const(CallPlan)*) target.address), 0, 0];
         case staticData:
         case constantPool:
             return archive.dataPosition(cast(const(void)*) target.address);
@@ -494,7 +508,6 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
         case typeInfo:
         case hostSymbol:
         case frontendString:
-        case nativePlan:
         case callbackEntry:
         case callback:
             throw refusal(text("a word needs a relocation of kind ",
@@ -510,6 +523,8 @@ private size_t addressOf(
             return cast(size_t) archive.signatureAt(reference[0]);
         case functionWord:
             return cast(size_t) archive.functionAt(reference[0], reference[1]);
+        case nativePlan:
+            return cast(size_t) archive.planAt(reference[0]);
         case staticData:
         case constantPool:
             return cast(size_t) archive.dataAt(reference);
@@ -520,7 +535,6 @@ private size_t addressOf(
         case typeInfo:
         case hostSymbol:
         case frontendString:
-        case nativePlan:
         case callbackEntry:
         case callback:
             throw new SnakebiteException(
@@ -723,6 +737,7 @@ private void transferBody(
                 program._modules[m].newFunction;
     }
     transferStartData(archive, program);
+    transferPlans(archive, program);
     // All data before any function: a function can point into any module.
     // The bytes of all data come before the addresses in them: a datum can
     // point into any block or string.
@@ -735,6 +750,33 @@ private void transferBody(
     transferAddresses(archive, *program.store.blocks);
     foreach (m; 0 .. moduleCount)
         transferModule(archive, program, *program._modules[m]);
+}
+
+
+// The call plans of the store, in the order a compile made them. A load makes
+// each one again, with the function that makes it after a compile.
+private void transferPlans(ref Archive archive, ref Program program) {
+    NativeSignature[] signatures;
+    string[] symbols;
+    if (archive.isWriting)
+        program.plans.eachPlan((plan, signature, symbol) {
+            signatures ~= cast() signature;
+            symbols ~= symbol;
+        });
+    archive.transfer(signatures);
+    archive.transfer(symbols);
+    if (archive.isWriting)
+        return;
+    if (symbols.length != signatures.length)
+        throw new SnakebiteException(
+            "the program file holds call plans that do not match");
+    foreach (index, signature; signatures) {
+        auto plan = program.plans.plan(signature, symbols[index]);
+        if (plan is null)
+            throw new SnakebiteException(text("the program calls `",
+                symbols[index], "`, which this process does not have"));
+        archive._plans ~= plan;
+    }
 }
 
 

@@ -128,6 +128,12 @@ private void* sharedObjectAddress(in char[] name) {
 // `Resolver.resolveIndependent` instead. It excludes executable fixtures
 // even when their names match, and keeps its answers in a separate cache.
 private void* symbolAddress(in char[] name) {
+    import snakebite.druntime.constructoratomic:
+        atomicAddSymbol, snakebite_constructor_atomic_add_int;
+
+    // The host wrapper that a call to `core.atomic.atomicOp!"+="` runs.
+    if (name == atomicAddSymbol)
+        return cast(void*) &snakebite_constructor_atomic_add_int;
     if (auto address = sharedObjectAddress(name))
         return address;
 

@@ -141,11 +141,11 @@ public struct CallAdapter {
             Type[] extraTypes;
             foreach (expression; _expressions[extraOffset .. $])
                 extraTypes ~= expression.type;
-            return plans.keep(plans.variadicOf(callee, extraTypes));
+            return plans.variadicKeptOf(callee, extraTypes);
         }
 
-        // A plan for one execution of a call through `address`; the caller
-        // keeps it with `PlanCache.keep` or drops it. The callee is variadic.
+        // A plan for one execution of a call through `address`, which the
+        // caller drops. The callee is variadic.
         public CallPlan prepareAtAddress(
             ref PlanCache plans, const(void)* address, bool hasContext,
         ) {
@@ -158,6 +158,22 @@ public struct CallAdapter {
                 extraTypes ~= expression.type;
             return plans.variadicAtAddress(
                 _type, hasContext, address, extraTypes);
+        }
+
+        // The plan of a call through a value, whose code is not known, kept
+        // for the life of the program. The callee is variadic.
+        public const(CallPlan)* prepareWithoutCode(
+            ref PlanCache plans, bool hasContext,
+        ) {
+            import dmd.astenums: VarArg;
+            import dmd.mtype: Type;
+
+            assert(_type.parameterList.varargs == VarArg.variadic);
+            Type[] extraTypes;
+            foreach (expression; _expressions[extraOffset .. $])
+                extraTypes ~= expression.type;
+            return plans.variadicKeptWithoutCode(
+                _type, hasContext, extraTypes);
         }
 
         public struct Value {

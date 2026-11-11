@@ -134,13 +134,11 @@ public struct PlanCache {
         if (auto cached = key in _signatures)
             return *cached;
 
-        auto plan = _store.newPlan;
         // These indirect calls pass only the declared parameters.
         // A C variadic call with no extra arguments still needs its
         // variadic ABI plan (including the SSE register count).
-        *plan = planOf(_signatureOf(type, context, type.linkage, null,
-            type.parameterList.varargs == VarArg.variadic),
-            null, _store.callbacks);
+        auto plan = _store.plan(_signatureOf(type, context, type.linkage, null,
+            type.parameterList.varargs == VarArg.variadic));
         return *_signatures.insert(key, plan);
     }
 
@@ -403,13 +401,45 @@ public struct PlanCache {
             return *cached;
 
         countPreparation;
-        auto plan = _store.newPlan;
-        *plan = prepare(function_, _store.resolver, _store.callbacks);
-        return *_plans.insert(function_, plan);
+        return *_plans.insert(function_, keptPlanOf(function_, null, false));
+    }
+
+    // The plan of one call site of a C-style or untyped D variadic callee,
+    // kept like `of` keeps one (see `variadicOf`).
+    public const(CallPlan)* variadicKeptOf(
+        FuncDeclaration function_,
+        scope Type[] extraArgumentTypes,
+    ) {
+        countPreparation;
+        return keptPlanOf(function_, extraArgumentTypes, true);
+    }
+
+    // As `variadicKeptOf`, for a call through a value of `type`, whose code
+    // is not known: the plan has no code to call.
+    public const(CallPlan)* variadicKeptWithoutCode(
+        TypeFunction type, bool hasContext,
+        scope Type[] extraArgumentTypes,
+    ) {
+        countPreparation;
+        return _store.plan(_signatureOf(type, hasContext, type.linkage,
+            extraArgumentTypes, true));
+    }
+
+    private CallPlan* keptPlanOf(
+        FuncDeclaration function_,
+        scope Type[] extraArgumentTypes,
+        in bool isVariadicCall,
+    ) {
+        string symbol;
+        auto signature = calleeOf(function_, extraArgumentTypes,
+            isVariadicCall, symbol);
+        if (auto plan = _store.plan(signature, symbol))
+            return plan;
+        throw unresolved(function_, symbol);
     }
 
     // As `.of`, but for one call site of an `extern(C)` C-style or
-    // `extern(D)` untyped variadic callee (`prepareVariadic`'s own doc):
+    // `extern(D)` untyped variadic callee (`calleeOf`'s own doc):
     // the plan depends on that call's own extra argument types, not on
     // `function_` alone, so this
     // never caches by declaration the way `_plans` does - it prepares a
@@ -420,7 +450,7 @@ public struct PlanCache {
     // calls this only once, while compiling the one `CallSite` a guest
     // `CallExp` ever produces.
     // No frontend lock: never cached (this method's own doc), so every
-    // call touches dmd, but only through `prepareVariadic` (`shapeOf`/
+    // call touches dmd, but only through `calleeOf` (`shapeOf`/
     // `_shapeOf`), which forces every dmd forward reference it could
     // still need itself, up front (`signatureOf`'s own doc). This is
     // still a compile-time-triggered path: a caller reaches it once per
@@ -430,8 +460,12 @@ public struct PlanCache {
         scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        return prepareVariadic(
-            function_, _store.resolver, extraArgumentTypes, _store.callbacks);
+        string symbol;
+        auto signature = calleeOf(function_, extraArgumentTypes, true, symbol);
+        void* address = symbol.length == 0 ? null : resolve(symbol);
+        if (address is null)
+            throw unresolved(function_, symbol);
+        return planOf(signature, address, _store.callbacks);
     }
 
     // As `variadicOf`, for a call through an address. A caller that
@@ -442,26 +476,17 @@ public struct PlanCache {
         scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        return prepareVariadicAtAddress(type, hasContext, address,
-            extraArgumentTypes, _store.callbacks);
-    }
-
-    // Keeps `plan` for the life of the program and returns where. A caller
-    // that stores the plan in a call site does this; one that uses it for
-    // one execution does not.
-    public const(CallPlan)* keep(CallPlan plan) {
-        auto kept = _store.newPlan;
-        *kept = plan;
-        return kept;
+        return planOf(_signatureOf(type, hasContext, type.linkage,
+            extraArgumentTypes, true), cast(void*) address, _store.callbacks);
     }
 
     // As `.of`, but for a raw address with no `FuncDeclaration` to key
-    // on - see `CallPlan.ofRawAddress`. Keyed and cached by linker symbol
+    // on - see `CallPlan.rawSignatureOf`. Keyed and cached by linker symbol
     // name instead, so a second bounds check anywhere in the guest
     // program reuses the first one's resolved address and plan. Returns
     // `null` when the symbol is not in this process, the same convention
     // `resolve` itself uses.
-    // No frontend lock: `CallPlan.ofRawAddress` classifies from
+    // No frontend lock: `CallPlan.rawSignatureOf` classifies from
     // caller-supplied `Register`s alone, with no `dmd.mtype.Type` and so
     // no dmd forward reference to force at all, and `_rawPlans` is a
     // `SharedTable` (ADR-0006).
@@ -483,14 +508,12 @@ public struct PlanCache {
             return *cached;
         }
 
-        auto address = resolve(name);
-        if (address is null)
+        auto plan = _store.plan(CallPlan.rawSignatureOf(
+            parameterRegisters, returnRegister, secondReturnRegister), name);
+        if (plan is null)
             return null;
 
         countPreparation;
-        auto plan = _store.newPlan;
-        *plan = CallPlan.ofRawAddress(
-            address, parameterRegisters, returnRegister, secondReturnRegister);
         return *_rawPlans.insert(name, plan);
     }
 
@@ -537,78 +560,48 @@ private bool hasResultStore(
     return true;
 }
 
-// Works out how to call `function_`, once.
+// Works out how to call `function_` at one call site: the signature, and
+// `symbol`, the linker name of its code.
 //
 // The linkage decides only the symbol's name, which dmd's own mangler
 // supplies, so nothing here is specific to C. A signature the implemented
 // ABI does not cover throws, naming what it could not pass - here, when
 // the plan is prepared, rather than on every call that would use it.
-private CallPlan prepare(
-    imported!"dmd.func".FuncDeclaration function_,
-    ref Resolver resolver,
-    CallbackBridge* callbacks,
-) {
-    return prepareCommon(function_, resolver, null, false, callbacks);
-}
-
-// As `prepare`, for one call site of an `extern(C)` C-style or
-// `extern(D)` untyped variadic callee: `extraArgumentTypes` are that
-// call's own extra arguments' types, in call order. For a C-style
-// callee, the frontend has already applied C's default argument
-// promotions (`float` widens to `double`, an integral narrower than
-// `int` widens to `int`) - exactly the types the callee's own `va_arg`
-// will read. An `extern(D)` untyped callee's own hidden `_arguments` is
-// not one of these - it is a whole extra argument in its own right,
-// added inside `prepareCommon` (`hasVArguments`'s own doc), since its
-// value comes from the call site's `TypeidExp`, not from a caller-
-// supplied type list. `PlanCache.variadicOf` is the one caller.
 //
-// The plan this builds is one call site's own shape, not `function_`'s
-// alone (ADR-0010's C- and D-variadics paragraphs; issue #334 steps 5
-// and 6): two call sites naming the same variadic function can pass
-// different extra arguments, and need different plans. This is never
-// cached by `function_` the way `PlanCache._plans` caches an ordinary
-// plan - a backend's own call-site cache (`PlanCache.of`'s own doc,
-// issue #96) is what makes a repeat call at the same site free instead.
-package CallPlan prepareVariadic(
+// `extraArgumentTypes` are the types of the extra arguments of one call of
+// a C-style or `extern(D)` untyped variadic callee, in call order, and
+// `isVariadicCall` says there is such a call. For a C-style callee, the
+// frontend has already applied C's default argument promotions (`float`
+// widens to `double`, an integral narrower than `int` widens to `int`) -
+// exactly the types the callee's own `va_arg` will read. An `extern(D)`
+// untyped callee's own hidden `_arguments` is not one of these - it is a
+// whole extra argument in its own right, added inside `planOf`
+// (`hasVArguments`'s own doc), since its value comes from the call site's
+// `TypeidExp`, not from a caller-supplied type list.
+//
+// The plan of a variadic call is one call site's own shape, not
+// `function_`'s alone (ADR-0010's C- and D-variadics paragraphs; issue #334
+// steps 5 and 6): two call sites naming the same variadic function can pass
+// different extra arguments, and need different plans.
+private NativeSignature calleeOf(
     imported!"dmd.func".FuncDeclaration function_,
-    ref Resolver resolver,
-    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
-    CallbackBridge* callbacks,
-) {
-    return prepareCommon(
-        function_, resolver, extraArgumentTypes, true, callbacks);
-}
-
-private CallPlan prepareVariadicAtAddress(
-    imported!"dmd.mtype".TypeFunction type,
-    bool hasContext,
-    const(void)* address,
-    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
-    CallbackBridge* callbacks,
-) {
-    return planOf(_signatureOf(type, hasContext, type.linkage,
-        extraArgumentTypes, true), cast(void*) address, callbacks);
-}
-
-private CallPlan prepareCommon(
-    imported!"dmd.func".FuncDeclaration function_,
-    ref Resolver resolver,
     scope imported!"dmd.mtype".Type[] extraArgumentTypes,
     in bool isVariadicCall,
-    CallbackBridge* callbacks,
+    out string symbol,
 ) {
-    import snakebite.druntime.constructoratomic: nativeTarget;
+    import snakebite.druntime.constructoratomic:
+        atomicAddSymbol, nativeTarget;
     import snakebite.frontend.dmd.mangle: mangledNameOf;
-    import std.conv: text;
 
     // Mangling forces `function_`'s type complete first (`mangledNameOf`'s
     // own doc) - done before `shapeOf` reads `function_.type.nextOf` to
     // classify the return value below, an inferred return type dmd has
     // not resolved yet would otherwise be read as `null`.
-    const name = mangledNameOf(function_);
+    symbol = mangledNameOf(function_).idup;
 
     auto target = nativeTarget(function_);
+    if (target.address !is null)
+        symbol = atomicAddSymbol;
 
     // The symbol's calling convention comes from its declared linkage,
     // and `extern(D)` code built by the host's own compiler can read
@@ -619,35 +612,35 @@ private CallPlan prepareCommon(
     const linkage = target.address is null
         ? function_.resolvedLinkage : target.linkage;
 
-    auto signature = signatureOfFunction(function_, linkage, extraArgumentTypes,
+    return signatureOfFunction(function_, linkage, extraArgumentTypes,
         isVariadicCall);
+}
 
-    void* address = target.address;
-    if (address is null)
-        address = resolver.resolve(name);
-    if (address is null) {
-        version (LDC) {
-            import gen.dpragma: LDCPragma;
+// The failure for a `function_` whose code `symbol` is not in this process.
+private Exception unresolved(
+    imported!"dmd.func".FuncDeclaration function_, in string symbol,
+) {
+    import std.conv: text;
 
-            // LDC compiles this declaration inline, so the host has no symbol
-            // for it; a wrapper in `snakebite.builtin.ldc` is the
-            // way to a result, and this one has none.
-            if (function_.llvmInternal != LDCPragma.LLVMnone)
-                throw new Exception(
-                    text("no host wrapper serves the LDC intrinsic `",
-                        function_.mangleOverride.length
-                            ? function_.mangleOverride : name,
-                        "` declared by `", function_.toString, "`"),
-                );
-        }
-        throw new Exception(
-            text("ffi cannot resolve the symbol `", name,
-                "` declared by `", function_.toString,
-                "`: it is not in this process"),
-        );
+    version (LDC) {
+        import gen.dpragma: LDCPragma;
+
+        // LDC compiles this declaration inline, so the host has no symbol
+        // for it; a wrapper in `snakebite.builtin.ldc` is the
+        // way to a result, and this one has none.
+        if (function_.llvmInternal != LDCPragma.LLVMnone)
+            return new Exception(
+                text("no host wrapper serves the LDC intrinsic `",
+                    function_.mangleOverride.length
+                        ? function_.mangleOverride : symbol,
+                    "` declared by `", function_.toString, "`"),
+            );
     }
-
-    return planOf(signature, address, callbacks);
+    return new Exception(
+        text("ffi cannot resolve the symbol `", symbol,
+            "` declared by `", function_.toString,
+            "`: it is not in this process"),
+    );
 }
 
 // The signature of the guest function `function_`, from its own declared
