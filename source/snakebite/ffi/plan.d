@@ -2,7 +2,8 @@ module snakebite.ffi.plan;
 
 
 import snakebite.ffi.callback: CallbackBridge;
-import snakebite.ffi.callplan: CallPlan, NativeSignature, planOf;
+import snakebite.ffi.callplan:
+    CallPlan, NativeSignature, hasStoreWidth, planOf;
 import snakebite.ffi.symbol: Resolver;
 
 
@@ -528,8 +529,7 @@ private bool hasResultStore(
     const result = returnPlanOf(type.nextOf);
     foreach (register; result.registers[0 .. result.count])
         if (register.kind != Register.Kind.x87
-                && (register.size == 0
-                    || (register.size > 8 && register.size != 16)))
+                && !hasStoreWidth(register.size))
             return false;
     return true;
 }

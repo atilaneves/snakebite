@@ -1121,6 +1121,8 @@ public struct CallPlan {
     // prepare time, from `buildMoves`; a plan's `Register`s carry a width
     // of one to eight bytes, or sixteen.
     private static Store storeOf(in ubyte size) {
+        if (!hasStoreWidth(size))
+            internalFailure("unsupported result register size");
         switch (size) {
             case 1: return Store.byte1;
             case 2: return Store.byte2;
@@ -1131,6 +1133,12 @@ public struct CallPlan {
             default: internalFailure("unsupported result register size");
         }
     }
+}
+
+// Whether a result register of `size` bytes has a `CallPlan.Store`: one to
+// eight bytes, or sixteen. The one place the rule is written.
+package bool hasStoreWidth(in size_t size) {
+    return size != 0 && (size <= 8 || size == 16);
 }
 
 // Split from `callAt`'s body so the hot path itself is only ever a compare
