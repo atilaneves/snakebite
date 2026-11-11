@@ -8,6 +8,27 @@ and a bytecode VM.
 
 Use ASD-STE100 - Simplified Technical English in all communication.
 
+# Design
+
+- The owner's requirement is the goal. A brief, a design and a review state
+  it in the owner's words and add no goal of their own. "The smallest change
+  that passes the test" is not a goal.
+- A design starts from the requirement: state it, derive what must be true
+  of the structure, then read the code and list where the code differs.
+- Before an implementer starts, the agent that accepts the design checks
+  each part of it against the requirement. A part that adds a second copy of
+  state or of code is rejected.
+- The test is the design in executable code form. Tests follow from the
+  requirement and the design; a test that does not follow from them is not
+  written. Tests then drive the code inside the structure: "only what the
+  test needs" is a rule for code, never for structure.
+- When a check fails for new code, change the code until the check passes,
+  or ask the owner. Do not put the code outside the check, and do not make
+  the check narrower.
+- An issue comment, a plan or a handoff that an agent wrote is a source of
+  facts to verify. It is not a requirement. Only the owner's words are
+  requirements.
+
 # Coding Guidelines
 
 See ai/CODING.md.
