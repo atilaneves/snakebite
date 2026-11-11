@@ -4,6 +4,7 @@ module snakebite.backends.api;
 private:
 
 
+import snakebite.backends.statistics: CompilationStatistics;
 import snakebite.program: Program;
 import snakebite.start.data: FunctionHandle, StartData;
 
@@ -22,43 +23,6 @@ public final class DeclarationHandle: FunctionHandle {
 
     public override void call(void* returnPlace, void*[] args) {
         _backend.call(_function, returnPlace, args);
-    }
-}
-
-
-// Cumulative work done by a backend's compiler. A backend without a
-// compilation phase leaves `hasCompiler` false; this is distinct from a
-// compiler whose measured duration is zero.
-public struct CompilationStatistics {
-    import core.time: Duration;
-
-    bool hasCompiler;
-    size_t cacheMisses;
-    Duration duration;
-}
-
-
-// Wall time since `start`, less the time `backend` compiled in it, so that
-// an interval and the compilation it causes are reported once each.
-public struct ExecutionClock {
-    import core.time: Duration, MonoTime;
-
-    private const(Backend) _backend;
-    private MonoTime _start;
-    private Duration _compiledAtStart;
-
-    public static ExecutionClock start(const(Backend) backend) {
-        return ExecutionClock(
-            backend,
-            MonoTime.currTime,
-            backend.compilationStatistics.duration,
-        );
-    }
-
-    public Duration peek() const {
-        const compiled =
-            _backend.compilationStatistics.duration - _compiledAtStart;
-        return MonoTime.currTime - _start - compiled;
     }
 }
 
@@ -121,11 +85,14 @@ public abstract class Backend {
     protected void release() {
     }
 
-    // Read-only cumulative statistics. Backends without a compilation phase
-    // use the default empty result.
-    public CompilationStatistics compilationStatistics() const {
-        return CompilationStatistics.init;
+    // Cumulative statistics, live: the compiler of a backend with a
+    // compilation phase updates them while the program runs. Backends without
+    // one leave the default empty result.
+    public final ref const(CompilationStatistics) compilationStatistics() const {
+        return _compilation;
     }
+
+    protected CompilationStatistics _compilation;
 
     // Invoke one guest function. `args` and the value written to
     // `returnPlace` are in native layout, exactly as compiled D would lay

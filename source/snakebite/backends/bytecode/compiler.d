@@ -45,12 +45,10 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 }
 
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
-    import core.time: Duration;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
-    import snakebite.backends.api: CompilationStatistics;
     import snakebite.program: Program;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.statics.classinfo;
@@ -130,8 +128,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // A depth failure repeats at any greater depth until a function on
     // its failed chain changes state. Guarded by the compiler lock.
     private FuncDeclaration[][FuncDeclaration] _speculationBlockers;
-    private size_t _cacheMisses;
-    private Duration _compilationTime;
     // Complete declared-storage layouts, shared by compilation, context
     // paths and host entry. Publication permits lock-free callback reads
     // after preparation, including during GC finalization (ADR-0006).
@@ -146,6 +142,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
+        _compilation.hasCompiler = true;
         _jit = jit;
         _plans = PlanCache(program.dependencyImage,
             &_program.isRootOwned);
@@ -227,14 +224,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     ) {
         foreach (declaration, compiled; _compiled)
             visit(declaration, compiled);
-    }
-
-    public override CompilationStatistics compilationStatistics() const {
-        return CompilationStatistics(
-            true,
-            _cacheMisses,
-            _compilationTime,
-        );
     }
 
     public override void call(
@@ -814,12 +803,12 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
             const outermost = _compilationDepth == 0;
             ++_compilationDepth;
-            ++_cacheMisses;
+            ++_compilation.cacheMisses;
             auto stopWatch = StopWatch(AutoStart.yes);
             scope (exit) {
                 --_compilationDepth;
                 if (outermost)
-                    _compilationTime += stopWatch.peek;
+                    _compilation.duration += stopWatch.peek;
             }
 
             // A struct method's hidden `this` is a pointer to the receiver,
