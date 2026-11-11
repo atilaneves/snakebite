@@ -264,7 +264,7 @@ public struct CallAdapter {
         }
 
         public Value hiddenArgument() {
-            import snakebite.ffi.abi: dVariadicArgumentsIsSlice;
+            import snakebite.ffi.argumentplan: dVariadicArgumentsIsSlice;
 
             auto expression = _expressions[0];
             auto value = Value(expression, typeFacts(expression.type));

@@ -6,7 +6,7 @@ import snakebite.backends.bytecode.vm:
     Arg, CallSite, Function, Instruction, opAdd, opCall, opConstant,
     opLoadIndirect, opReturn, Vm;
 import snakebite.ffi: PlanCache;
-import snakebite.ffi.abi: Register;
+import snakebite.ffi.argumentplan: Register;
 import snakebite.stack.frames: defaultFrameCapacity;
 
 

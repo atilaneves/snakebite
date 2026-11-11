@@ -3369,7 +3369,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // moment this returns, on every exit path, with no bump-allocator
         // bookkeeping and nothing to explicitly pop.
         // `8` is a register's width on the one ABI this project supports
-        // (`ffi.abi.supported` is `false` everywhere else) - `size_t.sizeof`
+        // (`ffi.argumentplan.supported` is `false` everywhere else) - `size_t.sizeof`
         // names that rather than repeating the literal.
         if (facts.size <= size_t.sizeof && facts.alignment <= size_t.sizeof) {
             align(size_t.sizeof) ubyte[size_t.sizeof] buffer = void;

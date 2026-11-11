@@ -6,7 +6,7 @@ private:
 
 import snakebite.backends.api: Backend;
 import snakebite.start.data: StartData;
-import snakebite.ffi.abi: ArgumentPlan, Register;
+import snakebite.ffi.argumentplan: ArgumentPlan, Linkage, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 import snakebite.ffi.plan: NativeSignature;
 
@@ -225,7 +225,7 @@ private struct MainRun {
 // `extern(C) int main(char[][] arguments)`: the slice travels as two integer
 // eightbytes.
 private enum mainSignature = NativeSignature(
-    imported!"dmd.astenums".LINK.c,
+    Linkage.c,
     false, false, false, false, false,
     ArgumentPlan(
         [Register(Register.Kind.signed, 4), Register.init], 1, false),
