@@ -68,7 +68,9 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
         string[] hostArguments = ["sb", "first", "second"];
 
         auto instance = ownedBackend!backend(program);
-        run(instance, hostArguments).should == 42;
+        run(
+            instance.startData, instance.compilationStatistics,
+            hostArguments).should == 42;
     }
 }
 

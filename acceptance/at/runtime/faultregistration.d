@@ -128,7 +128,8 @@ private int programStatus(Backend)(in Sandbox sandbox, in string code) {
         return execute([executable]).status;
     } else {
         auto program = Program([parseSnippet(code)]);
-        return run(new Backend(program));
+        auto backend = new Backend(program);
+        return run(backend.startData, backend.compilationStatistics);
     }
 }
 
