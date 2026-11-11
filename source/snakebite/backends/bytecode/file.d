@@ -20,7 +20,7 @@ import snakebite.backends.bytecode.vm:
     AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
     Function, handlerAt, handlerOffset, Instruction, JitSetting,
     prepareForExecution, Role, Roles, rolesOf, withoutCount;
-import snakebite.failure.report: SnakebiteException;
+import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
@@ -1105,7 +1105,7 @@ private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
     if (archive.isWriting) {
         const compiled = cast(const(Function)*) handle.compiledCode;
         if (compiled is null)
-            throw refusal("a start function is not one of the bytecode backend");
+            internalFailure("a start function is not one of the bytecode backend");
         position = archive.positionOf(compiled);
     }
     archive.scalar(position);
