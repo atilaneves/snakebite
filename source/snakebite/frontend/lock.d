@@ -1,12 +1,17 @@
 module snakebite.frontend.lock;
 
+private:
+
 import core.sync.mutex: Mutex;
 
 // The one lock around dmd's process-global state. It only excludes other
-// threads: code that holds it allocates from the GC.
+// threads: code that holds it allocates from the GC. It is a global because
+// dmd's state is process-global too. It lives in a module of its own because
+// both the compiler and the delegate queries need it, and neither may import
+// the other.
 package(snakebite.frontend) __gshared Mutex frontendMutex;
 
-shared static this() {
+private shared static this() {
     frontendMutex = new Mutex;
 }
 

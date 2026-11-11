@@ -118,7 +118,7 @@ public struct FunctionContext {
 // `Dsymbol` of its own, straight to the nearest enclosing function or
 // aggregate. Shared because a captured variable's owner (`VarDeclaration.
 // toParent2`) and a delegate's own target's parent (`FuncDeclaration.
-// toParent2`, see `delegateTargetOf` below) are both resolved the same way.
+// toParent2`, see `delegateTargetOf` in `delegates.d`) are both resolved the same way.
 public imported!"dmd.func".FuncDeclaration outerFunctionOf(
     imported!"dmd.dsymbol".Dsymbol symbol,
 ) {
