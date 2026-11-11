@@ -480,7 +480,6 @@ public imported!"dub.description".ProjectDescription projectDescriptionFromJson(
 private DubDescription descriptionFromJson(
     in imported!"std.json".JSONValue value,
 ) {
-
     auto description = fromJson!DubDescription(value);
     description.project = withTargetLookup(description.project);
     return description;
