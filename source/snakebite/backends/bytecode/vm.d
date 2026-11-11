@@ -2274,7 +2274,7 @@ private const(Instruction)* opCallNative(
 
 pragma(inline, false)
 private const(Instruction)* opCallDirectTwoWordsPairResult(bool indirect)(
-    CallSite* site,
+    const(CallSite)* site,
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -5723,14 +5723,21 @@ static if (jitSupported) {
         // A final state publishes the call shape for the lifetime of the site.
         const current = atomicLoad!(MemoryOrder.acq)(
             *cast(shared const(uint)*) &site.directState);
-        if (current == CallSite.DirectState.threeWordsSign32)
-            return &callPreparedThreeWords!(Load.sign32);
-        if (current == CallSite.DirectState.threeWordsZero32)
-            return &callPreparedThreeWords!(Load.zero32);
-        return original;
+        switch (current) with (CallSite.DirectState) {
+            case threeWordsSign32:
+                return &callPreparedNative!(opCallDirectThreeWords!(Load.sign32));
+            case threeWordsZero32:
+                return &callPreparedNative!(opCallDirectThreeWords!(Load.zero32));
+            case twoWordsPairResult:
+                return &callPreparedNative!(opCallDirectTwoWordsPairResult!false);
+            case twoWordsIndirectPairResult:
+                return &callPreparedNative!(opCallDirectTwoWordsPairResult!true);
+            default:
+                return original;
+        }
     }
 
-    private const(Instruction)* callPreparedThreeWords(Load middle)(
+    private const(Instruction)* callPreparedNative(alias call)(
         const(Instruction)* pc,
         Activation* active,
         DispatchState* state,
@@ -5738,8 +5745,7 @@ static if (jitSupported) {
         ulong r0,
         double fp0,
     ) {
-        return opCallDirectThreeWords!middle(
-            &active.callSites[pc.source], pc, active, state, frame);
+        return call(&active.callSites[pc.source], pc, active, state, frame);
     }
 
     private void buildJitTable(ref JitTables tables) nothrow {
