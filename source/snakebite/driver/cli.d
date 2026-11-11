@@ -25,7 +25,7 @@ public struct Options {
 // `bin/sb`: run a project's unit tests and its `main` on one backend.
 public int run(string[] args) {
     import snakebite.backends: BackendName;
-    import snakebite.image.dependency: Optimise;
+    import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
         executeBackend, prepareSources, runProject;
