@@ -21,9 +21,8 @@ private extern(C) int visit(
     size_t size,
     void* result,
 ) nothrow {
-    import core.sys.linux.elf: Elf64_Nhdr, NT_GNU_BUILD_ID;
+    import core.sys.linux.elf: Elf64_Nhdr, NT_GNU_BUILD_ID, PT_NOTE;
 
-    enum noteType = 4; // PT_NOTE
     enum noteAlignment = 4;
     static size_t padded(in size_t length) {
         return (length + noteAlignment - 1) & ~(noteAlignment - 1);
@@ -31,7 +30,7 @@ private extern(C) int visit(
 
     auto id = cast(immutable(ubyte)[]*) result;
     foreach (header; object.dlpi_phdr[0 .. object.dlpi_phnum]) {
-        if (header.p_type != noteType)
+        if (header.p_type != PT_NOTE)
             continue;
         auto notes = (cast(const(ubyte)*) (object.dlpi_addr + header.p_vaddr))
             [0 .. header.p_memsz];

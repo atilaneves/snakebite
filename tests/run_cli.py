@@ -6270,6 +6270,40 @@ def test_load_refuses_a_file_from_another_build(tmp_path: Path) -> None:
     assert load.stdout == ""
 
 
+def test_load_rejects_an_unknown_backend_name(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        import core.stdc.stdio: printf;
+        int main() { printf("hello\n"); return 0; }
+        """)
+    saved = tmp_path / "main.sbc"
+    save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
+    assert save.returncode == 0, output(save)
+    load = run_sb("--backend=nonsense", f"--load={saved}", cwd=tmp_path)
+    assert load.returncode == 1, output(load)
+    assert "valid backends" in load.stderr, output(load)
+
+
+@pytest.mark.parametrize("option", ["--backend=interpreter", "--no-jit"])
+def test_load_refuses_an_option_that_it_cannot_honour(
+    tmp_path: Path, option: str
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        import core.stdc.stdio: printf;
+        int main() { printf("hello\n"); return 0; }
+        """)
+    saved = tmp_path / "main.sbc"
+    save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
+    assert save.returncode == 0, output(save)
+    load = run_sb(option, f"--load={saved}", cwd=tmp_path)
+    assert load.returncode == 1, output(load)
+    assert option.split("=")[0] in load.stderr, output(load)
+    assert load.stdout == ""
+
+
 # The tests can run in parallel (see build/pytest-workers.sh) because the
 # state that they share, the `.snakebite` directory and the dub package store,
 # is keyed by project path and published with an atomic rename.

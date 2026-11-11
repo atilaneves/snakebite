@@ -218,17 +218,6 @@ public CliResult parseArgs(string[] args) {
         return result;
     }
 
-    if (result.options.loadPath.length) {
-        if (args.length != 1 || result.options.savePath.length)
-            return CliResult(
-                1, "--load takes no project directory and no --save\n"
-                    ~ helpText);
-        return result;
-    }
-    if (args.length != 2)
-        return CliResult(1, "expected one project directory\n" ~ helpText);
-
-    result.options.projectDirectory = args[1];
     if (!parseBackendName(backendName, result.options.backend))
         return CliResult(
             1,
@@ -236,11 +225,52 @@ public CliResult parseArgs(string[] args) {
                 "valid backends: " ~ validBackendNames,
         );
 
+    if (result.options.loadPath.length) {
+        if (args.length != 1 || result.options.savePath.length)
+            return CliResult(
+                1, "--load takes no project directory and no --save\n"
+                    ~ helpText);
+        const unhonoured = optionIgnoredByLoad(result.options);
+        if (unhonoured.length)
+            return CliResult(
+                1, "--load does not honour " ~ unhonoured ~ "\n" ~ helpText);
+        return result;
+    }
+    if (args.length != 2)
+        return CliResult(1, "expected one project directory\n" ~ helpText);
+
+    result.options.projectDirectory = args[1];
+
     if (result.options.savePath.length
             && result.options.backend != BackendName.bytecode)
         return CliResult(1, "--save needs the bytecode backend\n");
 
     return result;
+}
+
+
+// A saved program carries what the options choose: its sources, its
+// versions, its backend. Only the program arguments still apply at run time.
+private string optionIgnoredByLoad(in Options options) {
+    import snakebite.backends: BackendName;
+
+    if (options.backend != BackendName.bytecode)
+        return "--backend";
+    if (options.importPaths.length)
+        return "--import-path";
+    if (options.stringImportPaths.length)
+        return "--string-import-path";
+    if (options.versions.length)
+        return "--version";
+    if (options.lowmem)
+        return "--lowmem";
+    if (options.noJit)
+        return "--no-jit";
+    if (options.jitPerfMap)
+        return "--jit-perf-map";
+    if (options.noOptimiseImage)
+        return "--no-optimise-image";
+    return "";
 }
 
 
