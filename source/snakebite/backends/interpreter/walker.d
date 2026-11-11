@@ -26,7 +26,7 @@ import snakebite.native.arguments: CallArguments;
 public final class Interpreter: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.program: Program;
-    import snakebite.ffi: CallbackBridge, CallbackCall;
+    import snakebite.ffi: CallbackCall;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
 
@@ -47,12 +47,11 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     public this(const Program program) {
         super(program);
         _shared = new Shared(program, &call);
-        _shared.plans.useCallbacks(
-            new CallbackBridge(
-                &invokeCallback,
-                cast(void*) this,
-                &prepareCallback,
-            ));
+        _shared.linked.bindCallbacks(
+            &invokeCallback,
+            cast(void*) this,
+            &prepareCallback,
+        );
         import snakebite.language.checks: nullDerefPlanOf;
 
         _checksNullDeref = nullDerefPlanOf(program.checks).kind
@@ -292,8 +291,8 @@ private struct Shared {
     // whether a callee is walked or called natively.
     const Program program;
     // Declared before what points into it, so that it is destroyed after.
-    // The interpreter keeps its own signatures and plans and uses this for
-    // the store of its static data.
+    // The interpreter keeps its own signatures, and uses this for the store
+    // of its static data, its plans and its callback bridge.
     LinkedModules linked;
     NativeData nativeData;
     RuntimeTypes runtimeTypes;
@@ -385,7 +384,7 @@ private struct Shared {
     this(const Program program, typeof(callGuest) callGuest) {
         this.program = program;
         this.callGuest = callGuest;
-        plans = PlanCache(program.dependencyImage,
+        plans = PlanCache(&linked,
             &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
         linked = LinkedModules(program.dependencyImage);

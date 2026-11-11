@@ -2,6 +2,7 @@ module ut.ffi.concurrency;
 
 
 import ut;
+import snakebite.backends.bytecode.linkedmodules: LinkedModules;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -102,7 +103,8 @@ unittest {
         assert(function_ !is null,
             "No `snakebite_ut_concurrency_wide` in the guest program");
 
-        PlanCache cache;
+        auto linked = LinkedModules(null);
+        auto cache = PlanCache(&linked);
 
         shared size_t ready = 0;
         shared bool go = false;

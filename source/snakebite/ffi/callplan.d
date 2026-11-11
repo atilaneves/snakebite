@@ -130,7 +130,7 @@ public struct CallPlan {
     private CallbackArgument[] _callbackArguments;
     // The backend instance's own registry of guest function words - the
     // one that knows which words are guest functions and owns their pool
-    // entries. Shared mutable state owned by the `PlanCache`, never part
+    // entries. Shared mutable state owned by `LinkedModules`, never part
     // of this plan's own value: `callWithCallbacks` casts the `const`
     // away to reserve an entry on first use.
     private CallbackBridge* _callbacks;

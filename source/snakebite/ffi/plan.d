@@ -1,10 +1,11 @@
 module snakebite.ffi.plan;
 
 
+import snakebite.backends.bytecode.linkedmodules: LinkedModules;
 import snakebite.ffi.callback: CallbackBridge;
+import snakebite.ffi.symbol: Resolver;
 import snakebite.ffi.callplan:
     CallPlan, NativeSignature, hasStoreWidth, planOf;
-import snakebite.ffi.symbol: Resolver;
 
 
 private:
@@ -26,8 +27,6 @@ import snakebite.failure.report: internalFailure;
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
-    import snakebite.image.dependency: DependencyImage;
-
     // Holds `SharedTable`s (finding 2.4): a copy would share their
     // storage with the original until one side grows.
     @disable this(this);
@@ -36,17 +35,21 @@ public struct PlanCache {
     // (`Program.isRootOwned`). Without it every function can have native
     // code.
     public this(
-        const(DependencyImage)* image,
+        LinkedModules* linked,
         bool delegate(imported!"dmd.dsymbol".Dsymbol) const isRootOwned = null,
     ) {
-        _resolver = Resolver(image);
+        _linked = linked;
         _isRootOwned = isRootOwned;
     }
 
     import dmd.func: FuncDeclaration;
     import dmd.mtype: TypeFunction;
 
-    private CallbackBridge* _callbacks;
+    // Owns the plans that this prepares, the resolver they bind symbols
+    // with and the callback bridge. This keeps the index from a declaration
+    // to its plan, and the counts. The owner of the cache keeps `_linked`
+    // alive longer.
+    private LinkedModules* _linked;
 
     public void* callableAddress(
         const(void)* word, FuncDeclaration declaration,
@@ -62,23 +65,23 @@ public struct PlanCache {
         // always released before the bridge takes its mutex; the bridge
         // never takes the compiler lock.
         NativeSignature signature;
-        if (adjustment != 0
-                && _callbacks.reservedAdjustedEntry(word, adjustment) is null) {
+        if (adjustment != 0 && _linked.callbacks.reservedAdjustedEntry(
+                word, adjustment) is null) {
             import snakebite.frontend.compiler: withCompilerLock;
 
             withCompilerLock({ signature = nativeSignatureOf(declaration); });
         }
-        return cast(void*) _callbacks.adjustedEntryOf(
+        return cast(void*) _linked.callbacks.adjustedEntryOf(
             word, signature, adjustment);
     }
 
     public CallbackBridge.GuestTarget guestTarget(const(void)* address) const {
-        return _callbacks is null ? CallbackBridge.GuestTarget.init
-            : _callbacks.guestTarget(address);
+        return _linked.callbacks is null ? CallbackBridge.GuestTarget.init
+            : _linked.callbacks.guestTarget(address);
     }
 
     public bool isGuestWord(const(void)* word) const {
-        return _callbacks !is null && _callbacks.contains(word);
+        return _linked.callbacks !is null && _linked.callbacks.contains(word);
     }
 
     // Whether `of` and the callback entry of `function_` can plan its
@@ -100,7 +103,7 @@ public struct PlanCache {
         auto target = nativeTarget(function_);
         if (target.address !is null)
             return target.address;
-        return _resolver.resolve(mangledNameOf(function_));
+        return _linked.resolver.resolve(mangledNameOf(function_));
     }
 
     // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
@@ -131,28 +134,20 @@ public struct PlanCache {
         if (auto cached = key in _signatures)
             return *cached;
 
-        auto plan = new CallPlan;
+        auto plan = _linked.newPlan;
         // These indirect calls pass only the declared parameters.
         // A C variadic call with no extra arguments still needs its
         // variadic ABI plan (including the SSE register count).
         *plan = planOf(_signatureOf(type, context, type.linkage, null,
             type.parameterList.varargs == VarArg.variadic),
-            null, _callbacks);
+            null, _linked.callbacks);
         return *_signatures.insert(key, plan);
-    }
-
-    // The registry of this backend instance's guest function words, and
-    // the owner of their pool entries (ADR-0003). A backend installs one
-    // before it prepares any plan; every plan this cache prepares reads
-    // it at call time to swap a guest function word for its entry.
-    public void useCallbacks(CallbackBridge* callbacks) {
-        _callbacks = callbacks;
     }
 
     // How many chunks of entries the installed bridge has.
     version(unittest)
     public size_t callbackChunkCount() {
-        return _callbacks is null ? 0 : _callbacks.chunkCount;
+        return _linked.callbacks is null ? 0 : _linked.callbacks.chunkCount;
     }
 
     // Records that `word` is what this backend stores for the guest
@@ -166,8 +161,8 @@ public struct PlanCache {
         FuncDeclaration declaration,
     ) {
         requireCallbacks;
-        if (!_callbacks.contains(word))
-            _callbacks.register(word, nativeSignatureOf(declaration));
+        if (!_linked.callbacks.contains(word))
+            _linked.callbacks.register(word, nativeSignatureOf(declaration));
     }
 
     // As `registerGuestFunction`, for a backend that keeps the
@@ -179,11 +174,11 @@ public struct PlanCache {
         NativeSignature signature,
     ) {
         requireCallbacks;
-        _callbacks.register(word, signature);
+        _linked.callbacks.register(word, signature);
     }
 
     private void requireCallbacks() const {
-        if (_callbacks is null)
+        if (_linked.callbacks is null)
             throw new Exception(
                 "ffi: a guest function was registered before the " ~
                     "backend installed its callback bridge",
@@ -201,7 +196,6 @@ public struct PlanCache {
     private SharedTable!(string, CallPlan*) _rawPlans;
     private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
     private SharedTable!(FuncDeclaration, bool) _independentNativeSymbols;
-    private Resolver _resolver;
     private bool delegate(imported!"dmd.dsymbol".Dsymbol) const _isRootOwned;
     private shared size_t _preparations;
     version(unittest) private size_t _nativeSymbolLookups;
@@ -209,11 +203,11 @@ public struct PlanCache {
     // Resolves a linker name through the cache shared by this backend's
     // plan preparation and its other FFI operations.
     public void* resolve(in char[] name) {
-        return _resolver.resolve(name);
+        return _linked.resolver.resolve(name);
     }
 
     public void* resolveThreadLocal(in char[] name) const {
-        return _resolver.resolveThreadLocal(name);
+        return _linked.resolver.resolveThreadLocal(name);
     }
 
     // Whether `function_` has machine code in this process. Missing symbols
@@ -274,9 +268,10 @@ public struct PlanCache {
                 return;
             }
             auto target = nativeTarget(function_);
-            found = target.address !is null || _resolver.resolveIndependent(
-                mangledNameOf(function_),
-            ) !is null;
+            found = target.address !is null
+                || _linked.resolver.resolveIndependent(
+                    mangledNameOf(function_),
+                ) !is null;
             _independentNativeSymbols.insert(function_, found);
         });
         return found;
@@ -370,7 +365,7 @@ public struct PlanCache {
 
     version(unittest)
     public size_t symbolLookups() @safe @nogc nothrow pure const scope {
-        return _resolver.lookups;
+        return _linked.resolver.lookups;
     }
 
     // How many plans this has had to prepare - the expensive work the
@@ -408,8 +403,8 @@ public struct PlanCache {
             return *cached;
 
         countPreparation;
-        auto plan = new CallPlan;
-        *plan = prepare(function_, _resolver, _callbacks);
+        auto plan = _linked.newPlan;
+        *plan = prepare(function_, _linked.resolver, _linked.callbacks);
         return *_plans.insert(function_, plan);
     }
 
@@ -435,9 +430,9 @@ public struct PlanCache {
         scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        auto plan = new CallPlan;
+        auto plan = _linked.newPlan;
         *plan = prepareVariadic(
-            function_, _resolver, extraArgumentTypes, _callbacks);
+            function_, _linked.resolver, extraArgumentTypes, _linked.callbacks);
         return plan;
     }
 
@@ -446,9 +441,9 @@ public struct PlanCache {
         scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        auto plan = new CallPlan;
+        auto plan = _linked.newPlan;
         *plan = prepareVariadicAtAddress(type, hasContext, address,
-            extraArgumentTypes, _callbacks);
+            extraArgumentTypes, _linked.callbacks);
         return plan;
     }
 
@@ -485,7 +480,7 @@ public struct PlanCache {
             return null;
 
         countPreparation;
-        auto plan = new CallPlan;
+        auto plan = _linked.newPlan;
         *plan = CallPlan.ofRawAddress(
             address, parameterRegisters, returnRegister, secondReturnRegister);
         return *_rawPlans.insert(name, plan);

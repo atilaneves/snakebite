@@ -31,7 +31,7 @@ import snakebite.language.checks:
     AssertFailure, BoundsCheck, CAssertCall, hookOf;
 import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 import snakebite.language.storage.resolver: planSlice;
-import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
+import snakebite.ffi: CallbackCall, PlanCache;
 import std.typecons: Flag, No, Yes;
 
 
@@ -74,7 +74,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // out of nesting order, so they cannot share one LIFO stack.
     // Entries are owned and released by their host thread (ADR-0006).
     private ExecutionStates!(Vm*) _vms;
-    private CallbackBridge* _callbacks;
     // Set by `release` when no host code holds a callback entry, so that no
     // guest code of this instance can run again once its states are gone.
     private shared bool _jitCodeCanGo;
@@ -149,7 +148,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         linked = LinkedModules(program.dependencyImage);
         _compilation.hasCompiler = true;
         _jit = jit;
-        _plans = PlanCache(program.dependencyImage,
+        _plans = PlanCache(&linked,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
         _nativeData = NativeData(&linked.store, &_program.isRootOwned,
@@ -164,8 +163,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
         }, () => _nativeData.release, &releaseJitCode);
-        _callbacks = new CallbackBridge(&invokeCallback, cast(void*) this);
-        _plans.useCallbacks(_callbacks);
+        linked.bindCallbacks(&invokeCallback, cast(void*) this);
     }
 
     // How many chunks of callback entries this instance's bridge has.
@@ -184,7 +182,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         import core.atomic: atomicStore;
 
         static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            atomicStore(_jitCodeCanGo, !_callbacks.hasEntries);
+            atomicStore(_jitCodeCanGo, !linked.callbacks.hasEntries);
         _vms.end;
     }
 

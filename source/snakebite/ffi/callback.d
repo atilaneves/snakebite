@@ -570,8 +570,8 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 // entry, takes this bridge's mutex (never the compiler lock).
 //
 // A struct, not a class (ai/CODING.md): no base, no children, no virtual
-// methods. `PlanCache` and every plan it prepares share one instance by
-// reference, so it is always reached through a heap-allocated
+// methods. `LinkedModules` owns one, and every plan prepared with it shares
+// it by reference, so it is always reached through a heap-allocated
 // `CallbackBridge*`, the same way a class reference would be shared.
 public struct CallbackBridge {
     import snakebite.host.sharedtable: SharedTable;
