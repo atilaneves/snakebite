@@ -312,11 +312,14 @@ private struct Archive {
             "the program file names a string that it does not hold");
     }
 
-    size_t symbolIndexOf(const(void)* address) {
-        const name = _program.plans.resolver.nameOf(address);
+    // The index of the symbol that `address` is in, and the distance of the
+    // address from its start.
+    size_t[2] symbolPosition(const(void)* address) {
+        size_t distance;
+        const name = _program.plans.resolver.nameOf(address, distance);
         if (name is null)
-            throw refusal("a word points at host code that has no symbol name");
-        return symbolIndexOfName(name);
+            throw refusal("a word points at host code or data that has no symbol name");
+        return [symbolIndexOfName(name), distance];
     }
 
     // The index of `name` in the table of names of host code, which the
@@ -560,15 +563,19 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
         case adoptedString:
             return archive.stringPosition(cast(const(void)*) target.address);
         case hostSymbol:
-            return [archive.symbolIndexOf(
-                cast(const(void)*) target.address), 0, 0];
+            const position = archive.symbolPosition(
+                cast(const(void)*) target.address);
+            return [position[0], position[1], 0];
         case handler:
+            throw refusal("a word needs a relocation of kind handler");
         case tlsDescriptor:
+            throw refusal("a word needs a relocation of kind tlsDescriptor");
         case typeInfo:
+            throw refusal("a word needs a relocation of kind typeInfo");
         case frontendString:
+            throw refusal("a word needs a relocation of kind frontendString");
         case callback:
-            throw refusal(text("a word needs a relocation of kind ",
-                target.kind));
+            throw refusal("a word needs a relocation of kind callback");
     }
 }
 
@@ -583,7 +590,7 @@ private size_t addressOf(
         case callbackEntry:
             return cast(size_t) archive.entryAt(reference);
         case hostSymbol:
-            return cast(size_t) archive.symbolAt(reference[0]);
+            return cast(size_t) archive.symbolAt(reference[0]) + reference[1];
         case nativePlan:
             return cast(size_t) archive.planAt(reference[0]);
         case staticData:
@@ -592,12 +599,20 @@ private size_t addressOf(
         case adoptedString:
             return cast(size_t) archive.stringAt(reference);
         case handler:
+            throw new SnakebiteException(
+                "the program file holds a relocation of kind handler");
         case tlsDescriptor:
+            throw new SnakebiteException(
+                "the program file holds a relocation of kind tlsDescriptor");
         case typeInfo:
+            throw new SnakebiteException(
+                "the program file holds a relocation of kind typeInfo");
         case frontendString:
+            throw new SnakebiteException(
+                "the program file holds a relocation of kind frontendString");
         case callback:
             throw new SnakebiteException(
-                "the program file holds a relocation that it cannot hold");
+                "the program file holds a relocation of kind callback");
     }
 }
 

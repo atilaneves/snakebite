@@ -4788,8 +4788,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (variable.isThreadLocalStorage)
             return Address(Target.Kind.tlsDescriptor,
                 _bytecode._nativeData.tlsDescriptorOf(variable));
-        const placed = _bytecode._nativeData.storageOf(variable);
-        return Address(Target.Kind.staticData, placed.ptr, placed.where);
+        return _bytecode._nativeData.addressOfStorage(variable);
     }
 
     private Instruction.Handler staticLoadHandler(VarDeclaration variable) {

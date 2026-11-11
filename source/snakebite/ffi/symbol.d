@@ -48,11 +48,29 @@ public struct Resolver {
         return *_addresses.insert(name.idup, routed);
     }
 
-    // A name that `resolve` answered `address` for, or null.
-    public string nameOf(const(void)* address) const {
+    // The name of the symbol that `address` is in or `distance` bytes after,
+    // or null. The names `resolve` answered come first; any other address in a
+    // shared object of the process is asked of the loader, the reverse of
+    // `sharedObjectAddress`. A name is answered only when `resolve` gives it
+    // back as the address of that symbol.
+    public string nameOf(const(void)* address, out size_t distance) {
         if (auto found = address in _names)
             return *found;
-        return null;
+        version (Posix) {
+            import core.sys.posix.dlfcn: Dl_info, dladdr;
+            import std.string: fromStringz;
+
+            Dl_info info;
+            if (dladdr(address, &info) == 0 || info.dli_sname is null
+                    || info.dli_saddr is null || info.dli_saddr > address)
+                return null;
+            const name = info.dli_sname.fromStringz.idup;
+            if (resolve(name) !is info.dli_saddr)
+                return null;
+            distance = address - info.dli_saddr;
+            return name;
+        } else
+            return null;
     }
 
     // `name`'s address, but only when a genuine, independent native copy
