@@ -1755,6 +1755,86 @@ def test_saved_program_runs_as_the_compiled_program(tmp_path: Path) -> None:
         assert loaded.stderr == from_ram.stderr
 
 
+# A program in `files` (path below `app`, source), saved and then loaded with
+# and without the JIT, behaves as the same program compiled and run from RAM.
+def assert_saved_program_runs_as_the_compiled_program(
+    tmp_path: Path, files: dict[str, str],
+) -> None:
+    for name, text in files.items():
+        write(tmp_path / "app" / name, text)
+    app = str(tmp_path / "app")
+    common = ("--backend=bytecode", "--no-optimise-image")
+
+    from_ram = run_sb(*common, app, cwd=tmp_path)
+    saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
+                   cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    for flags in ([], ["--no-jit"]):
+        loaded = run_sb(*flags, f"--load={tmp_path / 'program.sbc'}",
+                        cwd=tmp_path)
+        assert loaded.returncode == from_ram.returncode, output(loaded)
+        assert guest_lines(loaded) == guest_lines(from_ram)
+        assert loaded.stderr == from_ram.stderr
+
+
+def test_saved_program_with_constant_operands_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+        int fb() { return 41; }
+        int main() { return fib(10) - 55 + fb() + 1; }
+        """})
+
+
+def test_saved_program_with_addresses_in_module_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        __gshared int x = 7;
+        __gshared int* p = &x;
+        struct Holder { int n; int* q; }
+        __gshared Holder holder = Holder(2, &x);
+        __gshared string[3] names = ["one", "two", "three"];
+        int main() {
+            *p += 1;
+            printf("%d %d %.*s\\n", *holder.q, holder.n,
+                cast(int) names[2].length, names[2].ptr);
+            return x + cast(int) names[1].length;
+        }
+        """})
+
+
+def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import other: count, otherLiteral;
+        struct Defaults { int a = 5; string s = "dflt"; double d = 1.5; }
+        int variable;
+        static this() { variable = 40; }
+        int main() {
+            Defaults d;
+            printf("%d %.*s\\n", d.a, cast(int) d.s.length, d.s.ptr);
+            return variable + count
+                + ("shared literal".ptr is otherLiteral() ? 1 : 100);
+        }
+        """,
+        "other.d": """
+        module other;
+        immutable(char)* otherLiteral() { return "shared literal".ptr; }
+        int count = 1;
+        """,
+    })
+
+
 # A save never writes a file that loads into a different state: a program
 # with static data that can hold an address is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
