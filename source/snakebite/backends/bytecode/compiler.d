@@ -142,7 +142,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callLowering);
+            &classRuntimeInfo, &callLowering,
+            (module_) => &moduleForD(module_).blocks);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
@@ -770,11 +771,19 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // The module of `compiledProgram` for the D module that declares
     // `declaration`, made at its first use. Under the compiler lock.
     private Module* moduleFor(Declaration declaration) {
-        import snakebite.frontend.dmd.functions: moduleOf, prettyNameOf;
-        import std.string: fromStringz;
+        import snakebite.frontend.dmd.functions: moduleOf;
 
         auto owner = moduleOf(declaration);
         assert(owner !is null, "a compiled declaration has a D module");
+        return moduleForD(owner);
+    }
+
+    // The module of `compiledProgram` for the D module `owner`, made at its
+    // first use. Under the compiler lock.
+    private Module* moduleForD(imported!"dmd.dmodule".Module owner) {
+        import snakebite.frontend.dmd.functions: prettyNameOf;
+        import std.string: fromStringz;
+
         if (auto found = owner in _modules)
             return *found;
 

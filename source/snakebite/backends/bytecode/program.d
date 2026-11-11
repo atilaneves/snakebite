@@ -8,7 +8,7 @@ import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.native.signature: SignatureTable;
-import snakebite.native.staticstore: StaticStore;
+import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.stack.tls: TlsSlots;
 import snakebite.start.data: StartData;
 
@@ -58,13 +58,17 @@ public struct Program {
 }
 
 
-// The compiled code that one D module defines. The program owns it and the
-// address does not change.
+// The compiled code and the static data that one D module defines. The
+// program owns it and the address does not change.
 public struct Module {
     @disable this(this);
 
     // The name of the D module.
     public string name;
+
+    // The static data that the D module defines: its variables and their
+    // initial bytes. The addresses in instructions point into the blocks.
+    public StaticBlocks blocks;
 
     // Each is a heap block that never moves: a call site embeds the address
     // of its callee before the callee is filled. One append per function.
