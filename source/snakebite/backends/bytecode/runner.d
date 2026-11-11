@@ -205,12 +205,6 @@ public final class StartFunction: FunctionHandle {
         _step = step;
     }
 
-    // A handle whose function is compiled already: no step, no compiler.
-    this(Runner* runner, const(Function)* compiled) {
-        _runner = runner;
-        _compiled = compiled;
-    }
-
     public override void call(void* returnPlace, void*[] args) {
         import core.atomic: atomicLoad, MemoryOrder;
 

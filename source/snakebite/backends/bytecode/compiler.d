@@ -57,7 +57,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
-    import snakebite.backends.bytecode.runner: CompileStep, Runner, StartFunction;
+    import snakebite.backends.bytecode.runner:
+        CompileStep, Runner, StartFunction;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
@@ -845,8 +846,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
-        Instruction, Role, Roles, addressSlotOf, bindInstructionReferences, branchTargetField, recordAssertSiteRelocs,
-        recordCallSiteRelocs, recordExceptionHandlerRelocs, rolesOf,
+        Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
+        branchTargetField, recordAssertSiteRelocs, recordCallSiteRelocs,
+        recordExceptionHandlerRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1328,8 +1330,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
-        // The instruction indices become addresses only now: the passes
-        // above renumber instructions and read the indices.
+        // Branch targets and call site cleanup ranges become addresses only
+        // now: the passes above read them as indices.
         import std.conv: text;
 
         if (auto reason = bindInstructionReferences(result))
@@ -1352,11 +1354,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         emit(&opAssert, zero, _assertSites.length - 1, size_t.sizeof);
     }
-
-    private const(Instruction)* instructionAt(in size_t index) const {
-        return cast(const(Instruction)*) (_instructions.ptr + index);
-    }
-
 
     // How a copied instruction names frame storage. `ignored` marks a field
     // that holds no storage operand.
@@ -4216,7 +4213,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // the loop in source. Nothing does when a trivially-true loop is
         // a function's own last statement (its body returns
         // unconditionally instead), and a branch aimed one past the last
-        // instruction is exactly what `bindInstructionReferences` exists to catch.
+        // instruction is exactly what `bindInstructionReferences` exists to
+        // catch.
         // A `break` inside such a loop still lands somewhere real:
         // `build` appends a trailing `opReturnVoid` at that exact
         // position whenever nothing else already made it reachable.
