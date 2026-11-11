@@ -5,7 +5,7 @@ module snakebite.backends.bytecode.runner;
 // the threads, the JIT, and the call from the host into a compiled function.
 // It holds none of the compiled code and none of the compiler, and it
 // imports no frontend module.
-public:
+private:
 
 import snakebite.backends.bytecode.vm: Function, JitSetting, Vm;
 import snakebite.host.executionstates: ExecutionStates;
@@ -15,7 +15,7 @@ import snakebite.stack.tls: TlsSlots;
 // A `Function` holds the address of the JIT instance and the execution
 // states hold delegates of this object, so the address of a `Runner` must
 // never change. Hold it as a field of a class object.
-struct Runner {
+public struct Runner {
     import snakebite.backends.bytecode.jit: jitSupported;
 
     // Each native stack needs its own guest frame stack. Fibers can resume
@@ -30,17 +30,17 @@ struct Runner {
     private bool delegate() _hasCallbackEntries;
     // The JIT code region and the other JIT state. Its address never
     // changes, and each `Function` compiled for this runner points to it.
-    // The destructor of the field frees the region.
+    // `releaseJitCode` frees the region.
     static if (jitSupported) {
         import snakebite.backends.bytecode.jit: JitInstance;
 
         private JitInstance _jitInstance;
 
-        package JitInstance* jitInstance() {
+        package JitInstance* jitInstance() @safe @nogc nothrow pure return {
             return &_jitInstance;
         }
     } else {
-        package void* jitInstance() {
+        package void* jitInstance() @safe @nogc nothrow pure {
             return null;
         }
     }
@@ -67,7 +67,7 @@ struct Runner {
         }, onIdle, &releaseJitCode);
     }
 
-    public ref const(JitSetting) jitSetting() const return {
+    public ref const(JitSetting) jitSetting() @safe @nogc nothrow pure const return {
         return _jit;
     }
 

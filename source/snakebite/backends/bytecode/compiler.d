@@ -208,7 +208,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         void*[] args,
     ) {
         const compiled = compileFunction(function_);
-        runHostToGuest(compiled, returnPlace, args);
+        _runner.call(compiled, returnPlace, args);
     }
 
     public override void[] staticStorage(
@@ -233,22 +233,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         }
 
         public override void call(void* returnPlace, void*[] args) {
-            runHostToGuest(function_.get(), returnPlace, args);
+            _runner.call(function_.get(), returnPlace, args);
         }
-    }
-
-    // The bytecode backend's one host-to-guest entry is `Runner.call`.
-    // The program runner's top-level call (`call`) and a callback's re-entry
-    // (`callGuestFromHost`) both reach the compiled body only there.
-    private void runHostToGuest(
-        const(Function)* compiled,
-        void* returnPlace,
-        scope const(void*)[] args,
-        void* variadicCursor = null,
-        const(void)* variadicTypes = null,
-    ) {
-        _runner.call(compiled, returnPlace, args, variadicCursor,
-            variadicTypes);
     }
 
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
@@ -324,7 +310,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
-    // guest function pointer or delegate. It shares `runHostToGuest` with
+    // guest function pointer or delegate. It shares `Runner.call` with
     // the program runner's top-level call: neither binds arguments on its
     // own, and `call.function_` - the word `registerGuestWord` recorded
     // when the callee was first compiled - is already built, so this
@@ -332,7 +318,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // calling (ADR-0006). A `Throwable` the body throws unwinds through
     // the host frames untouched (ADR-0004).
     private void callGuestFromHost(CallbackCall* call) {
-        runHostToGuest(cast(const(Function)*) call.function_,
+        _runner.call(cast(const(Function)*) call.function_,
             call.returnPlace, call.arguments,
             call.variadicCursor, call.variadicTypes);
     }
