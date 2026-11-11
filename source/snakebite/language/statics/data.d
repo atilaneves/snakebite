@@ -224,22 +224,29 @@ public struct NativeData {
         return bytes;
     }
 
+    // The constant is data of `owner`, when there is one: the function whose
+    // instructions refer to it, or the field it initializes.
     public const(void)[] value(
         Type type,
         Expression expression,
+        Dsymbol owner = null,
     ) {
         const facts = typeFacts(type);
-        auto bytes = reserve(facts);
+        auto bytes = reserve(facts, owner);
         write(type, facts, expression, bytes.ptr);
         return bytes;
     }
 
-    public const(void)[] value(Type type, in void[] representation) {
+    public const(void)[] value(
+        Type type,
+        in void[] representation,
+        Dsymbol owner = null,
+    ) {
         import core.stdc.string: memcpy;
 
         const facts = typeFacts(type);
         assert(representation.length == facts.size);
-        auto bytes = reserve(facts);
+        auto bytes = reserve(facts, owner);
         memcpy(bytes.ptr, representation.ptr, bytes.length);
         return bytes;
     }
@@ -456,6 +463,7 @@ public struct NativeData {
                 : value(
                     field.type,
                     newInFrontend!getConstInitializer(field, false),
+                    field,
                 );
             if (field.isBitFieldDeclaration !is null) {
                 const access = bitfieldAccess(field);

@@ -5967,7 +5967,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileConstant(Expression expression) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, expression));
+        emitBytes(_bytecode._nativeData.value(_valueType, expression, _function));
     }
 
     override void visit(IntegerExp expression) {
@@ -5986,7 +5986,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, bytes));
+        emitBytes(_bytecode._nativeData.value(_valueType, bytes, _function));
     }
 
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
@@ -8250,7 +8250,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address in the native constant pool of `value`.
     private Address constantWord(in size_t value) {
         return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1]).ptr);
+            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function).ptr);
     }
 
     // A frame slot that holds the value of `pointer`. A plain local is that
@@ -8338,10 +8338,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (operand.op == EXP.null_) {
             const size_t zero;
             return Address(Target.Kind.constantPool,
-                _bytecode._nativeData.value(type, (&zero)[0 .. 1]).ptr);
+                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function).ptr);
         }
         return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(type, operand).ptr);
+            _bytecode._nativeData.value(type, operand, _function).ptr);
     }
 
     private bool isConstantOperand(
