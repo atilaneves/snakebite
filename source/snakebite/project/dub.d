@@ -2,28 +2,16 @@ module snakebite.project.dub;
 
 private:
 
-// What `dub describe` says about a project, with the choices that the
-// description was made with. A build of the dependencies needs them to ask
-// dub for the same targets.
-public struct DubDescription {
-    import dub.description: ProjectDescription;
-
-    public ProjectDescription project;
-    // The configuration as asked for. `unittest` stands for dub's generated
-    // test runner configuration, which `project.configuration` names.
-    public string requestedConfiguration;
-    public string[] versions;
-}
-
-
 // Guest source facts and dependency preparation share one DUB description.
 // Callers do not need its package records, target records, or cache format.
 public struct DubDependencies {
     private string _directory;
-    private DubDescription _description;
+    private imported!"snakebite.project.dubcache".DubDescription _description;
     private string[] _linkerFiles;
 
-    private this(in string directory, DubDescription description,
+    private this(
+        in string directory,
+        imported!"snakebite.project.dubcache".DubDescription description,
         string[] linkerFiles,
     ) {
         _directory = directory;
@@ -51,7 +39,28 @@ public struct DubDependencies {
 }
 
 
-public imported!"snakebite.project.sources".SourceSet dubSources(
+public struct SourceSet {
+    import snakebite.frontend.compiler: FrontendFlags;
+
+    public string[] files;
+    public string[] importPaths;
+    public string[] stringImportPaths;
+    public string[] linkerFlags;
+    public FrontendFlags flags;
+    public string[string] sourceOverrides;
+    public string[] linkerFiles;
+    public DubDependencies dependencies;
+    // Where `dub test` runs the test binary; empty when the recipe sets no
+    // `workingDirectory`, and for a bare directory.
+    public string workingDirectory;
+    // A bare directory is built as `dmd -i` builds it, which compiles a C
+    // module that a D module imports. A dub recipe names its C files in
+    // `sourceFiles`, and dub does not compile one that it does not name.
+    public bool importedCFilesAreRoots;
+}
+
+
+public SourceSet dubSources(
     in string directory, in string[] versions = null,
 ) {
     return dubSources(directory, dubDescribeProject(directory, versions));
@@ -116,11 +125,11 @@ public string fetchProject(
 }
 
 
-public DubDescription dubDescribeProject(
+public imported!"snakebite.project.dubcache".DubDescription dubDescribeProject(
     in string directory, in string[] versions = null,
 ) {
     import snakebite.image.dependency: defaultCompiler;
-    import snakebite.project.dubcache: cachedDubDescription;
+    import snakebite.project.dubcache: DubDescription, cachedDubDescription;
 
     return cachedDubDescription(directory, defaultCompiler, versions, {
         auto dub = loadedDub(directory);
@@ -187,19 +196,8 @@ private auto platformSettings(
     return settings;
 }
 
-// The directory that dub keeps its settings, packages and build cache in.
-// dub's own function for this is not public, so this is its rule for the
-// environment. The `dubHome` setting of a settings file is not read.
-public string dubHomeDirectory() {
-    import std.path: buildPath;
-    import std.process: environment;
-
-    const dpath = environment.get("DPATH", "");
-    return environment.get("DUB_HOME", dpath.length
-        ? buildPath(dpath, "dub") : buildPath(environment.get("HOME", ""), ".dub"));
-}
-
 private string dubCacheDirectory() {
+    import snakebite.project.dubcache: dubHomeDirectory;
     import std.path: buildPath;
 
     return buildPath(dubHomeDirectory, "cache");
@@ -265,7 +263,8 @@ private void runPreBuildCommands(
 // compiler binary of the description.
 public void buildDubDependencies(
     in string directory, in string stateDirectory,
-    in DubDescription description, in string[] linkerFiles,
+    in imported!"snakebite.project.dubcache".DubDescription description,
+    in string[] linkerFiles,
 ) {
     import snakebite.failure.report: SnakebiteException;
     import std.algorithm: all;
@@ -331,6 +330,7 @@ private string compilerBinary(in string directory, in string[] versions) {
 
 // The description starts the compiler to learn its platform.
 private void ensureCompilerWrapper(in string binary) {
+    import snakebite.project.dubcache: DubDescription;
     import std.file: exists;
 
     if (!binary.exists)
@@ -338,7 +338,9 @@ private void ensureCompilerWrapper(in string binary) {
 }
 
 // Only the ldc2 binary is a script; dmd runs as it is.
-private void installCompilerWrapper(in string binary, in DubDescription description) {
+private void installCompilerWrapper(
+    in string binary, in imported!"snakebite.project.dubcache".DubDescription description,
+) {
     import core.sys.posix.fcntl: O_CLOEXEC, O_CREAT, O_TRUNC, O_WRONLY, open;
     import core.sys.posix.unistd: close, write;
     import std.conv: octal;
@@ -368,7 +370,9 @@ private void installCompilerWrapper(in string binary, in DubDescription descript
 // output gets translated flags; dependencies retain their own checks.
 // A real build lets dub run its hooks and report every build failure. A
 // script that has nothing to translate starts the compiler as it is.
-private string compilerWrapperScript(in string binary, in DubDescription description) {
+private string compilerWrapperScript(
+    in string binary, in imported!"snakebite.project.dubcache".DubDescription description,
+) {
     import snakebite.image.dependency: defaultCompiler;
     import snakebite.frontend.checks: isCheckFlag, ldcArguments;
     import std.algorithm: canFind, startsWith;
@@ -441,7 +445,9 @@ private string compilerWrapperScript(in string binary, in DubDescription descrip
 // The full description provides dependency sources that the root's flat
 // import-files list does not contain. Root source contents are excluded:
 // editing a guest module must not cause another native build.
-public string dependencyFingerprint(in string directory, in DubDescription description) {
+public string dependencyFingerprint(
+    in string directory, in imported!"snakebite.project.dubcache".DubDescription description,
+) {
     import snakebite.project.dubcache: toJson;
     import std.conv: text;
     import std.digest.sha: sha256Of;
@@ -456,7 +462,9 @@ public string dependencyFingerprint(in string directory, in DubDescription descr
 }
 
 
-public string[] dubInputs(in string directory, in DubDescription description) {
+public string[] dubInputs(
+    in string directory, in imported!"snakebite.project.dubcache".DubDescription description,
+) {
     import dub.description: SourceFileRole;
     import std.path: buildPath;
 
@@ -495,9 +503,9 @@ private string fileFingerprint(in string[] files) {
 }
 
 
-public imported!"snakebite.project.sources".SourceSet dubSources(
+public SourceSet dubSources(
     in string directory,
-    imported!"snakebite.project.dub".DubDescription description,
+    imported!"snakebite.project.dubcache".DubDescription description,
 ) {
     import snakebite.frontend.compiler: FrontendFlags;
     import std.algorithm.iteration: filter, map;
@@ -505,7 +513,6 @@ public imported!"snakebite.project.sources".SourceSet dubSources(
     import std.conv: text;
     import dub.compilers.buildsettings: BuildOption, BuildSettings;
     import dub.description: SourceFileRole;
-    import snakebite.project.sources: SourceSet;
     import std.path: buildNormalizedPath, buildPath;
     import std.traits: EnumMembers;
 
