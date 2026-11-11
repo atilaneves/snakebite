@@ -4736,18 +4736,21 @@ static foreach (backend; Matrix!(
                     }
                     foreach (indirect; [false, true]) {
                         GuardedSlice result = GuardedSlice(13, values[], 17);
-                        foreach (length; [3L, 2L, 1L, -1L, 0L]) {
+                        foreach (round; 0 .. 300) {
+                            const throwsNow = round == 3 || round == 270;
+                            const length = throwsNow ? -1L : round % 4;
                             try {
                                 if (indirect)
                                     assign(&result, &values[1], length);
                                 else
                                     result.view = slice(&values[1], length);
-                                if (length < 0 || result.view.length != length
+                                if (throwsNow || result.view.length != length
                                         || result.view.ptr !is &values[1])
                                     return 5;
                             } catch (Exception exception) {
-                                if (length != -1 || exception.msg != "negative slice length"
-                                        || result.view.length != 1
+                                if (!throwsNow
+                                        || exception.msg != "negative slice length"
+                                        || result.view.length != (round - 1) % 4
                                         || result.view.ptr !is &values[1])
                                     return 6;
                             }

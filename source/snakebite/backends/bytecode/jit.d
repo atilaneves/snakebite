@@ -1492,13 +1492,22 @@ private struct Gen {
     }
 
     // A storage operand. An indirect one loads its address slot into `scratch`.
-    bool opnd(size_t raw, ubyte scratch, out Mem m) {
+    // A template can reuse a pointer if its register stays live until the access.
+    bool opnd(bool reusePointer = false)(size_t raw, ubyte scratch, out Mem m) {
         if (raw & indirectBit) {
             const slot = (raw >> 32) & 0x7fff_ffff;
             const disp = cast(uint) raw;
             if (slot > 0x7fff_0000 || disp > 0x7fff_0000)
                 return false;
-            a.ld(8, scratch, Mem(FRAME, cast(int) slot));
+            const addressSlot = Mem(FRAME, cast(int) slot);
+            static if (reusePointer) {
+                const cached = cachedInt(addressSlot, 8);
+                if (cached >= 0) {
+                    m = Mem(cast(ubyte) cached, cast(int) disp);
+                    return true;
+                }
+            }
+            a.ld(8, scratch, addressSlot);
             m = Mem(scratch, cast(int) disp);
             return true;
         }
@@ -1762,7 +1771,7 @@ private struct Gen {
             && op.fused.kind == CompareKind.floating;
         const usesInt = op.kind == JitOp.Kind.int3 || op.kind == JitOp.Kind.cmp3
             || op.kind == JitOp.Kind.castFixed || op.kind == JitOp.Kind.widen
-            || op.kind == JitOp.Kind.jump
+            || op.kind == JitOp.Kind.jump || op.kind == JitOp.Kind.copy
             || (op.kind == JitOp.Kind.fused && !fpCompare);
         if (!fpArithmetic && !fpCompare)
             fpSlots = FpSlots.init;
@@ -1825,9 +1834,11 @@ private struct Gen {
             Mem d, s;
             if (!opnd(ins.destination, R9, d))
                 return false;
+            const scalar = goodWidth(size) && d.base == FRAME;
             if (isLiteralCopy(ins, op, size)) {
                 const width = cast(int) size;
                 storeConstant(width, d, constantAt(ins.source, width));
+                intSlot = IntSlot.init;
                 return true;
             }
             if (op.copy.staticSource) {
@@ -1837,12 +1848,26 @@ private struct Gen {
                 if (goodWidth(size) && known.covers(ins.source, size)) {
                     usedKnown = true;
                     storeConstant(cast(int) size, d, known.bits);
+                    intSlot = IntSlot.init;
                     return true;
                 }
-                if (!opnd(ins.source, R10, s))
+                const valid = scalar
+                    ? opnd!(/*reusePointer*/ true)(ins.source, R10, s)
+                    : opnd(ins.source, R10, s);
+                if (!valid)
                     return false;
             }
-            copyChunks(s, d, size);
+            if (scalar) {
+                const width = cast(int) size;
+                const cached = cachedInt(s, width);
+                const reg = cached >= 0 ? cached : RAX;
+                if (cached < 0)
+                    a.ld(width, reg, s);
+                storeInt(d, width, reg);
+            } else {
+                copyChunks(s, d, size);
+                intSlot = IntSlot.init;
+            }
             return true;
         }
 
@@ -1894,6 +1919,7 @@ private struct Gen {
                     if (emitFused(header, test, t + 1))
                         return true;
                     a.n = saved;
+                    readIntSlot = false;
                 }
             }
             jmpTo(t);
@@ -2479,7 +2505,10 @@ private struct Gen {
         if (p.kind != CompareKind.floating) {
             if (!goodWidth(w))
                 return false;
-            if (!p.leftInR0 && !opnd(ins.destination, R9, l))
+            // R10 resolves the right address, so the cached left base stays
+            // live until the compare loads it.
+            if (!p.leftInR0
+                    && !opnd!(/*reusePointer*/ true)(ins.destination, R9, l))
                 return false;
             IntegerRight right;
             if (!integerRight(ins.source, p.constantRight, w, R10, right))
