@@ -463,13 +463,13 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
                 archive.positionOf(cast(const(Function)*) target.address);
             return [position[0], position[1], 0];
         case staticData:
+        case constantPool:
             return archive.dataPosition(cast(const(void)*) target.address);
         case handler:
         case tlsDescriptor:
         case typeInfo:
         case hostSymbol:
         case frontendString:
-        case constantPool:
         case nativePlan:
         case callbackEntry:
         case callback:
@@ -487,13 +487,13 @@ private size_t addressOf(
         case functionWord:
             return cast(size_t) archive.functionAt(reference[0], reference[1]);
         case staticData:
+        case constantPool:
             return cast(size_t) archive.dataAt(reference);
         case handler:
         case tlsDescriptor:
         case typeInfo:
         case hostSymbol:
         case frontendString:
-        case constantPool:
         case nativePlan:
         case callbackEntry:
         case callback:
