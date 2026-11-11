@@ -243,6 +243,44 @@ static foreach (backend; Matrix!()) {
         }, ["scale"]);
     }
 
+    @("jit.pointerFieldComparisonFollowsTheTakenPath." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Buffer {
+                size_t length;
+                size_t capacity;
+            }
+            struct Buffers {
+                Buffer* replacement;
+            }
+            bool fits(ref Buffers buffers, Buffer* current, size_t needed,
+                bool keepCurrent)
+            {
+                assert(needed > 0);
+                if (keepCurrent)
+                    goto compareCapacity;
+                current = buffers.replacement;
+            compareCapacity:
+                if (current.capacity >= needed)
+                    return true;
+                return false;
+            }
+            int main() {
+                Buffer small = Buffer(2, 3);
+                Buffer large = Buffer(4, 8);
+                Buffers buffers = Buffers(&large);
+                foreach (_; 0 .. 300) {
+                    if (!fits(buffers, &small, 8, false))
+                        return 1;
+                    if (fits(buffers, &small, 8, true))
+                        return 2;
+                }
+                return 0;
+            }
+        });
+    }
+
     @("jit.loopUpdateUsesTheNewStep." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
