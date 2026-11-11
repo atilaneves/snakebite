@@ -209,7 +209,7 @@ public TypeInfo_Class classRuntimeInfo(
     if (length != 0)
         data.storeSlice(&info.vtbl, data.reserve(
             TypeFacts(length * (void*).sizeof, (void*).alignof),
-            declaration));
+            declaration), (void*).sizeof);
     // An `extern(C++)` class has no classinfo slot: its first virtual
     // method is at index 0.
     const firstMethod = declaration.vtblOffset;
@@ -265,7 +265,7 @@ public TypeInfo_Class classRuntimeInfo(
     if (interfaceCount != 0)
         data.storeSlice(&info.interfaces, data.reserve(
             TypeFacts(interfaceCount * Interface.sizeof, (void*).alignof),
-            declaration));
+            declaration), Interface.sizeof);
     foreach (i; 0 .. interfaceCount) {
         auto base = (*declaration.vtblInterfaces)[i];
         data.storeReference(cast(void*) &info.interfaces[i].classinfo,
@@ -274,7 +274,7 @@ public TypeInfo_Class classRuntimeInfo(
         if (!isInterface) {
             auto table = _interfaceVtable(
                 declaration, base, &info.interfaces[i], hooks);
-            data.storeSlice(&info.interfaces[i].vtbl, table);
+            data.storeSlice(&info.interfaces[i].vtbl, table, (void*).sizeof);
             data.storeReference(info.m_init.ptr + base.offset, table.ptr);
         }
     }

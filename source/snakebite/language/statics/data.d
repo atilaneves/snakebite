@@ -398,10 +398,13 @@ public struct NativeData {
             ? Target.Kind.hostSymbol : _functionKind(address), address);
     }
 
-    // The slice at `place` becomes `data`, which is bytes of a datum.
-    public void storeSlice(void* place, in void[] data) {
+    // The slice at `place` becomes `data`, which is bytes of a datum, of
+    // elements of `elementSize` bytes.
+    public void storeSlice(
+        void* place, in void[] data, in size_t elementSize = 1,
+    ) {
         checkedStoreIntegral(cast(ubyte*) place + arrayLengthOffset,
-            data.length, size_t.sizeof);
+            data.length / elementSize, size_t.sizeof);
         storeReference(cast(ubyte*) place + arrayPointerOffset, data.ptr);
     }
 

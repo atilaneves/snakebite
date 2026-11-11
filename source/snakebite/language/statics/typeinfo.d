@@ -263,7 +263,7 @@ public struct RuntimeTypes {
             if (count != 0) {
                 auto elements = _data.reserve(
                     TypeFacts(count * (void*).sizeof, (void*).alignof));
-                _data.storeSlice(&tupleInfo.elements, elements);
+                _data.storeSlice(&tupleInfo.elements, elements, (void*).sizeof);
                 foreach (index, argument; *tuple.arguments)
                     reference(&tupleInfo.elements[index],
                         get(argument.type));
