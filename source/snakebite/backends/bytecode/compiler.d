@@ -53,45 +53,22 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm:
-        Function, JitSetting, prepareForExecution, Vm;
+        Function, JitSetting, prepareForExecution;
+    import snakebite.backends.bytecode.runner: Runner;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.failure.report: SnakebiteException;
-    import snakebite.stack.frames: defaultFrameCapacity;
-    import snakebite.host.threads: heapNew;
-    import snakebite.host.executionstates: ExecutionStates;
     import snakebite.language.statics.data: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
     import snakebite.language.statics.typeinfo: RuntimeTypes;
 
-    // Each native stack needs its own guest frame stack. Fibers can resume
-    // out of nesting order, so they cannot share one LIFO stack.
-    // Entries are owned and released by their host thread (ADR-0006).
-    private ExecutionStates!(Vm*) _vms;
+    // The machinery that runs the compiled functions. A `Function` points
+    // to its JIT instance, so the address of this field must never change.
+    private Runner _runner;
     private CallbackBridge* _callbacks;
-    // Set by `release` when no host code holds a callback entry, so that no
-    // guest code of this instance can run again once its states are gone.
-    private shared bool _jitCodeCanGo;
     private NativeData _nativeData;
     private PlanCache _plans;
-    // What the functions of this backend do with the JIT.
-    private JitSetting _jit;
-    // The JIT code region and the other JIT state of this instance. Its
-    // address never changes, and each `Function` that this instance compiles
-    // points to it. The destructor of the field frees the region.
-    static if (imported!"snakebite.backends.bytecode.jit".jitSupported) {
-        private imported!"snakebite.backends.bytecode.jit".JitInstance
-            _jitInstance;
-
-        package auto jitInstance() {
-            return &_jitInstance;
-        }
-    } else {
-        package void* jitInstance() {
-            return null;
-        }
-    }
     private CallSelection _callSelection;
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -148,7 +125,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     public this(const Program program, in JitSetting jit = JitSetting.init) {
         super(program);
         _compilation.hasCompiler = true;
-        _jit = jit;
         _plans = PlanCache(program.dependencyImage,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
@@ -161,9 +137,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _vms = ExecutionStates!(Vm*)(() {
-            return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
-        }, () => _nativeData.release, &releaseJitCode);
+        _runner = Runner(jit, () => _nativeData.tlsSlots,
+            () => _nativeData.release, () => _callbacks.hasEntries);
         _callbacks = new CallbackBridge(&invokeCallback, cast(void*) this);
         _plans.useCallbacks(_callbacks);
     }
@@ -174,26 +149,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return _plans.callbackChunkCount;
     }
 
-    // The owner ends the instance. The JIT code goes when no guest code can
-    // run: host code holds no callback entry, and (`ExecutionStates`) no
-    // thread has an execution state left, which is checked when the last
-    // one ends. Active calls and fibers keep a state until they return. If
-    // host code holds an entry, the callbacks keep the instance reachable
-    // for the life of the process, and its JIT code stays with it.
+    // The owner ends the instance. The JIT code stays while host code holds
+    // a callback entry: the callbacks keep the instance reachable for the
+    // life of the process (see `Runner.end`).
     protected override void release() {
-        import core.atomic: atomicStore;
-
-        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            atomicStore(_jitCodeCanGo, !_callbacks.hasEntries);
-        _vms.end;
-    }
-
-    private void releaseJitCode() nothrow @nogc {
-        import core.atomic: atomicLoad;
-
-        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            if (atomicLoad(_jitCodeCanGo))
-                _jitInstance.release;
+        _runner.end;
     }
 
     private void* constantSymbolAddress(
@@ -218,7 +178,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     version(unittest)
     public size_t executionStatesOfThisThread() {
-        return _vms.count;
+        return _runner.executionStatesOfThisThread;
     }
 
     // Every function this backend compiled, for tests that inspect the
@@ -237,7 +197,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         void*[] args,
     ) {
         const compiled = compileFunction(function_);
-        runHostToGuest(compiled, returnPlace, args);
+        _runner.call(compiled, returnPlace, args);
     }
 
     public override void[] staticStorage(
@@ -262,76 +222,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         }
 
         public override void call(void* returnPlace, void*[] args) {
-            runHostToGuest(function_.get(), returnPlace, args);
+            _runner.call(function_.get(), returnPlace, args);
         }
-    }
-
-    // The bytecode backend's one host-to-guest entry. The program
-    // runner's top-level call (`call`) and a callback's re-entry
-    // (`callGuestFromHost`) both reach the compiled body only here -
-    // neither binds arguments on its own. `args` are host-to-guest
-    // arguments in native layout, one pointer per parameter, per
-    // `Backend.call`'s own contract - each pointer holds the address of
-    // storage for that parameter's native bytes, which for a `ref`/`out`
-    // parameter are the target's own address. When the callee has a
-    // hidden `this`, `args[0]` is that same shape one more time, before
-    // the declared parameters: the address of a pointer-sized word
-    // holding the context - the one convention `CallPlan.call` and a
-    // callback's own `addresses` already use for it.
-    //
-    // A `ref`-returning callee hands back the result's own address, not
-    // its value - the same word compiled D returns in `rax`.
-    //
-    // `compiled` is already built and carries the layout that binds `args`
-    // (`Function.hostCall`): binding `args` into `Vm.HostArgument`s and
-    // running the compiled body touch no dmd state, so this takes no lock
-    // of its own. A thread that held the compiler lock here while it
-    // waited for another thread's callback - the way `Thread.join` waits
-    // in `otherThread`/`concurrentThreads` guest code - would never see
-    // that callback return (ADR-0006).
-    private void runHostToGuest(
-        const(Function)* compiled,
-        void* returnPlace,
-        scope const(void*)[] args,
-        void* variadicCursor = null,
-        const(void)* variadicTypes = null,
-    ) {
-        const layout = &compiled.hostCall;
-        layout.checkArgumentCount(args.length, "bytecode");
-
-        Vm.HostArgument[16] inlineArguments = void;
-        const count = layout.parameters.length
-            + layout.hasHiddenThis
-            + (variadicCursor !is null)
-            + (variadicTypes !is null);
-        auto arguments = count <= inlineArguments.length
-            ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
-        size_t filled;
-
-        scope const(void*)[] declaredArguments = args;
-        if (layout.hasHiddenThis) {
-            arguments[filled++] = Vm.HostArgument(
-                layout.hiddenThis.offset, args[0], layout.hiddenThis.width);
-            declaredArguments = args[1 .. $];
-        }
-
-        foreach (i, parameter; layout.parameters)
-            arguments[filled++] = Vm.HostArgument(
-                parameter.offset, declaredArguments[i], parameter.width);
-
-        if (variadicCursor !is null) {
-            assert(layout.variadicCursor != size_t.max);
-            arguments[filled++] = Vm.HostArgument(
-                layout.variadicCursor, &variadicCursor, size_t.sizeof);
-        }
-        if (variadicTypes !is null) {
-            assert(layout.variadicTypes != size_t.max);
-            arguments[filled++] = Vm.HostArgument(
-                layout.variadicTypes, &variadicTypes, size_t.sizeof);
-        }
-
-        auto active = _vms.enter;
-        active.state.call(*compiled, returnPlace, arguments[0 .. filled]);
     }
 
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
@@ -407,7 +299,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     // The re-entry a pool entry (ADR-0003) reaches when host code calls a
-    // guest function pointer or delegate. It shares `runHostToGuest` with
+    // guest function pointer or delegate. It shares `Runner.call` with
     // the program runner's top-level call: neither binds arguments on its
     // own, and `call.function_` - the word `registerGuestWord` recorded
     // when the callee was first compiled - is already built, so this
@@ -415,7 +307,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // calling (ADR-0006). A `Throwable` the body throws unwinds through
     // the host frames untouched (ADR-0004).
     private void callGuestFromHost(CallbackCall* call) {
-        runHostToGuest(cast(const(Function)*) call.function_,
+        _runner.call(cast(const(Function)*) call.function_,
             call.returnPlace, call.arguments,
             call.variadicCursor, call.variadicTypes);
     }
@@ -868,7 +760,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-            prepareForExecution(placeholder, _jit, jitInstance,
+            prepareForExecution(placeholder, _runner.jitSetting,
+                _runner.jitInstance,
                 function_.mangledNameOf);
             _complete.insert(function_, placeholder);
             if (outermost)
