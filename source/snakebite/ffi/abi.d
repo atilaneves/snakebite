@@ -5,10 +5,10 @@ private:
 
 
 import snakebite.failure.report: internalFailure;
-import snakebite.ffi.shape: ArgumentPlan, Linkage, Register;
+import snakebite.ffi.argumentplan: ArgumentPlan, Linkage, Register;
 
 // This module classifies one value's System V AMD64 ABI shape - the
-// `ArgumentPlan` and `Register` of `snakebite.ffi.shape` - from a dmd
+// `ArgumentPlan` and `Register` of `snakebite.ffi.argumentplan` - from a dmd
 // `Type`. It does not dispatch a call itself: that moved to the assembly
 // stub in `snakebite.ffi.sysv`, replayed by `snakebite.ffi.plan` (ADR-0001,
 // issue #334).

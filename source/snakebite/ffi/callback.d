@@ -515,7 +515,7 @@ private void invoke(ref Slot slot, CallFrame* frame) {
     const(void)* variadicTypes;
     void*[] guestAddresses = addresses;
     if (typesIndex != size_t.max) {
-        import snakebite.ffi.shape: callbackVariadicTypes;
+        import snakebite.ffi.argumentplan: callbackVariadicTypes;
 
         variadicTypes = callbackVariadicTypes(addresses[typesIndex]);
         guestAddresses = new void*[count - 1];

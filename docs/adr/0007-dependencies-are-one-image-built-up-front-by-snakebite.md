@@ -15,7 +15,7 @@ symbol request. Umbrella #100 decision 4 requires guest native code to
 come from the same compiler family as the host. dmd and LDC order
 `extern(D)` parameters differently. They also order `this` and the
 hidden return pointer differently. The classifier in
-`source/snakebite/ffi/shape.d` switches on the host compiler. `bin/ut`
+`source/snakebite/ffi/argumentplan.d` switches on the host compiler. `bin/ut`
 is built with dmd, `bin/sb` is built with LDC, and a user's dub
 defaults to dmd.
 

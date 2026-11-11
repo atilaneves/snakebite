@@ -23,7 +23,7 @@ private extern(C) int invokeDVariadicCallback(
 // the `"at"` output), unlike `bin/ut`, which dmd builds - so this callee
 // is the one place in this project's own test suites an `extern(D)`
 // untyped variadic callee's hidden `_arguments` argument actually
-// reaches ldc2's own ABI (`snakebite.ffi.shape.dVariadicArgumentsIsSlice`'s
+// reaches ldc2's own ABI (`snakebite.ffi.argumentplan.dVariadicArgumentsIsSlice`'s
 // own doc): ldc2's codegen passes it as a two-register `TypeInfo[]`
 // slice, not the one pointer dmd's codegen passes, so a plan that got
 // that shape wrong would either read garbage out of `_arguments` here,

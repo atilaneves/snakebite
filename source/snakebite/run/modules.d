@@ -284,7 +284,7 @@ private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
 private import snakebite.ffi.plan: NativeSignature;
-private import snakebite.ffi.shape: Linkage;
+private import snakebite.ffi.argumentplan: Linkage;
 
 
 // What `endAtExit` needs, in memory that the GC does not own: after a normal

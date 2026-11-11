@@ -1,4 +1,4 @@
-module snakebite.ffi.shape;
+module snakebite.ffi.argumentplan;
 
 
 private:

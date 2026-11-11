@@ -75,7 +75,7 @@ private extern(C) int snakebite_ut_non_copyable_aggregate_call_count() {
 
 // A real `extern(D)` function, not `extern(C)`: on dmd, the host compiler
 // that builds `bin/ut`, its parameters reach the registers and the stack
-// in reversed declaration order (`snakebite.ffi.shape.reversedDParameters`).
+// in reversed declaration order (`snakebite.ffi.argumentplan.reversedDParameters`).
 // Nine ABI words (four two-eightbyte `string`s plus one `int`) spill two
 // of the four strings to the stack, exercising the same stack-order rule
 // `ut.ffi.plan`'s `called.externD.*` tests check at the plan level -
@@ -2640,7 +2640,7 @@ private struct VariadicPointBackend {
 // `Matrix!`/`shouldBeRetOf` like an ordinary variadic test, unlike the
 // six that follow. `acceptance/at/ffi/dvariadic.d`'s own callee checks
 // this exact shape again, built by ldc2 instead of dmd - the one host
-// whose own `_arguments` ABI differs (`snakebite.ffi.shape.
+// whose own `_arguments` ABI differs (`snakebite.ffi.argumentplan.
 // dVariadicArgumentsIsSlice`'s own doc).
 pragma(mangle, "snakebite_ut_dvariadic_length_type_sum_backend")
 private extern(D) int snakebite_ut_dvariadic_length_type_sum_backend(
@@ -2727,7 +2727,7 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "Ctfe can't do this"),
 )) {
     // The same callee at two call sites in one guest function, one
-    // passing seven `int`s (more than `shape.maxIntegerArguments` once
+    // passing seven `int`s (more than `argumentplan.maxIntegerArguments` once
     // `_arguments` itself claims a register too, so the integer file
     // spills) and the other nine `double`s (more than `abi.
     // maxFloatingArguments`, so the SSE file spills) - `ut.ffi.plan`'s

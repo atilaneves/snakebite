@@ -391,7 +391,7 @@ static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,
 // `{7, 8, 9}`, read back as `a*100 + b*10 + c == 789`. This is the one
 // ABI decision `extern(C++)` changes from `extern(D)` on this branch:
 // the hidden pointer comes before `this` here, not after
-// (`shape.contextPrecedesHiddenReturnPointer`) - a swap would put the
+// (`argumentplan.contextPrecedesHiddenReturnPointer`) - a swap would put the
 // wrong value in the wrong words, not merely crash (issue #336
 // review, finding 4).
 static foreach (backend; Matrix!(Omit!(Ctfe, Because.inexpressible,

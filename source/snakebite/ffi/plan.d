@@ -39,7 +39,7 @@ import snakebite.failure.report: internalFailure;
 // keeps its address. `callAt` only replays the moves: read a word, write
 // it into the frame, call that one entry once, and read the result back.
 public struct CallPlan {
-    import snakebite.ffi.shape: ArgumentPlan, Register;
+    import snakebite.ffi.argumentplan: ArgumentPlan, Register;
     import snakebite.ffi.sysv:
         CallEntry, CallFrame, snakebite_ffi_call_sysv_amd64,
         snakebite_ffi_call_sysv_amd64_integer;
@@ -108,10 +108,10 @@ public struct CallPlan {
     // parameters. The caller's first argument slot holds that pointer.
     private bool _hiddenContext;
     // dmd and ldc use different orders when both invisible arguments are
-    // present. See `shape.contextPrecedesHiddenReturnPointer`.
+    // present. See `argumentplan.contextPrecedesHiddenReturnPointer`.
     private bool _contextPrecedesHiddenReturnPointer;
     // Whether the callee reads its parameters out of the registers in
-    // reverse declaration order - see `shape.reversedDParameters`.
+    // reverse declaration order - see `argumentplan.reversedDParameters`.
     private bool _reversedArguments;
     // The moves `callAt` replays - see the module comment.
     private Move[] _moves;
@@ -385,7 +385,7 @@ public struct CallPlan {
             return null;
         import snakebite.native.variadic:
             initializeNativeCursor;
-        import snakebite.ffi.shape:
+        import snakebite.ffi.argumentplan:
             maxFloatingArguments, maxIntegerArguments;
         import std.algorithm.comparison: min;
 
@@ -790,7 +790,8 @@ public struct CallPlan {
     // shape alone - see the module comment. Called once, from `prepare`
     // and `ofRawAddress`, after every other field is set.
     private void buildMoves() {
-        import snakebite.ffi.shape: maxFloatingArguments, maxIntegerArguments;
+        import snakebite.ffi.argumentplan:
+            maxFloatingArguments, maxIntegerArguments;
         import std.algorithm: sort;
 
         size_t integerCount;
@@ -907,7 +908,7 @@ public struct CallPlan {
 
             // A MEMORY-class argument never reaches a register - the
             // SysV ABI classifies it onto the stack outright, skipping
-            // register classification entirely (`shape.ArgumentPlan`'s own
+            // register classification entirely (`argumentplan.ArgumentPlan`'s own
             // doc) - so it always defers to the spilled pass below,
             // whatever room either register file has left.
             if (plan.memory) {
@@ -953,7 +954,7 @@ public struct CallPlan {
 
             // A MEMORY-class argument's eightbytes were never classified
             // into `plan.registers` (there is no register shape to read -
-            // see `shape.ArgumentPlan`'s own doc), so each one is built here
+            // see `argumentplan.ArgumentPlan`'s own doc), so each one is built here
             // instead, straight from its byte size: a whole `word64` load
             // for every full eightbyte, and for a size that does not end
             // on an eightbyte boundary, one final `copy` load - `loadOf`/
@@ -1478,7 +1479,7 @@ public struct PlanCache {
 
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
-    import snakebite.ffi.shape: Register;
+    import snakebite.ffi.argumentplan: Register;
     import snakebite.host.sharedtable: SharedTable;
 
     // Read without a lock by every thread that runs guest code
@@ -1918,7 +1919,7 @@ private CallPlan prepareCommon(
 // no pointer to the AST, so code that runs after compilation can
 // register an entry without a frontend.
 public struct NativeSignature {
-    import snakebite.ffi.shape: ArgumentPlan, Linkage;
+    import snakebite.ffi.argumentplan: ArgumentPlan, Linkage;
 
     public struct Parameter {
         ArgumentPlan shape;
@@ -1979,7 +1980,7 @@ public NativeSignature nativeSignatureOf(
 // keeps one per slot. Reference results use the same pointer return
 // convention as a forward call.
 package CallPlan prepareCallback(in NativeSignature signature) {
-    import snakebite.ffi.shape: Linkage;
+    import snakebite.ffi.argumentplan: Linkage;
 
     auto plan = planOf(signature);
     plan._callbackVariadic = signature.variadic;
@@ -2024,7 +2025,7 @@ private NativeSignature signatureOf(
 ) {
     import snakebite.ffi.abi:
         argumentPlanOf, linkageOf, needsHiddenReturnPointer, returnPlanOf;
-    import snakebite.ffi.shape: ArgumentPlan, Register, supported;
+    import snakebite.ffi.argumentplan: ArgumentPlan, Register, supported;
     import dmd.astenums: LINK, STC, Tdelegate, VarArg;
     import dmd.typesem: nextOf, toBasetype;
     import std.conv: text;
@@ -2189,7 +2190,7 @@ private NativeSignature signatureOf(
 // The part of `_shapeOf` that needs no AST: places every argument of
 // `signature` and builds the moves.
 private CallPlan planOf(in NativeSignature signature) {
-    import snakebite.ffi.shape:
+    import snakebite.ffi.argumentplan:
         ArgumentPlan, Linkage, Register, contextPrecedesHiddenReturnPointer,
         dVariadicArgumentsIsSlice, reversedDParameters;
 
@@ -2246,7 +2247,7 @@ private CallPlan planOf(in NativeSignature signature) {
     );
 
     // On ldc, `_arguments` is a two-register `TypeInfo[]` slice
-    // instead (`shape.dVariadicArgumentsIsSlice`'s own doc) - the same
+    // instead (`argumentplan.dVariadicArgumentsIsSlice`'s own doc) - the same
     // shape `abi.classify`'s own `Tarray` case gives any other
     // dynamic-array-typed argument, length then pointer, both
     // integer-class.

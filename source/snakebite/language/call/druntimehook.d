@@ -4,7 +4,7 @@ module snakebite.language.call.druntimehook;
 private:
 
 
-import snakebite.ffi.shape: Register;
+import snakebite.ffi.argumentplan: Register;
 
 
 // A druntime hook either backend calls directly by linker symbol, with
