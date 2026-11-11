@@ -2111,6 +2111,29 @@ def test_saved_program_with_host_variable_address_plus_offset_in_data_runs_as_co
         """})
 
 
+def test_saved_program_with_thread_local_variables_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import std.getopt: arraySep, optionChar;
+        int counter = 1;
+        int[3] table = [1, 2, 3];
+        int* pointer;
+        struct Holder { static int count = 5; }
+        int next() { static int calls; return ++calls; }
+        int main() {
+            counter += 2;
+            pointer = &table[2];
+            next();
+            optionChar = '+';
+            arraySep = ",";
+            return counter + *pointer + Holder.count + next()
+                + (optionChar == '+') + cast(int) arraySep.length;
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
