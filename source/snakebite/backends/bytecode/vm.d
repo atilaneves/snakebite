@@ -5422,8 +5422,9 @@ static if (jitSupported) {
     }
 
     // Prepares a compiled `function_` to run under `setting`, the JIT setting
-    // of the running process. The compiler does not know it: a compiled
-    // function is the same for each setting. When the functions count their
+    // of the `Bytecode` backend that compiled it; backends in one process can
+    // differ. The function compiler does not know it: a compiled function is
+    // the same for each setting. When the functions count their
     // events, this replaces the handler of each counted event by its counting
     // twin: a call, or a branch whose target is at or before it. It reads
     // the finished instructions, so their branch targets must be addresses.
@@ -5438,11 +5439,11 @@ static if (jitSupported) {
         function_.jit = jit;
         if (!setting.enabled)
             return;
-        foreach (index, ref instruction; function_.instructions) {
+        foreach (ref instruction; function_.instructions) {
             const target = branchTargetField(instruction);
             const counts = target is null
                 ? isCountedCall(instruction.handler)
-                : *target <= cast(size_t) &function_.instructions[index];
+                : *target <= cast(size_t) &instruction;
             if (!counts)
                 continue;
             // A handler with no twin stays: that instruction does not count.
