@@ -515,10 +515,10 @@ public struct PlanCache {
             return *cached;
         }
 
+        if (resolve(name) is null)
+            return null;
         auto plan = _store.plan(CallPlan.rawSignatureOf(
             parameterRegisters, returnRegister, secondReturnRegister), name);
-        if (plan is null)
-            return null;
 
         countPreparation;
         return *_rawPlans.insert(name, plan);
