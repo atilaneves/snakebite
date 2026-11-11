@@ -306,8 +306,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // allocator a `new T[](n)`/array literal calls through the same
     // `rawPlanOf` a bounds hook already goes through - never a private
     // bump allocator or free list of this compiler's own, and never a
-    // signature this module hardcodes: the VM that runs the plan reads
-    // it back only as a `CallSite.native` payload.
+    // signature this module hardcodes.
     package const(CallPlan)* allocatorPlan() {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 

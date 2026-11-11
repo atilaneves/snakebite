@@ -164,7 +164,7 @@ public struct Runner {
     // (ADR-0003). `context` is the address of the `Runner`.
     public extern(C) static void invokeCallback(
         void* context,
-        CallbackCall* call,
+        scope CallbackCall* call,
     ) {
         (cast(Runner*) context).callGuestFromHost(call);
     }
@@ -177,7 +177,7 @@ public struct Runner {
     // compiler lock of its own, on whichever thread's VM is calling
     // (ADR-0006). A `Throwable` the body throws unwinds through the host
     // frames untouched (ADR-0004).
-    private void callGuestFromHost(CallbackCall* call) {
+    private void callGuestFromHost(scope CallbackCall* call) {
         this.call(cast(const(Function)*) call.function_,
             call.returnPlace, call.arguments,
             call.variadicCursor, call.variadicTypes);

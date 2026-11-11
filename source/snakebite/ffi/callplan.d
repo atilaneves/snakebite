@@ -1159,9 +1159,9 @@ private void throwMissingReturnPlace() {
     );
 }
 
-// The DMD-free runtime entry point for a prepared call. The entry functions
-// below hand this function addresses of values already stored in native
-// layout.
+// The DMD-free runtime entry point for a prepared call. The VM
+// (`case native`) calls it with addresses of values already stored in
+// native layout.
 public void executeCallPlan(
     const(CallPlan)* plan,
     void* returnPlace,
