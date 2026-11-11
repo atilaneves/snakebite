@@ -2098,6 +2098,40 @@ def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_progr
         tmp_path, {"main.d": ABSENT_FUNCTION_PROGRAM.replace("COUNT", "0")})
 
 
+def test_call_of_an_absent_function_names_its_declaration_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int absentFunction(int);
+        int main() { return absentFunction(1); }
+        """)
+    for backend in ("interpreter", "bytecode"):
+        result = run_sb(f"--backend={backend}", str(tmp_path / "app"),
+                        cwd=tmp_path)
+        assert result.returncode != 0, output(result)
+        assert "declared by `absentFunction`" in result.stderr, (
+            backend, output(result))
+
+
+def test_never_called_absent_function_that_ffi_cannot_call_runs_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        extern(Windows) int absentFunction(int, ...);
+        int main(string[] args) {
+            if (args.length > 5)
+                return absentFunction(1, 2);
+            return 4;
+        }
+        """)
+    for backend in ("interpreter", "bytecode"):
+        result = run_sb(f"--backend={backend}", str(tmp_path / "app"),
+                        cwd=tmp_path)
+        assert result.returncode == 4, (backend, output(result))
+
+
 def test_save_of_unsupported_program_fails_and_writes_no_file(
     tmp_path: Path,
 ) -> None:
