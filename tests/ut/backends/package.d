@@ -151,8 +151,9 @@ public void shouldBeStatusOf(
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
         auto backend = ownedBackend!BackendType(program);
-        asTestFailure(run(backend), file, line)
-            .should == expected;
+        asTestFailure(
+            run(backend.startData, backend.compilationStatistics),
+            file, line).should == expected;
     }
 }
 
@@ -174,7 +175,9 @@ public void shouldBeStatusOfWithJitCode(
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
         auto backend = ownedBackend!BackendType(program);
-        asTestFailure(run(backend), file, line).should == expected;
+        asTestFailure(
+            run(backend.startData, backend.compilationStatistics),
+            file, line).should == expected;
         if (!testJit.enabled)
             return;
         foreach (name; jitted) {

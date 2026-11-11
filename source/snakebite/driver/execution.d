@@ -6,7 +6,7 @@ private:
 
 public struct ExecutionReport {
     import core.time: Duration;
-    import snakebite.backends: CompilationStatistics;
+    import snakebite.backends.statistics: CompilationStatistics;
 
     public int status;
     // Everything from making the backend to the end of the program. The
@@ -176,20 +176,21 @@ public ExecutionReport executeBackend(
 
     auto stopWatch = StopWatch(AutoStart.yes);
     auto backend = makeBackend(name, program, jit);
-    import snakebite.backends.api: ExecutionClock;
-    const running = ExecutionClock.start(backend);
+    import snakebite.backends.statistics: ExecutionClock;
+    const running = ExecutionClock.start(backend.compilationStatistics);
+    auto start = &backend.startData();
     import snakebite.run.modules: GuestModules;
-    const entry = GuestModules.Entry(backend);
+    const entry = GuestModules.Entry(*start, backend.compilationStatistics);
     StartupReport startup;
     int status;
     // Snippet callers construct Programs that do not start as a project,
     // and a program with a C `main` is not started as a project either.
-    auto start = &backend.startData();
     if (!program.startsAsProject || start.hasCEntryPoint || start.betterC)
-        status = run(backend, hostArguments);
+        status = run(*start, backend.compilationStatistics, hostArguments);
     else {
         startup = runDruntimeMain(
-            backend, program.testHooks, hostArguments, endsProcess);
+            *start, backend.compilationStatistics, program.testHooks,
+            hostArguments, endsProcess);
         status = startup.status;
     }
     const programDuration = running.peek
