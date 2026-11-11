@@ -4,7 +4,6 @@ module snakebite.run.program;
 private:
 
 
-import snakebite.backends.api: Backend;
 import snakebite.start.data: StartData;
 import snakebite.ffi.argumentplan: ArgumentPlan, Linkage, Register;
 import snakebite.ffi.callback: CallbackBridge, CallbackCall;
@@ -18,23 +17,24 @@ import snakebite.ffi.plan: NativeSignature;
 // (`GuestModules`): it orders them, runs them on each thread, and prints
 // what a destructor throws.
 public int run(
-    Backend backend,
+    ref StartData start,
+    ref const imported!"snakebite.backends.statistics".CompilationStatistics
+        compilation,
     in string[] hostArguments = null,
 ) {
     import snakebite.run.modules: GuestModules;
 
     // A C `main` starts no druntime: no module constructor or destructor
     // of a D module runs.
-    auto start = &backend.startData();
     if (start.hasCEntryPoint || start.betterC)
-        return runMain(backend, *start, hostArguments);
+        return runMain(start, hostArguments);
 
     auto modules = GuestModules.start(
-        backend, GuestModules.Tests.no, GuestModules.Ends.program);
+        start, compilation, GuestModules.Tests.no, GuestModules.Ends.program);
     if (modules.failed)
         return 1;
 
-    const status = runMain(backend, *start, hostArguments);
+    const status = runMain(start, hostArguments);
     const destructorStatus = modules.finish;
     return status != 0 ? status : destructorStatus;
 }
@@ -42,7 +42,6 @@ public int run(
 // The program's own `main`. `void main` maps to exit status 0, and no `main`
 // at all is not an error: the status is 0.
 package(snakebite) int runMain(
-    Backend backend,
     StartData start,
     in string[] hostArguments,
 ) {
@@ -138,7 +137,9 @@ public struct StartupReport {
 // goes on running programs in one process has its destructors run before
 // this returns.
 public StartupReport runDruntimeMain(
-    imported!"snakebite.backends.api".Backend backend,
+    ref StartData start,
+    ref const imported!"snakebite.backends.statistics".CompilationStatistics
+        compilation,
     in imported!"snakebite.image.dependency".TestHooks testHooks,
     in string[] arguments,
     in bool endsProcess = false,
@@ -165,7 +166,6 @@ public StartupReport runDruntimeMain(
         _runtimeArgs = savedArgs;
         _runtimeCArgs = savedCArgs;
     }
-    auto start = &backend.startData();
     testHooks.install;
     _runtimeArgs = arguments.length ? arguments.dup : [start.programName];
     auto cArguments = _runtimeArgs.map!(arg => cast(char*) arg.toStringz).array ~ null;
@@ -173,7 +173,7 @@ public StartupReport runDruntimeMain(
     _runtimeCArgs.argv = cArguments.ptr;
 
     auto modules = GuestModules.start(
-        backend, GuestModules.Tests.yes,
+        start, compilation, GuestModules.Tests.yes,
         endsProcess ? GuestModules.Ends.process : GuestModules.Ends.program);
     StartupReport report;
     report.constructorDuration = modules.constructors;
@@ -185,7 +185,7 @@ public StartupReport runDruntimeMain(
 
     // `_d_run_main` takes a function pointer with no context: a native entry
     // (ADR-0003) carries the run to it.
-    auto mainRun = MainRun(backend, start);
+    auto mainRun = MainRun(&start);
     mainRun.bridge = new CallbackBridge(&callMain, cast(void*) &mainRun);
     scope(exit) mainRun.bridge.release;
     mainRun.bridge.register(cast(void*) &mainRun, mainSignature);
@@ -216,7 +216,6 @@ public StartupReport runDruntimeMain(
 
 
 private struct MainRun {
-    Backend backend;
     StartData* start;
     CallbackBridge* bridge;
 }
@@ -242,7 +241,7 @@ private extern(C) void callMain(void* owner, CallbackCall* call) {
     auto run = cast(MainRun*) owner;
     const arguments = *cast(string[]*) call.arguments[0];
     *cast(int*) call.returnPlace = runMain(
-        run.backend, *run.start, arguments);
+        *run.start, arguments);
 }
 
 

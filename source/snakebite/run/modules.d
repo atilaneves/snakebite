@@ -38,7 +38,6 @@ import snakebite.failure.report: internalFailure, SnakebiteException;
 // the tests, the REPL) ends the phases itself with `finish`.
 public struct GuestModules {
     import core.time: Duration;
-    import snakebite.backends.api: Backend;
 
     // Whether the records also name the unit tests of each module, for the
     // runner that druntime starts.
@@ -63,23 +62,26 @@ public struct GuestModules {
     public Duration constructors;
 
     // While it lives, the explicit runtime start and end of a program with
-    // a C entry run the module phases of the program of `backend`.
+    // a C entry run the module phases of the program of `start`.
     public struct Entry {
         private EntryRun* _entry;
 
         @disable this(this);
 
-        public this(Backend backend) {
+        public this(
+            ref StartData start,
+            ref const CompilationStatistics compilation,
+        ) {
             import std.conv: text;
             import std.string: toStringz;
             import snakebite.host.runtimeentry: RuntimeEntry;
 
-            auto start = &backend.startData();
             if (!start.hasCEntryPoint || start.betterC)
                 return;
 
             _entry = new EntryRun;
-            _entry.backend = backend;
+            _entry.start = &start;
+            _entry.compilation = &compilation;
             _entry.file = Image.newFile;
             _entry.token = text("/proc/self/fd/", _entry.file).toStringz;
             RuntimeEntry.bind(_entry, &startEntry, &finishEntry, _entry.token);
@@ -98,28 +100,29 @@ public struct GuestModules {
         }
     }
 
-    // Registers the root modules of the program of `backend`. A startup that fails ends
-    // the way druntime's `rt_init` ends: the throwable is printed and
-    // `failed` is true. A program with no constructor, no destructor and,
+    // Registers the root modules of the program of `start`. A startup that
+    // fails ends the way druntime's `rt_init` ends: the throwable is printed
+    // and `failed` is true. A program with no constructor, no destructor and,
     // for `Tests.no`, no unit test, needs no registration.
     public static GuestModules start(
-        Backend backend,
+        ref StartData start,
+        ref const CompilationStatistics compilation,
         in Tests tests,
         in Ends ends,
     ) {
         import core.sys.posix.pthread: pthread_self;
-        import snakebite.backends.api: ExecutionClock;
+        import snakebite.backends.statistics: ExecutionClock;
 
         GuestModules modules;
         modules._ends = ends;
-        const buildingModuleInfo = ExecutionClock.start(backend);
-        auto run = newRun(backend, tests);
+        const buildingModuleInfo = ExecutionClock.start(compilation);
+        auto run = newRun(start, tests);
         if (run is null)
             return modules;
 
         modules._run = run;
         modules.moduleInfo = buildingModuleInfo.peek;
-        const registering = ExecutionClock.start(backend);
+        const registering = ExecutionClock.start(compilation);
         try {
             run.owner = pthread_self;
             run.threadsAtStart = kernelThreads;
@@ -225,7 +228,8 @@ public struct GuestModules {
 
 
 private struct EntryRun {
-    Backend backend;
+    StartData* start;
+    const(CompilationStatistics)* compilation;
     GuestModules modules;
     int file;
     const(char)* token;
@@ -233,7 +237,7 @@ private struct EntryRun {
 
 private extern(C) int startEntry(void* owner) {
     auto entry = cast(EntryRun*) owner;
-    entry.modules = GuestModules.start(entry.backend,
+    entry.modules = GuestModules.start(*entry.start, *entry.compilation,
         GuestModules.Tests.no, GuestModules.Ends.process);
     return !entry.modules.failed;
 }
@@ -279,7 +283,7 @@ private extern(C) RuntimeGroup* registeredGroup(void* dso);
 
 
 private import core.atomic: atomicLoad, atomicOp, atomicStore, cas;
-private import snakebite.backends.api: Backend;
+private import snakebite.backends.statistics: CompilationStatistics;
 private import snakebite.start.data:
     FunctionHandle, GateStorage, ModuleStart, StartData;
 private import snakebite.ffi.callback: CallbackBridge, CallbackCall;
@@ -466,7 +470,6 @@ private struct Run {
         failed,
     }
 
-    Backend backend;
     shared State state;
     ModuleInfo*[] records;
     Image image;
@@ -635,14 +638,13 @@ private void call(Phase* phase) {
 }
 
 
-// The registration for the program of `backend`, or null when none is needed.
+// The registration for the program of `start`, or null when none is needed.
 private Run* newRun(
-    Backend backend,
+    ref StartData start,
     in GuestModules.Tests tests,
 ) {
     import core.memory: GC;
 
-    auto start = &backend.startData();
     bool needed = tests == GuestModules.Tests.yes
         && start.modules.length != 0;
     needed = needed || start.dependencyModules.length != 0
@@ -657,10 +659,9 @@ private Run* newRun(
     auto run = new Run;
     // The registered records must outlive every thread that inherits them.
     GC.addRoot(cast(void*) run);
-    run.backend = backend;
     run.bridge = new CallbackBridge(&callPhase, cast(void*) run);
     run.dependencyModules = start.dependencyModules;
-    run.records = recordsOf(run, *start, tests);
+    run.records = recordsOf(run, start, tests);
     return run;
 }
 
