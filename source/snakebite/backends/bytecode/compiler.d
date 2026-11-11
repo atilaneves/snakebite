@@ -10628,23 +10628,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // `compileBuiltinCall` instead, before this is ever
                 // reached. A declared-but-unlinked `extern(C)` function
                 // still reaches here, and an unused branch can refer to
-                // one. Resolve it only if execution reaches the call.
-                // Known native targets stay prepared for callbacks that
-                // first run during GC. A target with no symbol has no
-                // plan to prepare early: the lookup misses again, so the
-                // call fails whenever it executes.
-                if (hasNativeSymbol) {
-                    const plan = preparation.prepare(_bytecode._plans, callee);
-                    return CallSite.native(
-                        plan, args, returnWidth);
-                }
-                // The returned delegate outlives this compiler, so it
-                // captures the backend and not `this`; `PlanCache` is a
-                // struct.
-                auto bytecode = _bytecode;
+                // one. Its plan is unbound: the call binds the symbol when
+                // execution reaches it, and fails if the symbol is still
+                // absent.
                 return CallSite.native(
-                    deferred(() =>
-                        preparation.prepare(bytecode._plans, callee)),
+                    preparation.prepare(
+                        _bytecode._plans, callee, !hasNativeSymbol),
                     args, returnWidth);
             });
     }

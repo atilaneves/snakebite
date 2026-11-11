@@ -106,9 +106,6 @@ private bool wordAt(
                     value = cast(size_t) site.prepareGuest.funcptr;
                     return true;
                 case nativePlan: value = cast(size_t) site.nativePlan; return true;
-                case prepareNativePlan:
-                    value = cast(size_t) site.prepareNativePlan.funcptr;
-                    return true;
                 case builtinEntry:
                     value = cast(size_t) site.builtinEntry;
                     return true;

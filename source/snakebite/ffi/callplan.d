@@ -140,6 +140,14 @@ public struct CallPlan {
         return cast(void*) _address;
     }
 
+    // Sets the address of a plan that was made without code. Threads that
+    // bind the same plan write the same word.
+    package void bindAddress(void* address) {
+        import core.atomic: atomicStore;
+
+        atomicStore(*cast(shared(void*)*) &_address, cast(shared(void*)) address);
+    }
+
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
     // register, for a variadic callee's `%al`.
     private size_t _sseCount;

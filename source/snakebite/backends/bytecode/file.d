@@ -745,7 +745,6 @@ private bool assignOperand(
         case callee:
         case prepareGuest:
         case nativePlan:
-        case prepareNativePlan:
         case builtinEntry:
         case valueSignature:
         case message:

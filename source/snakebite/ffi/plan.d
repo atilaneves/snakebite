@@ -419,17 +419,30 @@ public struct PlanCache {
             extraArgumentTypes, true));
     }
 
+    // The plan of a callee whose symbol is not in this process: it is
+    // unbound, and `callplanstore.bound` fails at the call if the symbol is
+    // still absent then.
+    public const(CallPlan)* unboundOf(
+        FuncDeclaration function_,
+        scope Type[] extraArgumentTypes = null,
+        in bool isVariadicCall = false,
+    ) {
+        countPreparation;
+        return keptPlanOf(function_, extraArgumentTypes, isVariadicCall, true);
+    }
+
     private CallPlan* keptPlanOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
         in bool isVariadicCall,
+        in bool mayBeAbsent = false,
     ) {
         string symbol;
         auto signature = calleeOf(function_, extraArgumentTypes,
             isVariadicCall, symbol);
-        if (auto plan = _store.plan(signature, symbol))
-            return plan;
-        throw unresolved(function_, symbol);
+        if (!mayBeAbsent && symbol.length != 0 && resolve(symbol) is null)
+            throw unresolved(function_, symbol);
+        return _store.plan(signature, symbol);
     }
 
     // As `.of`, but for one call site of an `extern(C)` C-style or

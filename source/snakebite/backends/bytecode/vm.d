@@ -8,6 +8,7 @@ import snakebite.failure.report: internalFailure;
 import snakebite.backends.bytecode.jit: jitSupported;
 
 
+import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi.callplan:
     CallPlan, directWordCallTarget, executeCallPlan, executeHostCallPlan,
     executeIndirectCallPlan, guestWordOf;
@@ -63,7 +64,8 @@ public struct CallSite {
         // compiler resolved by linker symbol (an allocation, a `~=`
         // dchar append, a bounds check): the same shape either way, so
         // this VM hardcodes no druntime signature for any of them.
-        // An unresolved target uses `prepareNativePlan` on first execution.
+        // A target that the process does not have is an unbound plan, which
+        // the first execution binds (`snakebite.ffi.callplanstore.bound`).
         native,
         // `calleeSlotOffset` is the caller's own frame offset holding a
         // `const(Function)*` value read back at run time in place of a
@@ -182,14 +184,6 @@ public struct CallSite {
         site.nativePlan = nativePlan;
         site.args = args;
         site.returnWidth = returnWidth;
-        return site;
-    }
-
-    public static CallSite native(
-        const(CallPlan)* delegate() prepare, Arg[] args, size_t returnWidth,
-    ) {
-        auto site = native(cast(const(CallPlan)*) null, args, returnWidth);
-        site.prepareNativePlan = prepare;
         return site;
     }
 
@@ -420,9 +414,6 @@ public struct CallSite {
     @relocated(Target.Kind.nativePlan, Place.Section.callSite,
         Place.Field.nativePlan)
     package const(CallPlan)* nativePlan;
-    @relocated(Target.Kind.callback, Place.Section.callSite,
-        Place.Field.prepareNativePlan)
-    package const(CallPlan)* delegate() prepareNativePlan;
 
     // A `native` site whose plan is zero to three word arguments and no
     // result or an integer result of one or two words called directly.
@@ -1076,7 +1067,7 @@ package void recordCallSiteRelocs(
     import std.traits: FieldNameTuple;
 
     // Address fields: `callee`, `prepareGuest`, `nativePlan`,
-    // `prepareNativePlan`, `builtinEntry` and `value.signature`. A
+    // `builtinEntry` and `value.signature`. A
     // delegate is kept by its function; its context is state of the
     // compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
     // follow from the two indexes. The call caches are filled at run time,
@@ -1090,8 +1081,7 @@ package void recordCallSiteRelocs(
         "directLoads", "indirectTarget",
     );
     enum addressFields = AliasSeq!(
-        "callee", "prepareGuest", "nativePlan", "prepareNativePlan",
-        "builtinEntry",
+        "callee", "prepareGuest", "nativePlan", "builtinEntry",
     );
     static foreach (name; FieldNameTuple!CallSite)
         static assert(staticIndexOf!(name, plainFields) >= 0
@@ -1110,8 +1100,6 @@ package void recordCallSiteRelocs(
         Target.Kind.callback, cast(size_t) site.prepareGuest.funcptr);
     recordAddress(relocs, section, index, Place.Field.nativePlan,
         Target.Kind.nativePlan, cast(size_t) site.nativePlan);
-    recordAddress(relocs, section, index, Place.Field.prepareNativePlan,
-        Target.Kind.callback, cast(size_t) site.prepareNativePlan.funcptr);
     recordAddress(relocs, section, index, Place.Field.builtinEntry,
         Target.Kind.hostSymbol, cast(size_t) site.builtinEntry);
     recordAddress(relocs, section, index, Place.Field.valueSignature,
@@ -2161,8 +2149,7 @@ private const(Instruction)* opCallNative(
     if (current == State.unprepared) {
         if (!cas(stateSlot, uint(State.unprepared), uint(State.preparing)))
             return opCallNotDirect(pc, active, state, frame, r0, fp0);
-        const plan = site.nativePlan !is null
-            ? site.nativePlan : site.prepareNativePlan();
+        const plan = CallPlanStore.bound(site.nativePlan);
         ubyte[3] order;
         Load[3] loads;
         size_t resultWidth;
@@ -2445,7 +2432,7 @@ private const(Instruction)* runCall(Decoded)(
         auto values = arguments.values;
         auto result = execution.destination;
         executeCallPlan(
-            site.nativePlan !is null ? site.nativePlan : site.prepareNativePlan(),
+            CallPlanStore.bound(site.nativePlan),
             result, values.ptr, values.length,
         );
         return execution.next;
