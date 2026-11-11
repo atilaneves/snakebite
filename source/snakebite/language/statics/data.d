@@ -75,10 +75,10 @@ public struct NativeData {
     private SharedTable!(VarDeclaration, Placed) _statics;
     private Placed[VarDeclaration] _pendingStatics;
     private SharedTable!(Type, Placed) _defaults;
-    // A thread-local variable's template: the bytes its storage starts
-    // with on every thread, built once under the lock like `_statics`
-    // (finding 1.3).
-    private SharedTable!(VarDeclaration, TlsDescriptor) _tlsDescriptors;
+    // A thread-local variable's descriptor, a datum of the blocks that holds
+    // the address of the template: the bytes its storage starts with on
+    // every thread. Built once under the lock like `_statics` (finding 1.3).
+    private SharedTable!(VarDeclaration, Placed) _tlsDescriptors;
 
     public this(
         StaticStore* store,
@@ -347,7 +347,8 @@ public struct NativeData {
 
         const facts = typeFacts(variable.type);
         if (variable.isThreadLocalStorage)
-            return Placed(_store.tlsSlots.slotFor(tlsDescriptorOf(variable)));
+            return Placed(_store.tlsSlots.slotFor(
+                cast(const(TlsDescriptor)*) tlsDescriptorOf(variable).ptr));
 
         if (hasNativeStorage(variable)) {
             // const would also make the referenced storage read-only here.
@@ -382,46 +383,73 @@ public struct NativeData {
             placed.ptr, placed.where);
     }
 
-    // The bytes every thread's own copy of a thread-local variable
-    // starts from, and the identity `TlsSlots.slotFor` keys that copy
-    // by - built once, under the lock, and read without one after that
-    // (like `_statics`). The bytecode compiler bakes a pointer to this
-    // into an `opTls*` instruction operand in place of a resolved
-    // address (finding 1.3): a thread-local variable's address is never
-    // a compile-time constant, the same way it never is in compiled D.
-    public const(TlsDescriptor)* tlsDescriptorOf(VarDeclaration declaration) {
+    // The descriptor of a thread-local variable: the bytes every thread's
+    // own copy starts from, and the identity `TlsSlots.slotFor` keys that
+    // copy by. It is a datum, built once, under the lock, and read without
+    // one after that (like `_statics`). The bytecode compiler bakes the
+    // address of this into an `opTls*` instruction operand in place of a
+    // resolved address (finding 1.3): a thread-local variable's address is
+    // never a compile-time constant, the same way it never is in compiled D.
+    public Placed tlsDescriptorOf(VarDeclaration declaration) {
         auto variable = definitionOf(declaration);
         if (auto found = variable in _tlsDescriptors)
-            return found;
+            return *found;
 
         import snakebite.frontend.compiler: withCompilerLock;
 
-        const(TlsDescriptor)* descriptor;
+        Placed descriptor;
         withCompilerLock({
             if (auto found = variable in _tlsDescriptors) {
-                descriptor = found;
+                descriptor = *found;
                 return;
             }
             const facts = typeFacts(variable.type);
+            string nativeName;
             if (hasNativeStorage(variable)) {
                 import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
                 const name = nativeSymbolName(variable);
                 // Only to learn that the symbol is there: this thread's
                 // address is not the descriptor's to keep.
-                if (_threadLocalAddress(name) !is null) {
-                    descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
-                        null, facts.size,
-                        name, _threadLocalAddress));
-                    return;
-                }
-                assert(!isExtern(variable), name);
+                if (_threadLocalAddress(name) !is null)
+                    nativeName = name;
+                else
+                    assert(!isExtern(variable), name);
             }
-            const bytes = buildInitialBytes(variable, facts);
-            descriptor = _tlsDescriptors.insert(variable, TlsDescriptor(
-                bytes.ptr, bytes.length));
+            Placed template_;
+            if (nativeName.length == 0)
+                template_ = buildInitialBytes(variable, facts);
+
+            TypeFacts descriptorFacts;
+            descriptorFacts.size = TlsDescriptor.sizeof;
+            descriptorFacts.alignment = TlsDescriptor.alignof;
+            descriptor = reserve(descriptorFacts, variable);
+            auto bytes = cast(ubyte*) descriptor.ptr;
+            (cast(TlsDescriptor*) bytes).size = facts.size;
+            if (nativeName.length) {
+                import core.stdc.string: memcpy;
+
+                auto copy = _store.newString(nativeName.length + 1);
+                memcpy(copy.ptr, nativeName.ptr, nativeName.length);
+                const nameOffset = TlsDescriptor.nativeName.offsetof;
+                checkedStoreIntegral(bytes + nameOffset + arrayLengthOffset,
+                    nativeName.length, size_t.sizeof);
+                storeAddress(&this, bytes + nameOffset + arrayPointerOffset,
+                    Address(Target.Kind.adoptedString, copy.ptr));
+            } else
+                storeAddress(&this, bytes + TlsDescriptor.templateBytes.offsetof,
+                    Address(Target.Kind.staticData, template_.ptr,
+                        template_.where));
+            _tlsDescriptors.insert(variable, descriptor);
         });
         return descriptor;
+    }
+
+    // The address of the descriptor of a thread-local variable, with what it
+    // points at.
+    public Address addressOfTlsDescriptor(VarDeclaration variable) {
+        auto placed = tlsDescriptorOf(variable);
+        return Address(Target.Kind.staticData, placed.ptr, placed.where);
     }
 
     // The one variable that an `extern` declaration shares its storage

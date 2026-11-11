@@ -2134,21 +2134,20 @@ def test_saved_program_with_thread_local_variables_runs_as_compiled(
         """})
 
 
-# A save never writes a file that loads into a different state: a program
-# that holds what a file cannot hold yet is refused, and no file is left.
-def test_save_of_unsupported_program_fails_and_writes_no_file(
+# A save never writes a file for a program that does not compile: it fails,
+# and no file is left.
+def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
     tmp_path: Path,
 ) -> None:
     write(tmp_path / "app" / "main.d", """
         module main;
-        int threadLocal = 1;
-        int main() { return threadLocal + 2; }
+        int main() { return undefinedName + 2; }
         """)
     target = tmp_path / "program.sbc"
     saved = run_sb("--backend=bytecode", "--no-optimise-image",
                    f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
     assert saved.returncode != 0, output(saved)
-    assert "cannot save the program" in saved.stderr, output(saved)
+    assert "undefined identifier `undefinedName`" in saved.stderr, output(saved)
     assert not target.exists()
     assert not Path(f"{target}.partial").exists()
 

@@ -17,8 +17,6 @@ public struct Target {
         handler,
         // Data of the program: literals, `.init` images, statics.
         staticData,
-        // The `TlsDescriptor` of a thread-local variable.
-        tlsDescriptor,
         // A `TypeInfo` object.
         typeInfo,
         // Code of the host process.

@@ -4786,8 +4786,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // storage, which is what a resolved address here would bake in.
     private Address staticAddressOf(VarDeclaration variable) {
         if (variable.isThreadLocalStorage)
-            return Address(Target.Kind.tlsDescriptor,
-                _bytecode._nativeData.tlsDescriptorOf(variable));
+            return _bytecode._nativeData.addressOfTlsDescriptor(variable);
         return _bytecode._nativeData.addressOfStorage(variable);
     }
 

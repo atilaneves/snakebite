@@ -30,11 +30,10 @@ public struct TlsDescriptor {
     public size_t size;
     // Set when the variable's storage is native (a dependency image's
     // own thread-local, or an `extern` one): the linker name that
-    // `nativeAddress` resolves, on each thread, to that thread's copy in
-    // the image's TLS block. No copy is made from a template then, so
-    // native code and guest code on one thread reach the same bytes.
+    // `TlsSlots.nativeAddress` resolves, on each thread, to that thread's
+    // copy in the image's TLS block. No copy is made from a template then,
+    // so native code and guest code on one thread reach the same bytes.
     public string nativeName;
-    public void* delegate(in char[] name) nativeAddress;
 }
 
 
@@ -58,8 +57,16 @@ public struct TlsSlots {
 
     private Entry[] _table;
     private size_t _count;
+    // This thread's address of a thread-local symbol, by linker name: what
+    // a descriptor with a `nativeName` resolves with. The same function for
+    // every table of a program.
+    private void* delegate(in char[] name) _nativeAddress;
 
     @disable this(this);
+
+    public this(void* delegate(in char[] name) nativeAddress) {
+        _nativeAddress = nativeAddress;
+    }
 
     ~this() {
         import core.memory: GC;
@@ -94,7 +101,7 @@ public struct TlsSlots {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
             // would be that thread's copy.
-            entry.bytes = descriptor.nativeAddress(descriptor.nativeName);
+            entry.bytes = _nativeAddress(descriptor.nativeName);
             assert(entry.bytes !is null, descriptor.nativeName);
         } else {
             import core.memory: GC;

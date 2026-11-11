@@ -568,8 +568,6 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             return [position[0], position[1], 0];
         case handler:
             throw refusal("a word needs a relocation of kind handler");
-        case tlsDescriptor:
-            throw refusal("a word needs a relocation of kind tlsDescriptor");
         case typeInfo:
             throw refusal("a word needs a relocation of kind typeInfo");
         case frontendString:
@@ -601,9 +599,6 @@ private size_t addressOf(
         case handler:
             throw new SnakebiteException(
                 "the program file holds a relocation of kind handler");
-        case tlsDescriptor:
-            throw new SnakebiteException(
-                "the program file holds a relocation of kind tlsDescriptor");
         case typeInfo:
             throw new SnakebiteException(
                 "the program file holds a relocation of kind typeInfo");

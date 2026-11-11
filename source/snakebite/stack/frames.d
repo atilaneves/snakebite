@@ -351,7 +351,7 @@ public struct FrameStack {
     // `Vm` that owns it, belongs to exactly one thread.
     public void[] tlsSlotFor(const(TlsDescriptor)* descriptor) {
         if (_tls is null) {
-            _tls = heapNew!TlsSlots;
+            _tls = heapNew!TlsSlots(null);
             _ownsTls = true;
         }
         return _tls.slotFor(descriptor);

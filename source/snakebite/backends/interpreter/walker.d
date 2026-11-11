@@ -398,7 +398,8 @@ private struct Shared {
         plans = PlanCache(&planStore,
             &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        store = StaticStore(() => heapNew!TlsSlots);
+        store = StaticStore(() => heapNew!TlsSlots(
+            (in char[] name) => plans.resolveThreadLocal(name)));
         nativeData = NativeData(&store, &this.program.isRootOwned,
             (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,
