@@ -57,7 +57,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
-    import snakebite.backends.bytecode.runner: Runner;
+    import snakebite.backends.bytecode.runner: CompileStep, Runner, StartFunction;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
@@ -237,51 +237,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return new StartFunction(
             &_runner,
             new CompileStep(() => compileFunction(function_)));
-    }
-
-    private struct CompileStep {
-        const(Function)* delegate() compute;
-    }
-
-    // The order of the two stores in `compileFirst` makes this true at every
-    // instant: a thread that reads a null `_step` then finds a non-null
-    // `_compiled`. `_compiled` is stored first and `_step` second, both with
-    // release; `_step` is read with acquire before `_compiled` is read
-    // again.
-    private static final class StartFunction: FunctionHandle {
-        private Runner* _runner;
-        private const(Function)* _compiled;
-        private CompileStep* _step;
-
-        this(Runner* runner, CompileStep* step) {
-            _runner = runner;
-            _step = step;
-        }
-
-        public override void call(void* returnPlace, void*[] args) {
-            import core.atomic: atomicLoad, MemoryOrder;
-
-            auto compiled = atomicLoad!(MemoryOrder.acq)(_compiled);
-            if (compiled is null)
-                compiled = compileFirst();
-            _runner.call(compiled, returnPlace, args);
-        }
-
-        // Two threads can both run the step: `compileFunction` gives both
-        // the same function.
-        private const(Function)* compileFirst() {
-            import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-
-            auto step = atomicLoad!(MemoryOrder.acq)(_step);
-            if (step is null)
-                // Another thread finished: it stored `_compiled` before it
-                // stored the null.
-                return atomicLoad!(MemoryOrder.acq)(_compiled);
-            auto compiled = step.compute();
-            atomicStore!(MemoryOrder.rel)(_compiled, compiled);
-            atomicStore!(MemoryOrder.rel)(_step, null);
-            return compiled;
-        }
     }
 
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {

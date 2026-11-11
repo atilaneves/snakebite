@@ -156,8 +156,6 @@ public ExecutionReport executeBackend(
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import snakebite.backends: makeBackend;
-    import snakebite.run.program: run;
-    import snakebite.run.program: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import core.memory: GC;
 
@@ -180,32 +178,68 @@ public ExecutionReport executeBackend(
     const running = ExecutionClock.start(backend.compilationStatistics);
     auto start = &backend.startData();
     import snakebite.run.modules: GuestModules;
+    // It lives until this function returns, as the runtime of a program
+    // with a C entry point ends with it.
     const entry = GuestModules.Entry(*start, backend.compilationStatistics);
-    StartupReport startup;
-    int status;
-    // Snippet callers construct Programs that do not start as a project,
-    // and a program with a C `main` is not started as a project either.
-    if (!program.startsAsProject || start.hasCEntryPoint || start.betterC)
-        status = run(*start, backend.compilationStatistics, hostArguments);
-    else {
-        startup = runDruntimeMain(
-            *start, backend.compilationStatistics, program.testHooks,
-            hostArguments, endsProcess);
-        status = startup.status;
-    }
-    const programDuration = running.peek
-        - startup.constructorDuration - startup.moduleInfoDuration;
+    const started = runStartData(
+        *start, backend.compilationStatistics, running,
+        program.testHooks, program.startsAsProject, hostArguments,
+        endsProcess);
     // Native objects can hold callback entries for guest destructors. Run
     // their finalizers while the backend and the frontend declarations that
     // those entries name are still alive.
     if (collectGarbage)
         GC.collect;
     return ExecutionReport(
-        status,
+        started.status,
         stopWatch.peek,
-        startup.constructorDuration,
-        startup.moduleInfoDuration,
-        programDuration,
+        started.constructorDuration,
+        started.moduleInfoDuration,
+        started.programDuration,
         backend.compilationStatistics,
     );
+}
+
+// What `runStartData` measured.
+public struct StartRun {
+    import core.time: Duration;
+
+    public int status;
+    public Duration constructorDuration;
+    public Duration moduleInfoDuration;
+    // The unit tests and `main`, without compilation.
+    public Duration programDuration;
+}
+
+// Runs the program of `start` and measures it. `running` began before the
+// backend made `start`. It takes no backend: whatever made `start` and
+// `compilation`, compiled or loaded, calls it. The caller holds the
+// `GuestModules.Entry` of `start` around this call. `startsAsProject` false
+// is a snippet.
+public StartRun runStartData(
+    ref imported!"snakebite.start.data".StartData start,
+    ref const imported!"snakebite.backends.statistics".CompilationStatistics
+        compilation,
+    in imported!"snakebite.backends.statistics".ExecutionClock running,
+    in imported!"snakebite.image.dependency".TestHooks testHooks,
+    in bool startsAsProject,
+    in string[] hostArguments = null,
+    in bool endsProcess = false,
+) {
+    import snakebite.run.program: run, StartupReport, runDruntimeMain;
+
+    StartupReport startup;
+    int status;
+    // A program with a C `main` is not started as a project either.
+    if (!startsAsProject || start.hasCEntryPoint || start.betterC)
+        status = run(start, compilation, hostArguments);
+    else {
+        startup = runDruntimeMain(
+            start, compilation, testHooks, hostArguments, endsProcess);
+        status = startup.status;
+    }
+    const programDuration = running.peek
+        - startup.constructorDuration - startup.moduleInfoDuration;
+    return StartRun(status, startup.constructorDuration,
+        startup.moduleInfoDuration, programDuration);
 }
