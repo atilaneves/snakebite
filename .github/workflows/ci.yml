@@ -48,7 +48,7 @@ jobs:
       - name: Install libreadline, strace and patch
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreadline-dev strace patch
+          sudo apt-get install -y -o Acquire::Retries=5 libreadline-dev strace patch
 
       - name: Run CI
         run: build/ci.sh
