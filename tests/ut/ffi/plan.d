@@ -3153,7 +3153,7 @@ unittest {
 
 @("boundsPlanOf.excludesConcurrentGlobalScopeSetup")
 unittest {
-    import snakebite.language.checks.failure: boundsPlanOf;
+    import snakebite.language.checks: boundsPlanOf;
     import snakebite.frontend.checks: Checks;
 
     readWhileGlobalScopeIsSetUp((function_) {
@@ -3165,7 +3165,7 @@ unittest {
 @("cAssertCallOf.excludesConcurrentGlobalScopeSetup")
 unittest {
     import dmd.location: Loc;
-    import snakebite.language.checks.assertion: cAssertCallOf;
+    import snakebite.language.checks: cAssertCallOf;
 
     readWhileGlobalScopeIsSetUp((function_) {
         (cAssertCallOf("x", Loc.initial, function_).function_ !is null).should == true;

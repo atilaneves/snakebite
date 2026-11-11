@@ -11,7 +11,7 @@ module ut.backends.flags;
 
 
 import snakebite.program: Program;
-import snakebite.language.checks.failure: BoundsCheck, cMessageOf;
+import snakebite.language.checks: BoundsCheck, cMessageOf;
 import snakebite.failure.halt: Halted, HostActions;
 import snakebite.frontend.compiler:
     checksOf, FrontendFlags, parseRootModules, parseSnippet;
