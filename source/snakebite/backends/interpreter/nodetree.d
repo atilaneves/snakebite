@@ -350,6 +350,14 @@ package struct OuterVariable {
     package bool indirect;
 }
 
+package struct VariadicCallPlan {
+    import snakebite.native.variadic: VariadicLayout;
+    import snakebite.native.value: TypeFacts;
+
+    TypeFacts[] facts;
+    VariadicLayout layout;
+}
+
 package bool isScalar(E)(E ev, Type type) {
     return scalarOf(ev, type).kind != Scalar.Kind.none;
 }
@@ -2822,14 +2830,6 @@ private final class LoadChain : Node {
             address = *cast(ubyte**) (address + offset);
         return address;
     }
-}
-
-package struct VariadicCallPlan {
-    import snakebite.native.variadic: VariadicLayout;
-    import snakebite.native.value: TypeFacts;
-
-    TypeFacts[] facts;
-    VariadicLayout layout;
 }
 
 // The extra arguments of a call of a guest variadic callee, in storage laid

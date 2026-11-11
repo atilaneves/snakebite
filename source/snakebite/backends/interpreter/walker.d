@@ -6,7 +6,8 @@ private:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
-    VariadicCallPlan, hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
+    VariadicCallPlan, hasNoResult, isAggregate, isPair, isScalar, resultWordFor,
+    rootOf;
 import snakebite.backends.api: DeclarationHandle;
 import snakebite.start.data: FunctionHandle;
 import snakebite.frontend.typefacts: tryTypeFacts, truthFacts;
