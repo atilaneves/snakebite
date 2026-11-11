@@ -408,7 +408,7 @@ private struct Shared {
             (name) => plans.resolve(name),
             &callableAddress,
             &classRuntimeInfo,
-            (type, loc) => nativeData.initialValue(type, loc));
+            (type, loc) => nativeData.initialValue(type, loc).bytes);
         facts = PreparedFacts(&nativeData, &runtimeTypes, &signatures);
     }
 

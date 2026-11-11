@@ -272,23 +272,15 @@ private struct Archive {
         return null;
     }
 
-    // Module, block and offset of an address in the blocks of a module or of
-    // the process store.
-    size_t[3] dataPosition(const(void)* address) {
-        foreach (m; 0 .. _program._modules.length + 1) {
-            size_t block, offset;
-            if (blocksAt(m).locate(address, block, offset))
-                return [m, block, offset];
-        }
-        throw refusal("a word points at data that the program does not hold");
-    }
-
-    // The position that a link of a datum names, when it names data.
-    size_t[3] blocksPosition(in StaticBlocks.Link link) {
-        if (link.set !is null)
+    // The module, block and offset of a place in the blocks `set`, when the
+    // program holds them.
+    size_t[3] blocksPosition(
+        in const(void)* set, in size_t block, in size_t offset,
+    ) {
+        if (set !is null)
             foreach (m; 0 .. _program._modules.length + 1)
-                if (blocksAt(m) is link.set)
-                    return [m, link.block, link.offset];
+                if (blocksAt(m) is set)
+                    return [m, block, offset];
         throw refusal("a word points at data that the program does not hold");
     }
 
@@ -495,7 +487,8 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             return [position[0], position[1], 0];
         case staticData:
         case constantPool:
-            return archive.dataPosition(cast(const(void)*) target.address);
+            return archive.blocksPosition(
+                target.datum.set, target.datum.block, target.datum.offset);
         case adoptedString:
             return archive.stringPosition(cast(const(void)*) target.address);
         case handler:
@@ -781,7 +774,7 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
         facts.size = datum.size;
         facts.alignment = datum.alignment;
         facts.canHoldAddress = datum.canHoldAddress;
-        auto bytes = blocks.reserve(facts);
+        auto bytes = blocks.reserve(facts).bytes;
         const placed = blocks.data[$ - 1];
         if (placed.block != datum.block || placed.offset != datum.offset)
             throw new SnakebiteException(
@@ -840,7 +833,7 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
 private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) {
     if (link.kind != Target.Kind.staticData)
         return referenceOf(archive, Target(link.kind, link.address));
-    return archive.blocksPosition(link);
+    return archive.blocksPosition(link.set, link.block, link.offset);
 }
 
 

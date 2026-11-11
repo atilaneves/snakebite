@@ -4,10 +4,18 @@ module snakebite.native.staticstore;
 private:
 
 
-import snakebite.backends.bytecode.relocation: Place, Reloc, Target;
+import snakebite.backends.bytecode.relocation: DatumRef, Place, Reloc, Target;
 import snakebite.host.threads: PerThread;
 import snakebite.native.value: TypeFacts;
 import snakebite.stack.tls: TlsSlots;
+
+
+// The bytes of a datum and the datum they belong to. It converts to the bytes.
+public struct Placed {
+    public void[] bytes;
+    public DatumRef where;
+    alias bytes this;
+}
 
 
 // The blocks that hold static data, and the free space in them. A block
@@ -153,7 +161,7 @@ public struct StaticBlocks {
     }
 
     // The caller holds the compiler lock.
-    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
+    public Placed reserve(in TypeFacts facts) @trusted pure nothrow {
         // Slots cannot move: constants can hold addresses of other slots.
         const needed = facts.size + facts.alignment - 1;
         if (_available.length < needed) {
@@ -168,7 +176,8 @@ public struct StaticBlocks {
             _blocks[$ - 1].length - _available.length + start, facts.size,
             facts.alignment, facts.canHoldAddress);
         _available = _available[start + facts.size .. $];
-        return bytes;
+        return Placed(bytes, DatumRef(&this, _data[$ - 1].block,
+            _data[$ - 1].offset));
     }
 }
 
@@ -242,7 +251,7 @@ public struct StaticStore {
     }
 
     // The caller holds the compiler lock.
-    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
+    public Placed reserve(in TypeFacts facts) @safe pure nothrow {
         return _blocks.reserve(facts);
     }
 

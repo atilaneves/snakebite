@@ -8,7 +8,7 @@ import dmd.dmodule: Module;
 import snakebite.failure.report: internalFailure;
 import snakebite.backends.bytecode.relocation: Target;
 import snakebite.frontend.typefacts;
-import snakebite.native.staticstore: StaticBlocks, StaticStore;
+import snakebite.native.staticstore: Placed, StaticBlocks, StaticStore;
 import snakebite.native.value:
     arrayLengthOffset, arrayPointerOffset, arrayValueSize, checkedLoadIntegral,
     checkedStoreIntegral, delegateContextOffset, delegateFunctionOffset,
@@ -71,9 +71,9 @@ public struct NativeData {
     // `_pendingStatics`, which the initialising thread alone reads,
     // knows it, so an initializer that refers to its own variable finds
     // the storage.
-    private SharedTable!(VarDeclaration, void[]) _statics;
-    private void[][VarDeclaration] _pendingStatics;
-    private SharedTable!(Type, const(void)[]) _defaults;
+    private SharedTable!(VarDeclaration, Placed) _statics;
+    private Placed[VarDeclaration] _pendingStatics;
+    private SharedTable!(Type, Placed) _defaults;
     // A thread-local variable's template: the bytes its storage starts
     // with on every thread, built once under the lock like `_statics`
     // (finding 1.3).
@@ -211,7 +211,7 @@ public struct NativeData {
         return address;
     }
 
-    public const(void)[] initialValue(
+    public Placed initialValue(
         Type type,
         in Loc loc,
     ) {
@@ -220,7 +220,7 @@ public struct NativeData {
 
         import snakebite.frontend.compiler: withCompilerLock;
 
-        const(void)[] bytes;
+        Placed bytes;
         withCompilerLock({
             if (auto found = type in _defaults)
                 bytes = *found;
@@ -234,7 +234,7 @@ public struct NativeData {
     // The constant goes to the blocks of the D module of `owner`, when there
     // is one: the function whose instructions refer to it, or the field it
     // initializes. Without `owner` it goes to `_store`.
-    public const(void)[] value(
+    public Placed value(
         Type type,
         Expression expression,
         Dsymbol owner = null,
@@ -245,7 +245,7 @@ public struct NativeData {
         return bytes;
     }
 
-    public const(void)[] value(
+    public Placed value(
         Type type,
         in void[] representation,
         Dsymbol owner = null,
@@ -261,11 +261,11 @@ public struct NativeData {
     // `owner` is given and there are such blocks: a variable, the constants
     // of a function and the initial bytes of a field. Any other datum (no
     // `owner`, or no blocks) goes to `_store`.
-    private void[] reserve(in TypeFacts facts, Dsymbol owner = null) {
+    private Placed reserve(in TypeFacts facts, Dsymbol owner = null) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: moduleOf;
 
-        void[] bytes;
+        Placed bytes;
         withCompilerLock({
             import std.algorithm: canFind;
 
@@ -338,7 +338,7 @@ public struct NativeData {
     // otherwise the one copy every thread shares. Native storage when
     // the variable has it (`hasNativeStorage`); this program's own
     // otherwise.
-    public void[] storageOf(VarDeclaration declaration) {
+    public Placed storageOf(VarDeclaration declaration) {
         import std.string: fromStringz;
 
         auto variable = definitionOf(declaration);
@@ -347,19 +347,20 @@ public struct NativeData {
 
         const facts = typeFacts(variable.type);
         if (variable.isThreadLocalStorage)
-            return _store.tlsSlots.slotFor(tlsDescriptorOf(variable));
+            return Placed(_store.tlsSlots.slotFor(tlsDescriptorOf(variable)));
 
         if (hasNativeStorage(variable)) {
             // const would also make the referenced storage read-only here.
             auto address = _symbolAddress(variable);
             if (address !is null)
-                return *_statics.insert(variable, address[0 .. facts.size]);
+                return *_statics.insert(
+                    variable, Placed(address[0 .. facts.size]));
             assert(!isExtern(variable), variable.toChars.fromStringz);
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
 
-        void[] bytes;
+        Placed bytes;
         withCompilerLock({
             if (auto found = variable in _statics) {
                 bytes = *found;
@@ -449,7 +450,7 @@ public struct NativeData {
     // recursive call for the same variable - its own initializer refers
     // to it - finds the reservation `_pendingStatics` is already holding
     // for it, rather than reserving a second time.
-    private void[] buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
+    private Placed buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: getConstInitializer;
         import snakebite.frontend.compiler: newInFrontend;
