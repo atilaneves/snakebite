@@ -16,6 +16,9 @@ import snakebite.native.value:
 
 private alias Link = StaticBlocks.Link;
 
+// A value below the first page is a flag, not an address.
+private enum firstAddress = 4096;
+
 
 // Owns constant storage and its referenced data for the backend's lifetime.
 public struct NativeData {
@@ -130,7 +133,7 @@ public struct NativeData {
             placed = reserve(TypeFacts(info.m_init.length,
                 alignment == 0 ? 1 : alignment), value.originalClass);
             auto address = placed.ptr;
-            copyBytes(address, info.m_init);
+            copyClassImage(address, info);
             // Register before fields: compile-time objects can form cycles.
             _compileTimeValues[value.value] = placed;
             scope (failure) _compileTimeValues.remove(value.value);
@@ -233,10 +236,12 @@ public struct NativeData {
     private static Dsymbol declarationOf(Type type) {
         import dmd.typesem: toBasetype;
 
-        if (auto struct_ = type.isTypeStruct)
-            return struct_.sym;
+        // The enum first: its base type is the type of its members, not its
+        // own declaration.
         if (auto enum_ = type.isTypeEnum)
             return enum_.sym;
+        if (auto struct_ = type.toBasetype.isTypeStruct)
+            return struct_.sym;
         return null;
     }
 
@@ -329,12 +334,58 @@ public struct NativeData {
                 recordLink(cast(ubyte*) place + link.place.index, link);
     }
 
+    // Whether the initial image of `info` is bytes of the host, whose address
+    // words are not recorded. Without `recordRelocs` no word needs a record.
+    public bool isHostClass(in TypeInfo_Class info) {
+        return recordRelocs && info.m_init.length != 0
+            && addressOfData(info.m_init.ptr).target.kind
+                == Target.Kind.hostSymbol;
+    }
+
+    // `place` becomes the initial image of the class `info`, but for the
+    // values of the fields of a class of the host: the caller writes those.
+    // The image of a class of the host is written from its structure, so that
+    // each address word has a record: the word of the vtable, the word of the
+    // monitor (null in an initial image), and a word for each interface, at
+    // the offset and with the table that the class information gives. The
+    // other words are the fields.
+    public void copyClassImage(void* place, in TypeInfo_Class info) {
+        import core.stdc.string: memset;
+
+        if (!isHostClass(info)) {
+            copyBytes(place, info.m_init);
+            return;
+        }
+        const image = info.m_init;
+        memset(place, 0, image.length);
+        storeAddress(&this, place,
+            Address(Target.Kind.hostSymbol, *cast(void**) image.ptr));
+        const hasMonitor = !(info.m_flags & TypeInfo_Class.ClassFlags.isCPPclass);
+        assert(!hasMonitor || (cast(const(void*)*) image.ptr)[1] is null,
+            "the monitor of an initial image is null");
+        for (auto parent = cast() info; parent !is null;
+                parent = parent.base)
+            foreach (interface_; parent.interfaces) {
+                assert(*cast(const(void)**) (image.ptr + interface_.offset)
+                    is interface_.vtbl.ptr,
+                    "an interface slot holds the table of the interface");
+                storeAddress(&this, cast(ubyte*) place + interface_.offset,
+                    Address(Target.Kind.hostSymbol, interface_.vtbl.ptr));
+            }
+    }
 
     // Type data are real druntime objects in datums of the blocks, so that a
     // file can hold them: an object of class `T`, with its vtable pointer a
     // word that names the vtable of `T` in the host.
     public T newObject(T)(Dsymbol owner = null) if (is(T == class)) {
         import core.stdc.string: memcpy;
+        import std.traits: InterfacesTuple;
+
+        // An interface slot of the initial image holds a table address, and
+        // only the vtable pointer has a record here. The fields of the type
+        // data have no default that is an address.
+        static assert(InterfacesTuple!T.length == 0,
+            T.stringof ~ " implements an interface");
 
         const initial = T.classinfo.m_init;
         auto placed = reserve(
@@ -378,7 +429,7 @@ public struct NativeData {
     // The word at `place` becomes a reference to `object`. A value below a
     // page is no address: it is a flag, and it stays as it is.
     public void storeReference(void* place, in void* object) {
-        if (cast(size_t) object < 4096) {
+        if (cast(size_t) object < firstAddress) {
             *cast(size_t*) place = cast(size_t) object;
             return;
         }

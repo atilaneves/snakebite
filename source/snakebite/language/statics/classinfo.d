@@ -254,8 +254,15 @@ public TypeInfo_Class classRuntimeInfo(
         }
         // An opaque class has no size, so its initialiser has no slots.
         if (info.m_init.length != 0) {
-            if (info.base !is null)
-                data.copyBytes(info.m_init.ptr, info.base.m_init);
+            if (info.base !is null) {
+                data.copyClassImage(info.m_init.ptr, info.base);
+                // The fields of a base of the host take their values from the
+                // declarations, as the fields of this class do.
+                if (data.isHostClass(info.base))
+                    for (auto parent = declaration.baseClass;
+                            parent !is null; parent = parent.baseClass)
+                        data.fillFields(parent, cast(ubyte*) info.m_init.ptr);
+            }
             data.storeReference(info.m_init.ptr, info.vtbl.ptr);
             data.fillFields(declaration, cast(ubyte*) info.m_init.ptr);
         }

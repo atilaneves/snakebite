@@ -971,7 +971,10 @@ package struct AssertSite {
 // takes the address of an instruction from `Function.instructions` there.
 // `cleanupEndIndex` is `size_t.max` when there is no cleanup end.
 package struct ExceptionHandler {
-    // A datum of the program, or a class of the host.
+    // A datum of the program, or a class of the host. The annotation names the
+    // kind of a class of the program; a class of the host has a `hostSymbol`
+    // relocation, and only a `handler` annotation changes how the file holds
+    // a field.
     @relocated(Target.Kind.staticData, Place.Section.exceptionHandler,
         Place.Field.type)
     package TypeInfo_Class type;
