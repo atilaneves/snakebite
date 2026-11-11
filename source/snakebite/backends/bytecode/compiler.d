@@ -226,23 +226,51 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return _nativeData.storageOf(variable);
     }
 
-    // The handle is a `StartFunction` of this backend. It holds the compiled
-    // function once there is one; until then it holds the step that compiles
-    // it, so the function compiles at its first call, as with `call`. The
-    // declaration is reachable only through that step.
+    // The handle is a `StartFunction` of this backend. Until its function is
+    // compiled it holds the step that compiles it, so the function compiles
+    // at its first call, as with `call`. The declaration is reachable only
+    // through that step. After the first call it holds the compiled function
+    // and nothing else: it drops the step.
     public override FunctionHandle compiledFunction(FuncDeclaration function_) {
         return new StartFunction(() => compileFunction(function_));
     }
 
     private final class StartFunction: FunctionHandle {
-        FunctionCompiler.Deferred!(const(Function)*) function_;
+        private const(Function)* delegate() _compute;
+        private const(Function)* _compiled;
 
         this(const(Function)* delegate() compute) {
-            function_ = typeof(function_)(compute);
+            _compute = compute;
         }
 
         public override void call(void* returnPlace, void*[] args) {
-            _runner.call(function_.get(), returnPlace, args);
+            import core.atomic: atomicLoad, MemoryOrder;
+
+            auto compiled = atomicLoad!(MemoryOrder.acq)(_compiled);
+            if (compiled is null)
+                compiled = compileFirst();
+            _runner.call(compiled, returnPlace, args);
+        }
+
+        // Two threads can both run the step: `compileFunction` gives both
+        // the same function. The step runs outside the lock, because it takes
+        // the compiler lock.
+        private const(Function)* compileFirst() {
+            import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+
+            const(Function)* delegate() compute;
+            synchronized (this)
+                compute = _compute;
+            if (compute is null)
+                // Another thread finished: it set `_compiled` before it
+                // dropped the step.
+                return atomicLoad!(MemoryOrder.acq)(_compiled);
+            auto compiled = compute();
+            synchronized (this) {
+                atomicStore!(MemoryOrder.rel)(_compiled, compiled);
+                _compute = null;
+            }
+            return compiled;
         }
     }
 
