@@ -1,4 +1,4 @@
-module snakebite.native.argumentflow;
+module snakebite.native.signature;
 
 
 private:
