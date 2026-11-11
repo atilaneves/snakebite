@@ -27,7 +27,8 @@ import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
 import snakebite.start.data:
-    dependencyModulesOf, FunctionHandle, MainStart, ModuleStart, StartData;
+    dependencyModulesOf, FunctionHandle, GateStorage, MainStart, ModuleStart,
+    StartData;
 import std.conv: text;
 import std.meta: AliasSeq;
 import std.traits: FieldNameTuple, Unqual;
@@ -286,6 +287,21 @@ private struct Archive {
                 if (blocksAt(m) is set)
                     return [m, block, offset];
         throw refusal("a word points at data that the program does not hold");
+    }
+
+    // What a gate (storage of a variable of the program, as `GateStorage`
+    // holds) is: a place in the blocks of the program, or a host symbol.
+    Target.Kind gateTarget(in void* address, out size_t[3] reference) {
+        foreach (m; 0 .. _program._modules.length + 1) {
+            size_t block, offset;
+            if (blocksAt(m).locate(address, block, offset)) {
+                reference = [m, block, offset];
+                return Target.Kind.staticData;
+            }
+        }
+        const position = symbolPosition(address);
+        reference = [position[0], position[1], 0];
+        return Target.Kind.hostSymbol;
     }
 
     void* dataAt(in size_t[3] position) {
@@ -1049,9 +1065,29 @@ private void transferStart(ref Archive archive, ref ModuleStart record) {
     transferHandles(archive, record.sharedDestructors);
     transferHandles(archive, record.threadDestructors);
     transferHandles(archive, record.unitTests);
-    if (archive.isWriting && (record.sharedGates.length != 0
-            || record.threadGates.length != 0))
-        throw refusal("a module has the gate of a destructor");
+    transferGates(archive, record.sharedGates);
+    transferGates(archive, record.threadGates);
+}
+
+// A gate is the storage of a variable: a target and a length.
+private void transferGates(ref Archive archive, ref GateStorage[] gates) {
+    const count = archive.length(gates.length);
+    if (!archive.isWriting)
+        gates = new GateStorage[count];
+    foreach (ref gate; gates) {
+        Target.Kind kind;
+        size_t[3] reference;
+        size_t length;
+        if (archive.isWriting) {
+            length = gate.length;
+            kind = archive.gateTarget(gate.ptr, reference);
+        }
+        archive.transfer(kind);
+        archive.scalar(reference);
+        archive.scalar(length);
+        if (!archive.isWriting)
+            gate = (cast(ubyte*) addressOf(archive, kind, reference))[0 .. length];
+    }
 }
 
 
