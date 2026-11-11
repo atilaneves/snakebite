@@ -5,214 +5,96 @@ private:
 
 
 import snakebite.failure.report: internalFailure;
+import snakebite.ffi.shape: ArgumentPlan, Linkage, Register;
 
-// This module classifies one value's System V AMD64 ABI shape -
-// `ArgumentPlan` and `Register` - and the two host-compiler switches
-// below (`reversedDParameters`, `contextPrecedesHiddenReturnPointer`) a
-// plan reads to interpret that shape. It no longer dispatches a call
-// itself: that moved to the assembly stub in `snakebite.ffi.sysv`,
-// replayed by `snakebite.ffi.plan` (ADR-0001, issue #334).
-//
-// The integer register limit is separate: values after the first six
-// integer words go on the stack, but they still belong to the function's
-// parameter list.
-public enum maxIntegerArguments = 6;
-public enum maxFloatingArguments = 8;
+// This module classifies one value's System V AMD64 ABI shape - the
+// `ArgumentPlan` and `Register` of `snakebite.ffi.shape` - from a dmd
+// `Type`. It does not dispatch a call itself: that moved to the assembly
+// stub in `snakebite.ffi.sysv`, replayed by `snakebite.ffi.plan` (ADR-0001,
+// issue #334).
 
-// Whether this can call anything at all: these rules are for the SysV
-// AMD64 ABI, and no other host ABI is implemented.
-public enum supported = () {
-    version (Posix) {
-        version (X86_64)
-            return true;
-        else
-            return false;
-    } else
-        return false;
-}();
+// The classes an eightbyte takes while `classify` walks a value.
+private enum ValueClass {
+    none,
+    integer,
+    sse,
+    sseup,
+    // The two eightbytes a scalar `real` (`long double`) always
+    // spans together (`classify`'s own `Tfloat80` case) - never
+    // produced alone, since `real`'s own 16-byte size and alignment
+    // mean nothing smaller ever reaches an X87 classification.
+    x87,
+    x87up,
+    memory,
+}
 
-// Whether native `extern(D)` code in this process assigns parameters to
-// registers in reverse declaration order. dmd's `extern(D)` variant of the
-// System V convention does; ldc and gdc keep the C order.
-public enum reversedDParameters = () {
-    version (DigitalMars)
-        return true;
-    else
-        return false;
-}();
-
-// Whether a method that returns a large aggregate receives its context
-// before its hidden return pointer. dmd puts `this` first for `extern(D)`;
-// ldc follows the System V order and puts the hidden return pointer first,
-// for every linkage. On dmd, a non-`extern(D)` method - `extern(C++)`
-// chief among them - follows the System V/Itanium order instead: the
-// glue layer (`e2ir.d`'s `callfunc`) only folds the hidden return pointer
-// in ahead of `this` when `tf.linkage == LINK.d`; for every other linkage
-// on a POSIX target it is appended after `this` instead, which its own
-// parameter-list nesting makes the *first* argument register, ahead of
-// `this` (verified against dmd's own `callfunc`, the comment "ehidden
-// goes last on Linux/OSX C++" marking exactly this branch).
-public bool contextPrecedesHiddenReturnPointer(
-    in imported!"dmd.astenums".LINK linkage,
-) {
+// The `Linkage` of dmd's `linkage`.
+public Linkage linkageOf(in imported!"dmd.astenums".LINK linkage) {
     import dmd.astenums: LINK;
 
-    version (DigitalMars)
-        return linkage == LINK.d || linkage == LINK.default_;
-    else
-        return false;
+    final switch (linkage) {
+        case LINK.default_:
+            return Linkage.default_;
+        case LINK.d:
+            return Linkage.d;
+        case LINK.c:
+            return Linkage.c;
+        case LINK.cpp:
+            return Linkage.cpp;
+        case LINK.windows:
+            return Linkage.windows;
+        case LINK.objc:
+            return Linkage.objc;
+        case LINK.system:
+            return Linkage.system;
+    }
 }
 
-// Whether an `extern(D)` untyped variadic call site's hidden `_arguments`
-// argument (issue #334 step 6) travels as a two-register `TypeInfo[]`
-// slice instead of dmd's own single pointer to the `TypeInfo_Tuple` the
-// frontend's leading `typeid` expression evaluates to. Both host
-// compilers' frontends insert that same `typeid` expression - this is a
-// codegen difference, not a frontend one: dmd's codegen forwards the
-// `TypeInfo_Tuple` reference itself, and the callee's own prologue reads
-// its `elements` field to build the slice; ldc's codegen reads `elements`
-// at the *call site* instead, and passes the resulting slice directly
-// (verified: disassembling a real `extern(D) int f(int a, int b, int c,
-// ...)` call built by ldc2 1.43, frontend 2.113.0 - the same frontend
-// version this project vendors - shows `%edi`/`%esi`=length/pointer, not
-// one pointer register; an ldc2-built callee's own prologue starts
-// `gp_offset` at 0x18, three GP registers for `_arguments`+`a`, matching
-// only the slice shape).
-public enum dVariadicArgumentsIsSlice = () {
-    version (LDC)
-        return true;
-    else
-        return false;
-}();
 
-// Convert the host compiler's callback argument shape to the tuple pointer
-// the frontend inserts for a guest `extern(D)` variadic call. LDC passes
-// the tuple's `elements` as a slice; dmd passes the tuple object itself.
-public const(void)* callbackVariadicTypes(const(void)* argument) {
-    import object: TypeInfo, TypeInfo_Tuple;
-
-    static if (dVariadicArgumentsIsSlice) {
-        auto elements = *cast(TypeInfo[]*) argument;
-        auto tuple = new TypeInfo_Tuple;
-        tuple.elements = elements;
-        return cast(const(void)*) tuple;
-    } else
-        return *cast(const(void)**) argument;
+// The shape of one parameter. `aggregatePlan` itself already gives a
+// non-trivially-copyable type (`isNonTriviallyCopyable`'s own doc) the
+// indirect, one-pointer shape this used to build only for LDC: the same
+// Itanium rule holds for any host compiler, since it is a fact about the
+// calling convention, not about which compiler built the caller. A
+// return's shape comes from `returnPlanOf`.
+public ArgumentPlan argumentPlanOf(imported!"dmd.mtype".Type type) {
+    return aggregatePlan(type);
 }
 
-// What one value's bytes have to become to travel in one argument or
-// return register. `integer` is used for an aggregate eightbyte; the
-// scalar kinds retain their widening rules.
-public struct Register {
-    public enum Kind {
-        signed,
-        unsigned,
-        pointer,
-        integer,
-        sse,
-        sseup,
-        x87,
-        none, // nothing travels: a `void` return
-    }
+public ArgumentPlan returnPlanOf(imported!"dmd.mtype".Type type) {
+    import dmd.astenums: Tcomplex80;
+    import dmd.typesem: size, toBasetype;
 
-    public Kind kind;
-    // In bytes, 1..8 for anything but `none` - not just 1, 2, 4 or 8: a
-    // partial register-class eightbyte (a struct field straddling one)
-    // can be any width in between, and so can a MEMORY-class argument's
-    // last eightbyte (issue #334 step 3).
-    public ubyte size;
-}
+    auto baseType = type.toBasetype;
+    // SysV returns `creal` in ST0 and ST1. Its argument form is
+    // MEMORY-class, and an aggregate that contains it stays that way.
+    if (baseType.ty == Tcomplex80)
+        return ArgumentPlan(
+            [Register(Register.Kind.x87, 16),
+                Register(Register.Kind.x87, 16)],
+            2,
+            false,
+        );
 
-// How a value travels. A regular value has at most two eightbytes after
-// the SysV cleanup rule; bare `creal` returns use two x87 registers. A
-// MEMORY value - larger than two eightbytes, or
-// with an unaligned field - travels as `memoryWords` whole eightbytes on
-// the stack, in declaration position, a plain "copy bytes" load each
-// (issue #334 step 3): `registers`/`count` above are meaningless for it.
-// A hidden-pointer return (`needsHiddenReturnPointer`) still bypasses this
-// entirely and never builds a MEMORY `ArgumentPlan` for the return value.
-public struct ArgumentPlan {
-    private import dmd.mtype: Type;
-
-    private enum ValueClass {
-        none,
-        integer,
-        sse,
-        sseup,
-        // The two eightbytes a scalar `real` (`long double`) always
-        // spans together (`classify`'s own `Tfloat80` case) - never
-        // produced alone, since `real`'s own 16-byte size and alignment
-        // mean nothing smaller ever reaches an X87 classification.
-        x87,
-        x87up,
-        memory,
-    }
-
-    public Register[2] registers;
-    public ubyte count;
-    public bool memory;
-    // MEMORY-class only: this value's own byte size, never truncated -
-    // `memoryWords` below is how many whole eightbytes that rounds up to,
-    // the count `snakebite.ffi.plan.CallPlan.buildMoves` places on the
-    // stack. Stays `0` unless `memory` is `true`.
-    public size_t memoryBytes;
-    // The value's ABI alignment in bytes. The stack planner uses this to
-    // insert padding before an aligned value, including register-class
-    // values that spill after their register file is full.
-    public size_t stackAlignment;
-    public bool indirect;
-
-    public size_t memoryWords() const @safe @nogc nothrow pure scope {
-        return (memoryBytes + 7) / 8;
-    }
-
-    // `aggregatePlan` itself already gives a non-trivially-copyable type
-    // (`isNonTriviallyCopyable`'s own doc) the indirect, one-pointer shape
-    // this used to build only for LDC: the same Itanium rule holds for
-    // any host compiler, since it is a fact about the calling convention,
-    // not about which compiler built the caller. `of` alone now answers
-    // a parameter's own question and a return's alike (issue #336
-    // review, finding 12: a parameter-only `ofParameter` wrapper stayed
-    // behind after that unification with nothing left to add).
-    public static ArgumentPlan of(Type type) {
-        return aggregatePlan(type);
-    }
-
-    public static ArgumentPlan ofReturn(Type type) {
-        import dmd.typesem: size, toBasetype;
-        import dmd.astenums: Tcomplex80;
-
-        auto baseType = type.toBasetype;
-        // SysV returns `creal` in ST0 and ST1. Its argument form is
-        // MEMORY-class, and an aggregate that contains it stays that way.
-        if (baseType.ty == Tcomplex80)
-            return ArgumentPlan(
-                [Register(Register.Kind.x87, 16),
-                    Register(Register.Kind.x87, 16)],
-                2,
-                false,
-            );
-
-        // A bare `real` return and a struct (or union) return that,
-        // once classified, is nothing but the two eightbytes a `real`
-        // field spans - `isX87OnlyAggregate`'s own doc - crosses in
-        // `%st0` instead of a general-purpose or SSE register: the one
-        // case `aggregatePlan` cannot answer for itself, since a
-        // *parameter* of that same shape has no `%st0` argument
-        // register to travel in and has to fall back to `of`'s own
-        // MEMORY route below (verified against gcc -O0: `struct
-        // { long double r; } make(void)` compiles to `fld`/`fstp`/
-        // `fld`/`ret`, ending with the value already loaded into
-        // `%st0`).
-        if (isX87OnlyAggregate(type))
-            return ArgumentPlan(
-                [Register(Register.Kind.x87, cast(ubyte) type.size),
-                    Register.init],
-                1,
-                false,
-            );
-        return of(type);
-    }
+    // A bare `real` return and a struct (or union) return that,
+    // once classified, is nothing but the two eightbytes a `real`
+    // field spans - `isX87OnlyAggregate`'s own doc - crosses in
+    // `%st0` instead of a general-purpose or SSE register: the one
+    // case `aggregatePlan` cannot answer for itself, since a
+    // *parameter* of that same shape has no `%st0` argument
+    // register to travel in and has to fall back to
+    // `argumentPlanOf`'s own MEMORY route below (verified against
+    // gcc -O0: `struct { long double r; } make(void)` compiles to
+    // `fld`/`fstp`/`fld`/`ret`, ending with the value already loaded
+    // into `%st0`).
+    if (isX87OnlyAggregate(type))
+        return ArgumentPlan(
+            [Register(Register.Kind.x87, cast(ubyte) type.size),
+                Register.init],
+            1,
+            false,
+        );
+    return argumentPlanOf(type);
 }
 
 // The SysV ABI classifies a MEMORY result as a hidden return pointer, and
@@ -223,7 +105,7 @@ public struct ArgumentPlan {
 // even when its size is at most two eightbytes. Either path always takes
 // this route, whatever its size or alignment - unlike a MEMORY-class
 // explicit parameter, it never becomes an `ArgumentPlan` `buildMoves`
-// places on the stack, so `ArgumentPlan.of`'s alignment limit does not
+// places on the stack, so `argumentPlanOf`'s alignment limit does not
 // apply to it.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums: Tcomplex80;
@@ -262,7 +144,7 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
 // struct layout.
 //
 // A *parameter* of this same shape still has no `%st0` argument
-// register to travel in - only `ofReturn` asks this question, ahead of
+// register to travel in - only `returnPlanOf` asks this question, ahead of
 // `aggregatePlan`'s own MEMORY route (verified against gcc -O0: `struct
 // { long double r; } take(struct S s)` reads `s` directly off the
 // stack, at `[rbp+0x10]`, never through a register).
@@ -278,12 +160,12 @@ private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
     if (bytes == 0 || bytes > 16 || isDmdIntegerPairArray(type))
         return false;
 
-    ArgumentPlan.ValueClass[2] classes = [
-        ArgumentPlan.ValueClass.none, ArgumentPlan.ValueClass.none,
+    ValueClass[2] classes = [
+        ValueClass.none, ValueClass.none,
     ];
     bool memory;
     classify(type, 0, classes, memory);
-    return !memory && classes[0] == ArgumentPlan.ValueClass.x87;
+    return !memory && classes[0] == ValueClass.x87;
 }
 
 // Whether `type` is a non-trivially-copyable struct, possibly through a
@@ -298,7 +180,7 @@ private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
 // address of a temporary the frontend's own semantic pass already builds
 // - the same copy-constructor call it inserts for passing such a struct
 // to *any* function, `extern(D)` included, which is why this is not
-// gated to one host compiler the way `ArgumentPlan.ofParameter` used to
+// gated to one host compiler the way a parameter-only wrapper used to
 // gate it to LDC alone.
 private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
     import dmd.dsymbolsem: isPOD;
@@ -424,8 +306,8 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
         return plan;
     }
 
-    ArgumentPlan.ValueClass[2] classes = [
-        ArgumentPlan.ValueClass.none, ArgumentPlan.ValueClass.none,
+    ValueClass[2] classes = [
+        ValueClass.none, ValueClass.none,
     ];
     bool memory;
     classify(type, 0, classes, memory);
@@ -434,17 +316,17 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     // shape after fields merge into different classes.
     if (!memory)
         foreach (i; 0 .. count)
-            if (classes[i] == ArgumentPlan.ValueClass.sseup
+            if (classes[i] == ValueClass.sseup
                     && (i == 0
-                        || (classes[i - 1] != ArgumentPlan.ValueClass.sse
+                        || (classes[i - 1] != ValueClass.sse
                             && classes[i - 1]
-                                != ArgumentPlan.ValueClass.sseup)))
-                classes[i] = ArgumentPlan.ValueClass.sse;
+                                != ValueClass.sseup)))
+                classes[i] = ValueClass.sse;
     // No argument register exists for an X87/X87UP eightbyte - only a
     // *return* value can cross in `%st0` (`isX87OnlyAggregate`'s own
-    // doc, checked by `ofReturn` before this function ever runs for a
+    // doc, checked by `returnPlanOf` before this function ever runs for a
     // clean real-only shape), so this function's own callers - every
-    // parameter, and `ofReturn`'s own fallback for anything that is not
+    // parameter, and `returnPlanOf`'s own fallback for anything that is not
     // a clean X87 shape - always take the MEMORY route real native code
     // takes for such a value (verified against gcc -O0: `struct
     // { long double r; } take(struct S s)` reads `s` straight off the
@@ -454,8 +336,8 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     // pointer the same as any other MEMORY-class return).
     if (!memory)
         foreach (class_; classes)
-            if (class_ == ArgumentPlan.ValueClass.x87
-                    || class_ == ArgumentPlan.ValueClass.x87up)
+            if (class_ == ValueClass.x87
+                    || class_ == ValueClass.x87up)
                 memory = true;
     if (memory) {
         plan.memory = true;
@@ -465,7 +347,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     }
 
     foreach (i; 0 .. count) {
-        final switch (classes[i]) with (ArgumentPlan.ValueClass) {
+        final switch (classes[i]) with (ValueClass) {
             case none:
                 break;
             case integer:
@@ -477,7 +359,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
                 break;
             case sse:
                 if (i + 1 < count
-                        && classes[i + 1] == ArgumentPlan.ValueClass.sseup) {
+                        && classes[i + 1] == ValueClass.sseup) {
                     plan.registers[plan.count++] = Register(
                         Register.Kind.sse, cast(ubyte) bytes);
                     break;
@@ -504,7 +386,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
 private void classify(
     imported!"dmd.mtype".Type unbasedType,
     in size_t offset,
-    ref ArgumentPlan.ValueClass[2] classes,
+    ref ValueClass[2] classes,
     ref bool memory,
 ) {
     import dmd.astenums: TY;
@@ -532,7 +414,7 @@ private void classify(
 
     final switch (type.ty) with (TY) {
     case Tfloat32, Tfloat64, Timaginary32, Timaginary64:
-        merge(classes, offset, bytes, ArgumentPlan.ValueClass.sse, memory);
+        merge(classes, offset, bytes, ValueClass.sse, memory);
         return;
     // `real` (`long double`) always spans exactly two eightbytes on this
     // ABI - its own 16-byte size and 16-byte alignment (`isIntegralSize`
@@ -543,32 +425,32 @@ private void classify(
     // function's entry already forces MEMORY for it before any
     // type-specific case runs. A `creal` parameter and any aggregate
     // containing one take `aggregatePlan`'s own `count > 2` branch;
-    // `ofReturn` handles bare `creal` before this route.
+    // `returnPlanOf` handles bare `creal` before this route.
     case Tfloat80, Timaginary80:
-        merge(classes, offset, 8, ArgumentPlan.ValueClass.x87, memory);
-        merge(classes, offset + 8, 8, ArgumentPlan.ValueClass.x87up,
+        merge(classes, offset, 8, ValueClass.x87, memory);
+        merge(classes, offset + 8, 8, ValueClass.x87up,
             memory);
         return;
     case Tcomplex32, Tcomplex64:
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
-                ArgumentPlan.ValueClass.sse, memory);
+                ValueClass.sse, memory);
         return;
     case Tpointer, Tclass, Tdelegate, Taarray, Tnull:
         foreach (i; 0 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
-                ArgumentPlan.ValueClass.integer, memory);
+                ValueClass.integer, memory);
         return;
     case Tarray:
-        merge(classes, offset, 8, ArgumentPlan.ValueClass.integer, memory);
+        merge(classes, offset, 8, ValueClass.integer, memory);
         merge(classes, offset + 8, 8,
-            ArgumentPlan.ValueClass.integer, memory);
+            ValueClass.integer, memory);
         return;
     // `void` only occurs as the element of a `void[N]`, which both host
     // compilers classify as `ubyte[N]`.
     case Tvoid, Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16, Tuns16,
         Tint32, Tuns32, Tint64, Tuns64, Tint128, Tuns128:
-        merge(classes, offset, bytes, ArgumentPlan.ValueClass.integer,
+        merge(classes, offset, bytes, ValueClass.integer,
             memory);
         return;
     case Tsarray: {
@@ -630,10 +512,10 @@ private void classify(
     // analysis. Vectors use the same two-SSE-register layout as their
     // element bytes on SysV AMD64.
     case Tvector:
-        merge(classes, offset, 8, ArgumentPlan.ValueClass.sse, memory);
+        merge(classes, offset, 8, ValueClass.sse, memory);
         foreach (i; 1 .. (bytes + 7) / 8)
             merge(classes, offset + i * 8, 8,
-                ArgumentPlan.ValueClass.sseup, memory);
+                ValueClass.sseup, memory);
         return;
     case Tcomplex80:
         memory = true;
@@ -667,10 +549,10 @@ private void classify(
 // leaving eightbyte 1's X87UP without the eightbyte 0 X87 the post-merge
 // check right after this function's own caller requires).
 private void merge(
-    ref ArgumentPlan.ValueClass[2] classes,
+    ref ValueClass[2] classes,
     in size_t offset,
     in size_t bytes,
-    in ArgumentPlan.ValueClass incoming,
+    in ValueClass incoming,
     ref bool memory,
 ) {
     const first = offset / 8;
@@ -682,20 +564,21 @@ private void merge(
 
     foreach (i; first .. last + 1) {
         const existing = classes[i];
-        if (existing == ArgumentPlan.ValueClass.none) {
+        if (existing == ValueClass.none) {
             classes[i] = incoming;
         } else if (existing == incoming) {
             // Nothing to merge - both fields already agree.
-        } else if (existing == ArgumentPlan.ValueClass.integer
-                || incoming == ArgumentPlan.ValueClass.integer) {
-            classes[i] = ArgumentPlan.ValueClass.integer;
-        } else if (existing == ArgumentPlan.ValueClass.x87
-                || existing == ArgumentPlan.ValueClass.x87up
-                || incoming == ArgumentPlan.ValueClass.x87
-                || incoming == ArgumentPlan.ValueClass.x87up) {
+        } else if (existing == ValueClass.integer
+                || incoming == ValueClass.integer) {
+            classes[i] = ValueClass.integer;
+        } else if (existing == ValueClass.x87
+                || existing == ValueClass.x87up
+                || incoming == ValueClass.x87
+                || incoming == ValueClass.x87up) {
             memory = true;
         } else {
-            classes[i] = ArgumentPlan.ValueClass.sse;
+            classes[i] = ValueClass.sse;
         }
     }
 }
+

@@ -75,7 +75,7 @@ private extern(C) int snakebite_ut_non_copyable_aggregate_call_count() {
 
 // A real `extern(D)` function, not `extern(C)`: on dmd, the host compiler
 // that builds `bin/ut`, its parameters reach the registers and the stack
-// in reversed declaration order (`snakebite.ffi.abi.reversedDParameters`).
+// in reversed declaration order (`snakebite.ffi.shape.reversedDParameters`).
 // Nine ABI words (four two-eightbyte `string`s plus one `int`) spill two
 // of the four strings to the stack, exercising the same stack-order rule
 // `ut.ffi.plan`'s `called.externD.*` tests check at the plan level -
@@ -2640,7 +2640,7 @@ private struct VariadicPointBackend {
 // `Matrix!`/`shouldBeRetOf` like an ordinary variadic test, unlike the
 // six that follow. `acceptance/at/ffi/dvariadic.d`'s own callee checks
 // this exact shape again, built by ldc2 instead of dmd - the one host
-// whose own `_arguments` ABI differs (`snakebite.ffi.abi.
+// whose own `_arguments` ABI differs (`snakebite.ffi.shape.
 // dVariadicArgumentsIsSlice`'s own doc).
 pragma(mangle, "snakebite_ut_dvariadic_length_type_sum_backend")
 private extern(D) int snakebite_ut_dvariadic_length_type_sum_backend(
