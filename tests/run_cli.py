@@ -1798,6 +1798,45 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
     assert "another build" in loaded.stderr, output(loaded)
 
 
+# A loaded program names its JIT code in the perf map as the same program
+# compiled and run from RAM does.
+def test_loaded_program_names_jit_code_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int step(int s, int i) { return s ^ i; }
+        int main() {
+            int one = 1; int n = 3000000; int i = 0; int s = 0;
+            while (i != n) { s = step(s, i); i += one; }
+            return s;
+        }
+        """)
+    app = str(tmp_path / "app")
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", app, cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    def mapped_names(*args: str) -> set[str]:
+        child = subprocess.Popen(
+            [sb_path(), "--jit-perf-map", *args], cwd=tmp_path,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        stdout, _ = child.communicate(timeout=120)
+        path = Path(f"/tmp/perf-{child.pid}.map")
+        try:
+            assert child.returncode == 0, stdout
+            return {line.split(maxsplit=2)[2]
+                    for line in path.read_text().splitlines()}
+        finally:
+            path.unlink(missing_ok=True)
+
+    from_ram = mapped_names("--backend=bytecode", "--no-optimise-image", app)
+    assert from_ram
+    assert mapped_names(f"--load={target}") == from_ram
+
+
 # A long run of guest instructions in one function, with asserts and
 # exceptions between them, finishes within a small native stack. A VM that
 # grows the native stack for each guest instruction overflows it.
