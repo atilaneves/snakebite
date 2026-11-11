@@ -5872,6 +5872,9 @@ static if (jitSupported) {
             put(&opCopyFixed!width,
                 JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: false), width));
         }
+        static if (chainedDispatch)
+            put(&opThenReturn!(opCopyFixed!(1, true)),
+                JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: true), 1));
         put(&opConstant, JitOp.plain(Kind.constant));
         put(&opZero, JitOp.plain(Kind.zero));
         put(&opJump, JitOp.plain(Kind.jump));
