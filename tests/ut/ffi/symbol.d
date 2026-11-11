@@ -3,8 +3,8 @@ module ut.ffi.symbol;
 
 import ut;
 import snakebite.ffi: Resolver;
-import snakebite.image.dependency:
-    DependencyImage, ProjectImageCache, defaultCompiler, loadImage;
+import snakebite.image.dependency: ProjectImageCache, defaultCompiler;
+import snakebite.image.loaded: DependencyImage, loadImage;
 import core.thread: Thread;
 import snakebite.backends: backendIdentity;
 import snakebite.driver.execution: prepareProject, executeBackend;

@@ -9,7 +9,7 @@ import snakebite.project.dub: SourceSet;
 // Collects image data from a live program without resetting the frontend.
 // `program` runs at most once, only when cache validation needs image source.
 // For startup without a live program, use `prepareStartupDependencies`.
-public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDependencies(
+public const(imported!"snakebite.image.loaded".DependencyImage)* prepareDependencies(
     in string directory,
     in SourceSet sources,
     scope imported!"snakebite.program".Program delegate() program,
@@ -28,7 +28,7 @@ public const(imported!"snakebite.image.dependency".DependencyImage)* prepareDepe
 // so constructors can wait for workers that use the frontend. A clean cache
 // hit does not analyse or reset. Unrelated stderr writers must be absent
 // during analysis because diagnostic capture redirects process-wide fd 2.
-public const(imported!"snakebite.image.dependency".DependencyImage)* prepareStartupDependencies(
+public const(imported!"snakebite.image.loaded".DependencyImage)* prepareStartupDependencies(
     in string directory,
     SourceSet sources,
     in imported!"snakebite.image.dependency".Optimise optimise
@@ -69,7 +69,8 @@ private enum Mode { live, projectEntry, startup }
 
 private struct Preparation {
     import snakebite.program: Program;
-    import snakebite.image.dependency: DependencyImage, Optimise;
+    import snakebite.image.loaded: DependencyImage;
+    import snakebite.image.dependency: Optimise;
 
     private const(SourceSet) _sources;
     private Optimise _optimise;

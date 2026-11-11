@@ -9,7 +9,7 @@ private:
 // dub-aware driver asks dub for import paths and flags and builds one of
 // these.
 public struct Program {
-    import snakebite.image.dependency: DependencyImage, TestHooks;
+    import snakebite.image.loaded: DependencyImage, TestHooks;
     import dmd.dmodule: Module;
     import dmd.func: FuncDeclaration;
     import dmd.dsymbol: Dsymbol;
