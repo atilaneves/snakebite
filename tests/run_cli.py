@@ -1861,6 +1861,16 @@ def test_saved_program_with_empty_array_literal_data_runs_as_the_compiled_progra
         """})
 
 
+def test_saved_program_with_pointer_past_the_end_of_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared ubyte[4096] big;
+        __gshared ubyte* end = big.ptr + big.length;
+        int main() { return end - big.ptr == 4096 ? 3 : 1; }
+        """})
+
 
 # A save never writes a file that loads into a different state: a program
 # that calls a function through a foreign call plan is refused, and no file is
