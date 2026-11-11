@@ -2259,6 +2259,30 @@ def test_saved_program_with_destructor_gate_and_a_second_thread_runs_as_compiled
         """})
 
 
+def test_saved_program_uses_its_dependency_image_after_the_load_returns(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "dependency" / "dub.sdl",
+          f'name "{dub_name("saved-image-dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dependency" / "source" / "dep.d", """
+        module dep;
+        int counter = 3;
+        int thrice(int x) { return x * 3; }
+        """)
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": dub_project_recipe("saved-image-app")
+            + f'dependency "{dub_name("saved-image-dep")}"'
+            + ' path="../dependency"\n',
+        "source/main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import dep: counter, thrice;
+        shared static ~this() { counter += 1; printf("end %d\\n", thrice(counter)); }
+        int main() { return 0; }
+        """,
+    })
+
+
 # A save never writes a file for a program that does not compile: it fails,
 # and no file is left.
 def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
