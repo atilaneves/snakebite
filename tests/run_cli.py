@@ -2111,6 +2111,20 @@ def test_saved_program_with_host_variable_address_plus_offset_in_data_runs_as_co
         """})
 
 
+def test_saved_program_with_class_virtual_call_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        class Base { int f() { return 1; } }
+        class Derived : Base { override int f() { return 5; } }
+        int main() {
+            Base b = new Derived;
+            return b.f();
+        }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
