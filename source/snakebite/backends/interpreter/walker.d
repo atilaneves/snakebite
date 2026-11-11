@@ -270,7 +270,9 @@ import snakebite.language.layout.temporary: canRetainTemporaries;
 // its own execution state.
 private struct Shared {
     import snakebite.native.signature: SignatureTable;
-    import snakebite.backends.bytecode.linkedmodules: LinkedModules;
+    import snakebite.native.staticstore: StaticStore;
+    import snakebite.stack.tls: TlsSlots;
+    import snakebite.host.threads: heapNew;
     import snakebite.ffi.callplanstore: CallPlanStore;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
@@ -300,7 +302,7 @@ private struct Shared {
     // Declared before what points into it, so that it is destroyed after.
     // The interpreter keeps its own signatures, and uses this for the store
     // of its static data, its plans and its callback bridge.
-    LinkedModules linked;
+    StaticStore store;
     CallPlanStore planStore;
     NativeData nativeData;
     RuntimeTypes runtimeTypes;
@@ -396,8 +398,8 @@ private struct Shared {
         plans = PlanCache(&planStore,
             &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        linked = LinkedModules(program.dependencyImage);
-        nativeData = NativeData(&linked.store, &this.program.isRootOwned,
+        store = StaticStore(() => heapNew!TlsSlots);
+        nativeData = NativeData(&store, &this.program.isRootOwned,
             (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
