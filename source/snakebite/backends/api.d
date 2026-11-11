@@ -9,6 +9,9 @@ import snakebite.program: Program;
 import snakebite.start.data: FunctionHandle, ModuleStart, StartData;
 
 
+private alias DModule = imported!"dmd.dmodule".Module;
+
+
 // The handle of a backend that runs a function from its declaration.
 public final class DeclarationHandle: FunctionHandle {
     private imported!"dmd.func".FuncDeclaration _function;
@@ -149,7 +152,7 @@ public abstract class Backend {
     // The storage of the start record of `module_`. The record must stay at
     // its address for the life of the backend. The default is a heap block.
     protected ModuleStart* moduleStartStorage(
-        imported!"dmd.dmodule".Module module_,
+        DModule module_,
     ) {
         return new ModuleStart;
     }
@@ -165,8 +168,9 @@ public abstract class Backend {
                 if (atomicLoad(_startBuilt))
                     return;
 
-                // `buildStartData` throws before it assigns, so a failure
-                // leaves no half-built data and the next call builds again.
+                // `buildStartData` writes each record in place, so a failure
+                // can leave records half filled. The next call builds again
+                // and resets them.
                 startDataStorage = buildStartData(
                     cast(Program) _program, &compiledFunction, &staticStorage,
                     &moduleStartStorage);

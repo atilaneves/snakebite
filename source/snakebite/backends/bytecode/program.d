@@ -16,8 +16,10 @@ import snakebite.start.data: ModuleStart, StartData;
 // What one process holds of a compiled program while it runs: the compiled
 // functions, the signatures, the static storage, the call plans and the start
 // data.
-// It holds nothing of the compiler and nothing of the machinery that
-// executes. A struct that its owner holds by value: its address, and the
+// It holds no frontend type and nothing of the machinery that executes. A slot
+// that is not filled yet (a call site, or a start handle, of a function that
+// is not compiled) holds a delegate that the compiler gave; the delegate fills
+// the slot at its first use and is then dropped. A struct that its owner holds by value: its address, and the
 // addresses of what it owns, do not change.
 public struct Program {
     @disable this(this);

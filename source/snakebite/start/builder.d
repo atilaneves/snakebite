@@ -22,8 +22,8 @@ alias ModuleStorage =
 // functions in it are the ones `compiledFunction` names; it compiles them when
 // it likes. `staticStorage` gives the bytes of a static variable.
 // `moduleStorage` gives the storage of the record of a root module; the
-// builder overwrites it. A failure
-// throws before the caller has a value to keep.
+// builder overwrites it. A failure throws before the caller has a value to
+// keep, and can leave records half filled.
 public StartData buildStartData(
     Program program,
     CompiledFunction compiledFunction,
@@ -73,6 +73,7 @@ private void addModules(
 
     foreach (i, module_; program.rootModules) {
         auto functions = findModuleFunctions(module_);
+        // `auto`: the code writes through the pointer, so it cannot be const.
         auto start = moduleStorage(module_);
         *start = ModuleStart.init;
         start.name = prettyNameOf(module_).fromStringz.idup;

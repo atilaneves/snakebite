@@ -43,17 +43,22 @@ data that one D module defines. It owns:
 - its static data blocks (`blocks`): the variables of the D module and their
   initial bytes, the constants that its functions refer to, and the initial
   bytes of its fields,
-- its start record (`start`, a `ModuleStart`): the name, the imports, and
-  the constructors, destructors and unit tests as function handles.
+- its start record (`start`, a `ModuleStart`, in
+  `source/snakebite/start/data.d`): the name, the flags and gates, the
+  imports, and the constructors, destructors and unit tests as function
+  handles.
 
-The rule: a `Module` owns what its D module defines. A note or an index of
-things that live elsewhere is not permitted in a `Module`. The owner of a
-template instance is the module that declares the template. This fits the
-present model, where a whole dub package is compiled at once. A later
-`.sbc` file is a list of modules.
+The rule: a `Module` owns the code and data that its D module defines. Data
+that it owns are not kept elsewhere with only a note in the `Module`. A
+reference to another module (an import) is a reference: the `Module` holds
+it as a position in the list of modules of the program, with the module
+names beside it. The owner of a template instance is the module that
+declares the template. This fits the present model, where a whole dub
+package is compiled at once. A later `.sbc` file is a list of modules.
 
 The compiler makes a `Module` at the first function or datum of its D
-module, and `buildStartData` makes the `Module` of each root module, so that
+module. `buildStartData` asks the compiler for the storage of the record of
+each root module, and the bytecode backend makes the `Module` there, so that
 every root module has one. `StartData.modules` is a list of pointers to the
 `ModuleStart` records, and the `Module` holds each record by value. The
 interpreter and the ctfe backend have no `Module`; they give a record on
@@ -114,11 +119,18 @@ through `NativeData.value` with an owner.
 ## Consequences
 
 - The code that executes does not depend on the compiler. A test or a tool
-  can build the machinery that executes with no frontend.
+  can build the machinery that executes with no frontend. The `Program` and
+  its `Module`s hold no frontend type. A slot that is not filled yet (a call
+  site, or a start handle, of a function that is not compiled) holds a
+  delegate that the compiler gave, which fills the slot at its first use.
+  After that the slot holds the compiled function, and the delegate is
+  dropped.
 - A `Program` that came from a file needs only the parts of the list above
   to be in the file. The parts that are not yet in a `Module` must move
   there, or have a stable form, before a `.sbc` file can hold a module.
-- The start record of a D module is in its `Module`, so a loaded module
-  carries its constructors, destructors and unit tests with it.
+- The start record of a D module is in its `Module`. A start handle of a
+  function that is not compiled still holds a delegate of the compiler, so a
+  loaded module carries its constructors, destructors and unit tests only
+  when they are compiled.
 - No cost is added to an instruction or a call. Reading the module records
   at start takes one more pointer step for each module.
