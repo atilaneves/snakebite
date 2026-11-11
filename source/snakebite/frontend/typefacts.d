@@ -46,13 +46,13 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     // `isIntegral` answers for the element, and a vector is wider than
     // any integral.
     const scalar = type.ty != Tvector;
-    return TypeFacts(
-        representationSize(type),
-        type.alignsize,
-        scalar && type.isIntegral,
-        scalar && type.isUnsigned,
-        false, 0, type.hasPointers,
-    );
+    TypeFacts facts;
+    facts.size = representationSize(type);
+    facts.alignment = type.alignsize;
+    facts.isIntegral = scalar && type.isIntegral;
+    facts.isUnsigned = scalar && type.isUnsigned;
+    facts.canHoldAddress = type.hasPointers;
+    return facts;
 }
 
 private imported!"dmd.mtype".Type representationType(

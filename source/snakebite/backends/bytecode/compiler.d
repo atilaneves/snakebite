@@ -205,8 +205,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         foreach (module_; _program.rootModules)
             (cast() module_).accept(collector); // DMD visitors need mutable nodes.
         startData.eachHandle((handle) {
-            auto start = cast(StartFunction) handle;
-            start.compiled;
+            handle.compiledCode;
         });
         fillGuestCallSites;
 
@@ -850,9 +849,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
 
+            if (_runner.jitSetting.perfMap || recordRelocs)
+                placeholder.mangledName = function_.mangledNameOf;
             prepareForExecution(placeholder, _runner.jitSetting,
-                _runner.jitInstance,
-                function_.mangledNameOf);
+                _runner.jitInstance, placeholder.mangledName);
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;

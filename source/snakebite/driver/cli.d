@@ -32,7 +32,8 @@ public int run(string[] args) {
     import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, executeLoaded, prepareSources, runProject, saveProgram;
+        executeBackend, executeLoaded, PreparationReport, prepareSources,
+        runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
@@ -57,9 +58,7 @@ public int run(string[] args) {
                 JitSetting(!parsed.options.noJit,
                     /*eager*/ false, parsed.options.jitPerfMap),
             );
-            _statistics = Statistics(true,
-                imported!"snakebite.driver.execution".PreparationReport.init,
-                report);
+            _statistics = Statistics(true, PreparationReport.init, report);
             return report.status;
         }
         // The project directory is where the compile runs: a relative path

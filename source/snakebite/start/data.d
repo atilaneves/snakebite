@@ -16,6 +16,13 @@ private:
 public abstract class FunctionHandle {
     // Calls the function as `Backend.call` does.
     public abstract void call(void* returnPlace, void*[] args);
+
+    // The compiled code that the handle runs, compiled first if need be. Only
+    // the backend that made the handle can use the address. Null for a
+    // backend that has no compiled code to keep.
+    public const(void)* compiledCode() {
+        return null;
+    }
 }
 
 

@@ -21,12 +21,14 @@ import snakebite.backends.bytecode.vm:
     Function, handlerAt, handlerOffset, Instruction, JitSetting,
     prepareForExecution, Role, Roles, rolesOf, withoutCount;
 import snakebite.failure.report: SnakebiteException;
+import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: NativeSignature;
 import snakebite.native.staticstore: StaticBlocks;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
 import snakebite.start.data:
     dependencyModulesOf, FunctionHandle, MainStart, ModuleStart, StartData;
+import std.conv: text;
 import std.meta: AliasSeq;
 import std.traits: FieldNameTuple, Unqual;
 
@@ -63,8 +65,11 @@ public void saveProgram(
     transferHeader(file, written);
     size_t signatureCount = body_._signatures.length;
     file.scalar(signatureCount);
-    foreach (signature; body_._signatures)
-        file.transfer(*signature);
+    foreach (signature; body_._signatures) {
+        // The walk takes a mutable record; a write changes nothing in it.
+        auto record = Signature(signature.parameters.dup, signature.variadic);
+        file.transfer(record);
+    }
     file.append(body_._written.data);
 
     const partial = path ~ ".partial";
@@ -95,7 +100,7 @@ public Header readHeader(const(ubyte)[] contents) {
 // done: the load calls the functions that a compile calls, in the same order.
 public void loadProgram(
     const(ubyte)[] contents, ref Program program, ref Runner runner,
-    in imported!"snakebite.image.dependency".DependencyImage* image,
+    in DependencyImage* image,
 ) {
     auto file = Archive.reading(contents);
     file._image = image;
@@ -110,6 +115,7 @@ public void loadProgram(
         file._signatures ~= program.signatures.intern(
             signature.parameters, signature.variadic);
     }
+    file._program = &program;
     file._runner = &runner;
     transferBody(file, program, &runner);
 
@@ -120,7 +126,7 @@ public void loadProgram(
                 throw new SnakebiteException(
                     "the program file is not valid: " ~ reason);
             prepareForExecution(function_, runner.jitSetting,
-                runner.jitInstance, function_.hostCall.name);
+                runner.jitInstance, function_.mangledName);
         }
 }
 
@@ -168,11 +174,9 @@ private struct Archive {
     // Writing: the place of each function. Reading: the function at a place.
     private size_t[2][const(Function)*] _positionOf;
     private size_t[const(ModuleStart)*] _moduleOfStart;
-    private Function*[][] _functions;
-    private Module*[] _modules;
     private Runner* _runner;
     private Program* _program;
-    private const(imported!"snakebite.image.dependency".DependencyImage)* _image;
+    private const(DependencyImage)* _image;
 
     static Archive writing(ref Program program) {
         Archive archive;
@@ -273,8 +277,8 @@ private struct Archive {
     }
 
     void* dataAt(in size_t[3] position) {
-        if (position[0] < _modules.length)
-            if (auto address = _modules[position[0]].blocks.addressOf(
+        if (position[0] < _program._modules.length)
+            if (auto address = _program._modules[position[0]].blocks.addressOf(
                     position[1], position[2]))
                 return address;
         throw new SnakebiteException(
@@ -282,10 +286,11 @@ private struct Archive {
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
-        if (module_ >= _functions.length || index >= _functions[module_].length)
+        if (module_ >= _program._modules.length
+                || index >= _program._modules[module_]._functions.length)
             throw new SnakebiteException(
                 "the program file names a function that it does not hold");
-        return _functions[module_][index];
+        return _program._modules[module_]._functions[index];
     }
 }
 
@@ -359,11 +364,6 @@ private template overlapsEarlier(T, size_t index) {
 }
 
 
-private ref Unqual!T mutable(T)(ref T value) @trusted {
-    return *cast(Unqual!T*) &value;
-}
-
-
 // The word an address field holds, for a field of a pointer type.
 private size_t wordOf(F)(ref const F field) {
     static if (is(F == delegate))
@@ -391,13 +391,13 @@ private void transfer(T)(ref Archive archive, ref T value) {
             auto fresh = new Unqual!E[count];
             foreach (ref element; fresh)
                 archive.transfer(element);
-            mutable(value) = cast(Unqual!T) fresh;
+            value = cast(T) fresh;
         }
     } else static if (is(T == E[N], E, size_t N)) {
         foreach (ref element; value)
             archive.transfer(element);
     } else static if (is(Unqual!T == Reloc)) {
-        transferReloc(archive, mutable(value));
+        transferReloc(archive, value);
     } else static if (is(Unqual!T == Instruction)
             || is(Unqual!T == CallSite) || isClassified!(Unqual!T)) {
         transferClassified(archive, value);
@@ -412,8 +412,6 @@ private void transfer(T)(ref Archive archive, ref T value) {
 
 // A struct of the VM: each field as it says.
 private void transferClassified(T)(ref Archive archive, ref T value) {
-    import std.conv: text;
-
     static foreach (index, name; FieldNameTuple!T) {{
         enum classification = classificationOf!(T, index);
         static if (!overlapsEarlier!(T, index)) {
@@ -425,7 +423,7 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
                             throw refusal(text("the field ", T.stringof, ".",
                                 name, " holds an address"));
                     } else
-                        mutable(value.tupleof[index]) = Field.init;
+                        value.tupleof[index] = Field.init;
                 } else
                     archive.transfer(value.tupleof[index]);
             } else static if (is(typeof(classification) == Relocated)) {
@@ -435,7 +433,7 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
                         distance = handlerOffset(value.tupleof[index]);
                     archive.scalar(distance);
                     if (!archive.isWriting)
-                        mutable(value.tupleof[index]) = handlerAt(distance);
+                        value.tupleof[index] = handlerAt(distance);
                 }
             }
         }
@@ -483,20 +481,26 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
 private size_t addressOf(
     ref Archive archive, in Target.Kind kind, in size_t[3] reference,
 ) {
-    switch (kind) with (Target.Kind) {
+    final switch (kind) with (Target.Kind) {
         case signature:
             return cast(size_t) archive.signatureAt(reference[0]);
         case functionWord:
             return cast(size_t) archive.functionAt(reference[0], reference[1]);
         case staticData:
             return cast(size_t) archive.dataAt(reference);
-        default:
+        case handler:
+        case tlsDescriptor:
+        case typeInfo:
+        case hostSymbol:
+        case frontendString:
+        case constantPool:
+        case nativePlan:
+        case callbackEntry:
+        case callback:
             throw new SnakebiteException(
                 "the program file holds a relocation that it cannot hold");
     }
 }
-
-private import std.conv: text;
 
 
 // Calls `visit` with each field of `record` that holds an address, and its
@@ -522,8 +526,6 @@ private void eachRelocated(T)(
 // the relocations that the file holds. A word that holds an address and no
 // relocation names it cannot be written.
 private Function prepareToWrite(ref Archive archive, ref Function function_) {
-    import std.conv: text;
-
     Function copy = function_;
     bool[size_t[3]] listed;
     Reloc[] kept;
@@ -595,30 +597,14 @@ private void applyReloc(ref Function target, in Reloc reloc) {
     const place = reloc.place;
     const address = reloc.target.address;
     bool done;
-    switch (place.section) with (Place.Section) {
+    final switch (place.section) with (Place.Section) {
         case function_:
             done = assignRelocated(target, place.field, address);
             break;
         case instruction:
-            if (place.index < target.instructions.length) {
-                auto instruction = &target.instructions[place.index];
-                switch (place.field) with (Place.Field) {
-                    case destination:
-                        instruction.destination = address;
-                        done = true;
-                        break;
-                    case source:
-                        instruction.source = address;
-                        done = true;
-                        break;
-                    case sourceWidth:
-                        instruction.sourceWidth = address;
-                        done = true;
-                        break;
-                    default:
-                        break;
-                }
-            }
+            if (place.index < target.instructions.length)
+                done = assignOperand(
+                    target.instructions[place.index], place.field, address);
             break;
         case constant:
             if (place.index < target.constants.length
@@ -632,12 +618,43 @@ private void applyReloc(ref Function target, in Reloc reloc) {
                 done = assignRelocated(target.callSites[place.index],
                     place.field, address);
             break;
-        default:
+        case assertSite:
+        case exceptionHandler:
             break;
     }
     if (!done)
         throw new SnakebiteException(
             "the program file holds a relocation with no place");
+}
+
+// Sets the operand of `instruction` at `field`, if an operand sits there.
+private bool assignOperand(
+    ref Instruction instruction, in Place.Field field, in size_t address,
+) {
+    final switch (field) with (Place.Field) {
+        case destination:
+            instruction.destination = address;
+            return true;
+        case source:
+            instruction.source = address;
+            return true;
+        case sourceWidth:
+            instruction.sourceWidth = address;
+            return true;
+        case word:
+        case callee:
+        case prepareGuest:
+        case nativePlan:
+        case prepareNativePlan:
+        case builtinEntry:
+        case valueSignature:
+        case message:
+        case file:
+        case halt:
+        case type:
+        case signature:
+            return false;
+    }
 }
 
 // Sets the field of `record` that is relocated at `field`, to `word`.
@@ -648,7 +665,7 @@ private bool assignRelocated(T)(ref T record, in Place.Field field, in size_t wo
         static if (is(typeof(classification) == Relocated)) {
             static if (is(Field == U*, U)) {
                 if (classification.field == field) {
-                    mutable(record.tupleof[index]) = cast(Field) word;
+                    record.tupleof[index] = cast(Field) word;
                     return true;
                 }
             }
@@ -668,17 +685,15 @@ private void transferBody(
     // The shape first, so that a function can refer to any other.
     size_t moduleCount = archive.length(program._modules.length);
     if (!archive.isWriting)
-        foreach (m; 0 .. moduleCount) {
-            archive._modules ~= program.newModule;
-            archive._functions ~= null;
-        }
+        foreach (m; 0 .. moduleCount)
+            program.newModule;
     foreach (m; 0 .. moduleCount) {
         size_t functionCount =
             archive.length(archive.isWriting
                 ? program._modules[m]._functions.length : 0);
         if (!archive.isWriting)
             foreach (f; 0 .. functionCount)
-                archive._functions[m] ~= program._modules[m].newFunction;
+                program._modules[m].newFunction;
     }
     transferStartData(archive, program);
     // All data before any function: a function can point into any module.
@@ -711,8 +726,11 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
             archive.bytes(cast(void[]) blocks.bytesOf(datum));
             continue;
         }
-        auto bytes = blocks.reserve(TypeFacts(datum.size, datum.alignment,
-            false, false, false, 0, false));
+        TypeFacts facts;
+        facts.size = datum.size;
+        facts.alignment = datum.alignment;
+        facts.canHoldAddress = false;
+        auto bytes = blocks.reserve(facts);
         const placed = blocks.data[$ - 1];
         if (placed.block != datum.block || placed.offset != datum.offset)
             throw new SnakebiteException(
@@ -778,10 +796,10 @@ private void transferStartData(ref Archive archive, ref Program program) {
         }
         archive.scalar(position);
         if (!archive.isWriting) {
-            if (position >= archive._modules.length)
+            if (position >= program._modules.length)
                 throw new SnakebiteException(
                     "the program file names a module that it does not hold");
-            record = &archive._modules[position].start;
+            record = &program._modules[position].start;
         }
     }
     transferHandles(archive, start.crtConstructors);
@@ -830,10 +848,10 @@ private void transferHandles(ref Archive archive, ref FunctionHandle[] handles) 
 private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
     size_t[2] position;
     if (archive.isWriting) {
-        auto start = cast(StartFunction) handle;
-        if (start is null)
+        const compiled = cast(const(Function)*) handle.compiledCode;
+        if (compiled is null)
             throw refusal("a start function is not one of the bytecode backend");
-        position = archive.positionOf(start.compiled);
+        position = archive.positionOf(compiled);
     }
     archive.scalar(position);
     if (!archive.isWriting)

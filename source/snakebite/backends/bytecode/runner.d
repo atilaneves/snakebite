@@ -258,6 +258,10 @@ public final class StartFunction: FunctionHandle {
         return compiled is null ? compileFirst() : compiled;
     }
 
+    public override const(void)* compiledCode() {
+        return compiled;
+    }
+
     public override void call(void* returnPlace, void*[] args) {
         import core.atomic: atomicLoad, MemoryOrder;
 
