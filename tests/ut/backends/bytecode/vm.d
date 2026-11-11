@@ -83,7 +83,7 @@ unittest {
         [-7],
         [
             CallSite.native(
-                cast(const(void)*) plan, [Arg(0, 0, int.sizeof)],
+                plan, [Arg(0, 0, int.sizeof)],
                 int.sizeof),
         ],
         [],

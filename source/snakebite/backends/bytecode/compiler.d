@@ -32,6 +32,7 @@ import snakebite.language.checks:
 import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 import snakebite.language.storage.resolver: planSlice;
 import snakebite.ffi: CallbackCall, PlanCache;
+import snakebite.ffi.callplan: CallPlan;
 import std.typecons: Flag, No, Yes;
 
 
@@ -53,14 +54,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.program: Program;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.statics.classinfo;
-    import snakebite.backends.bytecode.vm: Function, JitSetting, Vm;
+    import snakebite.backends.bytecode.vm:
+        Function, JitSetting, prepareForExecution;
+    import snakebite.backends.bytecode.runner: Runner;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.failure.report: SnakebiteException;
-    import snakebite.stack.frames: defaultFrameCapacity;
-    import snakebite.host.threads: heapNew;
-    import snakebite.host.executionstates: ExecutionStates;
     import snakebite.language.statics.data: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
     import snakebite.language.statics.typeinfo: RuntimeTypes;
@@ -69,29 +69,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // What the compiler fills: the signatures of the layouts, and the rest of
     // the compiled code and data of the program.
     package LinkedModules linked;
-
-    // Each native stack needs its own guest frame stack. Fibers can resume
-    // out of nesting order, so they cannot share one LIFO stack.
-    // Entries are owned and released by their host thread (ADR-0006).
-    private ExecutionStates!(Vm*) _vms;
-    // Set by `release` when no host code holds a callback entry, so that no
-    // guest code of this instance can run again once its states are gone.
-    private shared bool _jitCodeCanGo;
     private NativeData _nativeData;
     private PlanCache _plans;
-    // What the functions of this backend do with the JIT.
-    private JitSetting _jit;
-    // The JIT code region and the other JIT state of this instance. Its
-    // address never changes, and each `Function` that this instance compiles
-    // points to it. The destructor of the field frees the region.
-    static if (imported!"snakebite.backends.bytecode.jit".jitSupported) {
-        private imported!"snakebite.backends.bytecode.jit".JitInstance
-            _jitInstance;
-
-        package auto jitInstance() {
-            return &_jitInstance;
-        }
-    }
+    // The machinery that runs the compiled functions. A `Function` points
+    // to its JIT instance, so the address of this field must never change.
+    // Declared after `linked`, `_nativeData` and `_plans`, so that it is
+    // destroyed before them: its states release through `_nativeData`, and
+    // its callback entry reads `linked.plans`.
+    private Runner _runner;
     private CallSelection _callSelection;
     // The index from a declaration to its function, which `linked` owns.
     // Keyed by pointer, not by value: a call site compiled while
@@ -114,7 +99,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // reused by every `new T[](n)`/array literal any function compiles -
     // the same `rawPlanOf` a bounds hook already goes through, so this
     // costs nothing new besides the one symbol lookup.
-    private const(void)* _allocatorPlan;
+    private const(CallPlan)* _allocatorPlan;
     private RuntimeTypes _runtimeTypes;
     // Guest classes never reach dmd's own code generator, so nothing ever
     // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
@@ -147,7 +132,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         super(program);
         linked = LinkedModules(program.dependencyImage);
         _compilation.hasCompiler = true;
-        _jit = jit;
         _plans = PlanCache(&linked.plans,
             &_program.isRootOwned);
         _callSelection.linksFunctions = program.definesLinkableFunctions;
@@ -160,10 +144,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _vms = ExecutionStates!(Vm*)(() {
-            return heapNew!Vm(defaultFrameCapacity, _nativeData.tlsSlots);
-        }, () => _nativeData.release, &releaseJitCode);
-        linked.plans.bindCallbacks(&invokeCallback, cast(void*) this);
+        _runner = Runner(jit, () => _nativeData.tlsSlots,
+            () => _nativeData.release,
+            () => linked.plans.callbacks.hasEntries);
+        linked.plans.bindCallbacks(&Runner.invokeCallback, &_runner);
     }
 
     protected override ref StartData startDataStorage() {
@@ -176,26 +160,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return _plans.callbackChunkCount;
     }
 
-    // The owner ends the instance. The JIT code goes when no guest code can
-    // run: host code holds no callback entry, and (`ExecutionStates`) no
-    // thread has an execution state left, which is checked when the last
-    // one ends. Active calls and fibers keep a state until they return. If
-    // host code holds an entry, the callbacks keep the instance reachable
-    // for the life of the process, and its JIT code stays with it.
+    // The owner ends the instance. The JIT code stays while host code holds
+    // a callback entry: the callbacks keep the instance reachable for the
+    // life of the process (see `Runner.end`).
     protected override void release() {
-        import core.atomic: atomicStore;
-
-        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            atomicStore(_jitCodeCanGo, !linked.plans.callbacks.hasEntries);
-        _vms.end;
-    }
-
-    private void releaseJitCode() nothrow @nogc {
-        import core.atomic: atomicLoad;
-
-        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            if (atomicLoad(_jitCodeCanGo))
-                _jitInstance.release;
+        _runner.end;
     }
 
     private void* constantSymbolAddress(
@@ -220,7 +189,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     version(unittest)
     public size_t executionStatesOfThisThread() {
-        return _vms.count;
+        return _runner.executionStatesOfThisThread;
     }
 
     // Every function this backend compiled, for tests that inspect the
@@ -239,7 +208,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         void*[] args,
     ) {
         const compiled = compileFunction(function_);
-        runHostToGuest(compiled, returnPlace, args);
+        _runner.call(compiled, returnPlace, args);
     }
 
     public override void[] staticStorage(
@@ -264,76 +233,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         }
 
         public override void call(void* returnPlace, void*[] args) {
-            runHostToGuest(function_.get(), returnPlace, args);
+            _runner.call(function_.get(), returnPlace, args);
         }
-    }
-
-    // The bytecode backend's one host-to-guest entry. The program
-    // runner's top-level call (`call`) and a callback's re-entry
-    // (`callGuestFromHost`) both reach the compiled body only here -
-    // neither binds arguments on its own. `args` are host-to-guest
-    // arguments in native layout, one pointer per parameter, per
-    // `Backend.call`'s own contract - each pointer holds the address of
-    // storage for that parameter's native bytes, which for a `ref`/`out`
-    // parameter are the target's own address. When the callee has a
-    // hidden `this`, `args[0]` is that same shape one more time, before
-    // the declared parameters: the address of a pointer-sized word
-    // holding the context - the one convention `CallPlan.call` and a
-    // callback's own `addresses` already use for it.
-    //
-    // A `ref`-returning callee hands back the result's own address, not
-    // its value - the same word compiled D returns in `rax`.
-    //
-    // `compiled` is already built and carries the layout that binds `args`
-    // (`Function.hostCall`): binding `args` into `Vm.HostArgument`s and
-    // running the compiled body touch no dmd state, so this takes no lock
-    // of its own. A thread that held the compiler lock here while it
-    // waited for another thread's callback - the way `Thread.join` waits
-    // in `otherThread`/`concurrentThreads` guest code - would never see
-    // that callback return (ADR-0006).
-    private void runHostToGuest(
-        const(Function)* compiled,
-        void* returnPlace,
-        scope const(void*)[] args,
-        void* variadicCursor = null,
-        const(void)* variadicTypes = null,
-    ) {
-        const layout = &compiled.hostCall;
-        layout.checkArgumentCount(args.length, "bytecode");
-
-        Vm.HostArgument[16] inlineArguments = void;
-        const count = layout.parameters.length
-            + layout.hasHiddenThis
-            + (variadicCursor !is null)
-            + (variadicTypes !is null);
-        auto arguments = count <= inlineArguments.length
-            ? inlineArguments[0 .. count] : new Vm.HostArgument[count];
-        size_t filled;
-
-        scope const(void*)[] declaredArguments = args;
-        if (layout.hasHiddenThis) {
-            arguments[filled++] = Vm.HostArgument(
-                layout.hiddenThis.offset, args[0], layout.hiddenThis.width);
-            declaredArguments = args[1 .. $];
-        }
-
-        foreach (i, parameter; layout.parameters)
-            arguments[filled++] = Vm.HostArgument(
-                parameter.offset, declaredArguments[i], parameter.width);
-
-        if (variadicCursor !is null) {
-            assert(layout.variadicCursor != size_t.max);
-            arguments[filled++] = Vm.HostArgument(
-                layout.variadicCursor, &variadicCursor, size_t.sizeof);
-        }
-        if (variadicTypes !is null) {
-            assert(layout.variadicTypes != size_t.max);
-            arguments[filled++] = Vm.HostArgument(
-                layout.variadicTypes, &variadicTypes, size_t.sizeof);
-        }
-
-        auto active = _vms.enter;
-        active.state.call(*compiled, returnPlace, arguments[0 .. filled]);
     }
 
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
@@ -393,42 +294,19 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // Records that `compiled` is the word this backend stores for
     // `function_`'s address - what the plan swaps for a pool entry
     // (ADR-0003) when the word crosses to host code, and what
-    // `invokeCallback` gets back when host code calls that entry.
+    // `Runner.invokeCallback` gets back when host code calls that entry.
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
         _plans.registerGuestFunction(compiled, function_);
     }
 
-    extern(C) private static void invokeCallback(
-        void* context,
-        CallbackCall* call,
-    ) {
-        auto bytecode = cast(Bytecode) context;
-        bytecode.callGuestFromHost(call);
-    }
-
-    // The re-entry a pool entry (ADR-0003) reaches when host code calls a
-    // guest function pointer or delegate. It shares `runHostToGuest` with
-    // the program runner's top-level call: neither binds arguments on its
-    // own, and `call.function_` - the word `registerGuestWord` recorded
-    // when the callee was first compiled - is already built, so this
-    // takes no compiler lock of its own, on whichever thread's VM is
-    // calling (ADR-0006). A `Throwable` the body throws unwinds through
-    // the host frames untouched (ADR-0004).
-    private void callGuestFromHost(CallbackCall* call) {
-        runHostToGuest(cast(const(Function)*) call.function_,
-            call.returnPlace, call.arguments,
-            call.variadicCursor, call.variadicTypes);
-    }
-
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
     // allocator a `new T[](n)`/array literal calls through the same
     // `rawPlanOf` a bounds hook already goes through - never a private
     // bump allocator or free list of this compiler's own, and never a
-    // signature this module hardcodes: the VM that runs the plan reads
-    // it back only as an opaque `CallSite.native` payload.
-    package const(void)* allocatorPlan() {
+    // signature this module hardcodes.
+    package const(CallPlan)* allocatorPlan() {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
         if (auto found = atomicLoad!(MemoryOrder.acq)(_allocatorPlan))
@@ -865,17 +743,17 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             registerGuestWord(function_, placeholder);
 
             scope compiler = new FunctionCompiler(
-                this, _jit, function_, layout, returnFacts, isVoidReturn,
+                this, function_, layout, returnFacts, isVoidReturn,
                 isRefReturn);
             const(InlineBody)* builtInlineBody;
             *placeholder = compiler.build(body_, builtInlineBody);
             if (builtInlineBody !is null)
                 _inlineBodies[placeholder] = builtInlineBody;
-            if (placeholder.jitCounts && _jit.perfMap) {
-                import snakebite.frontend.dmd.mangle: mangledNameOf;
+            import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-                placeholder.jitName = function_.mangledNameOf;
-            }
+            prepareForExecution(placeholder, _runner.jitSetting,
+                _runner.jitInstance,
+                function_.mangledNameOf);
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
@@ -943,7 +821,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
-        Instruction, JitSetting, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
+        Instruction, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
         recordCallSiteRelocs, recordExceptionHandlerRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
@@ -962,8 +840,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers, jitCountEvents,
-        jitCounting, jitCountsEvent, jitStartHeat, RegisterFamily, registerFamily,
+        decodesIndirect, isFusedBranch, specialiseHandlers,
+        RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
         opBranchTrue, opCall, opCallWindowDiscard, opCallWindowFrame,
@@ -1031,7 +909,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     extern(D):
 
     private Bytecode _bytecode;
-    private const JitSetting _jit;
     private FuncDeclaration _function;
     private const FrameLayout _layout;
     private ClosureLayout _closureLayout;
@@ -1286,7 +1163,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     public this(
         Bytecode bytecode,
-        in JitSetting jit,
         FuncDeclaration function_,
         in FrameLayout layout,
         in TypeFacts returnFacts,
@@ -1294,7 +1170,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in bool isRefReturn,
     ) {
         _bytecode = bytecode;
-        _jit = jit;
         _function = function_;
         _layout = layout;
         _returnFacts = returnFacts;
@@ -1382,7 +1257,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         fuseLoadCopies;
         assignRegisters;
         specialiseHandlers(_instructions);
-        jitCountEvents(_instructions, _countedEvents);
 
         foreach (ref site; _callSites)
             if (site.cleanupStartIndex != size_t.max) {
@@ -1446,10 +1320,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
-        result.jitHeat = _jit.jitStartHeat;
-        result.jitCounts = _jit.jitCounting;
-        static if (imported!"snakebite.backends.bytecode.jit".jitSupported)
-            result.jit = _bytecode.jitInstance;
         return result;
     }
 
@@ -3283,10 +3153,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return offset;
     }
 
-    // The indices of the instructions that count an event for the JIT: the
-    // backward branches and the calls. Empty when the JIT is off.
-    private size_t[] _countedEvents;
-
     // Every `opJump`/`opBranchFalse`/`opBranchTrue` this compiler emitted
     // still names its target by a plain instruction index at this point -
     // `compileIf`/`compileFor`/`compileContinue` patch
@@ -3302,8 +3168,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         foreach (index, ref instruction; _instructions) {
             auto target = branchTargetField(instruction);
-            if (_jit.jitCountsEvent(instruction, index, target))
-                _countedEvents ~= index;
             if (target is null)
                 continue;
 
@@ -4143,7 +4007,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(expression.loc.linnum, uint.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.assertMessage);
-        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        _callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
 
@@ -4183,7 +4047,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 Address(functionKind, call.function_), size_t.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
-        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        _callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
 
@@ -7286,7 +7150,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(expression.e2, valueOffset, valueFacts.size);
 
         _callSites ~= CallSite.native(
-            cast(const(void)*) plan,
+            plan,
             [
                 Arg(arrayOffset, 0, size_t.sizeof),
                 Arg(valueOffset, 0, valueFacts.size),
@@ -9986,7 +9850,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitRuntimeTypeInfoConstant(
             expression.type, info, size_t.sizeof);
         _callSites ~= CallSite.native(
-            cast(const(void)*) plan,
+            plan,
             [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
             2 * size_t.sizeof);
         emit(&opCall, destOffset, _callSites.length - 1, 0);
@@ -10673,14 +10537,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 if (hasNativeSymbol) {
                     const plan = preparation.prepare(_bytecode._plans, callee);
                     return CallSite.native(
-                        cast(const(void)*) plan, args, returnWidth);
+                        plan, args, returnWidth);
                 }
                 // The returned delegate outlives this compiler, so it
                 // captures the backend and not `this`; `PlanCache` is a
                 // struct.
                 auto bytecode = _bytecode;
                 return CallSite.native(
-                    deferred(() => cast(const(void)*)
+                    deferred(() =>
                         preparation.prepare(bytecode._plans, callee)),
                     args, returnWidth);
             });
@@ -10992,7 +10856,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const nativePlan = isVariadic
-            ? cast(const(void)*) _bytecode._plans.keep(
+            ? _bytecode._plans.keep(
                 preparation.prepareAtAddress(
                     _bytecode._plans, null, hasContext))
             : _bytecode._plans.signatureOf(functionType, hasContext);
@@ -11229,7 +11093,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(fileOffset, 0, size_t.sizeof),
             Arg(lineOffset, 0, uint.sizeof),
         ] ~ extraArgs;
-        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        _callSites ~= CallSite.native(plan, args, 0);
         ++_hookSites;
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }

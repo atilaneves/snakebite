@@ -1159,19 +1159,15 @@ private void throwMissingReturnPlace() {
     );
 }
 
-// The DMD-free runtime entry point for a prepared call. The entry functions
-// below take the plan as an opaque pointer because `CallSite.nativePlan` in
-// the bytecode VM is one, filled by the compiler from several sources. No
-// JIT code or assembly calls them, so `extern(C)` is not needed by a caller.
-// They hand this function addresses of values already stored in native
-// layout.
-public extern(C) void executeCallPlan(
-    const(void)* opaquePlan,
+// The DMD-free runtime entry point for a prepared call. The VM
+// (`case native`) calls it with addresses of values already stored in
+// native layout.
+public void executeCallPlan(
+    const(CallPlan)* plan,
     void* returnPlace,
     scope const(void*)* arguments,
     size_t argumentCount,
 ) {
-    const plan = cast(const(CallPlan)*) opaquePlan;
     plan.call(returnPlace, arguments[0 .. argumentCount]);
 }
 
@@ -1188,13 +1184,12 @@ public extern(C) void executeCallPlan(
 // passed zero. `loads[p]` says how parameter `p` is read; only the loads of a
 // whole word, or of 1, 2 or 4 bytes zero- or sign-extended, take part. Null
 // otherwise.
-public extern(C) const(void)* directWordCallTarget(
-    const(void)* opaquePlan, out ubyte[3] order, out CallPlan.Load[3] loads,
+public const(void)* directWordCallTarget(
+    const(CallPlan)* plan, out ubyte[3] order, out CallPlan.Load[3] loads,
     out size_t resultWidth, out size_t parameterCount,
 ) {
     import snakebite.ffi.sysv: CallFrame;
 
-    const plan = cast(const(CallPlan)*) opaquePlan;
     if (!plan._integerOnly || plan._variadicCall
             || plan._hiddenReturnPointer
             || plan._callbackArguments.length != 0
@@ -1258,10 +1253,9 @@ public extern(C) const(void)* directWordCallTarget(
 
 // The guest word behind `address`, or null when `address` is not an entry of
 // the backend that owns the plan, and the receiver adjustment of that entry.
-public extern(C) const(void)* guestWordOf(
-    const(void)* opaquePlan, const(void)* address, out ptrdiff_t adjustment,
+public const(void)* guestWordOf(
+    const(CallPlan)* plan, const(void)* address, out ptrdiff_t adjustment,
 ) {
-    const plan = cast(const(CallPlan)*) opaquePlan;
     if (plan is null || plan._callbacks is null)
         return null;
     const target = plan._callbacks.guestTarget(address);
@@ -1271,20 +1265,19 @@ public extern(C) const(void)* guestWordOf(
 
 // Calls the host function at `address` with the plan, for an `address` that
 // `guestWordOf` found not to be a guest entry.
-public extern(C) void executeHostCallPlan(
-    const(void)* opaquePlan, const(void)* address, void* returnPlace,
+public void executeHostCallPlan(
+    const(CallPlan)* plan, const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
 ) {
-    (cast(const(CallPlan)*) opaquePlan).callAt(
+    plan.callAt(
         address, returnPlace, arguments[0 .. argumentCount]);
 }
 
-public extern(C) bool executeIndirectCallPlan(
-    const(void)* opaquePlan, ref const(void)* address, void* returnPlace,
+public bool executeIndirectCallPlan(
+    const(CallPlan)* plan, ref const(void)* address, void* returnPlace,
     scope const(void*)* arguments, size_t argumentCount,
     out ptrdiff_t contextAdjustment,
 ) {
-    const plan = cast(const(CallPlan)*) opaquePlan;
     if (plan._callbacks !is null) {
         const target = plan._callbacks.guestTarget(address);
         if (target.word !is null) {
