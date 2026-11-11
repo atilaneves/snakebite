@@ -318,6 +318,15 @@ private struct Archive {
         return _plans[index];
     }
 
+    // The entry that host code calls to reach a guest function, as a compile
+    // makes it: with the function and the signature it registered.
+    const(void)* entryAt(in size_t[3] reference) {
+        const word = functionAt(reference[0], reference[1]);
+        auto callbacks = _program.plans.callbacks;
+        return callbacks.adjustedEntryOf(
+            word, *callbacks.signatureOf(word), cast(ptrdiff_t) reference[2]);
+    }
+
     Function* functionAt(in size_t module_, in size_t index) {
         if (module_ >= _program._modules.length
                 || index >= _program._modules[module_]._functions.length)
@@ -495,6 +504,14 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             const position =
                 archive.positionOf(cast(const(Function)*) target.address);
             return [position[0], position[1], 0];
+        case callbackEntry:
+            // The entry of a guest function, with the receiver adjustment of
+            // an interface method.
+            const guest = archive._program.plans.callbacks.guestTarget(
+                cast(const(void)*) target.address);
+            const position =
+                archive.positionOf(cast(const(Function)*) guest.word);
+            return [position[0], position[1], cast(size_t) guest.adjustment];
         case nativePlan:
             return [archive.planIndexOf(
                 cast(const(CallPlan)*) target.address), 0, 0];
@@ -508,7 +525,6 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
         case typeInfo:
         case hostSymbol:
         case frontendString:
-        case callbackEntry:
         case callback:
             throw refusal(text("a word needs a relocation of kind ",
                 target.kind));
@@ -523,6 +539,8 @@ private size_t addressOf(
             return cast(size_t) archive.signatureAt(reference[0]);
         case functionWord:
             return cast(size_t) archive.functionAt(reference[0], reference[1]);
+        case callbackEntry:
+            return cast(size_t) archive.entryAt(reference);
         case nativePlan:
             return cast(size_t) archive.planAt(reference[0]);
         case staticData:
@@ -535,7 +553,6 @@ private size_t addressOf(
         case typeInfo:
         case hostSymbol:
         case frontendString:
-        case callbackEntry:
         case callback:
             throw new SnakebiteException(
                 "the program file holds a relocation that it cannot hold");
@@ -738,6 +755,7 @@ private void transferBody(
     }
     transferStartData(archive, program);
     transferPlans(archive, program);
+    transferSignatures(archive, program);
     // All data before any function: a function can point into any module.
     // The bytes of all data come before the addresses in them: a datum can
     // point into any block or string.
@@ -777,6 +795,27 @@ private void transferPlans(ref Archive archive, ref Program program) {
                 symbols[index], "`, which this process does not have"));
         archive._plans ~= plan;
     }
+}
+
+
+// The signature that each function of the program is registered with in the
+// callback bridge, before any function is read: a word that refers to the entry
+// of a function needs the signature.
+private void transferSignatures(ref Archive archive, ref Program program) {
+    foreach (module_; program._modules)
+        foreach (function_; module_._functions) {
+            NativeSignature signature;
+            if (archive.isWriting) {
+                const registered =
+                    program.plans.callbacks.signatureOf(function_);
+                if (registered is null)
+                    throw refusal("a function has no registered signature");
+                signature = cast(NativeSignature) *registered;
+            }
+            archive.transfer(signature);
+            if (!archive.isWriting)
+                program.plans.callbacks.register(function_, signature);
+        }
 }
 
 
@@ -881,16 +920,6 @@ private void transferModule(
                 applyReloc(*function_, reloc);
             function_.relocs = null;
         }
-        NativeSignature signature;
-        if (archive.isWriting) {
-            const registered = program.plans.callbacks.signatureOf(function_);
-            if (registered is null)
-                throw refusal("a function has no registered signature");
-            signature = cast(NativeSignature) *registered;
-        }
-        archive.transfer(signature);
-        if (!archive.isWriting)
-            program.plans.callbacks.register(function_, signature);
     }
 }
 

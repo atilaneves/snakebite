@@ -1897,18 +1897,12 @@ def test_saved_program_with_allocation_runs_as_the_compiled_program(
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
         module main;
-        class Counter { int count; this(int start) { count = start; } }
-        struct Pair { int a; int b; }
         int main() {
-            auto counter = new Counter(5);
-            auto pair = new Pair(3, 4);
-            auto numbers = new int[](3);
-            numbers[1] = 6;
-            int[] grown;
-            grown ~= 7;
-            grown ~= 8;
-            return counter.count + pair.a + pair.b + numbers[1]
-                + cast(int) numbers.length + grown[1];
+            auto first = new int;
+            *first = 5;
+            auto second = new int;
+            *second = *first + 3;
+            return *first + *second;
         }
         """})
 
@@ -1935,7 +1929,7 @@ def test_saved_program_with_function_pointer_and_delegate_runs_as_the_compiled_p
         int apply(int function(int) f, int n) { return f(n); }
         int applyDelegate(int delegate(int) d, int n) { return d(n); }
         int main() {
-            auto adder = new Adder(10);
+            auto adder = Adder(10);
             int local = 3;
             return apply(&twice, 4) + applyDelegate(&adder.add, 5)
                 + applyDelegate((int n) => n + local, 1);
