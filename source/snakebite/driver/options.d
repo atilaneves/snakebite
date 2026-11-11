@@ -30,9 +30,7 @@ public auto parseProjectOptions(Own...)(
     ref ProjectOptions options,
     Own own,
 ) {
-    import snakebite.memory.gc: lowmemHelp;
     import std.algorithm.searching: countUntil;
-    import std.getopt: getopt;
 
     const separator = args.countUntil("--");
     if (separator >= 0) {
@@ -40,16 +38,58 @@ public auto parseProjectOptions(Own...)(
         args = args[0 .. separator];
     }
 
-    return getopt(
+    auto common = CommonOptions(
         args,
-        "I|import-path", "Add an import path for a bare directory.",
-            &options.importPaths,
         "J|string-import-path", "Add a string import path for a bare directory.",
             &options.stringImportPaths,
-        "version", "Define a version identifier (repeatable).",
-            &options.versions,
-        "lowmem", lowmemHelp, &options.lowmem,
-        "no-jit", noJitHelp, &options.noJit,
         own,
     );
+    common.copyTo(options);
+
+    return common.getoptResult;
+}
+
+
+// The options that `bin/sb`, `bin/sb-repl` and `bin/bench` all take.
+public struct CommonOptions {
+    import std.getopt: GetoptResult;
+
+    public string[] importPaths;
+    public string[] versions;
+    public bool lowmem;
+    public bool noJit;
+    public GetoptResult getoptResult;
+
+    // Registers the common options together with `own`, the `getopt`
+    // arguments of the calling tool, and parses `args`.
+    public this(Own...)(ref string[] args, Own own) {
+        import snakebite.memory.gc: lowmemHelp;
+        import std.getopt: getopt;
+
+        getoptResult = getopt(
+            args,
+            "I|import-path", "Add an import path for a bare directory.",
+                &importPaths,
+            "version", "Define a version identifier (repeatable).", &versions,
+            "lowmem", lowmemHelp, &lowmem,
+            "no-jit", noJitHelp, &noJit,
+            own,
+        );
+    }
+
+    public void copyTo(Options)(ref Options options) const {
+        options.importPaths = importPaths.dup;
+        options.versions = versions.dup;
+        options.lowmem = lowmem;
+        options.noJit = noJit;
+    }
+}
+
+
+// The `getopt` arguments of `-b|--backend`, for the tools that select a
+// backend. Expand them into the call: `backendOption(name).expand`.
+public auto backendOption(ref string name) {
+    import std.typecons: tuple;
+
+    return tuple("b|backend", "Select the backend (default: bytecode).", &name);
 }

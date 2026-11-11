@@ -167,7 +167,7 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
-    import snakebite.driver.options: parseProjectOptions;
+    import snakebite.driver.options: backendOption, parseProjectOptions;
     import std.getopt: GetOptException;
 
     CliResult result;
@@ -178,8 +178,7 @@ public CliResult parseArgs(string[] args) {
         helpInfo = parseProjectOptions(
             args,
             result.options.project,
-            "b|backend", "Select the backend (default: bytecode).",
-                &backendName,
+            backendOption(backendName).expand,
             "jit-perf-map", jitPerfMapHelp, &result.options.jitPerfMap,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
