@@ -128,7 +128,7 @@ public string fetchProject(
 public imported!"snakebite.project.dubcache".DubDescription dubDescribeProject(
     in string directory, in string[] versions = null,
 ) {
-    import snakebite.image.dependency: defaultCompiler;
+    import snakebite.image.preparation: defaultCompiler;
     import snakebite.project.dubcache: DubDescription, cachedDubDescription;
 
     return cachedDubDescription(directory, defaultCompiler, versions, {
@@ -184,7 +184,7 @@ private auto platformSettings(
     import dub.compilers.compiler: getCompiler;
     import dub.generators.generator: GeneratorSettings;
     import dub.internal.vibecompat.inet.path: NativePath;
-    import snakebite.image.dependency: defaultCompiler;
+    import snakebite.image.preparation: defaultCompiler;
 
     GeneratorSettings settings;
     settings.compiler = getCompiler(defaultCompiler);
@@ -314,7 +314,7 @@ public void buildDubDependencies(
 // on what the description is made from. The script of a description is
 // written when the build knows the description.
 private string compilerBinary(in string directory, in string[] versions) {
-    import snakebite.image.dependency: defaultCompiler;
+    import snakebite.image.preparation: defaultCompiler;
     import snakebite.project.state: projectStateDirectory;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
@@ -373,7 +373,7 @@ private void installCompilerWrapper(
 private string compilerWrapperScript(
     in string binary, in imported!"snakebite.project.dubcache".DubDescription description,
 ) {
-    import snakebite.image.dependency: defaultCompiler;
+    import snakebite.image.preparation: defaultCompiler;
     import snakebite.frontend.checks: isCheckFlag, ldcArguments;
     import std.algorithm: canFind, startsWith;
     import std.json: JSONValue;
@@ -453,7 +453,7 @@ public string dependencyFingerprint(
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
     import std.process: environment;
-    import snakebite.image.dependency: defaultCompiler;
+    import snakebite.image.preparation: defaultCompiler;
 
     return text("snakebite-dub-v3", defaultCompiler, __VERSION__,
         environment.get("DFLAGS", ""), environment.get("LFLAGS", ""),

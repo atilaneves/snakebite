@@ -26,7 +26,7 @@ public struct ReplOptions {
 public int run(string[] args) {
     import snakebite.frontend.compiler:
         compilerPath, FrontendFlags, initialize, Snippets;
-    import snakebite.image.loaded: DependencyImage;
+    import snakebite.image.dependency: DependencyImage;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution: runProject;
     import snakebite.project.loading: EndsProcess;

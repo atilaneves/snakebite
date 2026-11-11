@@ -4,452 +4,261 @@ module snakebite.image.dependency;
 private:
 
 
-import snakebite.failure.report: internalFailure;
-import snakebite.image.loaded: DependencyImage, loadImage;
-import snakebite.host.runtimeentry: RuntimeEntry;
+public struct TestHooks {
+    import core.runtime: Runtime;
+
+    private typeof(Runtime.moduleUnitTester) _legacy;
+    private typeof(Runtime.extendedModuleUnitTester) _extended;
+
+    public static TestHooks of(
+        typeof(Runtime.moduleUnitTester) legacy,
+        typeof(Runtime.extendedModuleUnitTester) extended,
+    ) {
+        return TestHooks(legacy, extended);
+    }
+
+    public static TestHooks current() {
+        return TestHooks(Runtime.moduleUnitTester, Runtime.extendedModuleUnitTester);
+    }
+
+    public void install() const {
+        Runtime.moduleUnitTester = _legacy;
+        Runtime.extendedModuleUnitTester = _extended;
+    }
+
+    // Runtime hooks are function pointers, so they need a shared slot.
+    // Each nested run must restore the enclosing run's tracking state.
+    public struct Watch {
+        private TestHooks _hooks;
+        private Watch* _previous;
+        public bool escaped;
+
+        public void install(in TestHooks hooks) {
+            _hooks = hooks;
+            _previous = _watch;
+            _watch = &this;
+            TestHooks(
+                hooks._legacy is null ? null : &watchedLegacy,
+                hooks._extended is null ? null : &watchedExtended,
+            ).install;
+        }
+
+        public void restore() {
+            _watch = _previous;
+        }
+    }
+
+    private static bool watchedLegacy() {
+        try
+            return _watch._hooks._legacy();
+        catch (Throwable throwable) {
+            _watch.escaped = true;
+            throw throwable;
+        }
+    }
+
+    private static typeof(Runtime.extendedModuleUnitTester()()) watchedExtended() {
+        try
+            return _watch._hooks._extended();
+        catch (Throwable throwable) {
+            _watch.escaped = true;
+            throw throwable;
+        }
+    }
+}
+
+private __gshared TestHooks.Watch* _watch;
 
 
-// Whether the image build spends time on compiler optimisation. Real
-// `bin/sb` use keeps it on: a guest run pays the image's run time, not
-// just its build time. A test that only checks behaviour pays build time
-// on every run and gets nothing back from optimisation, so it turns this
-// off. DMD and LDC each map the intent to their own flags below.
-public alias Optimise = imported!"std.typecons".Flag!"optimise";
+// A project's dependency image stays loaded until the executable exits.
+// This value describes the image; its scope does not limit that lifetime.
+public struct DependencyImage {
+    private void* _handle;
+    private string _path;
+    private alias Modules = extern(C) const(ModuleInfo*)* function(size_t*);
+    private Modules _modules;
+    import snakebite.host.runtimeentry: RuntimeEntry;
+    // The image's own function for each function of `RuntimeEntry`, or null.
+    // Code in the image calls it and takes its address, so a guest
+    // reference must give the same address.
+    private void*[RuntimeEntry.symbols.length] _wrappers;
+    public TestHooks testHooks;
+
+    // The image exports its function registry under this name. The frontend
+    // generator writes the definition and `resolve` looks it up.
+    public enum registrySymbol = "snakebite_dependency_image_symbols_v1";
+    public enum entryStartupSettings = deferredRegistrySource;
+
+    public string path() @safe @nogc nothrow pure const return scope {
+        return _path;
+    }
+
+    public const(ModuleInfo*)[] deferredModules() const {
+        if (_modules is null)
+            return null;
+        size_t count;
+        const records = _modules(&count);
+        return records[0 .. count];
+    }
+
+    public void* resolve(in char[] name) const {
+        import core.sys.posix.dlfcn: dlerror, dlsym;
+        import std.string: toStringz;
+
+        if (_handle is null)
+            return null;
+        dlerror;
+        // const qualifies this description, not the loader's opaque handle.
+        const address = dlsym(cast(void*) _handle, name.toStringz);
+        if (dlerror is null) {
+            foreach (i, function_; RuntimeEntry.druntime)
+                if (_wrappers[i] !is null && address == function_)
+                    return cast(void*) _wrappers[i];
+            return cast(void*) address;
+        }
+
+        alias Registry = extern(C) void* function(const(char)[]);
+        dlerror;
+        const registry = cast(Registry) dlsym(cast(void*) _handle,
+            registrySymbol.toStringz);
+        if (dlerror !is null || registry is null)
+            return null;
+        return registry(name);
+    }
+}
 
 
-// The compiler must be from the host's installation. Inputs lists every
-// imported source or other file supplied by the caller, so edits invalidate
-// the cache. The compiler installation is assumed immutable at a given
-// path and version. No shell interprets source paths or compiler arguments.
-//
-public DependencyImage prepareImage(
-    in string source,
-    in string cacheDirectory,
-    in string compiler = defaultCompiler,
-    in string[] inputs = null,
-    in string[] importPaths = null,
-    in string[] stringImportPaths = null,
-    in string[] compilerArguments = null,
-    in string[] linkerFiles = null,
-    in string[] linkerArguments = null,
-    in Optimise optimise = Optimise.yes,
-    in bool deferStartup = false,
-) {
+// Loads an image that is already built, instead of having `prepareImage`
+// (in `snakebite.image.preparation`) make one.
+public DependencyImage loadImage(in string path) {
+    import snakebite.host.runlock: guestRunLock;
+
+    // Hooks belong to the process, and a guest run installs and watches them
+    // under this lock. A load must not capture or restore a run's hooks.
+    guestRunLock.lock;
+    scope(exit) guestRunLock.unlock;
+    return loadImageLocked(path);
+}
+
+
+private DependencyImage loadImageLocked(in string path) {
+    import core.sys.posix.dlfcn:
+        dlerror, dlopen, dlsym, RTLD_LAZY, RTLD_NODELETE;
+    import std.string: fromStringz, toStringz;
     import std.conv: text;
-    import std.digest.sha: sha256Of;
-    import std.digest: toHexString;
-    import std.file: exists, mkdirRecurse, rename, rmdirRecurse, write;
-    import std.path: absolutePath, buildPath;
-    import std.uuid: randomUUID;
+    import snakebite.failure.report: SnakebiteException;
+    import snakebite.host.runtimeentry: RuntimeEntry;
 
-    import std.algorithm.iteration: map;
-    import std.array: array;
+    const savedHooks = TestHooks.current;
+    scope(exit) savedHooks.install;
+    TestHooks.init.install;
 
-    string imageArgument(string argument) {
-        version (LDC) {
-            import std.algorithm: startsWith;
-            if (argument == "-debug" || argument.startsWith("-version=")
-                    || argument.startsWith("-debug="))
-                return "-d" ~ argument;
-        }
-        return argument;
+    DependencyImage image;
+    image._path = path;
+    // A plain `dlopen`, not `Runtime.loadLibrary`. Both register the
+    // image with druntime on this thread (`_d_dso_registry` runs from
+    // the image's own constructor): the GC scans its TLS, its module and
+    // TLS constructors run, and the record lives until the loader's own
+    // teardown at process exit finds and frees it. `Runtime.loadLibrary`
+    // additionally marks the record as an *explicit* load this thread
+    // must `dlclose` itself, and every thread this one starts inherits
+    // that duty (`core.thread`'s `pinLoadedLibraries` and druntime's
+    // `cleanupLoadedLibraries`). A guest thread still alive at process
+    // exit then reads the record after the loader freed it - a dependency
+    // image's finalizer runs before druntime's and libphobos's - and
+    // segfaults inside `dlclose`. Releasing that explicit reference is no
+    // answer either: druntime drops the whole record with it, so the
+    // GC stops scanning the image's TLS and the loader warns at exit.
+    // `RTLD_NODELETE` keeps the one loader reference taken here for the
+    // whole process, so symbols stay valid after this call returns and
+    // nothing ever closes the image.
+    image._handle = dlopen(path.toStringz, RTLD_LAZY | RTLD_NODELETE);
+    if (image._handle is null)
+        throw new SnakebiteException(text("Cannot load dependency image ",
+            path, ": ", dlerror.fromStringz));
+    image._modules = cast(DependencyImage.Modules) dlsym(image._handle,
+        "snakebite_dependency_image_modules_v1");
+    if (image._modules !is null) {
+        foreach (i, symbol; RuntimeEntry.symbols)
+            image._wrappers[i] = dlsym(
+                image._handle, text("__wrap_", symbol).toStringz);
+        alias Bind = extern(C) void function(
+            const(void)*, const(void)*, const(void)*, const(void)*);
+        const bind = cast(Bind) dlsym(image._handle,
+            "snakebite_dependency_entry_bind_v1");
+        const entries = RuntimeEntry.entries;
+        const druntime = RuntimeEntry.druntime;
+        bind(entries[0], entries[1], druntime[0], druntime[1]);
     }
-    string[] imageArguments() {
-        version (LDC) {
-            import snakebite.frontend.checks: ldcArguments;
-            return ldcArguments(compilerArguments);
-        } else {
-            import snakebite.frontend.checks: expandedCompilerArguments;
-            return expandedCompilerArguments(compilerArguments);
-        }
+    // Shared constructors run only on the first load. Retain their hooks
+    // even if later preparation fails, since the loaded image stays open.
+    if (auto hooks = image._handle in _imageTestHooks)
+        image.testHooks = *hooks;
+    else {
+        image.testHooks = TestHooks.current;
+        _imageTestHooks[image._handle] = image.testHooks;
     }
-    const arguments = imageArguments;
-    const importFlags = arguments.map!imageArgument.array
-        ~ importPaths.map!(path => "-I" ~ path).array
-        ~ stringImportPaths.map!(path => "-J" ~ path).array;
-    const executable = compilerPath(compiler);
-
-    // The only image compile flag that exists solely for optimisation is
-    // `-O`: `-allinst`/`-linkonce-templates` below are for correctness
-    // (a guest object supplies no template bodies of its own), not speed.
-    const optimiseFlags = optimise ? ["-O"] : null;
-    import snakebite.frontend.checks: Checks;
-
-    Checks checks;
-    foreach (argument; arguments)
-        checks.accept(argument);
-
-    // A BetterC object has no ModuleInfo section for the DSO startup object.
-    // Keep the same runtime choice for compilation and linking.
-    const runtimeFlags = checks.betterC ? ["-betterC"] : null;
-    const startupFlags = deferStartup
-        ? ["-L--wrap=_d_dso_registry", "-L-Bsymbolic-functions"]
-            ~ RuntimeEntry.symbols
-                .map!(symbol => "-L--wrap=" ~ symbol).array
-        : null;
-
-    // The image must emit transitive template bodies too, including runtime
-    // helpers introduced by assertion lowering. No guest object supplies them.
-    version (DigitalMars) {
-        const compileFlags = ["-c", "-fPIC", "-allinst"] ~ optimiseFlags;
-        const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
-            "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
-    } else version (LDC) {
-        // -allinst also analyzes unused template members, which can fail
-        // under the project's compiler options. Emit referenced bodies instead.
-        const compileFlags = ["-c", "-relocation-model=pic",
-            "-linkonce-templates"] ~ optimiseFlags;
-        const linkFlags = ["-shared", "-link-defaultlib-shared",
-            "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
-    } else {
-        static assert(false, "Dependency images require DMD or LDC");
-    }
-    // A linker response file stops DMD from moving archives
-    // outside the whole-archive pair. Guest calls do not create undefined
-    // symbols in image.o, so ordinary archive extraction loses their code.
-    import std.algorithm: endsWith;
-    string[] dependencyFlags;
-    bool[string] linked;
-    foreach (file; linkerFiles) {
-        const path = file.absolutePath;
-        if (path in linked)
-            continue;
-        linked[path] = true;
-        if (path.endsWith(".a"))
-            dependencyFlags ~= ["--whole-archive", path,
-                "--no-whole-archive"];
-        else
-            dependencyFlags ~= path;
-    }
-    // Everything the content fingerprint below depends on, minus file
-    // contents, keys a stamp record. An unchanged compiler, input set and
-    // source hits there without a compiler probe or a content hash: the
-    // record was written after a successful build, and a compiler whose
-    // stamp is unchanged is the one whose binary that build recorded. A CLI
-    // run pays this path once per invocation, so it has to cost a few
-    // stats, not a hash of the whole compiler executable.
-    const directory = cacheDirectory.absolutePath;
-    const settings = text("snakebite-image-v1\n", executable, "\n",
-        __VERSION__, "\n", compileFlags, "\n", linkFlags, "\n", importFlags,
-        "\n", dependencyFlags, "\n", linkerArguments, "\n",
-        inputs.map!(input => input.absolutePath).array, "\n",
-        source.length, ":", source,
-        deferStartup ? DependencyImage.entryStartupSettings : "");
-    auto stamps = ProjectImageCache(
-        directory.buildPath(sourceDigest(settings) ~ ".json"), settings, null,
-        executable);
-    // Every record written here names the image it was saved with.
-    const recorded = stamps.restore(() => source);
-    if (!recorded.isNull)
-        return loadImage(recorded.get);
-
-    string fingerprint = text("snakebite-image-v1\n", executable, "\n",
-        fileDigest(executable),
-        "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
-        "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
-        "\n", source.length, ":", source,
-        deferStartup ? DependencyImage.entryStartupSettings : "");
-    foreach (input; inputs ~ linkerFiles)
-        fingerprint ~= text("\n", input.absolutePath.length, ":",
-            input.absolutePath, ":", fileDigest(input));
-
-    directory.mkdirRecurse;
-    const destination = directory.buildPath(fingerprint.sha256Of.toHexString ~ ".so");
-    if (!destination.exists) {
-        const staging = directory.buildPath(text("build-", randomUUID));
-        staging.mkdirRecurse;
-        scope(exit) staging.rmdirRecurse;
-        const sourcePath = staging.buildPath("image.d");
-        const objectPath = staging.buildPath("image.o");
-        const imagePath = staging.buildPath("image.so");
-        sourcePath.write(source ~ (deferStartup ? DependencyImage.entryStartupSettings : "")
-            ~ text("\nstatic assert(__VERSION__ == ",
-            __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
-        runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
-            ~ [sourcePath, "-of=" ~ objectPath]);
-
-        import std.array: join;
-        import std.string: replace;
-        const responsePath = staging.buildPath("linker.rsp");
-        responsePath.write(dependencyFlags.map!(argument =>
-            "\"" ~ argument.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\"")
-            .join("\n"));
-        // A linker that resolves symbols in order, such as GNU ld with
-        // `--as-needed`, drops a library named before the objects that
-        // need it. Libraries therefore follow every object; the other
-        // linker arguments keep their place before them.
-        import std.algorithm: filter, startsWith;
-        bool isLibrary(string argument) { return argument.startsWith("-L-l"); }
-        const otherArguments = linkerArguments.filter!(a => !isLibrary(a)).array;
-        const libraryArguments = linkerArguments.filter!isLibrary.array;
-        runCompiler("linking", [executable] ~ linkFlags
-            ~ otherArguments
-            ~ ["-Xcc=-Wl,@linker.rsp"]
-            ~ [objectPath] ~ libraryArguments
-            ~ ["-of=" ~ imagePath], staging);
-        // Readers must never observe a partially linked image. Concurrent
-        // builders publish equivalent complete files with atomic rename.
-        rename(imagePath, destination);
-    }
-    auto image = loadImage(destination); // Returned as mutable: its handle is.
-    stamps.save(destination, source, inputs ~ linkerFiles);
     return image;
 }
 
 
-
-
-version (DigitalMars)
-    public enum defaultCompiler = "dmd";
-else version (LDC)
-    public enum defaultCompiler = "ldc2";
-
-
-private void runCompiler(
-    in string phase, in string[] command, in string directory = null,
-) {
-    import std.process: Config, execute;
-    import std.conv: text;
-
-    const result = execute(command, null, Config.none, size_t.max, directory);
-    if (result.status != 0) {
-        import snakebite.failure.report: SnakebiteException;
-
-        throw new SnakebiteException(text("Dependency image ", phase,
-            " failed\nCommand: ", command, "\n", result.output));
+// An empty module range preserves actual image GC/TLS registration without
+// starting a full-D static dependency before its C entry requests startup.
+private enum deferredRegistrySource = q{
+    private struct SnakebiteDeferredDSO {
+        size_t version_;
+        void** slot;
+        const(ModuleInfo*)* begin;
+        const(ModuleInfo*)* end;
     }
-}
-
-
-private string compilerPath(in string compiler) {
-    import std.file: exists;
-    import std.path: absolutePath, buildPath;
-    import std.process: environment;
-    import std.string: split;
-    import std.algorithm: canFind;
-
-    if (compiler.canFind('/')) {
-        require(compiler.exists, "Image compiler does not exist: " ~ compiler);
-        return compiler.absolutePath;
-    }
-    foreach (directory; environment.get("PATH", "").split(":")) {
-        const candidate = buildPath(directory, compiler);
-        if (candidate.exists)
-            return candidate.absolutePath;
-    }
-    require(false, "Image compiler not found on PATH: " ~ compiler);
-    internalFailure();
-}
-
-
-private void require(in bool condition, in string message) {
-    import snakebite.failure.report: SnakebiteException;
-
-    if (!condition)
-        throw new SnakebiteException(message);
-}
-
-
-// An image is a function of the generator that built it (this running
-// executable) and its inputs. The generator's file stamp is part of the
-// record's name: a different or rebuilt generator reads and writes its
-// own record and never accepts another's, and generators that take turns
-// on one project each keep a record. An unchanged image needs only
-// metadata checks and a loader reference: file stamps for the compiler
-// and every input stand in for their contents. A root edit
-// can reuse the same image if it requests the same templates. A project
-// that needs no image is recorded the same way, so the answer "no image"
-// is as cheap to give again as an image is.
-public struct ProjectImageCache {
-    private string _path;
-    private string _settings;
-    private string[] _roots;
-    private string _compiler;
-
-    public this(
-        in string recordPath,
-        in string settings,
-        in string[] roots,
-        in string compiler = defaultCompiler,
-        in string generator = runningExecutable,
-    ) {
-        import std.conv: text;
-        import std.path: extension, stripExtension;
-
-        _path = text(recordPath.stripExtension, "-", generatorKey(generator),
-            recordPath.extension);
-        _settings = sourceDigest(text("snakebite-project-image-v2", __VERSION__, settings));
-        _roots = roots.dup;
-        _compiler = compilerPath(compiler);
-    }
-
-    public struct Prepared {
-        public DependencyImage image;
-        public string[] inputs;
-    }
-
-    // Source is requested only to check a changed root or prepare a cold
-    // record. Cold preparation owns its build order and returns host data.
-    public bool prepare(
-        ref DependencyImage image,
-        scope string delegate() source,
-        scope Prepared delegate(scope string delegate()) coldPreparation,
-    ) {
-        string generated;
-        bool generatedOnce;
-        string generateSource() {
-            if (!generatedOnce) {
-                generated = source();
-                generatedOnce = true;
-            }
-            return generated;
+    private __gshared const(ModuleInfo*)[] snakebiteDeferredModules;
+    extern(C) void __real__d_dso_registry(void*);
+    extern(C) void __wrap__d_dso_registry(SnakebiteDeferredDSO* data) {
+        auto ranges = *data;
+        if (*data.slot is null) {
+            snakebiteDeferredModules = data.begin[0 .. data.end - data.begin];
+            ranges.begin = ranges.end = null;
         }
-        const recorded = restore(&generateSource);
-        if (!recorded.isNull) {
-            if (recorded.get.length)
-                image = loadImage(recorded.get);
-            return recorded.get.length != 0;
-        }
-
-        // The image contains mutable loader addresses.
-        auto prepared = coldPreparation(&generateSource);
-        image = prepared.image;
-        save(image.path, generateSource(), prepared.inputs);
-        return image.path.length != 0;
+        __real__d_dso_registry(&ranges);
     }
-
-    // The recorded image's path while the record holds for the current
-    // inputs: empty when the project needs no image, null when the record
-    // does not hold.
-    private imported!"std.typecons".Nullable!string restore(
-        scope string delegate() source,
+    export extern(C) const(ModuleInfo*)* snakebite_dependency_image_modules_v1(size_t* count) {
+        *count = snakebiteDeferredModules.length;
+        return snakebiteDeferredModules.ptr;
+    }
+    alias SnakebiteRuntimePhase = extern(C) int function();
+    private __gshared SnakebiteRuntimePhase snakebiteEntryInit;
+    private __gshared SnakebiteRuntimePhase snakebiteEntryTerm;
+    private __gshared void* snakebiteHostInit;
+    private __gshared void* snakebiteHostTerm;
+    extern(C) int __real_rt_init();
+    extern(C) int __real_rt_term();
+    export extern(C) void snakebite_dependency_entry_bind_v1(
+        SnakebiteRuntimePhase initialize, SnakebiteRuntimePhase terminate,
+        void* hostInitialize, void* hostTerminate,
     ) {
-        import std.file: exists, readText;
-        import std.json: parseJSON;
-        import std.typecons: Nullable;
-
-        if (!_path.exists)
-            return Nullable!string.init;
-        auto record = parseJSON(_path.readText);
-        if (record["settings"].str != _settings
-                || record["compiler"].str != _compiler)
-            return Nullable!string.init;
-        foreach (path, stamp; record["inputs"].object)
-            if (fileStamp(path) != stamp.str)
-                return Nullable!string.init;
-        const roots = fileStamps(_roots);
-        const rootChanged = roots != record["roots"];
-        if (rootChanged && sourceDigest(source()) != record["source"].str)
-            return Nullable!string.init;
-        if (rootChanged) {
-            record["roots"] = roots;
-            publish(record.toString);
-        }
-        return Nullable!string(record["image"].str);
+        snakebiteEntryInit = initialize;
+        snakebiteEntryTerm = terminate;
+        snakebiteHostInit = hostInitialize;
+        snakebiteHostTerm = hostTerminate;
     }
-
-    private void publish(in string contents) const {
-        import std.file: mkdirRecurse, rename, write;
-        import std.path: dirName;
-        import std.uuid: randomUUID;
-        import std.conv: text;
-
-        _path.dirName.mkdirRecurse;
-        const temporary = text(_path, ".", randomUUID);
-        temporary.write(contents);
-        rename(temporary, _path);
+    // A dependency that defines one of these functions keeps its definition.
+    export extern(C) int __wrap_rt_init() {
+        return cast(void*) &__real_rt_init == snakebiteHostInit
+            ? snakebiteEntryInit() : __real_rt_init();
     }
-
-    // `path` is empty for a project that needs no image.
-    private void save(in string path, in string source, in string[] inputs) const {
-        import std.json: JSONValue;
-
-        const image = path.length ? [path] : null;
-        JSONValue record;
-        record["settings"] = _settings;
-        record["compiler"] = _compiler;
-        record["roots"] = fileStamps(_roots);
-        record["inputs"] = fileStamps(inputs ~ [_compiler] ~ image);
-        record["source"] = sourceDigest(source);
-        record["image"] = path;
-        publish(record.toString);
+    export extern(C) int __wrap_rt_term() {
+        return cast(void*) &__real_rt_term == snakebiteHostTerm
+            ? snakebiteEntryTerm() : __real_rt_term();
     }
-}
-
-
-// The path of this running executable. On Linux the kernel resolves it to
-// the running file even after that file is replaced or removed; a path
-// from `thisExePath` then names the missing file.
-public string runningExecutable() {
-    version (linux)
-        return "/proc/self/exe";
-    else
-        return imported!"std.file".thisExePath;
-}
-
-
-// Names the build of snakebite that is running. A different or rebuilt
-// executable gives a different key; so does a copy, which costs one miss
-// and is never wrong. A stat stands in for hashing the executable, which
-// is megabytes.
-public string generatorKey(in string generator = runningExecutable) {
-    return sourceDigest(fileStamp(generator))[0 .. 16];
-}
-
-
-// The digest of a file's contents, read in chunks. Compilers and
-// libraries are megabytes; reading one whole would leave that much
-// garbage in the process GC heap, which the guest shares.
-private string fileDigest(in string path) {
-    import std.digest.sha: SHA256;
-    import std.digest: toHexString;
-    import std.stdio: File;
-
-    SHA256 digest;
-    foreach (chunk; File(path, "rb").byChunk(64 * 1024))
-        digest.put(chunk);
-    return digest.finish.toHexString.idup;
-}
-
-
-private string sourceDigest(in string source) @safe pure nothrow {
-    import std.digest.sha: sha256Of;
-    import std.digest: toHexString;
-
-    return source.sha256Of.toHexString.idup;
-}
-
-
-private imported!"std.json".JSONValue fileStamps(in string[] paths) {
-    import std.json: JSONValue;
-    import std.path: absolutePath;
-
-    // An empty set must remain an object so a reader can iterate its keys.
-    string[string] empty;
-    auto result = JSONValue(empty);
-    foreach (path; paths) {
-        const absolute = path.absolutePath;
-        result[absolute] = fileStamp(absolute);
+    pragma(mangle, "__wrap_" ~ imported!"core.runtime".Runtime.initialize.mangleof)
+    export bool snakebiteRuntimeInitialize() {
+        return __wrap_rt_init() != 0;
     }
-    return result;
-}
+    pragma(mangle, "__wrap_" ~ imported!"core.runtime".Runtime.terminate.mangleof)
+    export bool snakebiteRuntimeTerminate() {
+        return __wrap_rt_term() != 0;
+    }
+};
 
 
-// ctime and inode catch same-size edits with restored mtimes and atomic
-// replacements. Access time is excluded because reads must not invalidate us.
-private string fileStamp(in string path) {
-    import core.sys.posix.sys.stat: stat, stat_t;
-    import core.stdc.errno: errno, ENOENT, ENOTDIR;
-    import std.exception: errnoEnforce;
-    import std.string: toStringz;
-    import std.conv: text;
-
-    stat_t info;
-    const status = stat(path.toStringz, &info);
-    if (status != 0 && (errno == ENOENT || errno == ENOTDIR))
-        return "missing";
-    errnoEnforce(status == 0, "Cannot inspect image input " ~ path);
-    return text(info.st_dev, ":", info.st_ino, ":", info.st_size, ":",
-        info.st_mtim.tv_sec, ":", info.st_mtim.tv_nsec, ":",
-        info.st_ctim.tv_sec, ":", info.st_ctim.tv_nsec);
-}
+private __gshared TestHooks[void*] _imageTestHooks;

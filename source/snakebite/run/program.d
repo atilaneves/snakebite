@@ -139,13 +139,13 @@ public struct StartupReport {
 // this returns.
 public StartupReport runDruntimeMain(
     imported!"snakebite.backends.api".Backend backend,
-    in imported!"snakebite.image.loaded".TestHooks testHooks,
+    in imported!"snakebite.image.dependency".TestHooks testHooks,
     in string[] arguments,
     in bool endsProcess = false,
 ) {
     import snakebite.host.runlock: guestRunLock;
     import snakebite.run.modules: GuestModules;
-    import snakebite.image.loaded: TestHooks;
+    import snakebite.image.dependency: TestHooks;
     import std.algorithm.iteration: map;
     import std.array: array;
     import std.string: toStringz;

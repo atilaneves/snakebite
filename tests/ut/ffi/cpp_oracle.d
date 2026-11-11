@@ -15,7 +15,7 @@ module ut.ffi.cpp_oracle;
 // function pointers of the same shape as the guest's declarations.
 
 
-import snakebite.image.loaded: DependencyImage;
+import snakebite.image.dependency: DependencyImage;
 
 
 struct Counts {

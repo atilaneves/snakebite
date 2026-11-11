@@ -4,7 +4,7 @@ module ut.dub;
 import snakebite.project.dub: dependencyFingerprint, dubSources;
 import snakebite.project.dubcache:
     DubDescription, cachedDubDescription, projectDescriptionFromJson;
-import snakebite.image.dependency: defaultCompiler, generatorKey;
+import snakebite.image.preparation: defaultCompiler, generatorKey;
 import snakebite.project.state: projectStateDirectory;
 import dub.description: ProjectDescription;
 import std.json: parseJSON;

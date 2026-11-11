@@ -1312,7 +1312,7 @@ public extern(C) bool executeIndirectCallPlan(
 // without hashing at all, but it needs somewhere on the call site to keep
 // it, which is the caller's business and not this package's.
 public struct PlanCache {
-    import snakebite.image.loaded: DependencyImage;
+    import snakebite.image.dependency: DependencyImage;
 
     // Holds `SharedTable`s (finding 2.4): a copy would share their
     // storage with the original until one side grows.
