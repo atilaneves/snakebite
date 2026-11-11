@@ -159,14 +159,14 @@ unittest {
 }
 
 
-// `CallPlanStore.newPlan` is called without a lock by every thread that runs
+// `CallPlanStore.plan` is called without a lock by every thread that runs
 // guest code. Each call must put its plan on the store: a thread that loses a
 // race must retry against the new head, never spin on a stale one.
-@("plan.concurrentNewPlansAreAllDistinct")
+@("plan.concurrentPlansAreAllDistinct")
 unittest {
     import core.atomic: atomicLoad, atomicOp, atomicStore;
     import core.thread: Thread;
-    import snakebite.ffi.callplan: CallPlan;
+    import snakebite.ffi.callplan: CallPlan, NativeSignature;
 
     enum threads = 16;
     enum plansPerThread = 2000;
@@ -184,7 +184,7 @@ unittest {
             atomicOp!"+="(ready, 1);
             while (!atomicLoad(go)) {}
             foreach (ref plan; row)
-                plan = store.newPlan;
+                plan = store.plan(NativeSignature.init);
         });
     }
     foreach (t; 0 .. threads) {
@@ -200,8 +200,8 @@ unittest {
     bool[CallPlan*] seen;
     foreach (row; plans)
         foreach (plan; row) {
-            assert(plan !is null, "newPlan returned null");
-            assert(plan !in seen, "newPlan returned one plan twice");
+            assert(plan !is null, "plan returned null");
+            assert(plan !in seen, "plan returned one plan twice");
             seen[plan] = true;
         }
     assert(seen.length == threads * plansPerThread);
