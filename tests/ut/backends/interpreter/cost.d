@@ -701,7 +701,7 @@ private FuncDeclaration guestFunction(Module guestModule, in string name) {
 // A C variadic call through a function pointer: the plan that the
 // interpreter prepares for one execution of it is not kept after the call.
 @("steadyState.indirectVariadicCall.retainsNothing")
-@Tags(Interpreter.stringof)
+@Tags(Interpreter.stringof, "measures-process-heap")
 unittest {
     import core.memory: GC;
 
