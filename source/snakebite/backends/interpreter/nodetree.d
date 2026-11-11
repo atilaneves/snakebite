@@ -18,7 +18,7 @@ import dmd.location: Loc;
 import dmd.mtype: Type;
 import dmd.statement: Statement;
 import snakebite.language.storage.lifetime: InitStep;
-import snakebite.language.checks.failure: BoundsCheck;
+import snakebite.language.checks: BoundsCheck;
 import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
 import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.backends.interpreter.faultslot:
@@ -2872,7 +2872,7 @@ private final class Assertion(E) : Node {
 // an invariant: the object is read once, and a null one fails before the
 // invariant runs, as dmd's glue layer has it.
 private final class InvariantAssertion(E) : Node {
-    import snakebite.language.checks.assertion: AssertInvariantPlan;
+    import snakebite.language.checks: AssertInvariantPlan;
 
     private E _ev;
     private Node _object;
@@ -7232,8 +7232,8 @@ private Node buildEffect(E)(E ev, Expression expression) {
 }
 
 private Node buildAssertion(E)(E ev, AssertExp expression) {
-    import snakebite.language.checks.failure: assertPlanOf, FailurePlan;
-    import snakebite.language.checks.assertion:
+    import snakebite.language.checks: assertPlanOf, FailurePlan;
+    import snakebite.language.checks:
         AssertInvariantPlan, assertInvariantPlanOf;
 
     final switch (assertPlanOf(ev._program.checks).kind) with (FailurePlan.Kind) {
