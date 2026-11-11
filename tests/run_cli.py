@@ -2071,6 +2071,46 @@ def test_saved_program_with_host_function_address_in_static_data_runs_as_the_com
         """})
 
 
+def test_saved_program_with_function_addresses_in_data_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdlib: abs;
+        int twice(int n) { return 2 * n; }
+        __gshared int function(int) named = &twice;
+        __gshared int function(int) literal = (int n) => n + 1;
+        __gshared extern(C) int function(int) host = &abs;
+        struct Table { int function(int)[2] entries = [&twice, &twice]; }
+        __gshared Table table;
+        int main() {
+            return named(4) + literal(1) + host(-3) + table.entries[1](5);
+        }
+        """})
+
+
+def test_saved_program_with_host_variable_address_in_data_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: stdout;
+        __gshared shared(typeof(stdout))* p = &stdout;
+        int main() { return p is &stdout ? 3 : 4; }
+        """})
+
+
+def test_saved_program_with_host_variable_address_plus_offset_in_data_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.time: tzname;
+        __gshared const(char*)* q = &tzname[1];
+        int main() { return q is &tzname[1] ? 3 : 4; }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
