@@ -5417,27 +5417,41 @@ static if (jitSupported) {
         Scratch;
 
     // What `Function.jitHeat` starts with.
-    package uint jitStartHeat(in JitSetting setting) nothrow @nogc {
+    private uint jitStartHeat(in JitSetting setting) nothrow @nogc {
         return setting.eager ? cast(uint) -jitStep : 0;
     }
 
-    // Whether the functions of a backend with `setting` count their events.
-    package bool jitCounting(in JitSetting setting) nothrow @nogc {
-        return setting.enabled;
-    }
-
-    // Whether `instruction`, at `index`, counts an event for the JIT: a call,
-    // or a branch whose target is at or before it. `target` is the instruction
-    // index that a branch jumps to, and null for an instruction that does not
-    // branch.
-    package bool jitCountsEvent(in JitSetting setting,
-        in Instruction instruction, in size_t index, in size_t* target)
-        nothrow @nogc
+    // Prepares a compiled `function_` to run under `setting`, the JIT setting
+    // of the `Bytecode` backend that compiled it; backends in one process can
+    // differ. The function compiler does not know it: a compiled function is
+    // the same for each setting. When the functions count their
+    // events, this replaces the handler of each counted event by its counting
+    // twin: a call, or a branch whose target is at or before it. It reads
+    // the finished instructions, so their branch targets must be addresses.
+    // `name` is only evaluated when the perf map is on.
+    package void prepareForExecution(Function* function_,
+        in JitSetting setting,
+        imported!"snakebite.backends.bytecode.jit".JitInstance* jit,
+        lazy const(char)[] name)
     {
-        if (!setting.jitCounting)
-            return false;
-        return target is null
-            ? isCountedCall(instruction.handler) : *target <= index;
+        function_.jitHeat = setting.jitStartHeat;
+        function_.jitCounts = setting.enabled;
+        function_.jit = jit;
+        if (!setting.enabled)
+            return;
+        foreach (ref instruction; function_.instructions) {
+            const target = branchTargetField(instruction);
+            const counts = target is null
+                ? isCountedCall(instruction.handler)
+                : *target <= cast(size_t) &instruction;
+            if (!counts)
+                continue;
+            // A handler with no twin stays: that instruction does not count.
+            if (const twin = instruction.handler in _countingTwins.countedOf)
+                instruction.handler = cast(Instruction.Handler) *twin;
+        }
+        if (setting.perfMap)
+            function_.jitName = name;
     }
 
     // For the paths that cannot know at compile time whether the JIT is on.
@@ -5552,19 +5566,6 @@ static if (jitSupported) {
     {
         tables.twins.countedOf[original] = counted;
         tables.twins.uncountedOf[counted] = original;
-    }
-
-    // Replaces the handler of each of `instructions[indices]` by its counting
-    // twin. `indices` are the backward branches and the calls. A handler with
-    // no twin stays: that instruction does not count.
-    package void jitCountEvents(Instruction[] instructions,
-        const(size_t)[] indices)
-    {
-        foreach (index; indices)
-            if (const counted = instructions[index].handler
-                    in _countingTwins.countedOf)
-                instructions[index].handler =
-                    cast(Instruction.Handler) *counted;
     }
 
     // What a function is in: `compiling` while one thread makes its code, and
@@ -6088,22 +6089,8 @@ static if (jitSupported) {
 
 } else {
 
-    package bool jitCounting(in JitSetting) pure nothrow @nogc @safe {
-        return false;
-    }
-
-    package uint jitStartHeat(in JitSetting) pure nothrow @nogc @safe {
-        return 0;
-    }
-
-    package bool jitCountsEvent(in JitSetting, in Instruction, in size_t,
-        in size_t*) pure nothrow @nogc @safe
-    {
-        return false;
-    }
-
-    package void jitCountEvents(Instruction[], const(size_t)[])
-        pure nothrow @nogc @safe {}
+    package void prepareForExecution(Function*, in JitSetting, void*,
+        lazy const(char)[]) pure nothrow @nogc @safe {}
 
     private void countCall(const(Function)*) pure nothrow @nogc @safe {}
 
