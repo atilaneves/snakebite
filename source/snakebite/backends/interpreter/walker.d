@@ -26,7 +26,8 @@ import snakebite.native.arguments: CallArguments;
 public final class Interpreter: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.program: Program;
-    import snakebite.ffi: CallbackBridge, CallbackCall;
+    import snakebite.ffi: CallbackCall;
+    import snakebite.start.data: StartData;
     import snakebite.host.threads: heapNew;
     import snakebite.host.executionstates: ExecutionStates;
 
@@ -43,16 +44,16 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     // dereference sites; the checked evaluator is a separate type so that
     // an unchecked one runs no code for it.
     private bool _checksNullDeref;
+    private StartData _startData;
 
     public this(const Program program) {
         super(program);
         _shared = new Shared(program, &call);
-        _shared.plans.useCallbacks(
-            new CallbackBridge(
-                &invokeCallback,
-                cast(void*) this,
-                &prepareCallback,
-            ));
+        _shared.planStore.bindCallbacks(
+            &invokeCallback,
+            cast(void*) this,
+            &prepareCallback,
+        );
         import snakebite.language.checks: nullDerefPlanOf;
 
         _checksNullDeref = nullDerefPlanOf(program.checks).kind
@@ -88,6 +89,10 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     ) {
         this.onEvaluator!((evaluator) =>
             evaluator.call(function_, returnPlace, args));
+    }
+
+    protected override ref StartData startDataStorage() {
+        return _startData;
     }
 
     public override void[] staticStorage(
@@ -265,6 +270,10 @@ import snakebite.language.layout.temporary: canRetainTemporaries;
 // its own execution state.
 private struct Shared {
     import snakebite.native.signature: SignatureTable;
+    import snakebite.native.staticstore: StaticStore;
+    import snakebite.stack.tls: TlsSlots;
+    import snakebite.host.threads: heapNew;
+    import snakebite.ffi.callplanstore: CallPlanStore;
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
@@ -290,6 +299,11 @@ private struct Shared {
     // The program being run: its `isInterpreted` is the one decision for
     // whether a callee is walked or called natively.
     const Program program;
+    // Declared before what points into it, so that it is destroyed after.
+    // The interpreter keeps its own signatures, and uses this for the store
+    // of its static data, its plans and its callback bridge.
+    StaticStore store;
+    CallPlanStore planStore;
     NativeData nativeData;
     RuntimeTypes runtimeTypes;
     // How to reach each already-compiled function this guest calls,
@@ -380,10 +394,12 @@ private struct Shared {
     this(const Program program, typeof(callGuest) callGuest) {
         this.program = program;
         this.callGuest = callGuest;
-        plans = PlanCache(program.dependencyImage,
+        planStore = CallPlanStore(program.dependencyImage);
+        plans = PlanCache(&planStore,
             &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        nativeData = NativeData(&this.program.isRootOwned,
+        store = StaticStore(() => heapNew!TlsSlots);
+        nativeData = NativeData(&store, &this.program.isRootOwned,
             (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
@@ -7497,6 +7513,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto preparation = CallAdapter.Arguments.of(
             type, expression.arguments,
         );
+        // Dropped after this execution: nothing keeps it.
         const plan = preparation.prepareAtAddress(
             *_plans, address, hasContext,
         );

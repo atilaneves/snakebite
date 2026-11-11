@@ -6,6 +6,7 @@ import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
 import dmd.statement: ReturnStatement, Statement;
 import dmd.typesem: nextOf;
+import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.ffi.abi:
     argumentPlanOf, needsHiddenReturnPointer;
@@ -27,7 +28,7 @@ private enum declarations = q{
 
 @("druntime.sharedCtorAtomicPlan")
 unittest {
-    PlanCache cache;
+    mixin planCache;
     const plan = cache.of(atomicOperation!(int));
     shared int value = 41;
     int amount = 1;
@@ -74,7 +75,7 @@ unittest {
     auto function_ = findFunction(guestModule, "abs");
     assert(function_ !is null, "No function `abs` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     foreach (i; 0 .. 100)
         cache.of(function_);
 
@@ -96,7 +97,7 @@ unittest {
     assert(abs_ !is null && free_ !is null,
         "No `abs`/`free` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     foreach (i; 0 .. 10) {
         cache.of(abs_);
         cache.of(free_);
@@ -111,7 +112,7 @@ unittest {
 
 @("rawPlan.requiredSymbolReportsHostResolutionFailure")
 unittest {
-    PlanCache cache;
+    mixin planCache;
     const symbol = "snakebite_ut_missing_druntime_hook_439";
 
     (() => cache.requiredRawPlanOf(
@@ -143,7 +144,7 @@ unittest {
     auto function_ = findFunction(guestModule, "target");
     assert(function_ !is null, "No function `target` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     cache.hasNativeSymbol(function_).should == true;
     cache.hasIndependentNativeSymbol(function_).should == false;
 }
@@ -174,7 +175,8 @@ unittest {
         }
     }
     const ownership = Ownership(guestModule);
-    auto cache = PlanCache(null, &ownership.owns);
+    auto planStore = CallPlanStore(null);
+    auto cache = PlanCache(&planStore, &ownership.owns);
     cache.hasNativeSymbol(declared).should == true;
     cache.hasNativeSymbol(defined).should == false;
     cache.hasIndependentNativeSymbol(defined).should == false;
@@ -464,7 +466,7 @@ unittest {
     auto function_ = findFunction(guestModule, "snakebite_ut_bump");
     assert(function_ !is null, "No `snakebite_ut_bump` in the program");
 
-    PlanCache cache;
+    mixin planCache;
 
     // A `ref` parameter travels as the address of the argument's own
     // storage, and the caller's slot for it already holds that address -
@@ -486,7 +488,7 @@ unittest {
     auto function_ = findFunction(guestModule, "snakebite_ut_cell");
     assert(function_ !is null, "No `snakebite_ut_cell` in the program");
 
-    PlanCache cache;
+    mixin planCache;
 
     // A `ref` return hands back the address of the result in the return
     // register, so what lands in the caller's return place is a pointer
@@ -506,7 +508,7 @@ unittest {
     auto function_ = findFunction(guestModule, "snakebite_ut_cell");
     assert(function_ !is null, "No `snakebite_ut_cell` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     void invoke(
         scope void* returnPlace,
         scope const(void*)[] arguments,
@@ -539,7 +541,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_three_words` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     ThreeWords result;
     cache.of(function_).call(&result, []);
 
@@ -665,7 +667,7 @@ unittest {
     auto function_ = findFunction(guestModule, "snakebite_ut_scale");
     assert(function_ !is null, "No `snakebite_ut_scale` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     double value = 1.5;
     double result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -683,7 +685,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_identity` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     real value = 1.0L + real.epsilon;
     real result;
     cache.of(function_).call(&result, [cast(const(void)*) &value]);
@@ -701,7 +703,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_argument` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     real value = 7.25L;
     cache.of(function_).call(null, [cast(const(void)*) &value]);
 
@@ -718,7 +720,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_result` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     real result;
     cache.of(function_).call(&result, []);
 
@@ -740,7 +742,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_after_odd_stack` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long[7] prefix = [1, 2, 3, 4, 5, 6, 7];
     real value = 10.5L;
     real result;
@@ -766,7 +768,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_mixed` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long integer = 3;
     double floating = 2.5;
     real value = 4.0L;
@@ -789,7 +791,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_result` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     auto plan = cache.of(function_);
     foreach (i; 0 .. 256)
         plan.call(null, []);
@@ -809,7 +811,7 @@ unittest {
     assert(function_ !is null,
         "No `modfl` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     real value = 3.75L;
     real integral;
     real* integralSlot = &integral;
@@ -833,7 +835,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_d` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     real value = 1.0L + real.epsilon;
     real result;
     cache.of(function_).call(&result, [cast(const(void)*) &value]);
@@ -856,7 +858,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_pair_returned` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     RealPair result;
     cache.of(function_).call(&result, []);
 
@@ -879,7 +881,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_real_pair_param` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     RealPair value = RealPair(1.0L + real.epsilon);
     real result;
     cache.of(function_).call(&result, [cast(const(void)*) &value]);
@@ -907,7 +909,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_scale_float` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     float value = 2.0f;
     float result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -929,7 +931,7 @@ unittest {
     auto function_ = findFunction(guestModule, "snakebite_ut_pair");
     assert(function_ !is null, "No `snakebite_ut_pair` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     Pair value = Pair(39, 58);
     Pair result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -954,7 +956,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_floating_pair` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     FloatingPair value = FloatingPair(1.25, 2.5);
     FloatingPair result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -977,7 +979,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixed_pair` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     MixedPair value = MixedPair(39, 1.5);
     MixedPair result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -1003,7 +1005,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixed_after_six` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     int[6] integers = [10, 20, 30, 40, 50, 60];
     MixedPair value = MixedPair(7, 1.5);
     MixedPair result;
@@ -1037,7 +1039,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixed_after_eight` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     double[8] floating = [1, 2, 3, 4, 5, 6, 7, 8];
     MixedPair value = MixedPair(7, 1.5);
     MixedPair result;
@@ -1071,7 +1073,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixed_after_six_free_sse` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     int[6] integers = [1, 2, 3, 4, 5, 6];
     MixedPair value = MixedPair(7, 1.5);
     double g = 9.0;
@@ -1106,7 +1108,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixed_after_eight_free_integer` in the program");
 
-    PlanCache cache;
+    mixin planCache;
     double[8] floating = [1, 1, 1, 1, 1, 1, 1, 1];
     MixedPair value = MixedPair(7, 1.5);
     int i = 3;
@@ -1134,7 +1136,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_seven` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     int[7] values = [1, 2, 3, 4, 5, 6, 7];
     int result;
     cache.of(function_).call(&result, [
@@ -1172,7 +1174,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_split_after_five` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     int a = 1;
     int b = 2;
     int c = 3;
@@ -1227,7 +1229,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_eightLongs` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8;
     long result;
     cache.of(function_).call(&result, [
@@ -1275,7 +1277,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixedSpill` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long[7] integers = [10, 20, 30, 40, 50, 60, 70];
     double[9] floatings = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5];
     void*[16] arguments;
@@ -1317,7 +1319,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_memory_param` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     ThreeWords value = ThreeWords(17, 31, 47);
     size_t result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -1355,7 +1357,7 @@ unittest {
     assert(getter !is null,
         "No `snakebite_ut_fieldless_return` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     Fieldless result;
     *cast(ubyte*) &result = 0xFF;
     cache.of(getter).call(&result, []);
@@ -1384,7 +1386,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_double_of_long` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long value = 6;
     double result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -1441,7 +1443,7 @@ unittest {
     assert(function_ !is null,
         "No `getThreeWords` method in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     ContextHiddenPointer instance;
     ContextHiddenPointer* receiver = &instance;
     ThreeWords result;
@@ -1509,7 +1511,7 @@ unittest {
     assert(function_ !is null,
         "No `sumFiveLongsThenMixed` method in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     ContextThenMixedSpill instance;
     ContextThenMixedSpill* receiver = &instance;
     long a0 = 1, a1 = 2, a2 = 3, a3 = 4, a4 = 5;
@@ -1572,7 +1574,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_memory_after_six` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     int[6] integers = [1, 2, 3, 4, 5, 6];
     FourWords value = FourWords(10, 20, 30, 40);
     int g = 7;
@@ -1618,7 +1620,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_packed_pair` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     PackedPair value = PackedPair(3, 39);
     long result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -1677,7 +1679,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_memoryTwoSpill` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long a0 = 1, a1 = 2, a2 = 3, a3 = 4, a4 = 5, a5 = 6;
     ThreeWords value = ThreeWords(70, 80, 90);
     long b0 = 100, b1 = 200;
@@ -1731,7 +1733,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_memory_with_sse` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     double x = 1.5;
     double y = 2.5;
     ThreeWords value = ThreeWords(10, 20, 30);
@@ -1807,7 +1809,7 @@ unittest {
         cast(TwentyBytes*) (base + pageSize - TwentyBytes.sizeof);
     *value = TwentyBytes(1, 2, 3, 4, 5);
 
-    PlanCache cache;
+    mixin planCache;
     int result;
     cache.of(function_).call(&result, [cast(const void*) value]);
 
@@ -1860,7 +1862,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_aligned_memory` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     AlignedMemory value = AlignedMemory(17, 31);
     cache.of(function_).call(null, [cast(const(void*)) &value]);
 
@@ -1891,7 +1893,7 @@ unittest {
         "No `snakebite_ut_aligned_memory_after_odd_stack_word` in the " ~
             "guest program");
 
-    PlanCache cache;
+    mixin planCache;
     AlignedMemory value = AlignedMemory(17, 31);
     long[7] prefix = [1, 2, 3, 4, 5, 6, 7];
     cache.of(function_).call(null, [
@@ -1920,7 +1922,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_over_aligned` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     const plan = cache.of(function_);
     HostOverAligned value;
     size_t result;
@@ -1970,7 +1972,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_large_memory` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     LargeMemory value;
     foreach (i, ref word; value.words)
         word = i + 1;
@@ -2013,7 +2015,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_three_words_transform` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     ThreeWords value = ThreeWords(17, 31, 47);
     ThreeWords result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -2067,7 +2069,7 @@ unittest {
     assert(function_ !is null,
         "No `addOffset` method in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     ContextMemoryParam instance;
     instance.offset = 100;
     ContextMemoryParam* receiver = &instance;
@@ -2128,7 +2130,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_twoMemoryParams` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     ThreeWords first = ThreeWords(1, 2, 3);
     FourWords second = FourWords(10, 20, 30, 40);
     cache.of(function_).call(null, [
@@ -2180,7 +2182,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_sixteen_bytes_aligned` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     SixteenBytesAligned value = SixteenBytesAligned(3, 39, 5);
     long result;
     cache.of(function_).call(&result, [cast(const void*) &value]);
@@ -2216,7 +2218,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixed_both_files_full` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long[6] integers = [1, 2, 3, 4, 5, 6];
     double[8] floatings = [1, 1, 1, 1, 1, 1, 1, 1];
     MixedPair value = MixedPair(7, 1.5);
@@ -2266,7 +2268,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_externDMixedScalarSpill` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     long a = 1;
     MixedPair value = MixedPair(7, 1.5);
     long j0 = 10, j1 = 20, j2 = 30, j3 = 40, j4 = 50, j5 = 60;
@@ -2308,7 +2310,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_mixed_reversed_after_six` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     int[6] integers = [1, 2, 3, 4, 5, 6];
     MixedPairReversed value = MixedPairReversed(2.0, 37);
     long result;
@@ -2350,7 +2352,7 @@ unittest {
         "No `snakebite_ut_mixed_reversed_after_eight_doubles` in the " ~
             "guest program");
 
-    PlanCache cache;
+    mixin planCache;
     double[8] x = [1, 1, 1, 1, 1, 1, 1, 1];
     MixedPairReversed value = MixedPairReversed(2.0, 37);
     long result;
@@ -2414,7 +2416,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_memory_and_mixed` in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     int[6] integers = [1, 2, 3, 4, 5, 6];
     MemoryTriple m = MemoryTriple(1, 2, 3);
     MixedPair value = MixedPair(7, 1.5);
@@ -2600,7 +2602,7 @@ unittest {
         }
     }, "answer");
 
-    PlanCache cache;
+    mixin planCache;
     int[10] values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     void*[10] arguments;
     foreach (i, ref value; values)
@@ -2628,7 +2630,7 @@ unittest {
         }
     }, "answer");
 
-    PlanCache cache;
+    mixin planCache;
     double[9] values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
     void*[9] arguments;
     foreach (i, ref value; values)
@@ -2666,7 +2668,7 @@ unittest {
 
     site.extraArgumentTypes[0].toString.should == "double";
 
-    PlanCache cache;
+    mixin planCache;
     double[9] values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
     void*[9] arguments;
     foreach (i, ref value; values)
@@ -2704,7 +2706,7 @@ unittest {
         }
     }, "answer");
 
-    PlanCache cache;
+    mixin planCache;
     int tag = 3;
     VariadicMixedPair value = VariadicMixedPair(7, 2.5);
     long result;
@@ -2753,7 +2755,7 @@ unittest {
     auto siteOne = variadicCallSiteOf(oneWrapper);
     auto siteThree = variadicCallSiteOf(threeWrapper);
 
-    PlanCache cache;
+    mixin planCache;
 
     int countOne = 1;
     int valueOne = 41;
@@ -2797,7 +2799,7 @@ unittest {
         }
     }, "format");
 
-    PlanCache cache;
+    mixin planCache;
     char[32] buffer;
     char* bufferPtr = buffer.ptr;
     size_t n = buffer.length;
@@ -2883,7 +2885,7 @@ unittest {
         }
     }, "answer");
 
-    PlanCache cache;
+    mixin planCache;
     TypeInfo[7] elementTypes = [
         typeid(int), typeid(int), typeid(int), typeid(int),
         typeid(int), typeid(int), typeid(int),
@@ -2933,7 +2935,7 @@ unittest {
     auto siteOne = variadicCallSiteOf(oneWrapper);
     auto siteThree = variadicCallSiteOf(threeWrapper);
 
-    PlanCache cache;
+    mixin planCache;
 
     TypeInfo[1] oneElementTypes = [typeid(int)];
     auto vArgumentsOne = typeInfoTupleOf(oneElementTypes[]);
@@ -3004,7 +3006,7 @@ unittest {
     assert(call !is null && call.f !is null,
         "Expected a resolved call in `answer`");
 
-    PlanCache cache;
+    mixin planCache;
     int[3] values = [3, 4, 5];
     int[] slice = values[];
     int result;
@@ -3063,7 +3065,7 @@ unittest {
         }
     }, "answer");
 
-    PlanCache cache;
+    mixin planCache;
     TypeInfo[1] elementTypes = [typeid(PlanPoint)];
     auto vArguments = typeInfoTupleOf(elementTypes[]);
 

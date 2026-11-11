@@ -78,6 +78,12 @@ public abstract class Backend {
         _program = program;
     }
 
+    // The storage of the start data of this backend. The address does not
+    // change. `startData` fills it.
+    protected abstract ref StartData startDataStorage();
+
+    private shared bool _startBuilt;
+
     // Ends the owner's execution-state lifetime. Active calls keep their
     // state until return or unwind. Later callbacks can still enter the
     // reachable backend, and release their state when they finish. Guest
@@ -153,15 +159,12 @@ public abstract class Backend {
 
                 // `buildStartData` throws before it assigns, so a failure
                 // leaves no half-built data and the next call builds again.
-                _startData = buildStartData(
+                startDataStorage = buildStartData(
                     cast(Program) _program, &compiledFunction, &staticStorage);
                 atomicStore!(MemoryOrder.rel)(_startBuilt, true);
             });
-        return _startData;
+        return startDataStorage;
     }
-
-    private StartData _startData;
-    private shared bool _startBuilt;
 
     // Execute one synthesised `string`-returning function and return its
     // result. The guest renders the value itself (`std.conv.text`), so the

@@ -35,6 +35,16 @@ shared static this() {
     testJit = JitSetting(!args.canFind("--no-jit"), args.canFind("--eager-jit"));
 }
 
+// Declares `planStore` and `cache`, a `PlanCache` over a `CallPlanStore` with
+// no dependency image, in the scope that mixes it in.
+public mixin template planCache() {
+    import snakebite.ffi.callplanstore: CallPlanStore;
+    import snakebite.ffi: PlanCache;
+
+    CallPlanStore planStore = CallPlanStore(null);
+    PlanCache cache = PlanCache(&planStore);
+}
+
 // A handle on a new backend of type `B` for `program`. A `Bytecode` backend
 // gets the JIT setting of this run of `bin/ut`.
 public Owned!B ownedBackend(B)(const Program program) {

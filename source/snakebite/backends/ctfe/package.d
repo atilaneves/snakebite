@@ -8,12 +8,19 @@ private:
 public final class Ctfe: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import snakebite.backends.api: DeclarationHandle;
+    import snakebite.start.data: StartData;
     import snakebite.program: Program;
     import snakebite.start.data: FunctionHandle;
     import snakebite.failure.report: SnakebiteException;
 
+    private StartData _startData;
+
     public this(const Program program) {
         super(program);
+    }
+
+    protected override ref StartData startDataStorage() {
+        return _startData;
     }
 
     public override void call(

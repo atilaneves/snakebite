@@ -3,6 +3,7 @@ module ut.backends.call.ffi;
 
 import ut.backends;
 import snakebite.program: Program;
+import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi: PlanCache;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
@@ -640,7 +641,7 @@ unittest {
     assert(function_ !is null,
         "No `snakebite_ut_dynamic_array` function in the guest program");
 
-    PlanCache cache;
+    mixin planCache;
     ubyte[] result;
     cache.of(function_).call(&result, []);
 

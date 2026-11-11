@@ -11,6 +11,9 @@ import dmd.func: FuncDeclaration;
 import dmd.dsymbol: Dsymbol;
 import dmd.declaration: VarDeclaration;
 import snakebite.language.layout.variables: forEachRuntimeVariable;
+import snakebite.native.staticstore: StaticStore;
+import snakebite.stack.tls: TlsSlots;
+import snakebite.host.threads: heapNew;
 import snakebite.language.statics.data: NativeData;
 import std.conv: text;
 import core.exception: AssertError;
@@ -39,7 +42,9 @@ static foreach (rootOwned; [true, false]) {
             });
         assert(variable !is null);
         int nativeValue = 7;
+        auto store = StaticStore(() => heapNew!TlsSlots);
         auto data = NativeData(
+            &store,
             &ownership.isRootOwned,
             (declaration) => declaration,
             (declaration) => cast(void*) &nativeValue,
@@ -690,4 +695,42 @@ private FuncDeclaration guestFunction(Module guestModule, in string name) {
         text("No function `", name, "` in the guest program"));
 
     return function_;
+}
+
+
+// A C variadic call through a function pointer: the plan that the
+// interpreter prepares for one execution of it is not kept after the call.
+@("steadyState.indirectVariadicCall.retainsNothing")
+@Tags(Interpreter.stringof, "measures-process-heap")
+unittest {
+    import core.memory: GC;
+
+    auto guestModule = parseSnippet(q{
+        extern(C) int snprintf(char*, size_t, const(char)*, ...);
+        long viaPointer(long trips) {
+            auto format = &snprintf;
+            char[32] buffer;
+            long sum = 0;
+            for (long i = 0; i < trips; ++i)
+                sum += format(buffer.ptr, buffer.length, "%d", 7);
+            return sum;
+        }
+    });
+    auto backend = Owned!Interpreter(Program([guestModule]));
+    auto function_ = guestFunction(guestModule, "viaPointer");
+    long result;
+    long trips = 10;
+    backend.call(function_, &result, [cast(void*) &trips]);
+    result.should == 10;
+
+    GC.collect;
+    const before = GC.stats.usedSize;
+    trips = 100_000;
+    backend.call(function_, &result, [cast(void*) &trips]);
+    result.should == 100_000;
+    GC.collect;
+    const after = GC.stats.usedSize;
+
+    // Much less than one byte per call: what is left is noise.
+    (cast(long) after - cast(long) before).shouldBeSmallerThan(100_000);
 }
