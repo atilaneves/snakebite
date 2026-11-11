@@ -1257,12 +1257,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         ExceptionHandler[] exceptionHandlers;
-        foreach (pending; _exceptionHandlers)
-            exceptionHandlers ~= ExceptionHandler(
-                pending._type, null, null, null, pending._catchOffset, null,
-                pending._bodyStart, pending._bodyEnd, pending._handler,
-                pending._cleanupEnd,
-            );
+        foreach (pending; _exceptionHandlers) {
+            ExceptionHandler handler;
+            handler.type = pending._type;
+            handler.catchOffset = pending._catchOffset;
+            handler.bodyStartIndex = pending._bodyStart;
+            handler.bodyEndIndex = pending._bodyEnd;
+            handler.handlerIndex = pending._handler;
+            handler.cleanupEndIndex = pending._cleanupEnd;
+            exceptionHandlers ~= handler;
+        }
 
         optimizeStaticLoads;
         fuseReturns;
