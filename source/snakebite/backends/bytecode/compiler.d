@@ -31,6 +31,7 @@ import snakebite.language.checks:
 import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 import snakebite.language.storage.resolver: planSlice;
 import snakebite.ffi: CallbackBridge, CallbackCall, PlanCache;
+import snakebite.ffi.callplan: CallPlan;
 import std.typecons: Flag, No, Yes;
 
 
@@ -92,7 +93,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // reused by every `new T[](n)`/array literal any function compiles -
     // the same `rawPlanOf` a bounds hook already goes through, so this
     // costs nothing new besides the one symbol lookup.
-    private const(void)* _allocatorPlan;
+    private const(CallPlan)* _allocatorPlan;
     private RuntimeTypes _runtimeTypes;
     // Guest classes never reach dmd's own code generator, so nothing ever
     // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
@@ -328,8 +329,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // `rawPlanOf` a bounds hook already goes through - never a private
     // bump allocator or free list of this compiler's own, and never a
     // signature this module hardcodes: the VM that runs the plan reads
-    // it back only as an opaque `CallSite.native` payload.
-    package const(void)* allocatorPlan() {
+    // it back only as a `CallSite.native` payload.
+    package const(CallPlan)* allocatorPlan() {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
         if (auto found = atomicLoad!(MemoryOrder.acq)(_allocatorPlan))
@@ -4027,7 +4028,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(expression.loc.linnum, uint.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.assertMessage);
-        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        _callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
 
@@ -4067,7 +4068,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 Address(functionKind, call.function_), size_t.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
-        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        _callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
 
@@ -7170,7 +7171,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         evalInto(expression.e2, valueOffset, valueFacts.size);
 
         _callSites ~= CallSite.native(
-            cast(const(void)*) plan,
+            plan,
             [
                 Arg(arrayOffset, 0, size_t.sizeof),
                 Arg(valueOffset, 0, valueFacts.size),
@@ -9870,7 +9871,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitRuntimeTypeInfoConstant(
             expression.type, info, size_t.sizeof);
         _callSites ~= CallSite.native(
-            cast(const(void)*) plan,
+            plan,
             [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
             2 * size_t.sizeof);
         emit(&opCall, destOffset, _callSites.length - 1, 0);
@@ -10557,14 +10558,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 if (hasNativeSymbol) {
                     const plan = preparation.prepare(_bytecode._plans, callee);
                     return CallSite.native(
-                        cast(const(void)*) plan, args, returnWidth);
+                        plan, args, returnWidth);
                 }
                 // The returned delegate outlives this compiler, so it
                 // captures the backend and not `this`; `PlanCache` is a
                 // struct.
                 auto bytecode = _bytecode;
                 return CallSite.native(
-                    deferred(() => cast(const(void)*)
+                    deferred(() =>
                         preparation.prepare(bytecode._plans, callee)),
                     args, returnWidth);
             });
@@ -10876,7 +10877,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const nativePlan = isVariadic
-            ? cast(const(void)*) preparation.prepareAtAddress(
+            ? preparation.prepareAtAddress(
                 _bytecode._plans, null, hasContext)
             : _bytecode._plans.signatureOf(functionType, hasContext);
         auto site = CallSite.indirect(
@@ -11112,7 +11113,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(fileOffset, 0, size_t.sizeof),
             Arg(lineOffset, 0, uint.sizeof),
         ] ~ extraArgs;
-        _callSites ~= CallSite.native(cast(const(void)*) plan, args, 0);
+        _callSites ~= CallSite.native(plan, args, 0);
         ++_hookSites;
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
