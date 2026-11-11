@@ -6214,6 +6214,62 @@ def test_fixture_fails_a_test_with_a_plain_dub_name(
         shutil.rmtree(cache / plain, ignore_errors=True)
 
 
+def test_saved_program_runs_as_from_ram(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        import core.stdc.stdio: printf;
+        int main() { printf("saved and loaded\n"); return 3; }
+        """)
+    saved = tmp_path / "main.sbc"
+    ram = run_backend("bytecode", app, tmp_path)
+    save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
+    load = run_sb(f"--load={saved}", cwd=tmp_path)
+    assert ram.returncode == 3, output(ram)
+    assert guest_lines(ram) == ["saved and loaded"]
+    assert (save.returncode, save.stdout, save.stderr) == (0, "", ""), output(save)
+    assert (load.returncode, guest_lines(load), load.stderr) == (
+        ram.returncode, guest_lines(ram), ram.stderr)
+
+
+def test_save_refuses_a_program_the_saved_path_cannot_handle(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        unittest { assert(true); }
+        int main() { return 0; }
+        """)
+    saved = tmp_path / "main.sbc"
+    save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
+    assert save.returncode != 0, output(save)
+    assert "cannot save" in save.stderr, output(save)
+    assert not saved.exists()
+
+
+def test_load_refuses_a_file_from_another_build(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    write(app / "main.d", r"""
+        module main;
+        import core.stdc.stdio: printf;
+        int main() { printf("hello\n"); return 0; }
+        """)
+    saved = tmp_path / "main.sbc"
+    save = run_sb("--no-optimise-image", f"--save={saved}", str(app), cwd=tmp_path)
+    assert save.returncode == 0, output(save)
+    data = bytearray(saved.read_bytes())
+    # The header is an 8-byte magic, a 4-byte version and a 4-byte length,
+    # then the build ID.
+    first_build_id_byte = 16
+    data[first_build_id_byte] ^= 0xFF
+    saved.write_bytes(bytes(data))
+    load = run_sb(f"--load={saved}", cwd=tmp_path)
+    assert load.returncode == 1, output(load)
+    assert "was saved by another build of sb" in load.stderr, output(load)
+    assert load.stdout == ""
+
+
 # The tests can run in parallel (see build/pytest-workers.sh) because the
 # state that they share, the `.snakebite` directory and the dub package store,
 # is keyed by project path and published with an atomic rename.
