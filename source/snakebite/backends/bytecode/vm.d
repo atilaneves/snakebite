@@ -12,7 +12,8 @@ import snakebite.ffi.callplan:
     CallPlan, directWordCallTarget, executeCallPlan, executeHostCallPlan,
     executeIndirectCallPlan, guestWordOf;
 import snakebite.native.signature: ArgumentFlow, Shape, Signature;
-import snakebite.backends.bytecode.relocation: Address, Place, Reloc, Target;
+import snakebite.backends.bytecode.relocation:
+    Address, handlerRelocated, Place, plain, Reloc, relocated, setBy, Target;
 import snakebite.builtin.call: BuiltinCall;
 import snakebite.stack.hostcall: HostCallLayout;
 import snakebite.failure.halt: HaltAction, isHalt;
@@ -38,9 +39,9 @@ private alias storeWidth = storeIntegral;
 // same-frame copy, just crossing into a frame that does not exist yet
 // when the call instruction runs.
 public struct Arg {
-    package size_t callerOffset;
-    package size_t calleeOffset;
-    package size_t width;
+    @plain package size_t callerOffset;
+    @plain package size_t calleeOffset;
+    @plain package size_t width;
 }
 
 
@@ -232,24 +233,30 @@ public struct CallSite {
     // signature the call site expects of its callee: null for every call
     // that is neither through a value nor virtual.
     public struct ValueArguments {
+        @relocated(Target.Kind.signature, Place.Section.callSite,
+            Place.Field.valueSignature)
         package const(Signature)* signature;
-        package Arg[] surplus;
-        package const(Shape)[] surplusShapes;
+        @plain package Arg[] surplus;
+        @plain package const(Shape)[] surplusShapes;
     }
 
-    package Kind kind;
-    package ValueArguments value;
-    package Arg[] args;
-    package Arg[] nativeArgs;
-    package size_t returnWidth;
+    @plain package Kind kind;
+    @plain package ValueArguments value;
+    @plain package Arg[] args;
+    @plain package Arg[] nativeArgs;
+    @plain package size_t returnWidth;
+    @relocated(Target.Kind.functionWord, Place.Section.callSite,
+        Place.Field.callee)
     package const(Function)* callee;
+    @relocated(Target.Kind.callback, Place.Section.callSite,
+        Place.Field.prepareGuest)
     package const(Function)* delegate() prepareGuest;
     // `size_t.max` unless the caller laid this call out in a `Window`.
-    package size_t windowSlot = size_t.max;
-    package size_t windowDisp;
-    package size_t windowScratch;
-    package size_t windowEnd;
-    package uint windowAlignment;
+    @plain package size_t windowSlot = size_t.max;
+    @plain package size_t windowDisp;
+    @plain package size_t windowScratch;
+    @plain package size_t windowEnd;
+    @plain package uint windowAlignment;
 
     // What `opCall` needs of a `guest` site whose callee is compiled, in
     // one place. The fields other than `state` are valid once `state` is
@@ -262,22 +269,22 @@ public struct CallSite {
             notEligible,
         }
 
-        package uint state;
-        package const(Function)* callee;
-        package size_t frameBytes;
-        package size_t frameOffset;
-        package uint alignment;
+        @plain package uint state;
+        @plain package const(Function)* callee;
+        @plain package size_t frameBytes;
+        @plain package size_t frameOffset;
+        @plain package uint alignment;
         // Where the call stores the address of the result, and where it
         // stores the base of the call windows of the callee, both from the
         // frame of the callee. A callee that keeps neither gets them in a
         // field of its activation that nothing has read yet.
-        package size_t placeStore;
-        package size_t windowStore;
+        @plain package size_t placeStore;
+        @plain package size_t windowStore;
         // Where that base lies from the activation of the callee.
-        package size_t windowBase;
+        @plain package size_t windowBase;
         // How far past the activation the committed bytes must reach: the
         // frame and the call windows of the callee.
-        package size_t reachBytes;
+        @plain package size_t reachBytes;
 
         // Copies every field but `state` and `callee` from `facts`.
         package void adopt(in FastCall facts) {
@@ -318,16 +325,16 @@ public struct CallSite {
         }
     }
 
-    package FastCall fast;
+    @plain package FastCall fast;
 
     static if (jitSupported && chainedDispatch) {
         // The first eligible indirect target. The entry publishes the
         // callee and adjustment. Only the thread that claims callee writes
         // the other fields.
         package struct IndirectTarget {
-            package const(void)* entry;
-            package const(Function)* callee;
-            package ptrdiff_t adjustment;
+            @plain package const(void)* entry;
+            @plain package const(Function)* callee;
+            @plain package ptrdiff_t adjustment;
 
             pragma(inline, true)
             private void remember(const(void)* entry, const(Function)* callee,
@@ -344,7 +351,7 @@ public struct CallSite {
             }
         }
 
-        package IndirectTarget indirectTarget;
+        @plain package IndirectTarget indirectTarget;
     }
 
     // Compiles the callee of a `guest` site on its first call and keeps it
@@ -410,7 +417,11 @@ public struct CallSite {
         return true;
     }
 
+    @relocated(Target.Kind.nativePlan, Place.Section.callSite,
+        Place.Field.nativePlan)
     package const(CallPlan)* nativePlan;
+    @relocated(Target.Kind.callback, Place.Section.callSite,
+        Place.Field.prepareNativePlan)
     package const(CallPlan)* delegate() prepareNativePlan;
 
     // A `native` site whose plan is zero to three word arguments and no
@@ -437,18 +448,20 @@ public struct CallSite {
         twoWordsIndirectPairResult,
     }
 
-    package uint directState;
-    package const(void)* directTarget;
-    package bool directSwapped;
-    package ubyte[3] directOrder;
-    package Load[3] directLoads;
+    @plain package uint directState;
+    @plain package const(void)* directTarget;
+    @plain package bool directSwapped;
+    @plain package ubyte[3] directOrder;
+    @plain package Load[3] directLoads;
+    @relocated(Target.Kind.hostSymbol, Place.Section.callSite,
+        Place.Field.builtinEntry)
     package BuiltinCall builtinEntry;
-    package size_t calleeSlotOffset;
-    package bool hasContext;
-    package size_t cleanupStartIndex = size_t.max;
-    package size_t cleanupEndIndex = size_t.max;
-    package const(void)* cleanupStart;
-    package const(void)* cleanupEnd;
+    @plain package size_t calleeSlotOffset;
+    @plain package bool hasContext;
+    @plain package size_t cleanupStartIndex = size_t.max;
+    @plain package size_t cleanupEndIndex = size_t.max;
+    @setBy("bindInstructionReferences") package const(void)* cleanupStart;
+    @setBy("bindInstructionReferences") package const(void)* cleanupEnd;
 
     public static CallSite temporary() {
         CallSite site;
@@ -461,9 +474,9 @@ public struct CallSite {
 // Both offsets and the width are resolved by the compiler before the VM
 // runs.
 package struct ClosureSlot {
-    package size_t sourceOffset;
-    package size_t closureOffset;
-    package size_t width;
+    @plain package size_t sourceOffset;
+    @plain package size_t closureOffset;
+    @plain package size_t width;
 }
 
 
@@ -841,9 +854,9 @@ private const(Instruction)* executeCall(
 }
 
 
-private struct SplitOperand {
-    uint displacement;
-    uint addressSlot;
+package struct SplitOperand {
+    @plain uint displacement;
+    @plain uint addressSlot;
 }
 
 static assert(SplitOperand.sizeof == size_t.sizeof);
@@ -869,7 +882,7 @@ public struct Instruction {
     // the compiler from mutable data-segment storage.
     package enum size_t immutableSource = 1;
 
-    package Handler handler;
+    @handlerRelocated package Handler handler;
     // What a field means is decided by the opcode alone - never dmd's own
     // numeric types, so this VM has none of them to import. `0` means an
     // opcode does not use a given field. The roles a field plays, across
@@ -905,18 +918,21 @@ public struct Instruction {
     //    sees it - then rewrites each index to the address it names, once
     //    the function's instructions have stopped growing and so can no
     //    longer move.
+    // The file holds each of the three as the instruction index or the
+    // relocation that `rolesOf` says it is, or as it is. The split forms are
+    // the same bytes.
     union {
-        package size_t destination;
-        private SplitOperand splitDestination;
+        @plain package size_t destination;
+        @plain package SplitOperand splitDestination;
     }
     union {
-        package size_t source;
-        private SplitOperand splitSource;
+        @plain package size_t source;
+        @plain package SplitOperand splitSource;
     }
-    package size_t width;
+    @plain package size_t width;
     union {
-        package size_t sourceWidth;
-        private SplitOperand splitRight;
+        @plain package size_t sourceWidth;
+        @plain package SplitOperand splitRight;
     }
 
     public this(Handler handler, size_t destination = 0, size_t source = 0,
@@ -940,10 +956,12 @@ public struct Instruction {
 // VM never has to reach into dmd's own `Loc`. Assertions use all fields;
 // range checks only need the source location.
 package struct AssertSite {
-    package string message;
-    package string file;
-    package size_t line;
+    @plain package string message;
+    @plain package string file;
+    @plain package size_t line;
     // Not null for a check that halts rather than throws.
+    @relocated(Target.Kind.hostSymbol, Place.Section.assertSite,
+        Place.Field.halt)
     package HaltAction halt;
 }
 
@@ -953,70 +971,81 @@ package struct AssertSite {
 // takes the address of an instruction from `Function.instructions` there.
 // `cleanupEndIndex` is `size_t.max` when there is no cleanup end.
 package struct ExceptionHandler {
+    @relocated(Target.Kind.typeInfo, Place.Section.exceptionHandler,
+        Place.Field.type)
     package TypeInfo_Class type;
-    package size_t catchOffset;
-    package size_t bodyStartIndex;
-    package size_t bodyEndIndex;
-    package size_t handlerIndex;
-    package size_t cleanupEndIndex = size_t.max;
+    @plain package size_t catchOffset;
+    @plain package size_t bodyStartIndex;
+    @plain package size_t bodyEndIndex;
+    @plain package size_t handlerIndex;
+    @plain package size_t cleanupEndIndex = size_t.max;
 }
 
 
 public struct Function {
-    package Instruction[] instructions;
-    package long[] constants;
-    package CallSite[] callSites;
-    package AssertSite[] assertSites;
-    package ExceptionHandler[] exceptionHandlers;
-    package size_t frameSize;
-    package uint frameAlignment;
+    @plain package Instruction[] instructions;
+    @plain package long[] constants;
+    @plain package CallSite[] callSites;
+    @plain package AssertSite[] assertSites;
+    @plain package ExceptionHandler[] exceptionHandlers;
+    @plain package size_t frameSize;
+    @plain package uint frameAlignment;
     // `size_t.max` means this function's locals stay in its activation
     // frame. Otherwise this private frame slot holds its closure pointer.
-    package size_t closureOffset = size_t.max;
+    @plain package size_t closureOffset = size_t.max;
     // The hidden context slot is copied into the first word of the closure.
-    package size_t contextOffset = size_t.max;
-    package size_t closureSize;
-    package uint closureAlignment = 1;
-    package ClosureSlot[] closureSlots;
-    package size_t[] parameterOffsets;
+    @plain package size_t contextOffset = size_t.max;
+    @plain package size_t closureSize;
+    @plain package uint closureAlignment = 1;
+    @plain package ClosureSlot[] closureSlots;
+    @plain package size_t[] parameterOffsets;
     // Where a C-variadic function reads its cursor, and how many parameters
     // it declares before it; `size_t.max` for any other function.
-    package size_t cursorOffset = size_t.max;
-    package size_t declaredParameters;
+    @plain package size_t cursorOffset = size_t.max;
+    @plain package size_t declaredParameters;
+    @relocated(Target.Kind.signature, Place.Section.function_,
+        Place.Field.signature)
     package const(Signature)* signature;
-    package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
+    @plain package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
-    package HostCallLayout hostCall;
+    @plain package HostCallLayout hostCall;
     // Every word of this function that holds a process address, except the
-    // handler of each instruction.
-    package Reloc[] relocs;
+    // handler of each instruction. The compiler records them only when
+    // `Bytecode.recordRelocs` is set. A file holds the list; a load applies
+    // it and drops it.
+    @plain package Reloc[] relocs;
+    // The mangled name of the function, set when the compiler records
+    // relocations, so that a loaded function can name its JIT code.
+    @plain package const(char)[] mangledName;
     // `size_t.max` unless this function lays out call windows. Otherwise
     // this frame slot holds the address where they start, and `windowBytes`
     // is how far they reach from it.
-    package size_t windowSlot = size_t.max;
-    package size_t windowBytes;
+    @plain package size_t windowSlot = size_t.max;
+    @plain package size_t windowBytes;
     // Facts about this function as a callee, fixed once it is compiled.
     // Whether a caller can write the arguments into a call window: the
     // layout has no D-variadic slots, no frame asks for a page of
     // alignment, and there is no closure. The signature to compare against
     // is `signature`, and the context slot, if any, is `contextOffset`.
-    package bool windowCallable;
+    @plain package bool windowCallable;
     // `frameAlignment`, raised to what an `Activation` needs.
-    package uint activationAlignment = uint(Activation.alignof);
+    @setBy("fixWindowFacts") package uint activationAlignment
+        = uint(Activation.alignof);
 
     // What a call of this function through a call window needs, but for
     // `callee` and `state`.
-    package CallSite.FastCall windowFacts;
+    @setBy("fixWindowFacts") package CallSite.FastCall windowFacts;
 
     // Tier-up. `jitHeat` wraps around after `jitThreshold` events; `jitState`
     // is a `JitTier`.
-    package uint jitHeat;
-    package uint jitState;
+    @setBy("prepareForExecution") package uint jitHeat;
+    @setBy("prepareForExecution") package uint jitState;
     // Whether calls of this function count towards `jitHeat`.
-    package bool jitCounts;
-    package const(char)[] jitName;
+    @setBy("prepareForExecution") package bool jitCounts;
+    @setBy("prepareForExecution") package const(char)[] jitName;
     // The JIT state of the `Bytecode` instance that compiled this function.
     static if (jitSupported)
+        @setBy("prepareForExecution")
         package imported!"snakebite.backends.bytecode.jit".JitInstance* jit;
 
     package void fixWindowFacts() {
@@ -1086,6 +1115,14 @@ package void recordCallSiteRelocs(
         Target.Kind.hostSymbol, cast(size_t) site.builtinEntry);
     recordAddress(relocs, section, index, Place.Field.valueSignature,
         Target.Kind.signature, cast(size_t) site.value.signature);
+}
+
+package void recordFunctionRelocs(
+    ref Reloc[] relocs, in Function function_,
+) {
+    // `signature` is the only address field of the `Function` itself.
+    recordAddress(relocs, Place.Section.function_, 0, Place.Field.signature,
+        Target.Kind.signature, cast(size_t) function_.signature);
 }
 
 package void recordAssertSiteRelocs(
@@ -4847,6 +4884,16 @@ package string bindInstructionReferences(ref Function function_) {
     return null;
 }
 
+// A handler as a file holds it: the distance from `opReturnVoid`. The
+// distance means something only to the build that made it.
+package ptrdiff_t handlerOffset(in Instruction.Handler handler) {
+    return cast(ptrdiff_t) handler - cast(ptrdiff_t) &opReturnVoid;
+}
+
+package Instruction.Handler handlerAt(in ptrdiff_t offset) {
+    return cast(Instruction.Handler) (cast(ptrdiff_t) &opReturnVoid + offset);
+}
+
 // The field of `instruction` that holds the instruction of the same function
 // where control continues, or null.
 package size_t* branchTargetField(ref Instruction instruction) {
@@ -5487,6 +5534,15 @@ static if (jitSupported) {
             function_.jitName = name;
     }
 
+    // The handler that `handler` is the counting twin of, or `handler`.
+    package Instruction.Handler withoutCount(
+        in Instruction.Handler handler,
+    ) nothrow {
+        if (const original = handler in _countingTwins.uncountedOf)
+            return cast(Instruction.Handler) *original;
+        return cast(Instruction.Handler) handler;
+    }
+
     // For the paths that cannot know at compile time whether the JIT is on.
     pragma(inline, true)
     private void countCallIfOn(const(Function)* callee) {
@@ -6124,6 +6180,12 @@ static if (jitSupported) {
 
     package void prepareForExecution(Function*, in JitSetting, void*,
         lazy const(char)[]) pure nothrow @nogc @safe {}
+
+    package Instruction.Handler withoutCount(
+        in Instruction.Handler handler,
+    ) pure nothrow @nogc @trusted {
+        return cast(Instruction.Handler) handler;
+    }
 
     private void countCall(const(Function)*) pure nothrow @nogc @safe {}
 

@@ -79,6 +79,8 @@ public struct Address {
 // Where a word that holds an address sits in a `Function`.
 public struct Place {
     public enum Section : ubyte {
+        // The `Function` itself.
+        function_,
         instruction,
         constant,
         callSite,
@@ -106,6 +108,8 @@ public struct Place {
         halt,
         // `ExceptionHandler`.
         type,
+        // `Function`.
+        signature,
     }
 
     // The two enums come first so that a `Place` is 16 bytes.
@@ -122,3 +126,43 @@ public struct Reloc {
 }
 
 static assert(Reloc.sizeof == 32, "a function keeps one Reloc for each address");
+
+
+// How each field of a compiled program reaches a file. Every field of a type
+// that a `Function` holds says it where it is declared, and a field that
+// says nothing stops the build of the file writer.
+//
+// `plain`: the field is data. It is written as it is. A field that can hold
+// an address (a pointer, a delegate or a class reference) is plain only for
+// the value null: nothing but a run writes an address into it.
+public struct Plain {}
+public enum plain = Plain();
+
+// The field holds an address of this process. It is not written: a `Reloc`
+// of the function names what it points at, and a load puts the address of the
+// same thing in the new process back. The `section` and `field` are where
+// the `Reloc` says it sits. The handler of an instruction has no `Reloc`:
+// every instruction has one, so the file holds it by itself.
+public struct Relocated {
+    public Target.Kind kind;
+    public Place.Section section;
+    public Place.Field field;
+}
+
+public Relocated relocated(
+    in Target.Kind kind, in Place.Section section, in Place.Field field,
+) @safe pure nothrow @nogc {
+    return Relocated(kind, section, field);
+}
+
+public enum handlerRelocated = Relocated(Target.Kind.handler);
+
+// The field is not in the file. The function `name` sets it after a load,
+// and the same function sets it after a compile.
+public struct SetBy {
+    public string name;
+}
+
+public SetBy setBy(in string name) @safe pure nothrow @nogc {
+    return SetBy(name);
+}

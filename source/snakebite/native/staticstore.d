@@ -22,6 +22,11 @@ public struct StaticBlocks {
     private void[][] _blocks;
     private void[] _available;
 
+    // Whether nothing has reserved a byte.
+    public bool isEmpty() const @safe pure nothrow @nogc {
+        return _blocks.length == 0;
+    }
+
     // The caller holds the compiler lock.
     public void[] reserve(in TypeFacts facts) @safe pure nothrow {
         // Slots cannot move: constants can hold addresses of other slots.
@@ -67,6 +72,11 @@ public struct StaticStore {
 
         foreach (block; _stringBlocks)
             free(block);
+    }
+
+    // Whether nothing has reserved a byte or adopted a string.
+    public bool isEmpty() const @safe pure nothrow @nogc {
+        return _blocks.isEmpty && _stringBlocks.length == 0;
     }
 
     // The caller holds the compiler lock.

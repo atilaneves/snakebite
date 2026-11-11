@@ -6,7 +6,7 @@ private:
 
 import snakebite.program: Program;
 import snakebite.start.data:
-    FunctionHandle, GateStorage, ModuleStart, StartData;
+    dependencyModulesOf, FunctionHandle, GateStorage, ModuleStart, StartData;
 
 
 // What the builder asks of a backend.
@@ -48,8 +48,7 @@ public StartData buildStartData(
     if (data.betterC)
         return data;
 
-    data.dependencyModules = program.dependencyImage is null
-        ? null : program.dependencyImage.deferredModules;
+    data.dependencyModules = dependencyModulesOf(program.dependencyImage);
     addModules(data, compiledFunction, staticStorage, moduleStorage, program);
     return data;
 }

@@ -46,6 +46,32 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
 }
 
+// Compiles every function of the root modules that has a body. Named
+// distinctly from the other collectors: see `Collector` in `imagesource.d`.
+private extern(C++) final class EagerCompileCollector
+        : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
+    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.declarationcollector: DeclarationCollector;
+    alias visit = DeclarationCollector.visit;
+
+    private Bytecode _bytecode;
+    private bool[FuncDeclaration] _visited;
+
+    this(Bytecode bytecode) {
+        _bytecode = bytecode;
+    }
+
+    override void visit(FuncDeclaration function_) {
+        if (function_ in _visited)
+            return;
+        _visited[function_] = true;
+        if (function_.fbody is null || !_bytecode.isGuestFunction(function_))
+            return;
+        _bytecode.compileFunction(function_);
+        function_.fbody.accept(this);
+    }
+}
+
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
@@ -58,7 +84,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
     import snakebite.backends.bytecode.runner:
-        CompileStep, Runner, StartFunction;
+        CompileStep, Runner, StartFunction, wire;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
@@ -78,7 +104,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // Declared after `compiledProgram`, `_nativeData` and `_plans`, so that it
     // is destroyed before them: its states release through `_nativeData`,
     // and its callback entry reads `compiledProgram.plans`.
-    private Runner _runner;
+    private Runner _runner = void;
     private CallSelection _callSelection;
     // The index from a declaration to its function, which `compiledProgram`
     // owns. Keyed by pointer, not by value: a call site compiled while
@@ -150,10 +176,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
             (type, loc) => _nativeData.initialValue(type, loc));
-        _runner = Runner(jit, () => _nativeData.tlsSlots,
-            () => _nativeData.release,
-            () => compiledProgram.plans.callbacks.hasEntries);
-        compiledProgram.plans.bindCallbacks(&Runner.invokeCallback, &_runner);
+        wire(compiledProgram, _runner, jit);
     }
 
     protected override ref StartData startDataStorage() {
@@ -162,6 +185,78 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     protected override ModuleStart* moduleStartStorage(SourceModule module_) {
         return &moduleForD(module_).start;
+    }
+
+    // Compiles the whole program and writes it to `path`. The compile is the
+    // one a run makes, except that every function with a body compiles, not
+    // only those that run, and the compiler records the relocations. What a
+    // first run fills lazily is filled first: each start handle, and the callee
+    // of each guest call site. A function that does not compile ends the
+    // save with that error, and no file is written.
+    public void save(in string path, in string workingDirectory) {
+        import snakebite.backends.bytecode.file: Header, saveProgram;
+        import snakebite.image.preparation: generatorKey;
+
+        if (_compiled.length != 0)
+            internalFailure("a save starts with nothing compiled");
+        recordRelocs = true;
+
+        scope collector = new EagerCompileCollector(this);
+        foreach (module_; _program.rootModules)
+            (cast() module_).accept(collector); // DMD visitors need mutable nodes.
+        startData.eachHandle((handle) {
+            auto start = cast(StartFunction) handle;
+            start.compiled;
+        });
+        fillGuestCallSites;
+
+        const image = _program.dependencyImage;
+        saveProgram(compiledProgram,
+            Header(generatorKey, image is null ? "" : image.path,
+                workingDirectory),
+            path);
+    }
+
+    // Fills the callee of every guest call site, compiling the callees, until
+    // no function is new. The delegate that filled a site is then dropped, and
+    // the relocations of the call sites are recorded again.
+    private void fillGuestCallSites() {
+        import snakebite.backends.bytecode.vm: CallSite, recordCallSiteRelocs;
+        import snakebite.backends.bytecode.relocation: Place, Reloc;
+
+        size_t count() {
+            size_t total;
+            foreach (module_; compiledProgram._modules)
+                total += module_._functions.length;
+            return total;
+        }
+
+        size_t before;
+        do {
+            before = count;
+            // The lists grow while the loops run.
+            for (size_t m = 0; m < compiledProgram._modules.length; ++m)
+                for (size_t f = 0;
+                        f < compiledProgram._modules[m]._functions.length; ++f)
+                    foreach (ref site;
+                            compiledProgram._modules[m]._functions[f].callSites)
+                        if (site.kind == CallSite.Kind.guest
+                                && site.prepareGuest !is null) {
+                            site.cacheCallee;
+                            site.prepareGuest = null;
+                        }
+        } while (count != before);
+
+        foreach (module_; compiledProgram._modules)
+            foreach (function_; module_._functions) {
+                Reloc[] kept;
+                foreach (reloc; function_.relocs)
+                    if (reloc.place.section != Place.Section.callSite)
+                        kept ~= reloc;
+                foreach (index, ref site; function_.callSites)
+                    recordCallSiteRelocs(kept, index, site);
+                function_.relocs = kept;
+            }
     }
 
     // How many chunks of callback entries this instance's bridge has.
@@ -848,7 +943,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ExceptionHandler, Function,
         Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
         branchTargetField, recordAssertSiteRelocs, recordCallSiteRelocs,
-        recordExceptionHandlerRelocs, rolesOf,
+        recordExceptionHandlerRelocs, recordFunctionRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1326,6 +1421,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.hostCall = _layout.hostCall(
             cast(string) _function.toString);
         result.relocs = _relocs;
+        if (_bytecode.recordRelocs) {
+            import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+            recordFunctionRelocs(result.relocs, result);
+            result.mangledName = _function.mangledNameOf;
+        }
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
@@ -1999,7 +2100,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 case constant:
                     reloc.place.index += constantBase;
                     break;
-                case callSite, assertSite, exceptionHandler:
+                case function_, callSite, assertSite, exceptionHandler:
                     internalFailure("a copied body has no call, assertion or "
                         ~ "catch site");
             }

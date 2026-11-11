@@ -46,6 +46,15 @@ public struct ModuleStart {
     public GateStorage[] sharedGates;
     public GateStorage[] threadGates;
 
+    // Calls `visit` with each function handle of the module.
+    public void eachHandle(scope void delegate(FunctionHandle) visit) {
+        foreach (handles; [independentConstructors, sharedConstructors,
+                threadConstructors, sharedDestructors, threadDestructors,
+                unitTests])
+            foreach (handle; handles)
+                visit(handle);
+    }
+
     // Whether the module has a constructor or a destructor.
     public bool hasPhaseFunctions() const {
         return independentConstructors.length
@@ -67,6 +76,14 @@ public struct MainStart {
 }
 
 
+// The modules of the dependency image that a program runs on, or none.
+public const(ModuleInfo*)[] dependencyModulesOf(
+    in imported!"snakebite.image.dependency".DependencyImage* image,
+) {
+    return image is null ? null : image.deferredModules;
+}
+
+
 public struct StartData {
     public string programName;
     // A C-linkage `main` is the entry of the process, as the C runtime
@@ -81,4 +98,15 @@ public struct StartData {
     public FunctionHandle[] crtDestructors;
     public const(ModuleInfo*)[] dependencyModules;
     public MainStart main;
+
+    // Calls `visit` with each function handle of the program.
+    public void eachHandle(scope void delegate(FunctionHandle) visit) {
+        foreach (module_; modules)
+            module_.eachHandle(visit);
+        foreach (handles; [crtConstructors, crtDestructors])
+            foreach (handle; handles)
+                visit(handle);
+        if (main.present)
+            visit(main.function_);
+    }
 }

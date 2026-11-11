@@ -6,7 +6,8 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 # frontend import paths.
 "${DMD:-dmd}" -o- -i -Isource source/snakebite/backends/bytecode/vm.d \
     source/snakebite/backends/bytecode/runner.d \
-    source/snakebite/backends/bytecode/program.d
+    source/snakebite/backends/bytecode/program.d \
+    source/snakebite/backends/bytecode/file.d
 
 build/reggae.sh
 ninja

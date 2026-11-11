@@ -749,6 +749,12 @@ public struct CallbackBridge {
         return _words.contains(word);
     }
 
+    // The signature that `word` was registered with, or null.
+    public const(NativeSignature)* signatureOf(const(void)* word) const {
+        const registered = word in _words;
+        return registered is null ? null : &registered.signature;
+    }
+
     public struct GuestTarget {
         const(void)* word;
         ptrdiff_t adjustment;

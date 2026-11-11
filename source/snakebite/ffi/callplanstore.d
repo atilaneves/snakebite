@@ -49,6 +49,11 @@ public struct CallPlanStore {
     // swap.
     private shared(PlanEntry)* _plans;
 
+    // Whether no plan was made.
+    public bool isEmpty() const @safe nothrow pure @nogc {
+        return _plans is null;
+    }
+
     // An empty plan for the caller to fill, kept for the life of this.
     public CallPlan* newPlan() nothrow pure {
         import core.atomic: atomicLoad, cas;

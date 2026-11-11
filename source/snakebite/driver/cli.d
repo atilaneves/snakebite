@@ -32,11 +32,12 @@ public int run(string[] args) {
     import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, prepareSources, runProject;
+        executeBackend, executeLoaded, prepareSources, runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
     import std.file: exists, isDir;
+    import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
 
     const parsed = parseArgs(args);
@@ -48,6 +49,16 @@ public int run(string[] args) {
     selectFrontendMemory(parsed.options.lowmem);
 
     try {
+        if (parsed.options.load.length)
+            return executeLoaded(
+                parsed.options.load, parsed.options.programArguments,
+                JitSetting(!parsed.options.noJit,
+                    /*eager*/ false, parsed.options.jitPerfMap),
+            ).status;
+        // The project directory is where the compile runs: a relative path
+        // of the caller must be absolute before that.
+        const savePath = parsed.options.save.length
+            ? parsed.options.save.absolutePath : "";
         string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
@@ -65,6 +76,17 @@ public int run(string[] args) {
                     parsed.options.backend != BackendName.ctfe,
                     parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
                 );
+                if (savePath.length) {
+                    saveProgram(
+                        preparation.project.program,
+                        savePath,
+                        sources.workingDirectory.length
+                            ? sources.workingDirectory : directory,
+                        JitSetting(!parsed.options.noJit,
+                            /*eager*/ false, parsed.options.jitPerfMap),
+                    );
+                    return 0;
+                }
                 enterWorkingDirectory();
                 const report = executeBackend(
                     parsed.options.backend,
