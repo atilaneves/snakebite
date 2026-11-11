@@ -94,14 +94,15 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         }
     }
     private CallSelection _callSelection;
+    // The index from a declaration to its function, which `linked` owns.
     // Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
     // recursion - embeds this pointer in its `CallSite` before the body
     // this AA slot points at has been filled in. The slot's address must
     // therefore never move once handed out, which is why this holds a
-    // `Function*` rather than a `Function` - a heap block `new` allocates
-    // once and never relocates, unlike an associative array's own
-    // storage, which can rehash as more entries go in.
+    // `Function*` rather than a `Function` - a heap block that never
+    // relocates, unlike an associative array's own storage, which can
+    // rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
     // The functions in `_compiled` whose body is complete, read without a
     // lock: the first guest call of a thread can be the one that a GC
@@ -850,7 +851,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // callee is only ever dereferenced when the VM actually runs
             // the call, which cannot happen before `compile`/`call` returns
             // from the top-level compile that reached here.
-            auto placeholder = new Function;
+            auto placeholder = linked.newFunction;
             _compiled[function_] = placeholder;
             // A rejected body must not stay cached as an empty function
             // that a later call would run.
