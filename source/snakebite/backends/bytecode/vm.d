@@ -5466,7 +5466,8 @@ static if (jitSupported) {
     // differ. The function compiler does not know it: a compiled function is
     // the same for each setting. When the functions count their
     // events, this replaces the handler of each counted event by its counting
-    // twin: a call, or a branch whose target is at or before it. It reads
+    // twin: a call, or a branch whose target is at or before it. It sets
+    // each JIT field of the function. It reads
     // the finished instructions, so their branch targets must be addresses.
     // `name` is only evaluated when the perf map is on.
     package void prepareForExecution(Function* function_,
@@ -5475,6 +5476,7 @@ static if (jitSupported) {
         lazy const(char)[] name)
     {
         function_.jitHeat = setting.jitStartHeat;
+        function_.jitState = cast(uint) JitTier.interpreted;
         function_.jitCounts = setting.enabled;
         function_.jit = jit;
         if (!setting.enabled)
