@@ -157,7 +157,6 @@ public ExecutionReport executeBackend(
 ) {
     import snakebite.backends: makeBackend;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import core.memory: GC;
 
     import std.stdio: stdin, stdout, stderr;
 
@@ -177,57 +176,35 @@ public ExecutionReport executeBackend(
     import snakebite.backends.statistics: ExecutionClock;
     const running = ExecutionClock.start(backend.compilationStatistics);
     auto start = &backend.startData();
-    import snakebite.run.modules: GuestModules;
-    // It lives until this function returns, as the runtime of a program
-    // with a C entry point ends with it.
-    const entry = GuestModules.Entry(*start, backend.compilationStatistics);
-    const started = runStartData(
-        *start, backend.compilationStatistics, running,
+    return runStartData(
+        *start, backend.compilationStatistics, running, stopWatch,
         program.testHooks, program.startsAsProject, hostArguments,
-        endsProcess);
-    // Native objects can hold callback entries for guest destructors. Run
-    // their finalizers while the backend and the frontend declarations that
-    // those entries name are still alive.
-    if (collectGarbage)
-        GC.collect;
-    return ExecutionReport(
-        started.status,
-        stopWatch.peek,
-        started.constructorDuration,
-        started.moduleInfoDuration,
-        started.programDuration,
-        backend.compilationStatistics,
-    );
+        collectGarbage, endsProcess);
 }
 
-// What `runStartData` measured.
-public struct StartRun {
-    import core.time: Duration;
-
-    public int status;
-    public Duration constructorDuration;
-    public Duration moduleInfoDuration;
-    // The unit tests and `main`, without compilation.
-    public Duration programDuration;
-}
-
-// Runs the program of `start` and measures it. `running` began before the
-// backend made `start`. It takes no backend: whatever made `start` and
-// `compilation`, compiled or loaded, calls it. The caller holds the
-// `GuestModules.Entry` of `start` around this call. `startsAsProject` false
-// is a snippet.
-public StartRun runStartData(
+// Runs the program of `start` and reports on it. `running` began before the
+// backend made `start`, and `latency` before the backend was made. It takes
+// no backend: whatever made `start` and `compilation`, compiled or loaded,
+// can call it. `startsAsProject` false is a snippet. The function holds the
+// `GuestModules.Entry` of `start` until it returns, as the runtime of a
+// program with a C entry point ends with it.
+ExecutionReport runStartData(
     ref imported!"snakebite.start.data".StartData start,
     ref const imported!"snakebite.backends.statistics".CompilationStatistics
         compilation,
     in imported!"snakebite.backends.statistics".ExecutionClock running,
+    ref imported!"std.datetime.stopwatch".StopWatch latency,
     in imported!"snakebite.image.dependency".TestHooks testHooks,
     in bool startsAsProject,
-    in string[] hostArguments = null,
-    in bool endsProcess = false,
+    in string[] hostArguments,
+    in bool collectGarbage,
+    in bool endsProcess,
 ) {
+    import core.memory: GC;
+    import snakebite.run.modules: GuestModules;
     import snakebite.run.program: run, StartupReport, runDruntimeMain;
 
+    const entry = GuestModules.Entry(start, compilation);
     StartupReport startup;
     int status;
     // A program with a C `main` is not started as a project either.
@@ -240,6 +217,17 @@ public StartRun runStartData(
     }
     const programDuration = running.peek
         - startup.constructorDuration - startup.moduleInfoDuration;
-    return StartRun(status, startup.constructorDuration,
-        startup.moduleInfoDuration, programDuration);
+    // Native objects can hold callback entries for guest destructors. Run
+    // their finalizers while the backend and the frontend declarations that
+    // those entries name are still alive.
+    if (collectGarbage)
+        GC.collect;
+    return ExecutionReport(
+        status,
+        latency.peek,
+        startup.constructorDuration,
+        startup.moduleInfoDuration,
+        programDuration,
+        compilation,
+    );
 }
