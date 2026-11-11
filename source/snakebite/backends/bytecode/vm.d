@@ -5724,16 +5724,16 @@ static if (jitSupported) {
         const current = atomicLoad!(MemoryOrder.acq)(
             *cast(shared const(uint)*) &site.directState);
         switch (current) with (CallSite.DirectState) {
-        case threeWordsSign32:
-            return &callPreparedNative!(opCallDirectThreeWords!(Load.sign32));
-        case threeWordsZero32:
-            return &callPreparedNative!(opCallDirectThreeWords!(Load.zero32));
-        case twoWordsPairResult:
-            return &callPreparedNative!(opCallDirectTwoWordsPairResult!false);
-        case twoWordsIndirectPairResult:
-            return &callPreparedNative!(opCallDirectTwoWordsPairResult!true);
-        default:
-            return original;
+            case threeWordsSign32:
+                return &callPreparedNative!(opCallDirectThreeWords!(Load.sign32));
+            case threeWordsZero32:
+                return &callPreparedNative!(opCallDirectThreeWords!(Load.zero32));
+            case twoWordsPairResult:
+                return &callPreparedNative!(opCallDirectTwoWordsPairResult!false);
+            case twoWordsIndirectPairResult:
+                return &callPreparedNative!(opCallDirectTwoWordsPairResult!true);
+            default:
+                return original;
         }
     }
 
