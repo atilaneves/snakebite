@@ -1808,6 +1808,24 @@ def test_saved_program_with_addresses_in_module_data_runs_as_the_compiled_progra
         """})
 
 
+def test_saved_program_with_array_literal_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        static immutable string[] names = ["a", "bb", "ccc"];
+        __gshared int[] numbers = [1, 2, 3];
+        __gshared int target;
+        struct Defaults { int* pointer = &target; string text = "x"; }
+        __gshared Defaults defaults;
+        int main() {
+            return cast(int)(names.length + numbers.length
+                + (defaults.pointer is &target ? 10 : 0) + defaults.text.length
+                + *numbers.ptr);
+        }
+        """})
+
+
 def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:

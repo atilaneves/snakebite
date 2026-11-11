@@ -825,7 +825,15 @@ private void storeValue(
     if (auto literal = value.isArrayLiteralExp) {
         assert(type.ty == Tarray || type.ty == Tpointer);
         const elementSize = type.nextOf.size;
-        auto data = new void[literal.elements.length * elementSize];
+        // The data of the process store when there is one, so that a file can
+        // hold them.
+        void[] data;
+        if (nativeData !is null && literal.elements.length != 0) {
+            auto arrayFacts = typeFacts(type.nextOf);
+            arrayFacts.size = literal.elements.length * elementSize;
+            data = nativeData.reserve(arrayFacts);
+        } else
+            data = new void[literal.elements.length * elementSize];
         foreach (i; 0 .. literal.elements.length)
             storeValue(type.nextOf, literal[i],
                 cast(ubyte*) data.ptr + i * elementSize, symbolAddress, nativeData);
