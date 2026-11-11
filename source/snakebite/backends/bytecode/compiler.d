@@ -11128,7 +11128,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const call = cAssertCallOf(
                     cMessageOf(BoundsCheck.index).ptr, loc, _function);
                 compileCAssertCall(call, constantArgument(
-                    Address(Target.Kind.hostSymbol, call.assertion),
+                    _bytecode.adoptedString(call.assertion),
                     size_t.sizeof));
                 break;
             }
