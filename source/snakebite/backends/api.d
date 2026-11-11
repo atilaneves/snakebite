@@ -6,7 +6,7 @@ private:
 
 import snakebite.backends.statistics: CompilationStatistics;
 import snakebite.program: Program;
-import snakebite.start.data: FunctionHandle, StartData;
+import snakebite.start.data: FunctionHandle, ModuleStart, StartData;
 
 
 // The handle of a backend that runs a function from its declaration.
@@ -146,6 +146,14 @@ public abstract class Backend {
     // declaration in this and in `staticStorage`, and nowhere else.
     public abstract FunctionHandle compiledFunction(FuncDeclaration function_);
 
+    // The storage of the start record of `module_`. The record must stay at
+    // its address for the life of the backend. The default is a heap block.
+    protected ModuleStart* moduleStartStorage(
+        imported!"dmd.dmodule".Module module_,
+    ) {
+        return new ModuleStart;
+    }
+
     // The start data of the program, built once (see `buildStartData`).
     public final ref StartData startData() {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
@@ -160,7 +168,8 @@ public abstract class Backend {
                 // `buildStartData` throws before it assigns, so a failure
                 // leaves no half-built data and the next call builds again.
                 startDataStorage = buildStartData(
-                    cast(Program) _program, &compiledFunction, &staticStorage);
+                    cast(Program) _program, &compiledFunction, &staticStorage,
+                    &moduleStartStorage);
                 atomicStore!(MemoryOrder.rel)(_startBuilt, true);
             });
         return startDataStorage;

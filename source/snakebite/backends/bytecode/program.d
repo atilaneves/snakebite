@@ -10,7 +10,7 @@ import snakebite.image.dependency: DependencyImage;
 import snakebite.native.signature: SignatureTable;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.stack.tls: TlsSlots;
-import snakebite.start.data: StartData;
+import snakebite.start.data: ModuleStart, StartData;
 
 
 // What one process holds of a compiled program while it runs: the compiled
@@ -62,6 +62,11 @@ public struct Program {
 // program owns it and the address does not change.
 public struct Module {
     @disable this(this);
+
+    // The start record of the D module: its phases and unit tests, and its
+    // imports as positions in `StartData.modules`. The start data points
+    // here. It is filled when the start data is built.
+    public ModuleStart start;
 
     // The static data that the D module defines: its variables and their
     // initial bytes. The addresses in instructions point into the blocks.
