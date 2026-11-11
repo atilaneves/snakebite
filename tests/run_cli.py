@@ -1866,6 +1866,92 @@ def test_saved_program_with_host_calls_runs_as_the_compiled_program(
         """})
 
 
+def test_saved_program_with_array_bounds_check_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int[] numbers = [1, 2, 3];
+        int main(string[] args) {
+            const index = args.length + 1;
+            return numbers[index] + numbers[index + 1];
+        }
+        """})
+
+
+def test_saved_program_with_bounds_failure_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int[] numbers = [1, 2, 3];
+        int main() {
+            const index = numbers.length + 2;
+            return numbers[index];
+        }
+        """})
+
+
+def test_saved_program_with_allocation_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        class Counter { int count; this(int start) { count = start; } }
+        struct Pair { int a; int b; }
+        int main() {
+            auto counter = new Counter(5);
+            auto pair = new Pair(3, 4);
+            auto numbers = new int[](3);
+            numbers[1] = 6;
+            int[] grown;
+            grown ~= 7;
+            grown ~= 8;
+            return counter.count + pair.a + pair.b + numbers[1]
+                + cast(int) numbers.length + grown[1];
+        }
+        """})
+
+
+def test_saved_program_with_template_from_phobos_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import std.algorithm: max, min;
+        int main() {
+            return max(3, 9) + min(4, 2);
+        }
+        """})
+
+
+def test_saved_program_with_function_pointer_and_delegate_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int twice(int n) { return 2 * n; }
+        struct Adder { int base; int add(int n) { return base + n; } }
+        int apply(int function(int) f, int n) { return f(n); }
+        int applyDelegate(int delegate(int) d, int n) { return d(n); }
+        int main() {
+            auto adder = new Adder(10);
+            int local = 3;
+            return apply(&twice, 4) + applyDelegate(&adder.add, 5)
+                + applyDelegate((int n) => n + local, 1);
+        }
+        """})
+
+
+def test_saved_program_with_main_arguments_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int main(string[] args) { return cast(int) args.length + 4; }
+        """})
+
+
 # A save never writes a file that loads into a different state: a program
 # that holds what a file cannot hold yet is refused, and no file is left.
 def test_save_of_unsupported_program_fails_and_writes_no_file(
