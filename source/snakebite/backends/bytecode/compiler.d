@@ -143,7 +143,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (type, loc) => _nativeData.initialValue(type, loc));
         _runner = Runner(jit, () => _nativeData.tlsSlots,
             () => _nativeData.release, () => _callbacks.hasEntries);
-        _callbacks = new CallbackBridge(&invokeCallback, cast(void*) this);
+        _callbacks = new CallbackBridge(&Runner.invokeCallback, &_runner);
         _plans.useCallbacks(_callbacks);
     }
 
@@ -295,33 +295,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // Records that `compiled` is the word this backend stores for
     // `function_`'s address - what the plan swaps for a pool entry
     // (ADR-0003) when the word crosses to host code, and what
-    // `invokeCallback` gets back when host code calls that entry.
+    // `Runner.invokeCallback` gets back when host code calls that entry.
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
         _plans.registerGuestFunction(compiled, function_);
-    }
-
-    extern(C) private static void invokeCallback(
-        void* context,
-        CallbackCall* call,
-    ) {
-        auto bytecode = cast(Bytecode) context;
-        bytecode.callGuestFromHost(call);
-    }
-
-    // The re-entry a pool entry (ADR-0003) reaches when host code calls a
-    // guest function pointer or delegate. It shares `Runner.call` with
-    // the program runner's top-level call: neither binds arguments on its
-    // own, and `call.function_` - the word `registerGuestWord` recorded
-    // when the callee was first compiled - is already built, so this
-    // takes no compiler lock of its own, on whichever thread's VM is
-    // calling (ADR-0006). A `Throwable` the body throws unwinds through
-    // the host frames untouched (ADR-0004).
-    private void callGuestFromHost(CallbackCall* call) {
-        _runner.call(cast(const(Function)*) call.function_,
-            call.returnPlace, call.arguments,
-            call.variadicCursor, call.variadicTypes);
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
