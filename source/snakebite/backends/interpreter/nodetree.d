@@ -2824,13 +2824,20 @@ private final class LoadChain : Node {
     }
 }
 
+package struct VariadicCallPlan {
+    import snakebite.native.variadic: VariadicLayout;
+    import snakebite.native.value: TypeFacts;
+
+    TypeFacts[] facts;
+    VariadicLayout layout;
+}
+
 // The extra arguments of a call of a guest variadic callee, in storage laid
 // out as its cursor reads them (`VariadicLayout`). The call evaluates this
 // node into the callee's frame, so the storage sits on the frame stack above
 // that frame and the call gives both back together. The value is the address
 // of the storage, which the cursor of the callee holds.
 private final class VariadicExtras : LongNode {
-    import snakebite.backends.interpreter.walker: VariadicCallPlan;
     import snakebite.stack.frames: FrameStack;
 
     private FrameStack* _frames;

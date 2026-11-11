@@ -6,7 +6,7 @@ private:
 import snakebite.backends.interpreter.integeroperations: combine, shifted;
 import snakebite.backends.interpreter.nodetree:
     AccessSite, CalleeResult, OuterVariable, TreeCallee, TreeFlow, TreeRoot,
-    hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
+    VariadicCallPlan, hasNoResult, isAggregate, isPair, isScalar, resultWordFor, rootOf;
 import snakebite.backends.api: DeclarationHandle;
 import snakebite.start.data: FunctionHandle;
 import snakebite.frontend.typefacts: tryTypeFacts, truthFacts;
@@ -540,14 +540,6 @@ private struct FinallyKey {
     const(void)* statement;
     const(void)* destination;
     Exit exit;
-}
-
-package struct VariadicCallPlan {
-    import snakebite.native.variadic: VariadicLayout;
-    import snakebite.native.value: TypeFacts;
-
-    TypeFacts[] facts;
-    VariadicLayout layout;
 }
 
 private struct CallSiteKey {
