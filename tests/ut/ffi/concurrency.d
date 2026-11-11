@@ -157,3 +157,52 @@ unittest {
                 );
     }
 }
+
+
+// `CallPlanStore.newPlan` is called without a lock by every thread that runs
+// guest code. Each call must put its plan on the store: a thread that loses a
+// race must retry against the new head, never spin on a stale one.
+@("plan.concurrentNewPlansAreAllDistinct")
+unittest {
+    import core.atomic: atomicLoad, atomicOp, atomicStore;
+    import core.thread: Thread;
+    import snakebite.ffi.callplan: CallPlan;
+
+    enum threads = 16;
+    enum plansPerThread = 2000;
+
+    auto store = CallPlanStore(null);
+    shared size_t ready = 0;
+    shared bool go = false;
+    auto plans = new CallPlan*[][](threads, plansPerThread);
+
+    auto workers = new Thread[threads];
+    // A function call gives each thread its own `row`; a closure over the
+    // loop variable would share one.
+    Thread startedBy(CallPlan*[] row) {
+        return new Thread({
+            atomicOp!"+="(ready, 1);
+            while (!atomicLoad(go)) {}
+            foreach (ref plan; row)
+                plan = store.newPlan;
+        });
+    }
+    foreach (t; 0 .. threads) {
+        workers[t] = startedBy(plans[t]);
+        workers[t].start;
+    }
+
+    while (atomicLoad(ready) < threads) {}
+    atomicStore(go, true);
+    foreach (worker; workers)
+        worker.join;
+
+    bool[CallPlan*] seen;
+    foreach (row; plans)
+        foreach (plan; row) {
+            assert(plan !is null, "newPlan returned null");
+            assert(plan !in seen, "newPlan returned one plan twice");
+            seen[plan] = true;
+        }
+    assert(seen.length == threads * plansPerThread);
+}

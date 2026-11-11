@@ -54,10 +54,13 @@ public struct CallPlanStore {
         import core.atomic: atomicLoad, cas;
 
         auto entry = new PlanEntry;
-        auto head = atomicLoad(_plans);
-        do
+        // Plans are only pushed, never popped or reused, so a head that
+        // compares equal is the same node: no ABA.
+        shared(PlanEntry)* head;
+        do {
+            head = atomicLoad(_plans);
             entry.next = cast(PlanEntry*) head;
-        while (!cas(&_plans, head, cast(shared(PlanEntry)*) entry));
+        } while (!cas(&_plans, head, cast(shared(PlanEntry)*) entry));
         return &entry.plan;
     }
 }
