@@ -747,6 +747,13 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
         kept ~= reloc;
     }
     copy.relocs = kept;
+    // The word of a constant that holds an address is left to its relocation.
+    copy.constants = function_.constants.dup;
+    foreach (reloc; kept)
+        if (reloc.place.section == Place.Section.constant
+                && reloc.place.field == Place.Field.word
+                && reloc.place.index < copy.constants.length)
+            copy.constants[reloc.place.index] = 0;
 
     void require(
         in Relocated relocated, in size_t index, in size_t word,
@@ -1207,3 +1214,4 @@ private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
         handle = new StartFunction(
             archive._runner, archive.functionAt(position[0], position[1]));
 }
+
