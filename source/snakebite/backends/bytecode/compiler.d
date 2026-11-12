@@ -3,7 +3,7 @@ module snakebite.backends.bytecode.compiler;
 
 private:
 
-import snakebite.start.data: FunctionHandle, StartData;
+import snakebite.start.data: FunctionHandle, ModuleStart, StartData;
 import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
@@ -159,6 +159,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return compiledProgram.startData;
     }
 
+    protected override ModuleStart* moduleStartStorage(SourceModule module_) {
+        return &moduleForD(module_).start;
+    }
+
     // How many chunks of callback entries this instance's bridge has.
     version(unittest)
     public size_t callbackChunkCount() {
@@ -222,23 +226,61 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return _nativeData.storageOf(variable);
     }
 
-    // The handle is a `StartFunction` of this backend. It holds the compiled
-    // function once there is one; until then it holds the step that compiles
-    // it, so the function compiles at its first call, as with `call`. The
-    // declaration is reachable only through that step.
+    // The handle is a `StartFunction`. Until its function is compiled it
+    // holds the step that compiles it, so the function compiles at its first
+    // call, as with `call`. The step holds this backend and the declaration.
+    // After the first call the handle holds the address of the `Runner` and
+    // the compiled function, and drops the step. The `Runner` is a field of
+    // this backend, and a handle lives as long as the backend (see
+    // `Backend.compiledFunction`), so the address stays valid.
     public override FunctionHandle compiledFunction(FuncDeclaration function_) {
-        return new StartFunction(() => compileFunction(function_));
+        return new StartFunction(
+            &_runner,
+            new CompileStep(() => compileFunction(function_)));
     }
 
-    private final class StartFunction: FunctionHandle {
-        FunctionCompiler.Deferred!(const(Function)*) function_;
+    private struct CompileStep {
+        const(Function)* delegate() compute;
+    }
 
-        this(const(Function)* delegate() compute) {
-            function_ = typeof(function_)(compute);
+    // The order of the two stores in `compileFirst` makes this true at every
+    // instant: a thread that reads a null `_step` then finds a non-null
+    // `_compiled`. `_compiled` is stored first and `_step` second, both with
+    // release; `_step` is read with acquire before `_compiled` is read
+    // again.
+    private static final class StartFunction: FunctionHandle {
+        private Runner* _runner;
+        private const(Function)* _compiled;
+        private CompileStep* _step;
+
+        this(Runner* runner, CompileStep* step) {
+            _runner = runner;
+            _step = step;
         }
 
         public override void call(void* returnPlace, void*[] args) {
-            _runner.call(function_.get(), returnPlace, args);
+            import core.atomic: atomicLoad, MemoryOrder;
+
+            auto compiled = atomicLoad!(MemoryOrder.acq)(_compiled);
+            if (compiled is null)
+                compiled = compileFirst();
+            _runner.call(compiled, returnPlace, args);
+        }
+
+        // Two threads can both run the step: `compileFunction` gives both
+        // the same function.
+        private const(Function)* compileFirst() {
+            import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+
+            auto step = atomicLoad!(MemoryOrder.acq)(_step);
+            if (step is null)
+                // Another thread finished: it stored `_compiled` before it
+                // stored the null.
+                return atomicLoad!(MemoryOrder.acq)(_compiled);
+            auto compiled = step.compute();
+            atomicStore!(MemoryOrder.rel)(_compiled, compiled);
+            atomicStore!(MemoryOrder.rel)(_step, null);
+            return compiled;
         }
     }
 

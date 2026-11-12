@@ -10,15 +10,19 @@ import snakebite.image.dependency: DependencyImage;
 import snakebite.native.signature: SignatureTable;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.stack.tls: TlsSlots;
-import snakebite.start.data: StartData;
+import snakebite.start.data: ModuleStart, StartData;
 
 
 // What one process holds of a compiled program while it runs: the compiled
 // functions, the signatures, the static storage, the call plans and the start
 // data.
-// It holds nothing of the compiler and nothing of the machinery that
-// executes. A struct that its owner holds by value: its address, and the
-// addresses of what it owns, do not change.
+// It holds no frontend type. A slot that is not filled yet (a call site, or a
+// start handle, of a function that is not compiled) holds a delegate that the
+// compiler gave; the delegate fills the slot at its first use and is then
+// dropped. A filled start handle holds the compiled function and the address
+// of the `Runner` that runs it, and no other part of the compiler.
+// A struct that its owner holds by value: its address, and the addresses of
+// what it owns, do not change.
 public struct Program {
     @disable this(this);
 
@@ -62,6 +66,11 @@ public struct Program {
 // program owns it and the address does not change.
 public struct Module {
     @disable this(this);
+
+    // The start record of the D module: its phases and unit tests, and its
+    // imports as positions in `StartData.modules`. The start data points
+    // here. It is filled when the start data is built.
+    public ModuleStart start;
 
     // The static data that the D module defines: its variables and their
     // initial bytes. The addresses in instructions point into the blocks.

@@ -73,7 +73,9 @@ public struct StartData {
     // calls it.
     public bool hasCEntryPoint;
     public bool betterC;
-    public ModuleStart[] modules;
+    // One record for each root module, in the order of the constructors. A
+    // backend decides where each record lives (see `buildStartData`).
+    public ModuleStart*[] modules;
     // In the order of the modules, which is the order of the constructors.
     public FunctionHandle[] crtConstructors;
     public FunctionHandle[] crtDestructors;

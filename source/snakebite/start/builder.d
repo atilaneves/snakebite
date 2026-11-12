@@ -14,16 +14,21 @@ alias CompiledFunction =
     FunctionHandle delegate(imported!"dmd.func".FuncDeclaration);
 alias StaticStorage =
     void[] delegate(imported!"dmd.declaration".VarDeclaration);
+alias ModuleStorage =
+    ModuleStart* delegate(imported!"dmd.dmodule".Module);
 
 
 // Reads the frontend one time and builds the start data of `program`. The
 // functions in it are the ones `compiledFunction` names; it compiles them when
-// it likes. `staticStorage` gives the bytes of a static variable. A failure
-// throws before the caller has a value to keep.
+// it likes. `staticStorage` gives the bytes of a static variable.
+// `moduleStorage` gives the storage of the record of a root module; the
+// builder overwrites it. A failure throws before the caller has a value to
+// keep, and can leave records half filled.
 public StartData buildStartData(
     Program program,
     CompiledFunction compiledFunction,
     StaticStorage staticStorage,
+    ModuleStorage moduleStorage,
 ) {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import dmd.astenums: Tvoid;
@@ -45,7 +50,7 @@ public StartData buildStartData(
 
     data.dependencyModules = program.dependencyImage is null
         ? null : program.dependencyImage.deferredModules;
-    addModules(data, compiledFunction, staticStorage, program);
+    addModules(data, compiledFunction, staticStorage, moduleStorage, program);
     return data;
 }
 
@@ -54,6 +59,7 @@ private void addModules(
     ref StartData data,
     CompiledFunction compiledFunction,
     StaticStorage staticStorage,
+    ModuleStorage moduleStorage,
     Program program,
 ) {
     import dmd.dmodule: Module;
@@ -67,7 +73,9 @@ private void addModules(
 
     foreach (i, module_; program.rootModules) {
         auto functions = findModuleFunctions(module_);
-        ModuleStart start;
+        // `auto`: the code writes through the pointer, so it cannot be const.
+        auto start = moduleStorage(module_);
+        *start = ModuleStart.init;
         start.name = prettyNameOf(module_).fromStringz.idup;
         start.standalone = !module_.needmoduleinfo;
         bool[size_t] seen;
