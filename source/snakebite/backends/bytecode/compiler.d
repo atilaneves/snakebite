@@ -4606,11 +4606,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         size_t marker;
         size_t firstTemporary;
+        bool evaluated;
+        // A compile that failed is dropped, so the cleanup of its temporaries
+        // is not compiled. Compiling it runs while the failure unwinds, and
+        // a speculative compile can throw there: a second exception in a
+        // cleanup ends the process.
         _expressions.run(position, cast(const(void)*) root, {
             marker = _instructions.length;
             emit(null, 0, 0, 0);
             firstTemporary = _temporaries.length;
-        }, evaluate, { endLifetime(marker, firstTemporary); });
+        }, {
+            evaluate();
+            evaluated = true;
+        }, {
+            if (evaluated)
+                endLifetime(marker, firstTemporary);
+        });
     }
 
     private void endLifetime(in size_t marker, in size_t firstTemporary) {
