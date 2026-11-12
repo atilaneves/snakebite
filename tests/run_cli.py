@@ -2678,6 +2678,35 @@ def test_saved_program_with_a_speculative_template_instance_runs_as_the_compiled
         """})
 
 
+# `caller` compiles its tiny callee to copy it in place of the call. The
+# callee passes a function literal in a full expression with a temporary
+# that has a destructor, so that compile fails and its cleanup is not
+# compiled.
+def test_saved_program_with_a_temporary_beside_a_function_literal_in_a_callee_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        struct Data(T) {
+            invariant {}
+            ~this() {}
+            Data!U as(U)() { Data!U result; return result; }
+            void enter(void delegate(T)) {}
+        }
+        void caller(Data!ubyte data) { callee(data); }
+        const(char)[] callee(ref Data!ubyte data) {
+            const(char)[] result;
+            data.as!char.enter((char) {});
+            return result;
+        }
+        int main() {
+            Data!ubyte data;
+            caller(data);
+            return 3;
+        }
+        """})
+
+
 # A save never writes a file for a program that does not compile: it fails,
 # and no file is left.
 def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
