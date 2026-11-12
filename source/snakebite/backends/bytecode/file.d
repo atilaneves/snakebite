@@ -14,8 +14,9 @@ private:
 
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.backends.bytecode.relocation:
-    DatumRef, HostCode, Place, Plain, Reloc, Relocated, SetBy, Target;
+    HostCode, Place, Plain, Reloc, Relocated, SetBy;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
+import snakebite.native.address: DatumRef, Target;
 import snakebite.backends.bytecode.vm:
     AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
     Function, hostCodeAt, hostCodeOffset, Instruction, JitSetting,
@@ -984,8 +985,8 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
             datum.canHoldAddress = source.canHoldAddress;
             contents = cast(ubyte[]) blocks.bytesOf(source).dup;
             foreach (link; source.links)
-                contents[link.place.index
-                    .. link.place.index + size_t.sizeof] = 0;
+                contents[link.wordOffset
+                    .. link.wordOffset + size_t.sizeof] = 0;
         }
         archive.scalar(datum.block);
         archive.scalar(datum.offset);
@@ -1034,7 +1035,9 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             StaticBlocks.Link link;
             if (archive.isWriting)
                 link = links[linkIndex];
-            archive.transfer(link.place);
+            auto linkPlace = Place(Place.Section.datum, Place.Field.word,
+                link.wordOffset);
+            archive.transfer(linkPlace);
             archive.transfer(link.kind);
             size_t[3] reference;
             if (archive.isWriting)
@@ -1043,7 +1046,8 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             if (archive.isWriting)
                 continue;
             auto bytes = cast(ubyte[]) blocks.bytesOf(blocks.data[index]);
-            const place = link.place;
+            link.wordOffset = linkPlace.index;
+            const place = linkPlace;
             if (place.section != Place.Section.datum
                     || place.index > bytes.length
                     || bytes.length - place.index < size_t.sizeof)

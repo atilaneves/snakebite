@@ -14,7 +14,8 @@ import snakebite.ffi.callplan:
     executeIndirectCallPlan, guestWordOf;
 import snakebite.native.signature: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation:
-    Address, hostCode, Place, plain, Reloc, relocated, setBy, Target;
+    hostCode, Place, plain, Reloc, relocated, setBy;
+import snakebite.native.address: Address, Target;
 import snakebite.builtin.call: BuiltinCall;
 import snakebite.stack.hostcall: HostCallLayout;
 import snakebite.failure.halt: HaltAction, isHalt;
