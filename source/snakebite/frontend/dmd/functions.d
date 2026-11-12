@@ -463,10 +463,10 @@ private void appendFromScope(
         }
 
         if (auto instance = member.isTemplateInstance()) {
-            import dmd.templatesem: needsCodegen;
+            import snakebite.frontend.declarationcollector: compilesIntoBuild;
 
             // See `appendFromScope` above for why this check is here.
-            if (instance.needsCodegen())
+            if (instance.compilesIntoBuild)
                 appendFromScope(instance.members, action);
             continue;
         }

@@ -47,6 +47,20 @@ package(snakebite) extern(C++) class ImportCSafeVisitor
     }
 }
 
+// The native compiler generates code for a template instance only when
+// `needsCodegen` says so. It says no for an instance with errors, for one
+// that only a speculative check, such as `is(typeof(...))`, made, and for
+// one that a non-root module makes when it imports no root module. dmd
+// asserts that `needsCodegen` gets the primary instance, so any other
+// instance is not one that compiles.
+package(snakebite) bool compilesIntoBuild(
+    imported!"dmd.dtemplate".TemplateInstance instance,
+) {
+    import dmd.templatesem: needsCodegen;
+
+    return instance.inst is instance && instance.needsCodegen;
+}
+
 // Named distinctly from every class that extends it (`Collector` in
 // `imagesource.d`, `InlineAsmCollector` and `InlineAsmVersionGate` in
 // `inlineasm.d`): an `extern(C++) class` with no explicit C++ namespace
@@ -79,7 +93,7 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     override void visit(TemplateDeclaration declaration) {}
 
     override void visit(TemplateInstance instance) {
-        if (instance.members !is null)
+        if (instance.members !is null && instance.compilesIntoBuild)
             foreach (member; *instance.members)
                 member.accept(this);
     }

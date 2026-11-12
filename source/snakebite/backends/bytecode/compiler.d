@@ -4603,11 +4603,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         size_t marker;
         size_t firstTemporary;
+        bool evaluated;
+        // The cleanup of a full expression is compiled only when the
+        // evaluation returned. A compile that failed is dropped as a whole,
+        // and compiling the cleanup while the failure unwinds could throw a
+        // second exception, which ends the process.
         _expressions.run(position, cast(const(void)*) root, {
             marker = _instructions.length;
             emit(null, 0, 0, 0);
             firstTemporary = _temporaries.length;
-        }, evaluate, { endLifetime(marker, firstTemporary); });
+        }, {
+            evaluate();
+            evaluated = true;
+        }, {
+            if (evaluated)
+                endLifetime(marker, firstTemporary);
+        });
     }
 
     private void endLifetime(in size_t marker, in size_t firstTemporary) {

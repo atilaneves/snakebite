@@ -1861,6 +1861,40 @@ def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
     })
 
 
+# An append after `assumeSafeAppend` to an array of static data copies it, as
+# in compiled D.
+def test_saved_program_appends_to_arrays_of_static_data_as_compiled_d(
+    tmp_path: Path,
+) -> None:
+    program = {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Stacks {
+            int[] numbers = [0];
+            bool[] flags = [false];
+            void push() {
+                numbers.assumeSafeAppend ~= 1;
+                flags.assumeSafeAppend ~= true;
+                numbers.length--;
+                flags.length--;
+            }
+        }
+        int main() {
+            Stacks stacks;
+            stacks.push();
+            stacks.push();
+            printf("%d %d %d\\n", cast(int) stacks.numbers.length,
+                   stacks.numbers[0], stacks.flags[0] ? 1 : 0);
+            return 0;
+        }
+        """}
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, program)
+    from_ram = run_sb("--backend=bytecode", "--no-optimise-image",
+                      str(tmp_path / "app"), cwd=tmp_path)
+    assert from_ram.returncode == 0, output(from_ram)
+    assert guest_lines(from_ram) == ["1 0 0"], output(from_ram)
+
+
 def test_saved_program_with_host_calls_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
@@ -2620,6 +2654,54 @@ def test_saved_program_uses_its_dependency_image_after_the_load_returns(
         int main() { return 0; }
         """,
     })
+
+
+# A template instance that only a speculative check made, such as
+# `is(typeof(...))`, has an error in its body that the frontend gagged. The
+# native compiler generates no code for it, so the save compiles none.
+def test_saved_program_with_a_speculative_template_instance_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        void check(T)() { T value; value.missing(); }
+        enum works(T) = is(typeof(check!T));
+        int main() {
+            static assert(!works!int);
+            printf("done\\n");
+            return 0;
+        }
+        """})
+
+
+# `caller` compiles its tiny callee to copy it in place of the call. The
+# callee passes a function literal in a full expression with a temporary
+# that has a destructor, so that compile fails and its cleanup is not
+# compiled.
+def test_saved_program_with_a_temporary_beside_a_function_literal_in_a_callee_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        struct Data(T) {
+            invariant {}
+            ~this() {}
+            Data!U as(U)() { Data!U result; return result; }
+            void enter(void delegate(T)) {}
+        }
+        void caller(Data!ubyte data) { callee(data); }
+        const(char)[] callee(ref Data!ubyte data) {
+            const(char)[] result;
+            data.as!char.enter((char) {});
+            return result;
+        }
+        int main() {
+            Data!ubyte data;
+            caller(data);
+            return 3;
+        }
+        """})
 
 
 # A save never writes a file for a program that does not compile: it fails,

@@ -263,6 +263,27 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// A function template that only a speculative check, `is(typeof(...))`,
+// instantiates gets no code from the native compiler, so its `asm` block
+// is never compiled in. The load-time scan for an unguarded `asm` block
+// must not reject it, and the program gives the result that the native
+// build gives: the body does not compile, so the check is false.
+static foreach (backend; Matrix!()) {
+    @("inlineasm.loadDiagnostic.speculativeOnlyInstanceIsNotScanned." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2.shouldBeRetOf!(backend, q{
+            void check(T)() {
+                asm { nop; }
+                T value;
+                value.missing();
+            }
+            enum works(T) = is(typeof(check!T));
+            int result() { return works!int ? 1 : 2; }
+        }, "result");
+    }
+}
+
 // `driveSharedSemantic`'s own comment says `modules` is the root-owned set
 // for every load path, but the REPL builds a wider one:
 // `Program(interpretedModules(module_, importPaths))` in
