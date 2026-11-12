@@ -178,13 +178,18 @@ public struct StaticBlocks {
     }
 
     // The caller holds the compiler lock.
-    public Placed reserve(in TypeFacts facts) @trusted pure nothrow {
+    public Placed reserve(in TypeFacts facts) @trusted nothrow {
         // Slots cannot move: constants can hold addresses of other slots.
         const needed = facts.size + facts.alignment - 1;
         if (_available.length < needed) {
+            import core.memory: GC;
             import std.algorithm: max;
 
-            _available = new void[max(4096, needed)];
+            // Not `new void[]`: the GC takes that for an appendable array,
+            // and `assumeSafeAppend` on a datum would let an append grow it
+            // over its neighbours.
+            const size = max(4096, needed);
+            _available = GC.calloc(size, 0)[0 .. size];
             _blocks ~= _available;
         }
         const start = -cast(size_t) _available.ptr & (facts.alignment - 1);
@@ -268,7 +273,7 @@ public struct StaticStore {
     }
 
     // The caller holds the compiler lock.
-    public Placed reserve(in TypeFacts facts) @safe pure nothrow {
+    public Placed reserve(in TypeFacts facts) @safe nothrow {
         return _blocks.reserve(facts);
     }
 
