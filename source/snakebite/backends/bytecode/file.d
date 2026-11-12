@@ -71,6 +71,7 @@ public void saveProgram(
         file.transfer(record);
     }
     file.transfer(body_._symbols);
+    transferHostEntries(file, body_);
     file.append(body_._written.data);
 
     const partial = path ~ ".partial";
@@ -119,6 +120,7 @@ public void loadProgram(
     file.transfer(file._symbols);
     file._program = &program;
     file._runner = &runner;
+    transferHostEntries(file, file);
     transferBody(file, program, &runner);
 
     foreach (module_; program._modules)
@@ -130,6 +132,35 @@ public void loadProgram(
             prepareForExecution(function_, runner.jitSetting,
                 runner.jitInstance, function_.mangledName);
         }
+}
+
+
+// The entries of the callback bridge that forward to host code with a receiver
+// adjustment, in the order of the first reference: the host code (a symbol and
+// a distance), the adjustment and the signature that made each. A load makes
+// each one again with `adjustedEntryOf`, as a compile does. `source` is the
+// archive that the body was written to; a read archive is its own source.
+private void transferHostEntries(ref Archive archive, ref Archive source) {
+    size_t[] symbols = source._hostEntrySymbols;
+    size_t[] distances = source._hostEntryDistances;
+    ptrdiff_t[] adjustments = source._hostEntryAdjustments;
+    NativeSignature[] signatures = source._hostEntrySignatures;
+    archive.transfer(symbols);
+    archive.transfer(distances);
+    archive.transfer(adjustments);
+    archive.transfer(signatures);
+    if (archive.isWriting)
+        return;
+    if (distances.length != symbols.length
+            || adjustments.length != symbols.length
+            || signatures.length != symbols.length)
+        throw new SnakebiteException(
+            "the program file holds callback entries that do not match");
+    auto callbacks = archive._program.plans.callbacks;
+    foreach (index; 0 .. symbols.length)
+        archive._hostEntries ~= callbacks.adjustedEntryOf(
+            archive.symbolAt(symbols[index]) + distances[index],
+            signatures[index], adjustments[index]);
 }
 
 
@@ -172,6 +203,15 @@ private struct Archive {
     private string[] _symbols;
     private size_t[string] _symbolIndex;
     private CallPlan*[] _plans;
+    // Entries that forward to host code with an adjustment. Writing: the
+    // index of each entry, and what made it, in the order of the first
+    // reference. Reading: the entry that each record made.
+    private size_t[const(void)*] _hostEntryIndex;
+    private size_t[] _hostEntrySymbols;
+    private size_t[] _hostEntryDistances;
+    private ptrdiff_t[] _hostEntryAdjustments;
+    private NativeSignature[] _hostEntrySignatures;
+    private const(void)*[] _hostEntries;
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
@@ -376,10 +416,41 @@ private struct Archive {
     // The entry that host code calls to reach a guest function, as a compile
     // makes it: with the function and the signature it registered.
     const(void)* entryAt(in size_t[3] reference) {
+        if (reference[0] == _program._modules.length) {
+            if (reference[1] >= _hostEntries.length)
+                throw new SnakebiteException(
+                    "the program file names a callback entry that it does not hold");
+            return _hostEntries[reference[1]];
+        }
         const word = functionAt(reference[0], reference[1]);
         auto callbacks = _program.plans.callbacks;
         return callbacks.adjustedEntryOf(
             word, *callbacks.signatureOf(word), cast(ptrdiff_t) reference[2]);
+    }
+
+    // The reference to an entry of the bridge that forwards to host code with
+    // an adjustment: the index that follows the last module, then the index of
+    // the entry. False when `entry` is not such an entry.
+    bool hostEntryReference(const(void)* entry, out size_t[3] reference) {
+        if (auto found = entry in _hostEntryIndex) {
+            reference = [_program._modules.length, *found, 0];
+            return true;
+        }
+        const(void)* word;
+        ptrdiff_t adjustment;
+        const(NativeSignature)* signature;
+        if (!_program.plans.callbacks.adjustedHostTarget(
+                entry, word, adjustment, signature))
+            return false;
+        const position = symbolPosition(word);
+        const index = _hostEntrySymbols.length;
+        _hostEntrySymbols ~= position[0];
+        _hostEntryDistances ~= position[1];
+        _hostEntryAdjustments ~= adjustment;
+        _hostEntrySignatures ~= cast() *signature;
+        _hostEntryIndex[entry] = index;
+        reference = [_program._modules.length, index, 0];
+        return true;
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
@@ -574,6 +645,10 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             // an interface method.
             const guest = archive._program.plans.callbacks.guestTarget(
                 cast(const(void)*) target.address);
+            size_t[3] hostEntry;
+            if (guest.word is null && archive.hostEntryReference(
+                    cast(const(void)*) target.address, hostEntry))
+                return hostEntry;
             const position =
                 archive.positionOf(cast(const(Function)*) guest.word);
             return [position[0], position[1], cast(size_t) guest.adjustment];

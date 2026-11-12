@@ -595,6 +595,11 @@ public struct CallbackBridge {
     private SharedTable!(Adjusted, const(void)*) _adjustedEntries;
     private SharedTable!(const(void)*, const(void)*) _wordOfEntry;
     private SharedTable!(const(void)*, Adjusted) _adjustedGuestEntries;
+    // An adjusted entry that forwards to host code: the host code and the
+    // adjustment, and the signature that made the entry. A backend that
+    // saves its program asks for them (`adjustedHostTarget`).
+    private SharedTable!(const(void)*, Adjusted) _adjustedHostEntries;
+    private SharedTable!(const(void)*, NativeSignature) _adjustedHostSignatures;
     private CallbackHandler _handler;
     private void* _owner;
     private void function(void*, const(void)*) _prepare;
@@ -781,6 +786,22 @@ public struct CallbackBridge {
         return contains(address) ? GuestTarget(address, 0) : GuestTarget.init;
     }
 
+    // Whether `entry` is an entry that `adjustedEntryOf` made for host code,
+    // and if so the host code, the adjustment and the signature it was made
+    // with.
+    public bool adjustedHostTarget(
+        const(void)* entry, out const(void)* word, out ptrdiff_t adjustment,
+        out const(NativeSignature)* signature,
+    ) const {
+        const found = entry in _adjustedHostEntries;
+        if (found is null)
+            return false;
+        word = found.word;
+        adjustment = found.offset;
+        signature = entry in _adjustedHostSignatures;
+        return true;
+    }
+
     // The entry `adjustedEntryOf` already reserved for `word` with a nonzero
     // `adjustment`, or null. No lock: a caller that has to read the AST to
     // build the signature asks this first and builds it only on a miss.
@@ -822,8 +843,12 @@ public struct CallbackBridge {
             contains(word) ? null : word,
         );
         const reserved = _pool.reserve(slot);
-        if (contains(word))
+        if (contains(word)) {
             _adjustedGuestEntries.insert(reserved, key);
+        } else {
+            _adjustedHostEntries.insert(reserved, key);
+            _adjustedHostSignatures.insert(reserved, cast() signature);
+        }
         return *_adjustedEntries.insert(key, reserved);
     }
 }

@@ -2402,6 +2402,52 @@ def test_saved_program_with_guest_class_of_host_base_with_interface_runs_as_the_
         """})
 
 
+def test_saved_program_with_guest_class_of_host_base_overriding_some_interface_methods_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.sync.mutex: Mutex;
+        import std.stdio: writeln;
+        class Guarded : Mutex {
+            int locks;
+            override void lock() { ++locks; super.lock(); }
+        }
+        int main() {
+            auto g = new Guarded;
+            Object.Monitor m = g;
+            m.lock(); m.unlock();
+            auto dg = &m.lock;
+            dg();
+            m.unlock();
+            writeln(g.locks);
+            return g.locks;
+        }
+        """})
+
+
+def test_saved_program_with_guest_classes_deriving_a_host_base_with_interface_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.sync.mutex: Mutex;
+        import std.stdio: writeln;
+        class A : Mutex { override void lock() { writeln("A"); super.lock(); } }
+        class B : A { override void unlock() { writeln("B"); super.unlock(); } }
+        void use(Object.Monitor m) { m.lock(); m.unlock(); }
+        int main() {
+            use(new A); use(new B);
+            auto b = new B;
+            synchronized (b) { writeln("sync"); }
+            auto dg = &(cast(Object.Monitor) b).unlock;
+            b.lock();
+            dg();
+            return 0;
+        }
+        """})
+
+
 def test_saved_program_with_thread_local_variables_runs_as_compiled(
     tmp_path: Path,
 ) -> None:

@@ -530,6 +530,12 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             return Target.Kind.functionWord;
         if (_plans.guestTarget(address).word !is null)
             return Target.Kind.callbackEntry;
+        const(void)* hostWord;
+        ptrdiff_t adjustment;
+        const(imported!"snakebite.ffi.callplan".NativeSignature)* signature;
+        if (_plans.adjustedHostTarget(
+                address, hostWord, adjustment, signature))
+            return Target.Kind.callbackEntry;
         return Target.Kind.hostSymbol;
     }
 
