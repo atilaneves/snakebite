@@ -14,7 +14,7 @@ private:
 
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.backends.bytecode.relocation:
-    DatumRef, Place, Plain, Reloc, Relocated, SetBy, Target;
+    DatumRef, HostCode, Place, Plain, Reloc, Relocated, SetBy, Target;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
 import snakebite.backends.bytecode.vm:
     AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
@@ -171,13 +171,6 @@ private void transferHeader(ref Archive archive, ref Header header) {
 }
 
 
-private SnakebiteException refusal(in string reason) {
-    return new SnakebiteException(
-        "cannot save the program: " ~ reason ~ ", which a program file "
-        ~ "cannot hold yet");
-}
-
-
 // The bytes of a file as they are written or read, and the places that the
 // file refers to by number: the signatures of the program and the functions
 // of its modules.
@@ -304,7 +297,7 @@ private struct Archive {
     size_t[2] positionOf(const(Function)* function_) {
         if (auto found = function_ in _positionOf)
             return *found;
-        throw refusal("a function points at a function that no module holds");
+        internalFailure("a function points at a function that no module holds");
     }
 
     // The blocks of module `index`, or the blocks of the process store for the
@@ -326,7 +319,7 @@ private struct Archive {
             foreach (m; 0 .. _program._modules.length + 1)
                 if (blocksAt(m) is set)
                     return [m, block, offset];
-        throw refusal("a word points at data that the program does not hold");
+        internalFailure("a word points at data that the program does not hold");
     }
 
     // What a gate (storage of a variable of the program, as `GateStorage`
@@ -355,7 +348,7 @@ private struct Archive {
         size_t index, offset;
         if (_program.store.locateString(address, index, offset))
             return [index, offset, 0];
-        throw refusal("a word points at a string that the program does not hold");
+        internalFailure("a word points at a string that the program does not hold");
     }
 
     void* stringAt(in size_t[3] position) {
@@ -372,7 +365,7 @@ private struct Archive {
         size_t distance;
         const name = _program.plans.resolver.nameOf(address, distance);
         if (name is null)
-            throw refusal("a word points at host code or data that has no symbol name");
+            internalFailure("a word points at host code or data that has no symbol name");
         return [symbolIndexOfName(name), distance];
     }
 
@@ -403,7 +396,7 @@ private struct Archive {
     size_t planIndexOf(const(CallPlan)* plan) {
         if (auto found = plan in _planIndex)
             return *found;
-        throw refusal("a call site names a call plan that the store does not hold");
+        internalFailure("a call site names a call plan that the store does not hold");
     }
 
     const(CallPlan)* planAt(in size_t index) {
@@ -501,17 +494,20 @@ private bool fieldsArePure(T)() {
     return true;
 }
 
-// The classification of field `index` of `T`: `Plain`, `Relocated` or `SetBy`.
+// The classification of field `index` of `T`: `Plain`, `Relocated`, `HostCode`
+// or `SetBy`.
 // A field with none, or with two, stops the build.
 private template classificationOf(T, size_t index) {
     import std.meta: Filter;
 
     alias attributes = __traits(getAttributes, T.tupleof[index]);
     enum isKind(alias attribute) = is(typeof(attribute) == Plain)
-        || is(typeof(attribute) == Relocated) || is(typeof(attribute) == SetBy);
+        || is(typeof(attribute) == Relocated)
+        || is(typeof(attribute) == HostCode)
+        || is(typeof(attribute) == SetBy);
     alias kinds = Filter!(isKind, attributes);
     static assert(kinds.length == 1, T.stringof ~ "." ~ FieldNameTuple!T[index]
-        ~ " has to say how it reaches the file: @plain, @relocated or @setBy");
+        ~ " has to say how it reaches the file: @plain, @relocated, @hostCode or @setBy");
     enum classificationOf = kinds[0];
 }
 
@@ -588,31 +584,29 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
                 static if (holdsAddress!Field) {
                     if (archive.isWriting) {
                         if (wordOf(value.tupleof[index]) != 0)
-                            throw refusal(text("the field ", T.stringof, ".",
-                                name, " holds an address"));
+                            internalFailure(text("the field ", T.stringof,
+                                ".", name, " holds an address"));
                     } else
                         value.tupleof[index] = Field.init;
                 } else
                     archive.transfer(value.tupleof[index]);
-            } else static if (is(typeof(classification) == Relocated)) {
-                static if (classification.kind == Target.Kind.handler) {
-                    // Code of the host executable. Only the handler of an
-                    // instruction is never null.
-                    bool present = true;
-                    static if (!is(Field == Instruction.Handler)) {
-                        if (archive.isWriting)
-                            present = wordOf(value.tupleof[index]) != 0;
-                        archive.scalar(present);
-                    }
-                    ptrdiff_t distance;
-                    if (archive.isWriting && present)
-                        distance = hostCodeOffset(wordOf(value.tupleof[index]));
-                    if (present)
-                        archive.scalar(distance);
-                    if (!archive.isWriting)
-                        value.tupleof[index] = present
-                            ? cast(Field) hostCodeAt(distance) : null;
+            } else static if (is(typeof(classification) == HostCode)) {
+                // Code of the host executable. Only the handler of an
+                // instruction is never null.
+                bool present = true;
+                static if (!is(Field == Instruction.Handler)) {
+                    if (archive.isWriting)
+                        present = wordOf(value.tupleof[index]) != 0;
+                    archive.scalar(present);
                 }
+                ptrdiff_t distance;
+                if (archive.isWriting && present)
+                    distance = hostCodeOffset(wordOf(value.tupleof[index]));
+                if (present)
+                    archive.scalar(distance);
+                if (!archive.isWriting)
+                    value.tupleof[index] = present
+                        ? cast(Field) hostCodeAt(distance) : null;
             }
         }
     }}
@@ -666,12 +660,9 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             const position = archive.symbolPosition(
                 cast(const(void)*) target.address);
             return [position[0], position[1], 0];
-        case handler:
-            throw refusal("a word needs a relocation of kind handler");
         case frontendString:
-            throw refusal("a word needs a relocation of kind frontendString");
-        case callback:
-            throw refusal("a word needs a relocation of kind callback");
+            // The strings of an assertion are in the file as bytes.
+            internalFailure("a word needs a relocation of kind frontendString");
     }
 }
 
@@ -694,15 +685,9 @@ private size_t addressOf(
             return cast(size_t) archive.dataAt(reference);
         case adoptedString:
             return cast(size_t) archive.stringAt(reference);
-        case handler:
-            throw new SnakebiteException(
-                "the program file holds a relocation of kind handler");
         case frontendString:
             throw new SnakebiteException(
                 "the program file holds a relocation of kind frontendString");
-        case callback:
-            throw new SnakebiteException(
-                "the program file holds a relocation of kind callback");
     }
 }
 
@@ -716,9 +701,7 @@ private void eachRelocated(T)(
         enum classification = classificationOf!(T, index);
         alias Field = typeof(T.tupleof[index]);
         static if (is(typeof(classification) == Relocated)) {
-            // The file holds code of the host executable by itself.
-            static if (classification.kind != Target.Kind.handler)
-                visit(classification, wordOf(record.tupleof[index]));
+            visit(classification, wordOf(record.tupleof[index]));
         }
         else static if (is(typeof(classification) == Plain)
                 && isClassified!(Unqual!Field))
@@ -741,7 +724,7 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
         if (reloc.place.section == Place.Section.assertSite
                 && reloc.target.kind == Target.Kind.frontendString)
             continue;
-        // Refuses any other kind that the file cannot hold.
+        // Names the target now, so that the file holds it.
         referenceOf(archive, reloc.target);
         listed[[cast(size_t) reloc.place.section,
             cast(size_t) reloc.place.field, reloc.place.index]] = true;
@@ -761,7 +744,7 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
     ) {
         if (word != 0 && !([cast(size_t) relocated.section,
                 cast(size_t) relocated.field, index] in listed))
-            throw refusal(text("a word of `", function_.hostCall.name,
+            internalFailure(text("a word of `", function_.hostCall.name,
                 "` holds an address that no relocation names"));
     }
 
@@ -794,8 +777,7 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
                 *field = (*field - cast(size_t) function_.instructions.ptr)
                     / Instruction.sizeof;
             else if (role == Role.address) {
-                require(Relocated(Target.Kind.handler,
-                    Place.Section.instruction,
+                require(Relocated(Place.Section.instruction,
                     mixin("Place.Field." ~ name)), index, *field);
                 *field = 0;
             }
@@ -862,13 +844,10 @@ private bool assignOperand(
             return true;
         case word:
         case callee:
-        case prepareGuest:
         case nativePlan:
-        case builtinEntry:
         case valueSignature:
         case message:
         case file:
-        case halt:
         case type:
         case signature:
             return false;
@@ -977,7 +956,7 @@ private void transferSignatures(ref Archive archive, ref Program program) {
                 const registered =
                     program.plans.callbacks.signatureOf(function_);
                 if (registered is null)
-                    throw refusal("a function has no registered signature");
+                    internalFailure("a function has no registered signature");
                 signature = cast(NativeSignature) *registered;
             }
             archive.transfer(signature);
@@ -1124,7 +1103,7 @@ private void transferStartData(ref Archive archive, ref Program program) {
         if (archive.isWriting) {
             const found = record in archive._moduleOfStart;
             if (found is null)
-                throw refusal("a module record belongs to no module");
+                internalFailure("a module record belongs to no module");
             position = *found;
         }
         archive.scalar(position);

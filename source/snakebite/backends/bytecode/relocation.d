@@ -8,13 +8,15 @@ private:
 // address of this process. A stored image has to load into a process whose
 // addresses differ, so each such word names the thing it points at. This
 // module imports nothing of the frontend: the VM compiles without it.
+//
+// A word that holds code of the host executable (the handler of an
+// instruction, the entry of a builtin call, the action of a halting check) has
+// no `Reloc`: the file holds it as a distance from one handler, and a field of
+// that kind says so with `hostCode`.
 
-// What an address points at. `handler` words are not listed one by one: every
-// instruction starts with one, so the loader finds them without a list.
+// What an address points at.
 public struct Target {
     public enum Kind : ubyte {
-        // The handler of an instruction.
-        handler,
         // Data of the program: literals, `.init` images, statics.
         staticData,
         // Code of the host process.
@@ -33,8 +35,6 @@ public struct Target {
         signature,
         // The entry that host code calls to reach a guest function.
         callbackEntry,
-        // A delegate that prepares a call site when it first runs.
-        callback,
     }
 
     public Kind kind;
@@ -116,14 +116,11 @@ public struct Place {
         word,
         // `CallSite`.
         callee,
-        prepareGuest,
         nativePlan,
-        builtinEntry,
         valueSignature,
         // `AssertSite`.
         message,
         file,
-        halt,
         // `ExceptionHandler`.
         type,
         // `Function`.
@@ -159,21 +156,23 @@ public enum plain = Plain();
 // The field holds an address of this process. It is not written: a `Reloc`
 // of the function names what it points at, and a load puts the address of the
 // same thing in the new process back. The `section` and `field` are where
-// the `Reloc` says it sits. The handler of an instruction has no `Reloc`:
-// every instruction has one, so the file holds it by itself.
+// the `Reloc` says it sits.
 public struct Relocated {
-    public Target.Kind kind;
     public Place.Section section;
     public Place.Field field;
 }
 
 public Relocated relocated(
-    in Target.Kind kind, in Place.Section section, in Place.Field field,
+    in Place.Section section, in Place.Field field,
 ) @safe pure nothrow @nogc {
-    return Relocated(kind, section, field);
+    return Relocated(section, field);
 }
 
-public enum handlerRelocated = Relocated(Target.Kind.handler);
+// The field holds code of the host executable and has no `Reloc`: the file
+// holds it as a distance from one handler. Only a field of the handler type
+// of an instruction is never null.
+public struct HostCode {}
+public enum hostCode = HostCode();
 
 // The field is not in the file. The function `name` sets it after a load,
 // and the same function sets it after a compile.

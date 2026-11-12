@@ -14,7 +14,7 @@ import snakebite.ffi.callplan:
     executeIndirectCallPlan, guestWordOf;
 import snakebite.native.signature: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation:
-    Address, handlerRelocated, Place, plain, Reloc, relocated, setBy, Target;
+    Address, hostCode, Place, plain, Reloc, relocated, setBy, Target;
 import snakebite.builtin.call: BuiltinCall;
 import snakebite.stack.hostcall: HostCallLayout;
 import snakebite.failure.halt: HaltAction, isHalt;
@@ -227,8 +227,7 @@ public struct CallSite {
     // signature the call site expects of its callee: null for every call
     // that is neither through a value nor virtual.
     public struct ValueArguments {
-        @relocated(Target.Kind.signature, Place.Section.callSite,
-            Place.Field.valueSignature)
+        @relocated(Place.Section.callSite, Place.Field.valueSignature)
         package const(Signature)* signature;
         @plain package Arg[] surplus;
         @plain package const(Shape)[] surplusShapes;
@@ -239,12 +238,10 @@ public struct CallSite {
     @plain package Arg[] args;
     @plain package Arg[] nativeArgs;
     @plain package size_t returnWidth;
-    @relocated(Target.Kind.functionWord, Place.Section.callSite,
-        Place.Field.callee)
+    @relocated(Place.Section.callSite, Place.Field.callee)
     package const(Function)* callee;
-    @relocated(Target.Kind.callback, Place.Section.callSite,
-        Place.Field.prepareGuest)
-    package const(Function)* delegate() prepareGuest;
+    // Null in a compiled program that is saved: every site is filled first.
+    @plain package const(Function)* delegate() prepareGuest;
     // `size_t.max` unless the caller laid this call out in a `Window`.
     @plain package size_t windowSlot = size_t.max;
     @plain package size_t windowDisp;
@@ -411,8 +408,7 @@ public struct CallSite {
         return true;
     }
 
-    @relocated(Target.Kind.nativePlan, Place.Section.callSite,
-        Place.Field.nativePlan)
+    @relocated(Place.Section.callSite, Place.Field.nativePlan)
     package const(CallPlan)* nativePlan;
 
     // A `native` site whose plan is zero to three word arguments and no
@@ -444,9 +440,7 @@ public struct CallSite {
     @plain package bool directSwapped;
     @plain package ubyte[3] directOrder;
     @plain package Load[3] directLoads;
-    @relocated(Target.Kind.handler, Place.Section.callSite,
-        Place.Field.builtinEntry)
-    package BuiltinCall builtinEntry;
+    @hostCode package BuiltinCall builtinEntry;
     @plain package size_t calleeSlotOffset;
     @plain package bool hasContext;
     @plain package size_t cleanupStartIndex = size_t.max;
@@ -873,7 +867,7 @@ public struct Instruction {
     // the compiler from mutable data-segment storage.
     package enum size_t immutableSource = 1;
 
-    @handlerRelocated package Handler handler;
+    @hostCode package Handler handler;
     // What a field means is decided by the opcode alone - never dmd's own
     // numeric types, so this VM has none of them to import. `0` means an
     // opcode does not use a given field. The roles a field plays, across
@@ -951,9 +945,7 @@ package struct AssertSite {
     @plain package string file;
     @plain package size_t line;
     // Not null for a check that halts rather than throws.
-    @relocated(Target.Kind.handler, Place.Section.assertSite,
-        Place.Field.halt)
-    package HaltAction halt;
+    @hostCode package HaltAction halt;
 }
 
 
@@ -962,12 +954,8 @@ package struct AssertSite {
 // takes the address of an instruction from `Function.instructions` there.
 // `cleanupEndIndex` is `size_t.max` when there is no cleanup end.
 package struct ExceptionHandler {
-    // A datum of the program, or a class of the host. The annotation names the
-    // kind of a class of the program; a class of the host has a `hostSymbol`
-    // relocation, and only a `handler` annotation changes how the file holds
-    // a field.
-    @relocated(Target.Kind.staticData, Place.Section.exceptionHandler,
-        Place.Field.type)
+    // A class of the program (a datum) or a class of the host (a symbol).
+    @relocated(Place.Section.exceptionHandler, Place.Field.type)
     package TypeInfo_Class type;
     @plain package size_t catchOffset;
     @plain package size_t bodyStartIndex;
@@ -998,8 +986,7 @@ public struct Function {
     // it declares before it; `size_t.max` for any other function.
     @plain package size_t cursorOffset = size_t.max;
     @plain package size_t declaredParameters;
-    @relocated(Target.Kind.signature, Place.Section.function_,
-        Place.Field.signature)
+    @relocated(Place.Section.function_, Place.Field.signature)
     package const(Signature)* signature;
     @plain package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
@@ -1070,13 +1057,13 @@ package void recordCallSiteRelocs(
 ) {
     import std.traits: FieldNameTuple;
 
-    // Address fields: `callee`, `prepareGuest`, `nativePlan`,
-    // `builtinEntry` and `value.signature`.
-    // `builtinEntry` is code of the host executable, so the file holds it
-    // by itself and it has no `Reloc`. A delegate is kept by its function;
-    // its context is state of the compiler. The instruction addresses `cleanupStart` and `cleanupEnd`
-    // follow from the two indexes. The call caches are filled at run time,
-    // so the compiled bytecode has no addresses in them.
+    // Address fields with a `Reloc`: `callee`, `nativePlan` and
+    // `value.signature`. `builtinEntry` is code of the host executable, so
+    // the file holds it by itself and it has no `Reloc`. `prepareGuest` is
+    // null once a save has filled the call sites. The instruction addresses
+    // `cleanupStart` and `cleanupEnd` follow from the two indexes. The call
+    // caches are filled at run time, so the compiled bytecode has no
+    // addresses in them.
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
@@ -1101,8 +1088,6 @@ package void recordCallSiteRelocs(
     enum section = Place.Section.callSite;
     recordAddress(relocs, section, index, Place.Field.callee,
         Target.Kind.functionWord, cast(size_t) site.callee);
-    recordAddress(relocs, section, index, Place.Field.prepareGuest,
-        Target.Kind.callback, cast(size_t) site.prepareGuest.funcptr);
     recordAddress(relocs, section, index, Place.Field.nativePlan,
         Target.Kind.nativePlan, cast(size_t) site.nativePlan);
     recordAddress(relocs, section, index, Place.Field.valueSignature,

@@ -102,13 +102,7 @@ private bool wordAt(
             const site = &fn.callSites[index];
             switch (place.field) with (Place.Field) {
                 case callee: value = cast(size_t) site.callee; return true;
-                case prepareGuest:
-                    value = cast(size_t) site.prepareGuest.funcptr;
-                    return true;
                 case nativePlan: value = cast(size_t) site.nativePlan; return true;
-                case builtinEntry:
-                    value = cast(size_t) site.builtinEntry;
-                    return true;
                 case valueSignature:
                     value = cast(size_t) site.value.signature;
                     return true;
@@ -121,7 +115,6 @@ private bool wordAt(
             switch (place.field) with (Place.Field) {
                 case message: value = cast(size_t) site.message.ptr; return true;
                 case file: value = cast(size_t) site.file.ptr; return true;
-                case halt: value = cast(size_t) site.halt; return true;
                 default: return false;
             }
         case exceptionHandler:
