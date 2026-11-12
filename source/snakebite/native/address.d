@@ -74,7 +74,7 @@ public struct Address {
     }
 
     // The word that goes into the instruction or constant.
-    public size_t word() const @safe pure nothrow @nogc {
+    package(snakebite) size_t word() const @safe pure nothrow @nogc {
         return _target.address;
     }
 

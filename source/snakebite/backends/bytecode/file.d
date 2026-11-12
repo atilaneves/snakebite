@@ -1035,9 +1035,7 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             StaticBlocks.Link link;
             if (archive.isWriting)
                 link = links[linkIndex];
-            auto linkPlace = Place(Place.Section.datum, Place.Field.word,
-                link.wordOffset);
-            archive.transfer(linkPlace);
+            archive.scalar(link.wordOffset);
             archive.transfer(link.kind);
             size_t[3] reference;
             if (archive.isWriting)
@@ -1046,15 +1044,12 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             if (archive.isWriting)
                 continue;
             auto bytes = cast(ubyte[]) blocks.bytesOf(blocks.data[index]);
-            link.wordOffset = linkPlace.index;
-            const place = linkPlace;
-            if (place.section != Place.Section.datum
-                    || place.index > bytes.length
-                    || bytes.length - place.index < size_t.sizeof)
+            if (link.wordOffset > bytes.length
+                    || bytes.length - link.wordOffset < size_t.sizeof)
                 throw new SnakebiteException(
                     "the program file holds a relocation with no place");
             const address = addressOf(archive, link.kind, reference);
-            bytes[place.index .. place.index + size_t.sizeof] =
+            bytes[link.wordOffset .. link.wordOffset + size_t.sizeof] =
                 (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
         }
     }

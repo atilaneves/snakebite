@@ -36,8 +36,7 @@ public struct StaticBlocks {
         public uint alignment;
         public bool canHoldAddress;
         // The words of the datum that hold an address, when the compiler
-        // records them (`recordAddress`). The offset of a word is the `index`
-        // of its place.
+        // records them (`recordAddress`).
         public Link[] links;
     }
 
