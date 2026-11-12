@@ -49,10 +49,11 @@ public struct Resolver {
     }
 
     // The name of the symbol that `address` is in or `distance` bytes after,
-    // or null. The names `resolve` answered come first; any other address in a
-    // shared object of the process is asked of the loader, the reverse of
-    // `sharedObjectAddress`. A name is answered only when `resolve` gives it
-    // back as the address of that symbol.
+    // or null. An address that `resolve` answered has the name that it
+    // answered for. Any other address is asked of the loader, and the name of
+    // the symbol that holds it is answered only when `resolve` gives that
+    // name back as the start of the symbol, so that a later process can ask
+    // `resolve` for the address again.
     public string nameOf(const(void)* address, out size_t distance) {
         if (auto found = address in _names)
             return *found;

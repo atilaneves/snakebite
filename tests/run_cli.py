@@ -2128,25 +2128,19 @@ def test_saved_program_with_host_function_address_in_static_data_runs_as_the_com
         """})
 
 
-def test_saved_program_with_function_addresses_in_data_runs_as_compiled(
+def test_saved_program_with_function_addresses_in_a_struct_default_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
         module main;
-        import core.stdc.stdlib: abs;
         int twice(int n) { return 2 * n; }
-        __gshared int function(int) named = &twice;
-        __gshared int function(int) literal = (int n) => n + 1;
-        __gshared extern(C) int function(int) host = &abs;
         struct Table { int function(int)[2] entries = [&twice, &twice]; }
         __gshared Table table;
-        int main() {
-            return named(4) + literal(1) + host(-3) + table.entries[1](5);
-        }
+        int main() { return table.entries[1](5); }
         """})
 
 
-def test_saved_program_with_host_variable_address_in_data_runs_as_compiled(
+def test_saved_program_with_host_variable_address_in_data_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
@@ -2157,7 +2151,7 @@ def test_saved_program_with_host_variable_address_in_data_runs_as_compiled(
         """})
 
 
-def test_saved_program_with_host_variable_address_plus_offset_in_data_runs_as_compiled(
+def test_saved_program_with_host_variable_address_plus_offset_in_data_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
@@ -2456,7 +2450,7 @@ def test_saved_program_with_guest_classes_deriving_a_host_base_with_interface_ru
         """})
 
 
-def test_saved_program_with_thread_local_variables_runs_as_compiled(
+def test_saved_program_with_thread_local_variables_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
@@ -2475,7 +2469,7 @@ def test_saved_program_with_thread_local_variables_runs_as_compiled(
         """})
 
 
-def test_saved_program_with_host_thread_local_variables_runs_as_compiled(
+def test_saved_program_with_host_thread_local_variables_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
@@ -2489,7 +2483,7 @@ def test_saved_program_with_host_thread_local_variables_runs_as_compiled(
         """})
 
 
-def test_saved_program_with_module_constructors_and_destructors_runs_as_compiled(
+def test_saved_program_with_module_constructors_and_destructors_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {
@@ -2517,7 +2511,7 @@ def test_saved_program_with_module_constructors_and_destructors_runs_as_compiled
     })
 
 
-def test_saved_program_with_unit_tests_runs_as_compiled(
+def test_saved_program_with_unit_tests_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {
@@ -2536,7 +2530,7 @@ def test_saved_program_with_unit_tests_runs_as_compiled(
     })
 
 
-def test_saved_program_with_destructor_gates_of_a_template_runs_as_compiled(
+def test_saved_program_with_destructor_gates_of_a_template_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {
@@ -2561,7 +2555,7 @@ def test_saved_program_with_destructor_gates_of_a_template_runs_as_compiled(
     })
 
 
-def test_saved_program_with_a_second_thread_runs_as_compiled(
+def test_saved_program_with_a_second_thread_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
@@ -2581,7 +2575,7 @@ def test_saved_program_with_a_second_thread_runs_as_compiled(
         """})
 
 
-def test_saved_program_with_destructor_gate_and_a_second_thread_runs_as_compiled(
+def test_saved_program_with_destructor_gate_and_a_second_thread_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
     assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
