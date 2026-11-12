@@ -1772,6 +1772,14 @@ def assert_saved_program_runs_as_the_compiled_program(
                    cwd=tmp_path)
     assert saved.returncode == 0, output(saved)
 
+    # A second save runs in another process, with other addresses: the file
+    # holds none of them.
+    saved_again = run_sb(*common, f"--save={tmp_path / 'again.sbc'}", app,
+                         cwd=tmp_path)
+    assert saved_again.returncode == 0, output(saved_again)
+    assert (tmp_path / "again.sbc").read_bytes() \
+        == (tmp_path / "program.sbc").read_bytes()
+
     for flags in ([], ["--no-jit"]):
         loaded = run_sb(*flags, f"--load={tmp_path / 'program.sbc'}",
                         *main_arguments, cwd=tmp_path)
