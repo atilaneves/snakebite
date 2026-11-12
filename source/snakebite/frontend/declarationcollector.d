@@ -47,6 +47,20 @@ package(snakebite) extern(C++) class ImportCSafeVisitor
     }
 }
 
+// The native compiler generates code for a template instance only when
+// `needsCodegen` says so. It says no for an instance with errors, for one
+// that only a speculative check, such as `is(typeof(...))`, made, and for
+// one that a non-root module makes when it imports no root module. dmd
+// asserts that `needsCodegen` gets the primary instance, so any other
+// instance is not one that compiles.
+package(snakebite) bool compilesIntoBuild(
+    imported!"dmd.dtemplate".TemplateInstance instance,
+) {
+    import dmd.templatesem: needsCodegen;
+
+    return instance.inst is instance && instance.needsCodegen;
+}
+
 // Named distinctly from every class that extends it (`Collector` in
 // `imagesource.d`, `InlineAsmCollector` and `InlineAsmVersionGate` in
 // `inlineasm.d`): an `extern(C++) class` with no explicit C++ namespace
@@ -66,7 +80,6 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
     import dmd.dsymbolsem: include;
     import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
-    import dmd.templatesem: needsCodegen;
     import dmd.expression: FuncExp;
     import dmd.func: CtorDeclaration, DtorDeclaration,
         FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
@@ -79,12 +92,8 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     // through `TemplateInstance` below.
     override void visit(TemplateDeclaration declaration) {}
 
-    // The native compiler generates code for an instance only when
-    // `needsCodegen` says so; it says no for an instance with errors, and for
-    // one that only a speculative check, such as `is(typeof(...))`, made.
     override void visit(TemplateInstance instance) {
-        if (instance.members !is null && instance.inst is instance
-                && instance.needsCodegen)
+        if (instance.members !is null && instance.compilesIntoBuild)
             foreach (member; *instance.members)
                 member.accept(this);
     }
