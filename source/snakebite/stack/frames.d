@@ -8,7 +8,6 @@ import snakebite.failure.report: internalFailure;
 
 import snakebite.stack.temporaries: TemporaryStack;
 import snakebite.host.cstack: CStack;
-import snakebite.host.threads: heapDelete, heapNew;
 import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
 
