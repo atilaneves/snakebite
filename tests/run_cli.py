@@ -1861,11 +1861,8 @@ def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
     })
 
 
-# A field initialiser that is an array literal is static data, which compiled
-# D never grows in place: `assumeSafeAppend` on it is a no-op and the append
-# that follows copies it. Static data that the GC took for an appendable array
-# let the append overwrite its neighbours, and a later `assumeSafeAppend`
-# read garbage as the used length of the block.
+# An append after `assumeSafeAppend` to an array of static data copies it, as
+# in compiled D.
 def test_saved_program_appends_to_arrays_of_static_data_as_compiled_d(
     tmp_path: Path,
 ) -> None:
