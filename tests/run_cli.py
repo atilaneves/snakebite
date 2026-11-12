@@ -7214,3 +7214,49 @@ def test_fixture_fails_a_test_with_a_plain_dub_name(
 # is keyed by project path and published with an atomic rename.
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# A virtual method of a dependency class template whose body has inline
+# assembler runs as the native program: the dependency image holds the code
+# that LDC compiled for it.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_virtual_method_of_dependency_class_template_with_inline_asm_runs(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "dependency" / "dub.sdl",
+          f'name "{dub_name("asm-class-dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dependency" / "source" / "dep.d", """
+        module dep;
+        class Box(T) {
+            T x;
+            this(T v) { x = v; }
+            int get() {
+                int r;
+                T v = x;
+                version (D_InlineAsm_X86_64)
+                    asm { mov EAX, v; add EAX, EAX; mov r, EAX; }
+                return r;
+            }
+        }
+        """)
+    write(tmp_path / "app" / "dub.sdl",
+          dub_project_recipe("asm-class-app")
+          + f'dependency "{dub_name("asm-class-dep")}" path="../dependency"\n')
+    write(tmp_path / "app" / "source" / "main.d", """
+        module main;
+        import core.stdc.stdio: printf;
+        import dep: Box;
+        int main() {
+            Object o = new Box!int(3);
+            printf("%d\\n", (cast(Box!int) o).get());
+            return 0;
+        }
+        """)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == ["6"]
