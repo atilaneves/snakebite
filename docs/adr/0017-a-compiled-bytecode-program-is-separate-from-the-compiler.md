@@ -23,16 +23,17 @@ is now in RAM, possibly JITing." The two uses differ in how the bytecode got
 into RAM. They must not differ in what executes it. The backend is the
 compiled program plus a compiler that fills it on demand.
 
-No save or load of a compiled program exists yet. This record describes the
-split that makes both possible.
+`Bytecode.save` writes a compiled program to a file, and `loadProgram` in
+`backends/bytecode/file.d` reads it into a `Program` with no compiler. This
+record describes the split that makes both work.
 
 ## Decision
 
 ### The check
 
-The first step of `build/ci.sh` compiles `vm.d`, `runner.d` and `program.d`
-with `dmd -o- -i -Isource` and no frontend import path. A frontend import in
-any of them, or in what they import, fails that step.
+The first step of `build/ci.sh` compiles `vm.d`, `runner.d`, `program.d` and
+`file.d` with `dmd -o- -i -Isource` and no frontend import path. A frontend
+import in any of them, or in what they import, fails that step.
 
 ### A Module owns what its D module defines
 
@@ -54,7 +55,7 @@ reference to another module (an import) is a reference: the `Module` holds
 it as a position in the list of modules of the program, with the module
 names beside it. The owner of a template instance is the module that
 declares the template. This fits the present model, where a whole dub
-package is compiled at once. A later `.sbc` file is a list of modules.
+package is compiled at once. A saved file is a list of modules.
 
 The compiler makes a `Module` at the first function or datum of its D
 module. `buildStartData` asks the compiler for the storage of the record of
@@ -91,30 +92,33 @@ process, and `Program` holds them:
 - The start data (`StartData`): the program name, `main`, the
   `crt_constructor` and `crt_destructor` functions, and the list of module
   records.
+- A datum that has no owner, or whose owner has no blocks, goes to the blocks
+  of `Program.store` (`NativeData.reserve` with no owner). The file holds
+  these blocks as it holds those of a `Module`.
 
 The storage of the shared data is `StaticStore` in `Program.store`. The
 tables that find it (by text, by type, by source node) are in the
 compiler's `NativeData`, which keys them with frontend types.
 
-### What is not yet in a Module
+### Type data
 
-No datum of a D module is left outside its `Module`, except the shared data
-above.
+A datum of a D module is in its `Module`, except the shared data above and
+the data that have no owner (the last item above).
 
-The type data are in the blocks. A `TypeInfo` object of a declared type
-(struct, class, interface, enum), the class information of a guest class
-with its vtable, its `.init` image and its `Interface` records, and a class
-object of a static initialiser are data of the `Module` of the D module of
-the declaration. The `TypeInfo` objects of derived types (pointer, array,
-qualifier, tuple, function) are data of the process store. They are real
-druntime objects: the vtable pointer of each is the address of a symbol of
-the host. The `TypeInfo` of a type that druntime has is a symbol of the
-host. Names are strings that the process store owns. An associative array of
-a static initialiser is the struct literal that the frontend made, stored as
-data; no code runs to make it.
+The type data follow this. A `TypeInfo` object of a declared type (struct,
+class, interface, enum), the class information of a guest class with its
+vtable, its `.init` image and its `Interface` records, and a class object of
+a static initialiser are data of the `Module` of the D module of the
+declaration. The `TypeInfo` objects of derived types (pointer, array,
+qualifier, tuple, function) have no owner: they are data of the process
+store. They are real druntime objects: the vtable pointer of each is the
+address of a symbol of the host. The `TypeInfo` of a type that druntime has
+is a symbol of the host. Names are strings that the process store owns. An
+associative array of a static initialiser is the struct literal that the
+frontend made, stored as data; no code runs to make it.
 
-A constant with a place in the blocks of a `Module` is only one that goes
-through `NativeData.value` with an owner.
+A constant has a place in the blocks of a `Module` only when it goes through
+`NativeData.value` with an owner.
 
 ## Consequences
 
@@ -127,11 +131,11 @@ through `NativeData.value` with an owner.
   dropped. A start handle that is filled holds the compiled function and the
   address of the `Runner` that runs it, and nothing else of the compiler.
 - A `Program` that came from a file needs only the parts of the list above
-  to be in the file. The parts that are not yet in a `Module` must move
-  there, or have a stable form, before a `.sbc` file can hold a module.
-- The start record of a D module is in its `Module`. A start handle of a
-  function that is not compiled still holds a delegate of the compiler, so a
-  loaded module carries its constructors, destructors and unit tests only
-  when they are compiled.
+  to be in the file. A save compiles the whole program first and fills every
+  start handle and every guest call site, so the file holds no delegate of
+  the compiler.
+- The start record of a D module is in its `Module`. A start handle in a
+  file holds a compiled function, so a loaded module carries its
+  constructors, destructors and unit tests.
 - No cost is added to an instruction or a call. Reading the module records
   at start takes one more pointer step for each module.

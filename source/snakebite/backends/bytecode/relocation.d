@@ -23,8 +23,6 @@ public struct Target {
         hostSymbol,
         // A compiled function, as a function pointer or a delegate holds it.
         functionWord,
-        // A string that the frontend owns, such as a file name.
-        frontendString,
         // A copy of a string literal that the process store owns.
         adoptedString,
         // A value in the native constant pool.
@@ -100,7 +98,6 @@ public struct Place {
         instruction,
         constant,
         callSite,
-        assertSite,
         exceptionHandler,
         // The bytes of a datum of a `StaticBlocks`. The `index` is the
         // offset in the datum.
@@ -118,9 +115,6 @@ public struct Place {
         callee,
         nativePlan,
         valueSignature,
-        // `AssertSite`.
-        message,
-        file,
         // `ExceptionHandler`.
         type,
         // `Function`.
@@ -130,7 +124,7 @@ public struct Place {
     // The two enums come first so that a `Place` is 16 bytes.
     public Section section;
     public Field field;
-    // The instruction, constant, call site, assert site or exception handler.
+    // The instruction, constant, call site or exception handler.
     public size_t index;
 }
 

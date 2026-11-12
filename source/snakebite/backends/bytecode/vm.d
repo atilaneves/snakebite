@@ -1059,13 +1059,14 @@ package void recordCallSiteRelocs(
 
     // Address fields with a `Reloc`: `callee`, `nativePlan` and
     // `value.signature`. `builtinEntry` is code of the host executable, so
-    // the file holds it by itself and it has no `Reloc`. `prepareGuest` is
-    // null once a save has filled the call sites. The instruction addresses
-    // `cleanupStart` and `cleanupEnd` follow from the two indexes. The call
-    // caches are filled at run time, so the compiled bytecode has no
-    // addresses in them.
+    // the file holds it by itself and it has no `Reloc`. `prepareGuest` is a
+    // delegate that is null once a save has filled the call sites, so it is
+    // plain. The instruction addresses `cleanupStart` and `cleanupEnd` follow
+    // from the two indexes. The call caches are filled at run time, so the
+    // compiled bytecode has no addresses in them.
     enum plainFields = AliasSeq!(
         "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
+        "prepareGuest",
         "calleeSlotOffset", "hasContext", "cleanupStartIndex",
         "cleanupEndIndex", "cleanupStart", "cleanupEnd", "windowSlot",
         "windowDisp", "windowScratch", "windowEnd", "windowAlignment",
@@ -1073,7 +1074,7 @@ package void recordCallSiteRelocs(
         "directLoads", "indirectTarget",
     );
     enum addressFields = AliasSeq!(
-        "callee", "prepareGuest", "nativePlan", "builtinEntry",
+        "callee", "nativePlan", "builtinEntry",
     );
     static foreach (name; FieldNameTuple!CallSite)
         static assert(staticIndexOf!(name, plainFields) >= 0
@@ -1100,23 +1101,6 @@ package void recordFunctionRelocs(
     // `signature` is the only address field of the `Function` itself.
     recordAddress(relocs, Place.Section.function_, 0, Place.Field.signature,
         Target.Kind.signature, cast(size_t) function_.signature);
-}
-
-package void recordAssertSiteRelocs(
-    ref Reloc[] relocs, in size_t index, in AssertSite site,
-) {
-    import std.traits: FieldNameTuple;
-
-    static foreach (name; FieldNameTuple!AssertSite)
-        static assert(name == "message" || name == "file" || name == "line"
-            || name == "halt",
-            "AssertSite." ~ name ~ " has to say whether it holds an address");
-
-    enum section = Place.Section.assertSite;
-    recordAddress(relocs, section, index, Place.Field.message,
-        Target.Kind.frontendString, cast(size_t) site.message.ptr);
-    recordAddress(relocs, section, index, Place.Field.file,
-        Target.Kind.frontendString, cast(size_t) site.file.ptr);
 }
 
 package void recordExceptionHandlerRelocs(

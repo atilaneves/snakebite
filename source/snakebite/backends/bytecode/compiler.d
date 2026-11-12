@@ -961,7 +961,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
         Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
-        branchTargetField, recordAssertSiteRelocs, recordCallSiteRelocs,
+        branchTargetField, recordCallSiteRelocs,
         recordExceptionHandlerRelocs, recordFunctionRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
@@ -1393,8 +1393,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_bytecode.recordRelocs) {
             foreach (index, ref site; _callSites)
                 recordCallSiteRelocs(_relocs, index, site);
-            foreach (index, ref site; _assertSites)
-                recordAssertSiteRelocs(_relocs, index, site);
             foreach (index, ref handler; exceptionHandlers)
                 recordExceptionHandlerRelocs(_relocs, index, handler,
                     _bytecode._nativeData.addressOfData(
@@ -2117,9 +2115,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 case constant:
                     reloc.place.index += constantBase;
                     break;
-                case function_, callSite, assertSite, exceptionHandler, datum:
-                    internalFailure("a copied body has no call, assertion or "
-                        ~ "catch site");
+                case function_, callSite, exceptionHandler, datum:
+                    internalFailure("a copied body has no call or catch site");
             }
             _relocs ~= reloc;
         }
