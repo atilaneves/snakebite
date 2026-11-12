@@ -1861,6 +1861,43 @@ def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
     })
 
 
+# A field initialiser that is an array literal is static data, which compiled
+# D never grows in place: `assumeSafeAppend` on it is a no-op and the append
+# that follows copies it. Static data that the GC took for an appendable array
+# let the append overwrite its neighbours, and a later `assumeSafeAppend`
+# read garbage as the used length of the block.
+def test_saved_program_appends_to_arrays_of_static_data_as_compiled_d(
+    tmp_path: Path,
+) -> None:
+    program = {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Stacks {
+            int[] numbers = [0];
+            bool[] flags = [false];
+            void push() {
+                numbers.assumeSafeAppend ~= 1;
+                flags.assumeSafeAppend ~= true;
+                numbers.length--;
+                flags.length--;
+            }
+        }
+        int main() {
+            Stacks stacks;
+            stacks.push();
+            stacks.push();
+            printf("%d %d %d\\n", cast(int) stacks.numbers.length,
+                   stacks.numbers[0], stacks.flags[0] ? 1 : 0);
+            return 0;
+        }
+        """}
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, program)
+    from_ram = run_sb("--backend=bytecode", "--no-optimise-image",
+                      str(tmp_path / "app"), cwd=tmp_path)
+    assert from_ram.returncode == 0, output(from_ram)
+    assert guest_lines(from_ram) == ["1 0 0"], output(from_ram)
+
+
 def test_saved_program_with_host_calls_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
