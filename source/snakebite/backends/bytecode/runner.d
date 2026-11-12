@@ -7,6 +7,7 @@ module snakebite.backends.bytecode.runner;
 // imports no frontend module.
 private:
 
+import snakebite.backends.bytecode.program: Program;
 import snakebite.backends.bytecode.vm: Function, JitSetting, Vm;
 import snakebite.ffi.callback: CallbackCall;
 import snakebite.host.executionstates: ExecutionStates;
@@ -186,6 +187,44 @@ public struct Runner {
 }
 
 
+// Wires `runner` to `program`, whatever filled the program: the compiler as
+// it compiles, or a file. The runner gets the JIT setting and three delegates
+// that only forward to the store and the plan store of the program, and the
+// callback bridge of the program calls `runner` back. Neither moves after
+// this: the delegates and the bridge hold their addresses, and a `Function`
+// holds the JIT instance of the runner.
+// `runner` is memory that no `Runner` holds yet (`= void`): a `Runner` has no
+// default value, and a function cannot assign one to its place without
+// building it at another address first.
+public void wire(ref Program program, ref Runner runner, in JitSetting jit) {
+    import core.lifetime: emplace;
+
+    // On the heap: the runner keeps the delegates, and a delegate of a
+    // closure of this function would end with this call.
+    auto forwarding = new Forwarding(&program);
+    emplace(&runner, jit,
+        &forwarding.tlsSlots, &forwarding.release,
+        &forwarding.hasCallbackEntries);
+    program.plans.bindCallbacks(&Runner.invokeCallback, &runner);
+}
+
+private struct Forwarding {
+    private Program* _program;
+
+    TlsSlots* tlsSlots() {
+        return _program.store.tlsSlots;
+    }
+
+    void release() {
+        _program.store.release;
+    }
+
+    bool hasCallbackEntries() {
+        return _program.plans.callbacks.hasEntries;
+    }
+}
+
+
 public struct CompileStep {
     const(Function)* delegate() compute;
 }
@@ -203,6 +242,24 @@ public final class StartFunction: FunctionHandle {
     this(Runner* runner, CompileStep* step) {
         _runner = runner;
         _step = step;
+    }
+
+    // A handle of a function that is compiled already.
+    this(Runner* runner, const(Function)* compiled) {
+        _runner = runner;
+        _compiled = compiled;
+    }
+
+    // The function, compiled by the step of this handle when no call did.
+    public const(Function)* compiled() {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        auto compiled = atomicLoad!(MemoryOrder.acq)(_compiled);
+        return compiled is null ? compileFirst() : compiled;
+    }
+
+    public override const(void)* compiledCode() {
+        return compiled;
     }
 
     public override void call(void* returnPlace, void*[] args) {

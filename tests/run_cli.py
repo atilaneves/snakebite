@@ -1727,6 +1727,982 @@ def guest_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
     ]
 
 
+# A program that is saved and then loaded behaves as the same program
+# compiled and run from RAM. The file does not depend on the JIT setting.
+def test_saved_program_runs_as_the_compiled_program(tmp_path: Path) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int main() { return 3; }
+        """)
+    app = str(tmp_path / "app")
+    common = ("--backend=bytecode", "--no-optimise-image")
+
+    from_ram = run_sb(*common, app, cwd=tmp_path)
+    assert from_ram.returncode == 3, output(from_ram)
+
+    files = {}
+    for name, flags in [("jit", []), ("no-jit", ["--no-jit"])]:
+        files[name] = tmp_path / f"{name}.sbc"
+        saved = run_sb(*common, *flags, f"--save={files[name]}", app,
+                       cwd=tmp_path)
+        assert saved.returncode == 0, output(saved)
+    assert files["jit"].read_bytes() == files["no-jit"].read_bytes()
+
+    for flags in ([], ["--no-jit"]):
+        loaded = run_sb(*flags, f"--load={files['jit']}", cwd=tmp_path)
+        assert loaded.returncode == from_ram.returncode, output(loaded)
+        assert guest_lines(loaded) == guest_lines(from_ram)
+        assert loaded.stderr == from_ram.stderr
+
+
+# A program in `files` (path below `app`, source), saved and then loaded with
+# and without the JIT, behaves as the same program compiled and run from RAM.
+# Both runs get `arguments` as the arguments of `main`.
+def assert_saved_program_runs_as_the_compiled_program(
+    tmp_path: Path, files: dict[str, str], arguments: tuple[str, ...] = (),
+) -> None:
+    for name, text in files.items():
+        write(tmp_path / "app" / name, text)
+    app = str(tmp_path / "app")
+    common = ("--backend=bytecode", "--no-optimise-image")
+    main_arguments = ("--", *arguments) if arguments else ()
+
+    from_ram = run_sb(*common, app, *main_arguments, cwd=tmp_path)
+    saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
+                   cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    # A second save runs in another process, with other addresses: the file
+    # holds none of them.
+    saved_again = run_sb(*common, f"--save={tmp_path / 'again.sbc'}", app,
+                         cwd=tmp_path)
+    assert saved_again.returncode == 0, output(saved_again)
+    assert (tmp_path / "again.sbc").read_bytes() \
+        == (tmp_path / "program.sbc").read_bytes()
+
+    for flags in ([], ["--no-jit"]):
+        loaded = run_sb(*flags, f"--load={tmp_path / 'program.sbc'}",
+                        *main_arguments, cwd=tmp_path)
+        assert loaded.returncode == from_ram.returncode, output(loaded)
+        assert guest_lines(loaded) == guest_lines(from_ram)
+        assert loaded.stderr == from_ram.stderr
+
+
+def test_saved_program_with_constant_operands_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+        int fb() { return 41; }
+        int main() { return fib(10) - 55 + fb() + 1; }
+        """})
+
+
+def test_saved_program_with_addresses_in_module_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int x = 7;
+        __gshared int* p = &x;
+        struct Holder { int n; int* q; }
+        __gshared Holder holder = Holder(2, &x);
+        __gshared string[3] names = ["one", "two", "three"];
+        int main() {
+            *p += 1;
+            assert(*holder.q == 8 && holder.q is &x);
+            assert(names[2] == "three");
+            return x + cast(int) names[1].length + holder.n;
+        }
+        """})
+
+
+def test_saved_program_with_array_literal_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        static immutable string[] names = ["a", "bb", "ccc"];
+        __gshared int[] numbers = [1, 2, 3];
+        __gshared int target;
+        struct Defaults { int* pointer = &target; string text = "x"; }
+        __gshared Defaults defaults;
+        int main() {
+            return cast(int)(names.length + numbers.length
+                + (defaults.pointer is &target ? 10 : 0) + defaults.text.length
+                + *numbers.ptr);
+        }
+        """})
+
+
+def test_saved_program_with_process_store_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import other: count, otherLiteral;
+        struct Defaults { int a = 5; string s = "dflt"; double d = 1.5; }
+        __gshared int variable;
+        static this() { variable = 40; }
+        int main() {
+            Defaults d;
+            assert(d.s == "dflt" && d.a == 5 && d.d == 1.5);
+            return variable + count
+                + ("shared literal".ptr is otherLiteral() ? 1 : 100);
+        }
+        """,
+        "other.d": """
+        module other;
+        immutable(char)* otherLiteral() { return "shared literal".ptr; }
+        __gshared int count = 1;
+        """,
+    })
+
+
+def test_saved_program_with_host_calls_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf, puts;
+        import core.stdc.stdlib: abs;
+        int main() {
+            puts("text");
+            printf("%d %s\\n", abs(-4), "again".ptr);
+            return 3;
+        }
+        """})
+
+
+def test_saved_program_with_array_bounds_check_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int[] numbers = [1, 2, 3];
+        int main(string[] args) {
+            const index = args.length + 1;
+            return numbers[index] + numbers[index + 1];
+        }
+        """})
+
+
+def test_saved_program_with_bounds_failure_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int[] numbers = [1, 2, 3];
+        int main() {
+            const index = numbers.length + 2;
+            return numbers[index];
+        }
+        """})
+
+
+def test_saved_program_with_c_bounds_failure_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": f'name "{dub_name("c-bounds")}"\n'
+                   'targetType "library"\n'
+                   'dflags "-checkaction=C"\n',
+        "source/app.d": """
+        module app;
+        __gshared int[] numbers = [1, 2, 3];
+        unittest {
+            const index = numbers.length + 2;
+            cast(void) numbers[index];
+        }
+        """,
+    })
+
+
+def test_saved_program_with_intrinsics_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.atomic: atomicLoad, atomicStore, cas;
+        import core.bitop: bsf, bswap, popcnt;
+        import core.math: fabs, sin, sqrt;
+        import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+        extern(C) int sum(int count, ...) {
+            va_list arguments;
+            va_start(arguments, count);
+            int total;
+            foreach (i; 0 .. count)
+                total += va_arg!int(arguments);
+            va_end(arguments);
+            return total;
+        }
+        shared int counter;
+        int main(string[] args) {
+            const one = cast(double) args.length;
+            atomicStore(counter, 4);
+            cas(&counter, 4, 6);
+            return cast(int) sqrt(one * 16) + cast(int) fabs(-one)
+                + cast(int) (sin(one * 0) * 10) + popcnt(0xF0u) + bsf(8u)
+                + cast(int) (bswap(0x01000000u)) + sum(2, 3, 4)
+                + atomicLoad(counter);
+        }
+        """})
+
+
+def test_saved_program_with_halt_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": f'name "{dub_name("halt")}"\n'
+                   'targetType "library"\n'
+                   'dflags "-checkaction=halt"\n',
+        "source/app.d": """
+        module app;
+        __gshared int[] numbers = [1, 2, 3];
+        unittest {
+            const index = numbers.length + 2;
+            assert(index < numbers.length);
+        }
+        """,
+    })
+
+
+def test_saved_program_with_allocation_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int main() {
+            auto first = new int;
+            *first = 5;
+            auto second = new int;
+            *second = *first + 3;
+            return *first + *second;
+        }
+        """})
+
+
+def test_saved_program_with_template_from_phobos_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import std.algorithm: max, min;
+        int main() {
+            return max(3, 9) + min(4, 2);
+        }
+        """})
+
+
+def test_saved_program_with_function_pointer_and_delegate_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int twice(int n) { return 2 * n; }
+        struct Adder { int base; int add(int n) { return base + n; } }
+        int apply(int function(int) f, int n) { return f(n); }
+        int applyDelegate(int delegate(int) d, int n) { return d(n); }
+        int main() {
+            auto adder = Adder(10);
+            int local = 3;
+            return apply(&twice, 4) + applyDelegate(&adder.add, 5)
+                + applyDelegate((int n) => n + local, 1);
+        }
+        """})
+
+
+def test_saved_program_with_main_arguments_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        int main(string[] args) {
+            foreach (argument; args[1 .. $])
+                printf("%.*s\\n", cast(int) argument.length, argument.ptr);
+            return cast(int) args.length + 4;
+        }
+        """}, arguments=("alpha", "be"))
+
+
+def test_saved_program_with_host_function_addresses_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.atomic: atomicLoad, atomicOp;
+        import core.stdc.stdlib: abs, qsort;
+        extern(C) int compare(const(void)* a, const(void)* b) {
+            return *cast(const(int)*) a - *cast(const(int)*) b;
+        }
+        shared int counter;
+        int main() {
+            int[4] values = [4, 1, 3, 2];
+            qsort(values.ptr, values.length, int.sizeof, &compare);
+            extern(C) int function(int) absolute = &abs;
+            atomicOp!"+="(counter, 3);
+            return values[0] * 100 + values[3] * 10 + absolute(-2)
+                + atomicLoad(counter);
+        }
+        """})
+
+
+def test_saved_program_with_empty_array_literal_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int[] numbers = [];
+        int main() { return numbers.length == 0 ? 3 : 1; }
+        """})
+
+
+def test_saved_program_with_pointer_past_the_end_of_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared ubyte[4096] big;
+        __gshared ubyte* end = big.ptr + big.length;
+        int main() { return end - big.ptr == 4096 ? 3 : 1; }
+        """})
+
+
+def test_saved_program_with_empty_datum_at_the_end_of_a_block_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    # `big` fills a block, so the empty array is a datum at the end of it.
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared ubyte[4096] big;
+        int main() {
+            auto p = big.ptr;
+            ubyte[0] empty = [];
+            return empty.length == 0 && p !is null ? 3 : 1;
+        }
+        """})
+
+
+def test_saved_program_with_function_literal_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int function(int) f = (int x) => x + 1;
+        int main() { return f(2); }
+        """})
+
+
+def test_saved_program_with_delegate_literal_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared int delegate(int) d = (int x) => x + 1;
+        int main() { return d(2); }
+        """})
+
+
+def test_saved_program_with_guest_function_address_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int twice(int n) { return 2 * n; }
+        __gshared int function(int) f = &twice;
+        int main() { return f(4); }
+        """})
+
+
+def test_saved_program_with_host_function_address_in_static_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdlib: abs;
+        extern(C) __gshared int function(int) f = &abs;
+        int main() { return f(-4); }
+        """})
+
+
+def test_saved_program_with_function_addresses_in_a_struct_default_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int twice(int n) { return 2 * n; }
+        struct Table { int function(int)[2] entries = [&twice, &twice]; }
+        __gshared Table table;
+        int main() { return table.entries[1](5); }
+        """})
+
+
+def test_saved_program_with_host_variable_address_in_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: stdout;
+        __gshared shared(typeof(stdout))* p = &stdout;
+        int main() { return p is &stdout ? 3 : 4; }
+        """})
+
+
+def test_saved_program_with_host_variable_address_plus_offset_in_data_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.time: tzname;
+        __gshared const(char*)* q = &tzname[1];
+        int main() { return q is &tzname[1] ? 3 : 4; }
+        """})
+
+
+# A saved program fails at a call of an absent function as the compiled
+# program does.
+ABSENT_FUNCTION_PROGRAM = """
+    module main;
+    extern(C) int snakebite_test_no_such_function(int);
+    int main(string[] args) {
+        if (args.length > COUNT)
+            return snakebite_test_no_such_function(1);
+        return 4;
+    }
+    """
+
+
+def test_saved_program_that_never_calls_an_absent_function_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(
+        tmp_path, {"main.d": ABSENT_FUNCTION_PROGRAM.replace("COUNT", "5")})
+
+
+def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(
+        tmp_path, {"main.d": ABSENT_FUNCTION_PROGRAM.replace("COUNT", "0")})
+    from_ram = run_sb("--backend=bytecode", "--no-optimise-image",
+                      str(tmp_path / "app"), cwd=tmp_path)
+    assert from_ram.returncode != 0, output(from_ram)
+    assert "declared by `snakebite_test_no_such_function`" in from_ram.stderr, (
+        output(from_ram))
+
+
+def test_call_of_an_absent_function_names_its_declaration_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int absentFunction(int);
+        int main() { return absentFunction(1); }
+        """)
+    for backend in ("interpreter", "bytecode"):
+        result = run_sb(f"--backend={backend}", str(tmp_path / "app"),
+                        cwd=tmp_path)
+        assert result.returncode != 0, output(result)
+        assert "declared by `absentFunction`" in result.stderr, (
+            backend, output(result))
+
+
+def test_never_called_absent_function_that_ffi_cannot_call_runs_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        extern(Windows) int absentFunction(int, ...);
+        int main(string[] args) {
+            if (args.length > 5)
+                return absentFunction(1, 2);
+            return 4;
+        }
+        """)
+    for backend in ("interpreter", "bytecode"):
+        result = run_sb(f"--backend={backend}", str(tmp_path / "app"),
+                        cwd=tmp_path)
+        assert result.returncode == 4, (backend, output(result))
+
+
+def test_saved_program_with_class_virtual_call_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        class Base { int f() { return 1; } }
+        class Derived : Base { override int f() { return 5; } }
+        int main() {
+            Base b = new Derived;
+            return b.f();
+        }
+        """})
+
+
+def test_saved_program_with_new_of_struct_and_array_append_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Point {
+            int x = 1;
+            int y = 2;
+            ~this() { printf("gone %d\\n", x); }
+        }
+        int main() {
+            auto point = new Point;
+            auto numbers = new int[](3);
+            numbers ~= 4;
+            Point[] points;
+            points ~= Point(3, 4);
+            return point.x + point.y + cast(int) numbers.length
+                + cast(int) points.length;
+        }
+        """})
+
+
+def test_saved_program_with_catch_of_guest_exception_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        class Failure : Exception {
+            this(string message) { super(message); }
+        }
+        int main() {
+            int caught;
+            try
+                throw new Failure("f");
+            catch (Failure e)
+                caught = 1;
+            catch (Exception e)
+                caught = 2;
+            try
+                throw new Exception("failed");
+            catch (Exception e)
+                caught += cast(int) e.msg.length;
+            return caught;
+        }
+        """})
+
+
+def test_saved_program_with_interface_call_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        interface Shape { int area(); }
+        class Square : Shape {
+            int side;
+            this(int side) { this.side = side; }
+            int area() { return side * side; }
+            override string toString() { return "square"; }
+        }
+        int main() {
+            Shape shape = new Square(2);
+            Object object = cast(Object) shape;
+            const name = object.toString;
+            const type = typeid(object).name;
+            printf("%.*s %.*s\\n", cast(int) name.length, name.ptr,
+                cast(int) type.length, type.ptr);
+            return shape.area + (cast(Square) object is null ? 100 : 0);
+        }
+        """})
+
+
+def test_saved_program_with_class_object_in_static_initialiser_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        class Square {
+            int side;
+            this(int side) { this.side = side; }
+            int area() { return side * side; }
+        }
+        __gshared Square constant = new Square(3);
+        int main() { return constant.area; }
+        """})
+
+
+def test_saved_program_with_static_associative_array_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        immutable int[string] sizes = ["a": 1, "bb": 2];
+        __gshared int[int] counts = [7: 70];
+        int main() {
+            counts[8] = 80;
+            int[string] local = ["c": 3];
+            return sizes["bb"] + counts[7] + counts[8] + local["c"]
+                + cast(int) sizes.length + ("zz" in sizes ? 100 : 0);
+        }
+        """})
+
+
+def test_saved_program_with_type_information_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Point {
+            int x = 1;
+            int y = 2;
+            ~this() { printf("gone %d\\n", x); }
+        }
+        enum Colour { red, green }
+        int main() {
+            auto point = new Point;
+            Point[] points;
+            points ~= Point(3, 4);
+            points.length = 0;
+            const name = typeid(Point).toString;
+            printf("%.*s %.*s %d\\n", cast(int) name.length, name.ptr,
+                cast(int) typeid(Colour).toString.length,
+                typeid(Colour).toString.ptr,
+                cast(int) typeid(const(int)[]).toString.length);
+            return point.x + point.y;
+        }
+        """})
+
+
+def test_saved_program_with_host_class_object_in_static_initialiser_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        __gshared Exception constant = new Exception("boom");
+        int main() {
+            auto object = cast(Object) constant;
+            return cast(int) constant.msg.length
+                + (typeid(object) is typeid(Exception) ? 10 : 0);
+        }
+        """})
+
+
+def test_saved_program_with_guest_class_of_host_base_with_interface_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.sync.mutex: Mutex;
+        class Guarded : Mutex {}
+        int main() {
+            auto guarded = new Guarded;
+            Object.Monitor monitor = guarded;
+            monitor.lock();
+            monitor.unlock();
+            return 3;
+        }
+        """})
+
+
+def test_saved_program_with_guest_class_of_host_base_overriding_some_interface_methods_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.sync.mutex: Mutex;
+        import std.stdio: writeln;
+        class Guarded : Mutex {
+            int locks;
+            override void lock() { ++locks; super.lock(); }
+        }
+        int main() {
+            auto g = new Guarded;
+            Object.Monitor m = g;
+            m.lock(); m.unlock();
+            auto dg = &m.lock;
+            dg();
+            m.unlock();
+            writeln(g.locks);
+            return g.locks;
+        }
+        """})
+
+
+def test_saved_program_with_guest_classes_deriving_a_host_base_with_interface_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.sync.mutex: Mutex;
+        import std.stdio: writeln;
+        class A : Mutex { override void lock() { writeln("A"); super.lock(); } }
+        class B : A { override void unlock() { writeln("B"); super.unlock(); } }
+        void use(Object.Monitor m) { m.lock(); m.unlock(); }
+        int main() {
+            use(new A); use(new B);
+            auto b = new B;
+            synchronized (b) { writeln("sync"); }
+            auto dg = &(cast(Object.Monitor) b).unlock;
+            b.lock();
+            dg();
+            return 0;
+        }
+        """})
+
+
+def test_saved_program_with_thread_local_variables_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int counter = 1;
+        int[3] table = [1, 2, 3];
+        int* pointer;
+        struct Holder { static int count = 5; }
+        int next() { static int calls; return ++calls; }
+        int main() {
+            counter += 2;
+            pointer = &table[2];
+            next();
+            return counter + *pointer + Holder.count + next();
+        }
+        """})
+
+
+def test_saved_program_with_host_thread_local_variables_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import std.getopt: arraySep, optionChar;
+        int main() {
+            optionChar = '+';
+            arraySep = ",";
+            return (optionChar == '+') + cast(int) arraySep.length;
+        }
+        """})
+
+
+def test_saved_program_with_module_constructors_and_destructors_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import other: Other;
+        int perThread;
+        shared int shared_;
+        shared static this() { shared_ = 3; printf("shared start\\n"); }
+        static this() { perThread = 5; printf("thread start\\n"); }
+        static ~this() { printf("thread end %d\\n", perThread); }
+        shared static ~this() { printf("shared end %d\\n", shared_); }
+        int main() { return perThread + shared_ + Other.value; }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        struct Other { static int value; }
+        shared static this() { printf("other shared start\\n"); }
+        static this() { Other.value = 1; printf("other thread start\\n"); }
+        static ~this() { printf("other thread end\\n"); }
+        shared static ~this() { printf("other shared end\\n"); }
+        """,
+    })
+
+
+def test_saved_program_with_unit_tests_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        unittest { printf("first test\\n"); }
+        unittest { printf("second test\\n"); }
+        int main() { return 4; }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        unittest { printf("other test\\n"); }
+        """,
+    })
+
+
+def test_saved_program_with_destructor_gates_of_a_template_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import other: Counted;
+        int main() {
+            Counted!int counted;
+            Counted!long other;
+            return counted.live + other.live;
+        }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        struct Counted(T) {
+            static int live = 1;
+            static ~this() { printf("gated thread end\\n"); }
+            shared static ~this() { printf("gated shared end\\n"); }
+        }
+        """,
+    })
+
+
+def test_saved_program_with_a_second_thread_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.thread: Thread;
+        int perThread;
+        static this() { perThread += 5; printf("thread start %d\\n", perThread); }
+        static ~this() { printf("thread end %d\\n", perThread); }
+        void work() { perThread += 1; printf("work %d\\n", perThread); }
+        int main() {
+            auto thread = new Thread(&work);
+            thread.start;
+            thread.join;
+            return perThread;
+        }
+        """})
+
+
+def test_saved_program_with_destructor_gate_and_a_second_thread_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.thread: Thread;
+        struct Counted(T) {
+            static int live;
+            static ~this() { printf("tmpl dtor %d\\n", live); }
+        }
+        alias C = Counted!int;
+        void work() { C.live = 7; printf("work %d\\n", C.live); }
+        int main() {
+            auto thread = new Thread(&work);
+            thread.start;
+            thread.join;
+            printf("main %d\\n", C.live);
+            return C.live;
+        }
+        """})
+
+
+def test_saved_program_uses_its_dependency_image_after_the_load_returns(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "dependency" / "dub.sdl",
+          f'name "{dub_name("saved-image-dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dependency" / "source" / "dep.d", """
+        module dep;
+        int counter = 3;
+        int thrice(int x) { return x * 3; }
+        """)
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": dub_project_recipe("saved-image-app")
+            + f'dependency "{dub_name("saved-image-dep")}"'
+            + ' path="../dependency"\n',
+        "source/main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import dep: counter, thrice;
+        shared static ~this() { counter += 1; printf("end %d\\n", thrice(counter)); }
+        int main() { return 0; }
+        """,
+    })
+
+
+# A save never writes a file for a program that does not compile: it fails,
+# and no file is left.
+def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int main() { return undefinedName + 2; }
+        """)
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode != 0, output(saved)
+    assert "undefined identifier `undefinedName`" in saved.stderr, output(saved)
+    assert not target.exists()
+    assert not Path(f"{target}.partial").exists()
+
+
+# A file belongs to the build that wrote it: another build refuses it before
+# it reads more, and runs nothing.
+def test_load_of_file_from_another_build_fails_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int main() { return 3; }
+        """)
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    contents = bytearray(target.read_bytes())
+    magic_and_length = len(b"snakebite-program-v1\n") + 8
+    contents[magic_and_length] ^= 1
+    target.write_bytes(contents)
+
+    loaded = run_sb(f"--load={target}", cwd=tmp_path)
+    assert loaded.returncode == 1, output(loaded)
+    assert "another build" in loaded.stderr, output(loaded)
+
+
+# A loaded program names its JIT code in the perf map as the same program
+# compiled and run from RAM does.
+def test_loaded_program_names_jit_code_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        int step(int s, int i) { return s ^ i; }
+        int main() {
+            int one = 1; int n = 3000000; int i = 0; int s = 0;
+            while (i != n) { s = step(s, i); i += one; }
+            return s;
+        }
+        """)
+    app = str(tmp_path / "app")
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", app, cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    def mapped_names(*args: str) -> set[str]:
+        child = subprocess.Popen(
+            [sb_path(), "--jit-perf-map", *args], cwd=tmp_path,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        stdout, _ = child.communicate(timeout=120)
+        path = Path(f"/tmp/perf-{child.pid}.map")
+        try:
+            assert child.returncode == 0, stdout
+            return {line.split(maxsplit=2)[2]
+                    for line in path.read_text().splitlines()}
+        finally:
+            path.unlink(missing_ok=True)
+
+    from_ram = mapped_names("--backend=bytecode", "--no-optimise-image", app)
+    assert from_ram
+    assert mapped_names(f"--load={target}") == from_ram
+
+
 # A long run of guest instructions in one function, with asserts and
 # exceptions between them, finishes within a small native stack. A VM that
 # grows the native stack for each guest instruction overflows it.

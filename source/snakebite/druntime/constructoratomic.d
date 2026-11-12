@@ -4,17 +4,7 @@ module snakebite.druntime.constructoratomic;
 private:
 
 
-// DMD generates this operation to gate an instantiated shared module
-// constructor. The host compiler builds this wrapper with its own druntime,
-// so its inline assembly stays in compiled host code.
-public extern(C) int snakebite_constructor_atomic_add_int(
-    shared int* value,
-    int amount,
-) nothrow @trusted {
-    import core.atomic: atomicOp;
-
-    return atomicOp!"+="(*value, amount);
-}
+public import snakebite.druntime.atomicwrapper;
 
 
 public struct NativeTarget {

@@ -21,13 +21,25 @@ import snakebite.failure.report: internalFailure;
 // next. A plan holds the answers so that a call is only loading slots into
 // registers and jumping.
 //
+// What binds a plan that the process had no code for when it was made. A
+// plan with a laid-out `symbol` binds when `resolve` has the symbol, and
+// otherwise a call fails with `failure`. A plan that could not be laid out
+// has no `symbol`, and a call of it always fails with `failure`. The text
+// is made at compile time, so a loaded program fails with the same text.
+package struct Pending {
+    string symbol;
+    string failure;
+    void* delegate(in char[]) resolve;
+}
+
+
 // A plan is immutable once built, and holds no dmd types, so calling
 // through one touches nothing the frontend owns. Its heart is a list of
 // moves: for every eightbyte of every argument, where its bytes come from
 // and which `CallFrame` slot (ADR-0001) it lands in. That shape - which
 // eightbyte reaches which integer register, SSE register or stack word -
 // depends only on the callee's signature, never on an argument's value, so
-// `prepare`/`ofRawAddress` compute it once, in `buildMoves`. `buildMoves`
+// `planOf` computes it once, in `buildMoves`. `buildMoves`
 // also picks which of the System V stub's two entries (`snakebite.ffi.
 // sysv`) the plan uses - the general one, or the leaner integer-only one
 // for a plan with no SSE argument registers and no stack words - and
@@ -136,8 +148,21 @@ public struct CallPlan {
     private CallbackBridge* _callbacks;
 
     // Where the code is; null for a plan that has no address to call.
-    package void* address() const {
+    public void* address() const {
         return cast(void*) _address;
+    }
+
+    // What binds a plan that the process had no code for when it was made;
+    // null for any other plan. `CallPlanStore.bound` reads it.
+    package const(Pending)* pending;
+
+    // Sets the address of a plan that was made without code. The plan is
+    // `const` to every caller of a call, and binding is the one write that
+    // they all allow: threads that bind the same plan write the same word.
+    package void bindAddress(void* address) const {
+        import core.atomic: atomicStore;
+
+        atomicStore(*cast(shared(void*)*) &_address, cast(shared(void*)) address);
     }
 
     // `CallFrame.sseCount`: how many of the moves above land in an SSE
@@ -197,7 +222,7 @@ public struct CallPlan {
     }
 
     // Calls another function with this plan's prepared ABI shape: fills a
-    // `Frame` by replaying the moves `prepare`/`ofRawAddress` computed,
+    // `Frame` by replaying the moves `planOf` computed,
     // calls the System V stub's `_entry` once, and writes the result back.
     // Every step is an argument-count check, a loop of plain loads and
     // stores, the stub call, and at most two result stores - no `final
@@ -724,7 +749,7 @@ public struct CallPlan {
         }
     }
 
-    // Prepares a plan for a raw address that has no `FuncDeclaration`
+    // The signature of a call to a raw address that has no `FuncDeclaration`
     // behind it - a druntime glue-layer hook such as
     // `_d_arraybounds_indexp`, `gc_malloc` or `_d_arrayappendcd`, called
     // by linker symbol rather than a guest declaration `prepare` walks a
@@ -737,24 +762,25 @@ public struct CallPlan {
     // that does return a plain register-width value, such as `gc_malloc`'s
     // pointer, names its own register instead - never more than one
     // eightbyte, the one shape every hook this backend calls this way
-    // needs.
-    package static CallPlan ofRawAddress(
-        const(void)* address,
+    // needs. `planOf` lays out the plan.
+    package static NativeSignature rawSignatureOf(
         scope const(Register)[] parameterRegisters,
         Register returnRegister = Register(Register.Kind.none, 0),
         Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
-        CallPlan plan;
-        plan._address = cast(void*) address;
-        plan._parameterCount = parameterRegisters.length;
-        plan._arguments.length = parameterRegisters.length;
-        foreach (i, register; parameterRegisters)
-            plan._arguments[i] =
+        import snakebite.ffi.argumentplan: Linkage;
+
+        NativeSignature signature;
+        signature.linkage = Linkage.c;
+        foreach (register; parameterRegisters) {
+            NativeSignature.Parameter parameter;
+            parameter.shape =
                 ArgumentPlan([register, Register.init], 1, false);
+            signature.parameters ~= parameter;
+        }
         if (returnRegister.kind != Register.Kind.none)
-            plan._return = returnPlanOf(returnRegister, secondReturnRegister);
-        plan.buildMoves;
-        return plan;
+            signature.result = returnPlanOf(returnRegister, secondReturnRegister);
+        return signature;
     }
 
     private static ArgumentPlan returnPlanOf(
@@ -765,7 +791,7 @@ public struct CallPlan {
             : ArgumentPlan([first, second], 2, false);
     }
 
-    // Whether this plan, built by `ofRawAddress`, was built from exactly
+    // Whether this plan, built from `rawSignatureOf`, was built from exactly
     // these register shapes - the cache keys such a plan by symbol name
     // alone, so a second caller naming the same symbol has to agree.
     package bool hasShape(
@@ -787,8 +813,8 @@ public struct CallPlan {
     }
 
     // Computes `_moves`, `_sseCount` and `_stackWordCount` from this plan's
-    // shape alone - see the module comment. Called once, from `prepare`
-    // and `ofRawAddress`, after every other field is set.
+    // shape alone - see the module comment. Called once, from `planOf`,
+    // after every other field is set.
     private void buildMoves() {
         import snakebite.ffi.argumentplan:
             maxFloatingArguments, maxIntegerArguments;

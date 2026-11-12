@@ -19,6 +19,10 @@ public struct Options {
     // run time, not just its build time. This flag trades that away for
     // faster image builds, for a caller that only checks behaviour.
     public bool noOptimiseImage;
+    // The file that `--save` writes the compiled program to, or empty.
+    public string save;
+    // The file that `--load` reads the compiled program from, or empty.
+    public string load;
 }
 
 
@@ -28,11 +32,13 @@ public int run(string[] args) {
     import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, prepareSources, runProject;
+        executeBackend, executeLoaded, PreparationReport, prepareSources,
+        runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.memory.gc: selectFrontendMemory;
     import std.file: exists, isDir;
+    import std.path: absolutePath;
     import std.stdio: stderr, stdout, write;
 
     const parsed = parseArgs(args);
@@ -44,6 +50,21 @@ public int run(string[] args) {
     selectFrontendMemory(parsed.options.lowmem);
 
     try {
+        if (parsed.options.load.length) {
+            // Nothing was prepared: the report shows those phases as taking
+            // no time.
+            const report = executeLoaded(
+                parsed.options.load, parsed.options.programArguments,
+                JitSetting(!parsed.options.noJit,
+                    /*eager*/ false, parsed.options.jitPerfMap),
+            );
+            _statistics = Statistics(true, PreparationReport.init, report);
+            return report.status;
+        }
+        // The project directory is where the compile runs: a relative path
+        // of the caller must be absolute before that.
+        const savePath = parsed.options.save.length
+            ? parsed.options.save.absolutePath : "";
         string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
@@ -61,6 +82,17 @@ public int run(string[] args) {
                     parsed.options.backend != BackendName.ctfe,
                     parsed.options.noOptimiseImage ? Optimise.no : Optimise.yes,
                 );
+                if (savePath.length) {
+                    saveProgram(
+                        preparation.project.program,
+                        savePath,
+                        sources.workingDirectory.length
+                            ? sources.workingDirectory : directory,
+                        JitSetting(!parsed.options.noJit,
+                            /*eager*/ false, parsed.options.jitPerfMap),
+                    );
+                    return 0;
+                }
                 enterWorkingDirectory();
                 const report = executeBackend(
                     parsed.options.backend,
@@ -182,6 +214,8 @@ public CliResult parseArgs(string[] args) {
             "jit-perf-map", jitPerfMapHelp, &result.options.jitPerfMap,
             "no-optimise-image", "Build the dependency image without optimisation (faster build, slower run).",
                 &result.options.noOptimiseImage,
+            "save", saveHelp, &result.options.save,
+            "load", loadHelp, &result.options.load,
         );
     } catch (GetOptException exception) {
         return CliResult(1, exception.msg);
@@ -193,10 +227,6 @@ public CliResult parseArgs(string[] args) {
         return result;
     }
 
-    if (args.length != 2)
-        return CliResult(1, "expected one project directory\n" ~ helpText);
-
-    result.options.projectDirectory = args[1];
     if (!parseBackendName(backendName, result.options.backend))
         return CliResult(
             1,
@@ -204,9 +234,41 @@ public CliResult parseArgs(string[] args) {
                 "valid backends: " ~ validBackendNames,
         );
 
+    if (const diagnostic = optionConflict(result.options, args.length))
+        return CliResult(1, diagnostic ~ "\n" ~ helpText);
+
+    if (result.options.load.length == 0)
+        result.options.projectDirectory = args[1];
     return result;
 }
 
+
+// Why the options cannot be used together, or null. A loaded program is
+// already compiled, so the options that describe a compile have no meaning
+// with `--load`, and only the bytecode backend has a compiled program to
+// save or load.
+private string optionConflict(in Options options, in size_t argumentCount) {
+    import snakebite.backends: BackendName;
+
+    const saves = options.save.length != 0;
+    const loads = options.load.length != 0;
+    if (saves && loads)
+        return "--save and --load cannot be used together";
+    if ((saves || loads) && options.backend != BackendName.bytecode)
+        return "--save and --load work with the bytecode backend only";
+    if (!loads)
+        return argumentCount == 2 ? null : "expected one project directory";
+    if (argumentCount != 1)
+        return "--load takes no project directory";
+    if (options.importPaths.length || options.stringImportPaths.length
+            || options.versions.length || options.noOptimiseImage)
+        return "--load takes none of the options that describe a compile";
+    return null;
+}
+
+
+private enum saveHelp = "Compile the program and write it to FILE; do not run it.";
+private enum loadHelp = "Run the program that FILE holds; no project directory.";
 
 private enum jitPerfMapHelp = "Write JIT symbols to /tmp/perf-<pid>.map.";
 
@@ -227,6 +289,8 @@ private enum helpText =
     "  --version=<identifier>    Define a version identifier (repeatable)\n" ~
     "  --no-optimise-image       Build the dependency image without\n" ~
     "                            optimisation (faster build, slower run)\n" ~
+    "  --save=FILE               " ~ saveHelp ~ "\n" ~
+    "  --load=FILE               " ~ loadHelp ~ "\n" ~
     "  --lowmem                  "
         ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
     "  --no-jit                  "

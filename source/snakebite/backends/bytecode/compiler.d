@@ -13,6 +13,7 @@ import snakebite.failure.report: internalFailure;
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.signature: Shape;
+import snakebite.native.staticstore: Placed;
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
@@ -46,6 +47,32 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
     return TypeFacts(size_t.sizeof, size_t.sizeof, false, true);
 }
 
+// Compiles every function of the root modules that has a body. Named
+// distinctly from the other collectors: see `Collector` in `imagesource.d`.
+private extern(C++) final class EagerCompileCollector
+        : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
+    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.declarationcollector: DeclarationCollector;
+    alias visit = DeclarationCollector.visit;
+
+    private Bytecode _bytecode;
+    private bool[FuncDeclaration] _visited;
+
+    this(Bytecode bytecode) {
+        _bytecode = bytecode;
+    }
+
+    override void visit(FuncDeclaration function_) {
+        if (function_ in _visited)
+            return;
+        _visited[function_] = true;
+        if (function_.fbody is null || !_bytecode.isGuestFunction(function_))
+            return;
+        _bytecode.compileFunction(function_);
+        function_.fbody.accept(this);
+    }
+}
+
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
@@ -58,7 +85,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
     import snakebite.backends.bytecode.runner:
-        CompileStep, Runner, StartFunction;
+        CompileStep, Runner, StartFunction, wire;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
@@ -69,8 +96,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     // Declared before what points into it, so that it is destroyed after.
     // What the compiler fills: the signatures of the layouts, and the rest of
-    // the compiled code and data of the program.
-    package Program compiledProgram;
+    // the compiled code and data of the program. The constructor makes it in
+    // place.
+    package Program compiledProgram = void;
     private NativeData _nativeData;
     private PlanCache _plans;
     // The machinery that runs the compiled functions. A `Function` points
@@ -78,7 +106,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // Declared after `compiledProgram`, `_nativeData` and `_plans`, so that it
     // is destroyed before them: its states release through `_nativeData`,
     // and its callback entry reads `compiledProgram.plans`.
-    private Runner _runner;
+    private Runner _runner = void;
     private CallSelection _callSelection;
     // The index from a declaration to its function, which `compiledProgram`
     // owns. Keyed by pointer, not by value: a call site compiled while
@@ -135,7 +163,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     public this(const SourceProgram program, in JitSetting jit = JitSetting.init) {
         super(program);
-        compiledProgram = Program(program.dependencyImage);
+        // In place: the program's tables of thread-local variables keep the
+        // address of its resolver.
+        import core.lifetime: emplace;
+
+        emplace(&compiledProgram, program.dependencyImage);
         _compilation.hasCompiler = true;
         _plans = PlanCache(&compiledProgram.plans,
             &_program.isRootOwned);
@@ -144,16 +176,12 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callLowering,
-            (module_) => &moduleForD(module_).blocks);
+            &classRuntimeInfo, (type) => _runtimeTypes.get(type),
+            (module_) => &moduleForD(module_).blocks, &callableKind);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
-            &classRuntimeInfo,
-            (type, loc) => _nativeData.initialValue(type, loc));
-        _runner = Runner(jit, () => _nativeData.tlsSlots,
-            () => _nativeData.release,
-            () => compiledProgram.plans.callbacks.hasEntries);
-        compiledProgram.plans.bindCallbacks(&Runner.invokeCallback, &_runner);
+            &classRuntimeInfo, &_nativeData);
+        wire(compiledProgram, _runner, jit);
     }
 
     protected override ref StartData startDataStorage() {
@@ -162,6 +190,84 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     protected override ModuleStart* moduleStartStorage(SourceModule module_) {
         return &moduleForD(module_).start;
+    }
+
+    // Compiles the whole program and writes it to `path`. The compile is the
+    // one a run makes, except that every function with a body compiles, not
+    // only those that run, and the compiler records the relocations. What a
+    // first run fills lazily is filled first: each start handle, and the callee
+    // of each guest call site. A function that does not compile ends the
+    // save with that error, and no file is written.
+    public void save(in string path, in string workingDirectory) {
+        import snakebite.backends.bytecode.file: Header, saveProgram;
+        import snakebite.image.preparation: generatorKey;
+
+        if (_compiled.length != 0)
+            internalFailure("a save starts with nothing compiled");
+        bool holdsData = !compiledProgram.store.isEmpty;
+        foreach (module_; compiledProgram._modules)
+            holdsData = holdsData || !module_.blocks.isEmpty;
+        if (holdsData)
+            internalFailure("a save starts with no static data, which has "
+                ~ "no records of its addresses otherwise");
+        recordRelocs = true;
+        _nativeData.recordRelocs = true;
+
+        scope collector = new EagerCompileCollector(this);
+        foreach (module_; _program.rootModules)
+            (cast() module_).accept(collector); // DMD visitors need mutable nodes.
+        startData.eachHandle((handle) {
+            handle.compiledCode;
+        });
+        fillGuestCallSites;
+
+        const image = _program.dependencyImage;
+        saveProgram(compiledProgram,
+            Header(generatorKey, image is null ? "" : image.path,
+                workingDirectory),
+            path);
+    }
+
+    // Fills the callee of every guest call site, compiling the callees, until
+    // no function is new. The delegate that filled a site is then dropped, and
+    // the relocations of the call sites are recorded again.
+    private void fillGuestCallSites() {
+        import snakebite.backends.bytecode.vm: CallSite, recordCallSiteRelocs;
+        import snakebite.backends.bytecode.relocation: Place, Reloc;
+
+        size_t count() {
+            size_t total;
+            foreach (module_; compiledProgram._modules)
+                total += module_._functions.length;
+            return total;
+        }
+
+        size_t before;
+        do {
+            before = count;
+            // The lists grow while the loops run.
+            for (size_t m = 0; m < compiledProgram._modules.length; ++m)
+                for (size_t f = 0;
+                        f < compiledProgram._modules[m]._functions.length; ++f)
+                    foreach (ref site;
+                            compiledProgram._modules[m]._functions[f].callSites)
+                        if (site.kind == CallSite.Kind.guest
+                                && site.prepareGuest !is null) {
+                            site.cacheCallee;
+                            site.prepareGuest = null;
+                        }
+        } while (count != before);
+
+        foreach (module_; compiledProgram._modules)
+            foreach (function_; module_._functions) {
+                Reloc[] kept;
+                foreach (reloc; function_.relocs)
+                    if (reloc.place.section != Place.Section.callSite)
+                        kept ~= reloc;
+                foreach (index, ref site; function_.callSites)
+                    recordCallSiteRelocs(kept, index, site);
+                function_.relocs = kept;
+            }
     }
 
     // How many chunks of callback entries this instance's bridge has.
@@ -184,17 +290,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             return callableAddress(function_, 0);
 
         return _plans.resolve(nativeSymbolName(symbol));
-    }
-
-    private void callLowering(
-        FuncDeclaration function_,
-        void* returnPlace,
-        scope void*[] arguments,
-    ) {
-        _callSelection.callLowering(function_, returnPlace, arguments,
-            &isGuestFunction, hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_), &call,
-            (callee, place, args) => _plans.of(callee).call(place, args));
     }
 
     version(unittest)
@@ -221,7 +316,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         _runner.call(compiled, returnPlace, args);
     }
 
-    public override void[] staticStorage(
+    public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
         return _nativeData.storageOf(variable);
@@ -346,9 +441,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             _classRuntime,
             Hooks(
                 &callableAddress,
-                &fillFieldInits,
                 &_runtimeTypes.linkedClassInfo,
                 (decl) => _runtimeTypes.rtInfo(decl),
+                null,
+                &_nativeData,
             ),
         ));
     }
@@ -403,6 +499,27 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return Address(callableKind(address), address);
     }
 
+    // The address of a copy of the C string `text` that the process store owns.
+    // The frontend frees its own strings, and a file holds the bytes of this
+    // one. The caller holds the compiler lock.
+    private imported!"snakebite.backends.bytecode.relocation".Address
+    adoptedString(const(char)* text) {
+        import core.stdc.string: memcpy, strlen;
+        import snakebite.backends.bytecode.relocation: Address, Target;
+
+        const length = strlen(text);
+        if (auto found = text[0 .. length] in _adoptedStrings)
+            return *found;
+        auto copy = compiledProgram.store.newString(length + 1);
+        memcpy(copy.ptr, text, length);
+        const address = Address(Target.Kind.adoptedString, copy.ptr);
+        _adoptedStrings[text[0 .. length].idup] = address;
+        return address;
+    }
+
+    private imported!"snakebite.backends.bytecode.relocation".Address[string]
+        _adoptedStrings;
+
     // What `callableAddress` returned: a guest function, the callback entry
     // that host code calls for one, or code of the host.
     private imported!"snakebite.backends.bytecode.relocation".Target.Kind
@@ -412,6 +529,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         if (address is null || _plans.isGuestWord(address))
             return Target.Kind.functionWord;
         if (_plans.guestTarget(address).word !is null)
+            return Target.Kind.callbackEntry;
+        if (_plans.isAdjustedHostEntry(address))
             return Target.Kind.callbackEntry;
         return Target.Kind.hostSymbol;
     }
@@ -468,12 +587,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             foreach (root; roots)
                 prepare(root);
         }
-    }
-
-    private void fillFieldInits(
-        ClassDeclaration declaration, ubyte* base,
-    ) {
-        _nativeData.fillFields(declaration, base);
     }
 
     // The body of `function_` for a caller to copy in place of a call, or
@@ -755,9 +868,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
 
+            if (_runner.jitSetting.perfMap || recordRelocs)
+                placeholder.mangledName = function_.mangledNameOf;
             prepareForExecution(placeholder, _runner.jitSetting,
-                _runner.jitInstance,
-                function_.mangledNameOf);
+                _runner.jitInstance, placeholder.mangledName);
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
@@ -847,8 +961,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
         Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
-        branchTargetField, recordAssertSiteRelocs, recordCallSiteRelocs,
-        recordExceptionHandlerRelocs, rolesOf,
+        branchTargetField, recordCallSiteRelocs,
+        recordExceptionHandlerRelocs, recordFunctionRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1279,10 +1393,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_bytecode.recordRelocs) {
             foreach (index, ref site; _callSites)
                 recordCallSiteRelocs(_relocs, index, site);
-            foreach (index, ref site; _assertSites)
-                recordAssertSiteRelocs(_relocs, index, site);
             foreach (index, ref handler; exceptionHandlers)
-                recordExceptionHandlerRelocs(_relocs, index, handler);
+                recordExceptionHandlerRelocs(_relocs, index, handler,
+                    _bytecode._nativeData.addressOfData(
+                        cast(const(void)*) handler.type).target);
         }
 
         ClosureSlot[] closureSlots;
@@ -1326,6 +1440,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.hostCall = _layout.hostCall(
             cast(string) _function.toString);
         result.relocs = _relocs;
+        if (_bytecode.recordRelocs)
+            recordFunctionRelocs(result.relocs, result);
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
@@ -1999,9 +2115,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 case constant:
                     reloc.place.index += constantBase;
                     break;
-                case callSite, assertSite, exceptionHandler:
-                    internalFailure("a copied body has no call, assertion or "
-                        ~ "catch site");
+                case function_, callSite, exceptionHandler, datum:
+                    internalFailure("a copied body has no call or catch site");
             }
             _relocs ~= reloc;
         }
@@ -3977,7 +4092,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(message + arrayLengthOffset, 0, size_t.sizeof),
             Arg(message + arrayPointerOffset, 0, size_t.sizeof),
             constantArgument(strlen(file), size_t.sizeof),
-            constantArgument(Address(Target.Kind.frontendString, file), size_t.sizeof),
+            constantArgument(_bytecode.adoptedString(file), size_t.sizeof),
             constantArgument(expression.loc.linnum, uint.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.assertMessage);
@@ -3996,8 +4111,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const call = cAssertCallOf(
                 cAssertionOf(expression), expression.loc, _function);
             compileCAssertCall(call, constantArgument(
-                Address(Target.Kind.frontendString, call.assertion),
-                size_t.sizeof));
+                _bytecode.adoptedString(call.assertion), size_t.sizeof));
         } else {
             const call = cAssertCallOf(null, expression.loc, _function);
             const message = compileMessage(messageExpression);
@@ -4009,16 +4123,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileCAssertCall(in CAssertCall call, in Arg assertion) {
         import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 
-        // Without a function, `cAssertCallOf` names it with a literal of the
-        // host.
-        const functionKind = call.function_[0] == 0
-            ? Target.Kind.hostSymbol : Target.Kind.frontendString;
         Arg[] args = [
             assertion,
-            constantArgument(Address(Target.Kind.frontendString, call.file), size_t.sizeof),
+            constantArgument(_bytecode.adoptedString(call.file), size_t.sizeof),
             constantArgument(call.line, uint.sizeof),
             constantArgument(
-                Address(functionKind, call.function_), size_t.sizeof),
+                _bytecode.adoptedString(call.function_), size_t.sizeof),
         ];
         auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
         _callSites ~= CallSite.native(plan, args, 0);
@@ -4665,10 +4775,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // storage, which is what a resolved address here would bake in.
     private Address staticAddressOf(VarDeclaration variable) {
         if (variable.isThreadLocalStorage)
-            return Address(Target.Kind.tlsDescriptor,
-                _bytecode._nativeData.tlsDescriptorOf(variable));
-        return Address(Target.Kind.staticData,
-            _bytecode._nativeData.storageOf(variable).ptr);
+            return _bytecode._nativeData.addressOfTlsDescriptor(variable);
+        return _bytecode._nativeData.addressOfStorage(variable);
     }
 
     private Instruction.Handler staticLoadHandler(VarDeclaration variable) {
@@ -5903,10 +6011,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileDeclaration(expression);
     }
 
-    extern(D) private void emitBytes(in void[] bytes) {
-        assert(bytes.length == _width);
+    extern(D) private void emitBytes(in Placed placed) {
+        assert(placed.length == _width);
         emit(&opStaticLoad, _destination,
-            Address(Target.Kind.staticData, bytes.ptr), bytes.length,
+            Address(Target.Kind.staticData, placed.ptr, placed.where),
+            placed.length,
             Instruction.immutableSource);
     }
 
@@ -6005,7 +6114,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) initial.length), size_t.sizeof);
             emit(&opConstant, _destination + arrayPointerOffset,
-                addConstant(Address(Target.Kind.staticData, initial.ptr)),
+                addConstant(_bytecode._nativeData.addressOfData(initial.ptr)),
                 size_t.sizeof);
             return;
         }
@@ -6870,7 +6979,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const object = reserveTemp(
                 TypeFacts(declaration.structsize, alignment));
             emit(&opStaticLoad, object,
-                Address(Target.Kind.staticData, runtime.m_init.ptr),
+                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opFrameAddress, _destination, object, size_t.sizeof);
         }
@@ -6885,7 +6994,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 runtime.m_init.length, declaration.alignsize == 0
                     ? 1 : declaration.alignsize));
             emit(&opStaticLoad, image,
-                Address(Target.Kind.staticData, runtime.m_init.ptr),
+                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opStoreIndirect, _destination, image,
                 runtime.m_init.length);
@@ -7020,11 +7129,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destination = size_t.max,
         in size_t width = size_t.max,
     ) {
-        auto address = cast(void*) info;
-
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
-            addConstant(Address(Target.Kind.typeInfo, address)),
+            addConstant(_bytecode._nativeData.addressOfData(
+                cast(const(void)*) info)),
             width == size_t.max ? _width : width);
     }
 
@@ -8194,8 +8302,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     // The address in the native constant pool of `value`.
     private Address constantWord(in size_t value) {
-        return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function).ptr);
+        const placed =
+            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function);
+        return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
     // A frame slot that holds the value of `pointer`. A plain local is that
@@ -8282,11 +8391,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return Address(Target.Kind.constantPool, size_t(0));
         if (operand.op == EXP.null_) {
             const size_t zero;
-            return Address(Target.Kind.constantPool,
-                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function).ptr);
+            const placed =
+                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function);
+            return Address(Target.Kind.constantPool, placed.ptr, placed.where);
         }
-        return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(type, operand, _function).ptr);
+        const placed = _bytecode._nativeData.value(type, operand, _function);
+        return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
     private bool isConstantOperand(
@@ -10504,23 +10614,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // `compileBuiltinCall` instead, before this is ever
                 // reached. A declared-but-unlinked `extern(C)` function
                 // still reaches here, and an unused branch can refer to
-                // one. Resolve it only if execution reaches the call.
-                // Known native targets stay prepared for callbacks that
-                // first run during GC. A target with no symbol has no
-                // plan to prepare early: the lookup misses again, so the
-                // call fails whenever it executes.
-                if (hasNativeSymbol) {
-                    const plan = preparation.prepare(_bytecode._plans, callee);
-                    return CallSite.native(
-                        plan, args, returnWidth);
-                }
-                // The returned delegate outlives this compiler, so it
-                // captures the backend and not `this`; `PlanCache` is a
-                // struct.
-                auto bytecode = _bytecode;
+                // one. Its plan is unbound: the call binds the symbol when
+                // execution reaches it, and fails if the symbol is still
+                // absent.
                 return CallSite.native(
-                    deferred(() =>
-                        preparation.prepare(bytecode._plans, callee)),
+                    hasNativeSymbol
+                        ? preparation.prepare(_bytecode._plans, callee)
+                        : preparation.prepareUnbound(
+                            _bytecode._plans, callee),
                     args, returnWidth);
             });
     }
@@ -10831,9 +10932,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const nativePlan = isVariadic
-            ? _bytecode._plans.keep(
-                preparation.prepareAtAddress(
-                    _bytecode._plans, null, hasContext))
+            ? preparation.prepareWithoutCode(
+                _bytecode._plans, hasContext)
             : _bytecode._plans.signatureOf(functionType, hasContext);
         auto site = CallSite.indirect(
             calleeOffset, guestArgs, nativeArgs, returnWidth, nativePlan,
@@ -10933,7 +11033,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     cMessageOf(check).ptr, loc, _function);
                 compileUnlessHolds(inBoundsOffset, 1, false, () =>
                     compileCAssertCall(call, constantArgument(
-                        Address(Target.Kind.hostSymbol, call.assertion),
+                        _bytecode.adoptedString(call.assertion),
                         size_t.sizeof)));
                 break;
             }
@@ -11005,7 +11105,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const call = cAssertCallOf(
                     cMessageOf(BoundsCheck.index).ptr, loc, _function);
                 compileCAssertCall(call, constantArgument(
-                    Address(Target.Kind.hostSymbol, call.assertion),
+                    _bytecode.adoptedString(call.assertion),
                     size_t.sizeof));
                 break;
             }
@@ -11035,7 +11135,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     nullDerefCMessage.ptr, loc, _function);
                 compileUnlessHolds(pointerOffset, size_t.sizeof, false, () =>
                     compileCAssertCall(call, constantArgument(
-                        Address(Target.Kind.hostSymbol, call.assertion),
+                        _bytecode.adoptedString(call.assertion),
                         size_t.sizeof)));
                 break;
             }
@@ -11057,7 +11157,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,
-            addConstant(Address(Target.Kind.frontendString, loc.filename)),
+            addConstant(_bytecode.adoptedString(loc.filename)),
             size_t.sizeof);
 
         const lineOffset = reserveTemp(pointerFacts);

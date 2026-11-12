@@ -138,7 +138,7 @@ public abstract class Backend {
     // static storage between calls (CTFE evaluates each call in isolation).
     // Module phases use it to do what dmd's glue layer does with the gate
     // of a module destructor.
-    public abstract void[] staticStorage(
+    public abstract imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     );
 

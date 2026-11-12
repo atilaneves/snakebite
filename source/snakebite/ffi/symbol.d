@@ -28,6 +28,10 @@ public struct Resolver {
         _image = image;
     }
 
+    // The first name that answered each address, so that a stored program can
+    // name the code it calls and ask for it again by name.
+    private SharedTable!(const(void)*, string) _names;
+
     version(unittest) private size_t _lookups;
 
     public void* resolve(in char[] name) {
@@ -38,7 +42,36 @@ public struct Resolver {
         auto address = _image is null ? null : _image.resolve(name);
         if (address is null)
             address = symbolAddress(name);
-        return *_addresses.insert(name.idup, RuntimeEntry.route(address));
+        auto routed = RuntimeEntry.route(address);
+        if (routed !is null)
+            _names.insert(routed, name.idup);
+        return *_addresses.insert(name.idup, routed);
+    }
+
+    // The name of the symbol that `address` is in or `distance` bytes after,
+    // or null. An address that `resolve` answered has the name that it
+    // answered for. Any other address is asked of the loader, and the name of
+    // the symbol that holds it is answered only when `resolve` gives that
+    // name back as the start of the symbol, so that a later process can ask
+    // `resolve` for the address again.
+    public string nameOf(const(void)* address, out size_t distance) {
+        if (auto found = address in _names)
+            return *found;
+        version (Posix) {
+            import core.sys.posix.dlfcn: Dl_info, dladdr;
+            import std.string: fromStringz;
+
+            Dl_info info;
+            if (dladdr(address, &info) == 0 || info.dli_sname is null
+                    || info.dli_saddr is null || info.dli_saddr > address)
+                return null;
+            const name = info.dli_sname.fromStringz.idup;
+            if (resolve(name) !is info.dli_saddr)
+                return null;
+            distance = address - info.dli_saddr;
+            return name;
+        } else
+            return null;
     }
 
     // `name`'s address, but only when a genuine, independent native copy
@@ -128,6 +161,12 @@ private void* sharedObjectAddress(in char[] name) {
 // `Resolver.resolveIndependent` instead. It excludes executable fixtures
 // even when their names match, and keeps its answers in a separate cache.
 private void* symbolAddress(in char[] name) {
+    import snakebite.druntime.atomicwrapper:
+        atomicAddSymbol, snakebite_constructor_atomic_add_int;
+
+    // The host wrapper that a call to `core.atomic.atomicOp!"+="` runs.
+    if (name == atomicAddSymbol)
+        return cast(void*) &snakebite_constructor_atomic_add_int;
     if (auto address = sharedObjectAddress(name))
         return address;
 

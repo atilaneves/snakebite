@@ -137,15 +137,31 @@ public struct CallAdapter {
 
             if (_type.parameterList.varargs != VarArg.variadic)
                 return plans.of(callee);
-
-            Type[] extraTypes;
-            foreach (expression; _expressions[extraOffset .. $])
-                extraTypes ~= expression.type;
-            return plans.keep(plans.variadicOf(callee, extraTypes));
+            return plans.variadicKeptOf(callee, extraTypes);
         }
 
-        // A plan for one execution of a call through `address`; the caller
-        // keeps it with `PlanCache.keep` or drops it. The callee is variadic.
+        // As `prepare`, for a callee whose symbol may not be in this process:
+        // the plan is unbound, and a call of it fails with the failure that
+        // `prepare` throws (`PlanCache.unboundOf`).
+        public const(CallPlan)* prepareUnbound(
+            ref PlanCache plans, FuncDeclaration callee,
+        ) {
+            import dmd.astenums: VarArg;
+
+            if (_type.parameterList.varargs != VarArg.variadic)
+                return plans.unboundOf(callee);
+            return plans.unboundVariadicOf(callee, extraTypes);
+        }
+
+        private Type[] extraTypes() {
+            Type[] types;
+            foreach (expression; _expressions[extraOffset .. $])
+                types ~= expression.type;
+            return types;
+        }
+
+        // A plan for one execution of a call through `address`, which the
+        // caller drops. The callee is variadic.
         public CallPlan prepareAtAddress(
             ref PlanCache plans, const(void)* address, bool hasContext,
         ) {
@@ -158,6 +174,22 @@ public struct CallAdapter {
                 extraTypes ~= expression.type;
             return plans.variadicAtAddress(
                 _type, hasContext, address, extraTypes);
+        }
+
+        // The plan of a call through a value, whose code is not known, kept
+        // for the life of the program. The callee is variadic.
+        public const(CallPlan)* prepareWithoutCode(
+            ref PlanCache plans, bool hasContext,
+        ) {
+            import dmd.astenums: VarArg;
+            import dmd.mtype: Type;
+
+            assert(_type.parameterList.varargs == VarArg.variadic);
+            Type[] extraTypes;
+            foreach (expression; _expressions[extraOffset .. $])
+                extraTypes ~= expression.type;
+            return plans.variadicKeptWithoutCode(
+                _type, hasContext, extraTypes);
         }
 
         public struct Value {

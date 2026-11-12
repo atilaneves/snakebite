@@ -50,7 +50,7 @@ static foreach (rootOwned; [true, false]) {
             (declaration) => cast(void*) &nativeValue,
             (name) => cast(void*) null,
             (declaration) => cast(TypeInfo_Class) null,
-            (function_, place, arguments) { assert(0); },
+            (type) => cast(TypeInfo) null,
         );
         const storage = data.storageOf(variable);
         available = false;

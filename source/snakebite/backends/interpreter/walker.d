@@ -95,7 +95,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
         return _startData;
     }
 
-    public override void[] staticStorage(
+    public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
         return _shared.nativeData.storageOf(variable);
@@ -398,17 +398,17 @@ private struct Shared {
         plans = PlanCache(&planStore,
             &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        store = StaticStore(() => heapNew!TlsSlots);
+        const resolver = &planStore.resolver;
+        store = StaticStore(() => heapNew!TlsSlots(resolver));
         nativeData = NativeData(&store, &this.program.isRootOwned,
             (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callLowering);
+            &classRuntimeInfo, (type) => runtimeTypes.get(type));
         runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
             (name) => plans.resolve(name),
             &callableAddress,
-            &classRuntimeInfo,
-            (type, loc) => nativeData.initialValue(type, loc));
+            &classRuntimeInfo, &nativeData);
         facts = PreparedFacts(&nativeData, &runtimeTypes, &signatures);
     }
 
@@ -437,18 +437,6 @@ private struct Shared {
         return plans.resolve(nativeSymbolName(symbol));
     }
 
-    private void callLowering(
-        FuncDeclaration function_,
-        void* returnPlace,
-        scope void*[] arguments,
-    ) {
-        callSelection.callLowering(function_, returnPlace, arguments,
-            (callee) => program.isInterpreted(callee),
-            plans.hasNativeSymbol(function_),
-            plans.hasIndependentNativeSymbol(function_), callGuest,
-            (callee, place, args) => plans.of(callee).call(place, args));
-    }
-
     // A guest class's native metadata. This vtable is real native layout
     // that native code reaching a guest object can call through directly
     // (an unoverridden base method, a template instantiated natively
@@ -474,12 +462,12 @@ private struct Shared {
             classRuntime,
             Hooks(
                 &callableAddress,
-                (decl, base) => nativeData.fillFields(decl, base),
                 &runtimeTypes.linkedClassInfo,
                 (decl) => runtimeTypes.rtInfo(decl),
                 (decl, info) {
                     declarationOf.insert(cast(const(void)*) info, decl);
                 },
+                &nativeData,
             ),
         ));
     }

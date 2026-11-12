@@ -31,6 +31,11 @@ public struct TypeFacts {
     // `true` - what indexing has to multiply an index by to find an
     // element's byte offset from the array's own pointer word.
     public size_t elementSize;
+    // Whether a value of the type can hold an address (a pointer, a
+    // dynamic array, a class reference, a delegate, or a struct with one).
+    // The default is the safe answer: a constructor that does not know
+    // says that it can.
+    public bool canHoldAddress = true;
 
     // A pointer-sized slot: what a `ref`/`out` parameter or local, a
     // struct's hidden `this`, or a `ref` return's own place all hold -

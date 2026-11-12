@@ -6,14 +6,14 @@ private:
 
 import snakebite.program: Program;
 import snakebite.start.data:
-    FunctionHandle, GateStorage, ModuleStart, StartData;
+    dependencyModulesOf, FunctionHandle, GateStorage, ModuleStart, StartData;
 
 
 // What the builder asks of a backend.
 alias CompiledFunction =
     FunctionHandle delegate(imported!"dmd.func".FuncDeclaration);
 alias StaticStorage =
-    void[] delegate(imported!"dmd.declaration".VarDeclaration);
+    imported!"snakebite.native.staticstore".Placed delegate(imported!"dmd.declaration".VarDeclaration);
 alias ModuleStorage =
     ModuleStart* delegate(imported!"dmd.dmodule".Module);
 
@@ -48,8 +48,7 @@ public StartData buildStartData(
     if (data.betterC)
         return data;
 
-    data.dependencyModules = program.dependencyImage is null
-        ? null : program.dependencyImage.deferredModules;
+    data.dependencyModules = dependencyModulesOf(program.dependencyImage);
     addModules(data, compiledFunction, staticStorage, moduleStorage, program);
     return data;
 }

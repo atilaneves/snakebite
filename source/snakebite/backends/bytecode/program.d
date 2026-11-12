@@ -3,6 +3,7 @@ module snakebite.backends.bytecode.program;
 
 private:
 
+import snakebite.backends.bytecode.relocation: plain, setBy;
 import snakebite.backends.bytecode.vm: Function;
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
@@ -27,31 +28,36 @@ public struct Program {
     @disable this(this);
 
     // `image` is the dependency image that symbols resolve in, or null. The
-    // owner must outlive this.
+    // owner must outlive this, and must construct it in place: the tables of
+    // thread-local variables keep the address of the resolver of `plans`.
     public this(const(DependencyImage)* image) {
-        store = StaticStore(() => heapNew!TlsSlots);
         plans = CallPlanStore(image);
+        const resolver = &plans.resolver;
+        store = StaticStore(() => heapNew!TlsSlots(resolver));
     }
 
     // The interned parameter signatures of the layouts. A `Signature*` of
     // one `Program` meets only others of the same one.
+    @setBy("SignatureTable.intern")
     public SignatureTable signatures;
 
     // The storage of the static data and constants. What fills it is
     // elsewhere: it holds no frontend type.
+    @setBy("Program.this")
     public StaticStore store;
 
     // The call plans, the resolver of their symbols and the callback bridge.
+    @setBy("wire")
     public CallPlanStore plans;
 
     // The start data of the program. The owner builds it at its first use
     // and the owner decides when. It needs the frontend to build, which this
     // does not.
-    public StartData startData;
+    @plain public StartData startData;
 
     // Each is a heap block that never moves: the compiler and the compiled
     // code point to a `Module`. One append per module.
-    private Module*[] _modules;
+    @plain package Module*[] _modules;
 
     // An empty module for the compiler to fill.
     public Module* newModule() @safe nothrow pure {
@@ -70,15 +76,16 @@ public struct Module {
     // The start record of the D module: its phases and unit tests, and its
     // imports as positions in `StartData.modules`. The start data points
     // here. It is filled when the start data is built.
-    public ModuleStart start;
+    @plain public ModuleStart start;
 
     // The static data that the D module defines: its variables and their
     // initial bytes. The addresses in instructions point into the blocks.
+    @setBy("Module.newModule")
     public StaticBlocks blocks;
 
     // Each is a heap block that never moves: a call site embeds the address
     // of its callee before the callee is filled. One append per function.
-    private Function*[] _functions;
+    @plain package Function*[] _functions;
 
     // An empty function for the compiler to fill. A compile that fails
     // takes it out again with `discardFunction`.

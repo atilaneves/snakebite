@@ -182,6 +182,89 @@ public ExecutionReport executeBackend(
         collectGarbage, endsProcess);
 }
 
+// Compiles all of `program` and writes it to `path`; it runs nothing.
+// `workingDirectory` is where a load runs the program.
+public void saveProgram(
+    imported!"snakebite.backends".Program program,
+    in string path,
+    in string workingDirectory,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
+    import snakebite.backends.api: Owned;
+    import snakebite.backends.bytecode: Bytecode;
+
+    auto backend = Owned!Bytecode(new Bytecode(program, jit));
+    backend.save(path, workingDirectory);
+}
+
+
+// Loads the program that the file `path` holds and runs it as
+// `executeBackend` runs a compiled one: the same `runStartData`, on a
+// `Program` and a `Runner` that the file fills instead of a compiler.
+public ExecutionReport executeLoaded(
+    in string path,
+    in string[] programArguments,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
+    import core.memory: GC;
+    import snakebite.backends.bytecode.file: loadProgram, readHeader;
+    import snakebite.backends.bytecode.program: Program;
+    import snakebite.backends.bytecode.runner: Runner, wire;
+    import snakebite.backends.statistics: CompilationStatistics, ExecutionClock;
+    import snakebite.failure.report: SnakebiteException;
+    import snakebite.image.dependency: DependencyImage, loadImage, TestHooks;
+    import snakebite.image.preparation: generatorKey;
+    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+    import std.datetime.stopwatch: AutoStart, StopWatch;
+    import std.file: read;
+    import std.stdio: stdin, stdout, stderr;
+
+    auto stopWatch = StopWatch(AutoStart.yes);
+    const contents = cast(const(ubyte)[]) read(path);
+    const header = readHeader(contents);
+    if (header.buildKey != generatorKey)
+        throw new SnakebiteException(
+            "the program file was written by another build of snakebite");
+
+    // On the GC heap, as the image of a compile is: the program and its call
+    // plans and tables of thread-local variables refer to it until the
+    // module destructors have run, after this function returns.
+    DependencyImage* image;
+    if (header.imagePath.length) {
+        image = new DependencyImage;
+        *image = loadImage(header.imagePath);
+    }
+    scope entered = ProjectDirectory(
+        header.workingDirectory, header.workingDirectory, EndsProcess.yes);
+    entered.enterWorking;
+
+    auto savedInput = stdin;
+    auto savedOutput = stdout;
+    auto savedError = stderr;
+    scope(exit) {
+        stdin = savedInput;
+        stdout = savedOutput;
+        stderr = savedError;
+    }
+
+    // On the GC heap, as the backend of a compile is: the module destructors
+    // run when the process ends, after this function returns, and callback
+    // entries reach the program and the runner until then.
+    auto program = new Program(image);
+    auto runner = cast(Runner*) GC.calloc(Runner.sizeof);
+    wire(*program, *runner, jit);
+    scope(exit) runner.end;
+    loadProgram(contents, *program, *runner, image);
+
+    CompilationStatistics compilation;
+    const running = ExecutionClock.start(compilation);
+    return runStartData(
+        program.startData, compilation, running, stopWatch,
+        image is null ? TestHooks.init : image.testHooks, true,
+        [program.startData.programName] ~ programArguments, false, true);
+}
+
+
 // Runs the program of `start` and reports on it. `running` began before the
 // backend made `start`, and `latency` before the backend was made. It takes
 // no backend: whatever made `start` and `compilation`, compiled or loaded,

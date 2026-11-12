@@ -155,6 +155,19 @@ private struct Pool {
         return offset < claimed
             ? &guestEntries[offset / callbackEntryBytes] : null;
     }
+
+    // The slot that `entry` runs, which a chunk of this pool holds.
+    const(Slot) slotOf(in const(void)* entry) const {
+        auto lock = cast(Mutex) mutex;
+        lock.lock;
+        scope(exit) lock.unlock;
+
+        foreach (chunk; chunks)
+            if (entry >= chunk.base && entry < chunk.base + chunkBytes)
+                return chunk.slots[(cast(const(ubyte)*) entry - chunk.base)
+                    / callbackEntryBytes];
+        internalFailure("an entry that no chunk of the pool holds");
+    }
 }
 
 
@@ -595,6 +608,10 @@ public struct CallbackBridge {
     private SharedTable!(Adjusted, const(void)*) _adjustedEntries;
     private SharedTable!(const(void)*, const(void)*) _wordOfEntry;
     private SharedTable!(const(void)*, Adjusted) _adjustedGuestEntries;
+    // The signature that made an adjusted entry that forwards to host code.
+    // The host code and the adjustment are in the slot of the entry. A
+    // backend that saves its program asks for them (`adjustedHostTarget`).
+    private SharedTable!(const(void)*, NativeSignature) _adjustedHostSignatures;
     private CallbackHandler _handler;
     private void* _owner;
     private void function(void*, const(void)*) _prepare;
@@ -749,6 +766,12 @@ public struct CallbackBridge {
         return _words.contains(word);
     }
 
+    // The signature that `word` was registered with, or null.
+    public const(NativeSignature)* signatureOf(const(void)* word) const {
+        const registered = word in _words;
+        return registered is null ? null : &registered.signature;
+    }
+
     public struct GuestTarget {
         const(void)* word;
         ptrdiff_t adjustment;
@@ -773,6 +796,27 @@ public struct CallbackBridge {
         if (const word = wordOf(address))
             return GuestTarget(word, 0);
         return contains(address) ? GuestTarget(address, 0) : GuestTarget.init;
+    }
+
+    // Whether `entry` is an entry that `adjustedEntryOf` made for host code.
+    public bool isAdjustedHostEntry(const(void)* entry) const {
+        return (entry in _adjustedHostSignatures) !is null;
+    }
+
+    // Whether `entry` is an entry that `adjustedEntryOf` made for host code,
+    // and if so the host code, the adjustment and the signature it was made
+    // with.
+    public bool adjustedHostTarget(
+        const(void)* entry, out const(void)* word, out ptrdiff_t adjustment,
+        out const(NativeSignature)* signature,
+    ) const {
+        signature = entry in _adjustedHostSignatures;
+        if (signature is null)
+            return false;
+        const slot = _pool.slotOf(entry);
+        word = slot.nativeAddress;
+        adjustment = slot.contextAdjustment;
+        return true;
     }
 
     // The entry `adjustedEntryOf` already reserved for `word` with a nonzero
@@ -816,8 +860,11 @@ public struct CallbackBridge {
             contains(word) ? null : word,
         );
         const reserved = _pool.reserve(slot);
-        if (contains(word))
+        if (contains(word)) {
             _adjustedGuestEntries.insert(reserved, key);
+        } else {
+            _adjustedHostSignatures.insert(reserved, cast() signature);
+        }
         return *_adjustedEntries.insert(key, reserved);
     }
 }

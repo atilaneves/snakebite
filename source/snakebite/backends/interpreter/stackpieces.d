@@ -265,9 +265,9 @@ pragma(inline, true)
 private size_t stackPointer() @system @nogc nothrow {
     version (LDC) {
         version (X86_64) {
-            import ldc.llvmasm: __asm;
+            import ldc.intrinsics: llvm_stacksave;
 
-            return __asm!size_t("mov %rsp, $0", "=r");
+            return cast(size_t) llvm_stacksave();
         } else
             return addressOfLocal;
     } else

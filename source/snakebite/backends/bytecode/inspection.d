@@ -74,14 +74,17 @@ public string[] misplacedRelocs(const(Function)* function_) {
 }
 
 private bool wordAt(
-    const(Function)* function_, in Place place, out size_t value,
+    const(Function)* fn, in Place place, out size_t value,
 ) {
     const index = place.index;
     final switch (place.section) with (Place.Section) {
+        case function_:
+            value = cast(size_t) fn.signature;
+            return place.field == Place.Field.signature;
         case instruction:
-            if (index >= function_.instructions.length)
+            if (index >= fn.instructions.length)
                 return false;
-            const instruction = function_.instructions[index];
+            const instruction = fn.instructions[index];
             switch (place.field) with (Place.Field) {
                 case destination: value = instruction.destination; return true;
                 case source: value = instruction.source; return true;
@@ -89,45 +92,28 @@ private bool wordAt(
                 default: return false;
             }
         case constant:
-            if (index >= function_.constants.length)
+            if (index >= fn.constants.length)
                 return false;
-            value = cast(size_t) function_.constants[index];
+            value = cast(size_t) fn.constants[index];
             return place.field == Place.Field.word;
         case callSite:
-            if (index >= function_.callSites.length)
+            if (index >= fn.callSites.length)
                 return false;
-            const site = &function_.callSites[index];
+            const site = &fn.callSites[index];
             switch (place.field) with (Place.Field) {
                 case callee: value = cast(size_t) site.callee; return true;
-                case prepareGuest:
-                    value = cast(size_t) site.prepareGuest.funcptr;
-                    return true;
                 case nativePlan: value = cast(size_t) site.nativePlan; return true;
-                case prepareNativePlan:
-                    value = cast(size_t) site.prepareNativePlan.funcptr;
-                    return true;
-                case builtinEntry:
-                    value = cast(size_t) site.builtinEntry;
-                    return true;
                 case valueSignature:
                     value = cast(size_t) site.value.signature;
                     return true;
                 default: return false;
             }
-        case assertSite:
-            if (index >= function_.assertSites.length)
-                return false;
-            const site = &function_.assertSites[index];
-            switch (place.field) with (Place.Field) {
-                case message: value = cast(size_t) site.message.ptr; return true;
-                case file: value = cast(size_t) site.file.ptr; return true;
-                case halt: value = cast(size_t) site.halt; return true;
-                default: return false;
-            }
         case exceptionHandler:
-            if (index >= function_.exceptionHandlers.length)
+            if (index >= fn.exceptionHandlers.length)
                 return false;
-            value = cast(size_t) cast(void*) function_.exceptionHandlers[index].type;
+            value = cast(size_t) cast(void*) fn.exceptionHandlers[index].type;
             return place.field == Place.Field.type;
+        case datum:
+            return false;
     }
 }
