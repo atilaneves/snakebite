@@ -57,7 +57,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
-    import snakebite.backends.bytecode.runner: Runner;
+    import snakebite.backends.bytecode.runner:
+        CompileStep, Runner, StartFunction;
     import snakebite.language.layout.frame: FrameLayout;
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
@@ -237,51 +238,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return new StartFunction(
             &_runner,
             new CompileStep(() => compileFunction(function_)));
-    }
-
-    private struct CompileStep {
-        const(Function)* delegate() compute;
-    }
-
-    // The order of the two stores in `compileFirst` makes this true at every
-    // instant: a thread that reads a null `_step` then finds a non-null
-    // `_compiled`. `_compiled` is stored first and `_step` second, both with
-    // release; `_step` is read with acquire before `_compiled` is read
-    // again.
-    private static final class StartFunction: FunctionHandle {
-        private Runner* _runner;
-        private const(Function)* _compiled;
-        private CompileStep* _step;
-
-        this(Runner* runner, CompileStep* step) {
-            _runner = runner;
-            _step = step;
-        }
-
-        public override void call(void* returnPlace, void*[] args) {
-            import core.atomic: atomicLoad, MemoryOrder;
-
-            auto compiled = atomicLoad!(MemoryOrder.acq)(_compiled);
-            if (compiled is null)
-                compiled = compileFirst();
-            _runner.call(compiled, returnPlace, args);
-        }
-
-        // Two threads can both run the step: `compileFunction` gives both
-        // the same function.
-        private const(Function)* compileFirst() {
-            import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-
-            auto step = atomicLoad!(MemoryOrder.acq)(_step);
-            if (step is null)
-                // Another thread finished: it stored `_compiled` before it
-                // stored the null.
-                return atomicLoad!(MemoryOrder.acq)(_compiled);
-            auto compiled = step.compute();
-            atomicStore!(MemoryOrder.rel)(_compiled, compiled);
-            atomicStore!(MemoryOrder.rel)(_step, null);
-            return compiled;
-        }
     }
 
     private const(FrameLayout)* layoutOf(FuncDeclaration function_) {
@@ -890,8 +846,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
-        Instruction, Role, Roles, addressSlotOf, branchTargetField, recordAssertSiteRelocs,
-        recordCallSiteRelocs, recordExceptionHandlerRelocs, rolesOf,
+        Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
+        branchTargetField, recordAssertSiteRelocs, recordCallSiteRelocs,
+        recordExceptionHandlerRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1272,8 +1229,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         // A `goto case`, or the `switch` itself, jumping to a
         // `CaseStatement` this compiler never reached leaves that jump's
-        // target at 0, a valid instruction index - `resolveBranches`
-        // below would not catch it. Unpatched, the jump runs at 0 every
+        // target at 0, a valid instruction index - `bindInstructionReferences`
+        // would not catch it. Unpatched, the jump runs at 0 every
         // time, an infinite loop instead of a compile error. A skipped
         // `CaseStatement` is the bug this guards; `reachable` exists to
         // stop it happening in the first place.
@@ -1300,25 +1257,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             inlineBody.frameSize = _tempSize;
             inlineBody.frameAlignment = _tempAlignment;
         }
-        resolveBranches();
 
         ExceptionHandler[] exceptionHandlers;
         foreach (pending; _exceptionHandlers) {
-            if (!(pending._handler < _instructions.length
-                    || pending._cleanupEnd != size_t.max))
-                internalFailure("a catch handler is followed by the code after "
-                    ~ "the statement, or by the function's closing "
-                    ~ "instruction");
-
-            exceptionHandlers ~= ExceptionHandler(
-                pending._type,
-                instructionAt(pending._bodyStart),
-                instructionAt(pending._bodyEnd),
-                instructionAt(pending._handler),
-                pending._catchOffset,
-                pending._cleanupEnd == size_t.max
-                    ? null : instructionAt(pending._cleanupEnd),
-            );
+            ExceptionHandler handler;
+            handler.type = pending._type;
+            handler.catchOffset = pending._catchOffset;
+            handler.bodyStartIndex = pending._bodyStart;
+            handler.bodyEndIndex = pending._bodyEnd;
+            handler.handlerIndex = pending._handler;
+            handler.cleanupEndIndex = pending._cleanupEnd;
+            exceptionHandlers ~= handler;
         }
 
         optimizeStaticLoads;
@@ -1326,14 +1275,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         fuseLoadCopies;
         assignRegisters;
         specialiseHandlers(_instructions);
-
-        foreach (ref site; _callSites)
-            if (site.cleanupStartIndex != size_t.max) {
-                site.cleanupStart = cast(void*) instructionAt(
-                    site.cleanupStartIndex);
-                site.cleanupEnd = cast(void*) instructionAt(
-                    site.cleanupEndIndex);
-            }
 
         if (_bytecode.recordRelocs) {
             foreach (index, ref site; _callSites)
@@ -1389,6 +1330,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         result.fixWindowFacts();
+        // Branch targets and call site cleanup ranges become addresses only
+        // now: the passes above read them as indices.
+        import std.conv: text;
+
+        if (auto reason = bindInstructionReferences(result))
+            internalFailure(text(reason, " in `", _function.toString, "`"));
         return result;
     }
 
@@ -1407,11 +1354,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         emit(&opAssert, zero, _assertSites.length - 1, size_t.sizeof);
     }
-
-    private const(Instruction)* instructionAt(in size_t index) const {
-        return cast(const(Instruction)*) (_instructions.ptr + index);
-    }
-
 
     // How a copied instruction names frame storage. `ignored` marks a field
     // that holds no storage operand.
@@ -2265,8 +2207,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     mention((mixin("instruction." ~ field) >> 32)
                         & 0x7fff_ffffUL);
             if (auto field = branchTargetField(instruction)) {
-                const target = cast(const(Instruction)*) *field;
-                isTarget[target - _instructions.ptr] = true;
+                if (*field < isTarget.length)
+                    isTarget[*field] = true;
             }
         }
         markScopeTargets(isTarget);
@@ -3220,43 +3162,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _tempAlignment = facts.alignment;
 
         return offset;
-    }
-
-    // Every `opJump`/`opBranchFalse`/`opBranchTrue` this compiler emitted
-    // still names its target by a plain instruction index at this point -
-    // `compileIf`/`compileFor`/`compileContinue` patch
-    // that index in once they know it, but never resolve it to an
-    // address themselves, since `_instructions` can still grow (and so
-    // move, on a reallocation) at any point before `build` returns. Once
-    // it has stopped growing, invalid indices are refused so the VM
-    // cannot execute memory outside the function. A cleanup may branch
-    // to its exclusive end, even one past the last instruction: the VM
-    // stops at that address before it reads an instruction.
-    private void resolveBranches() {
-        import std.conv: text;
-
-        foreach (index, ref instruction; _instructions) {
-            auto target = branchTargetField(instruction);
-            if (target is null)
-                continue;
-
-            if (!(*target < _instructions.length
-                    || (*target == _instructions.length
-                        && isCleanupEndBranch(index, *target))))
-                internalFailure(text("branch target ", *target,
-                    " is out of range in `", _function.toString, "`"));
-
-            *target = cast(size_t) instructionAt(*target);
-        }
-    }
-
-    private bool isCleanupEndBranch(in size_t index, in size_t target) const {
-        foreach (handler; _exceptionHandlers)
-            if (handler._cleanupEnd == target
-                    && index >= handler._handler && index < target)
-                return true;
-
-        return false;
     }
 
     private void compileStatement(Statement statement) {
@@ -4308,7 +4213,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // the loop in source. Nothing does when a trivially-true loop is
         // a function's own last statement (its body returns
         // unconditionally instead), and a branch aimed one past the last
-        // instruction is exactly what `resolveBranches` exists to catch.
+        // instruction is exactly what `bindInstructionReferences` exists to
+        // catch.
         // A `break` inside such a loop still lands somewhere real:
         // `build` appends a trailing `opReturnVoid` at that exact
         // position whenever nothing else already made it reachable.
@@ -4513,7 +4419,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // Patches a still-pending `opJump`/`opBranchTrue`/`opBranchFalse`
     // this compiler itself emitted with the instruction index its own
     // target is now known to start at - the same instruction-index
-    // currency `resolveBranches` later turns into a real address, via
+    // currency `bindInstructionReferences` later turns into a real address, via
     // the same field each opcode keeps it in (`branchTargetField`).
     private void patchTarget(in size_t instructionIndex, in size_t target) {
         auto field = branchTargetField(_instructions[instructionIndex]);

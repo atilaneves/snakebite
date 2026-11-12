@@ -948,16 +948,17 @@ package struct AssertSite {
 }
 
 
-// One guest catch clause. The compiler resolves the three instruction
-// pointers after code generation; the VM only needs native runtime metadata
-// to decide whether a Throwable belongs to the clause and where to resume.
+// One guest catch clause. The four places are indices of the instructions of
+// the function that holds it. Only a thrown exception reads them: the VM
+// takes the address of an instruction from `Function.instructions` there.
+// `cleanupEndIndex` is `size_t.max` when there is no cleanup end.
 package struct ExceptionHandler {
     package TypeInfo_Class type;
-    package const(Instruction)* bodyStart;
-    package const(Instruction)* bodyEnd;
-    package const(Instruction)* handler;
     package size_t catchOffset;
-    package const(Instruction)* cleanupEnd;
+    package size_t bodyStartIndex;
+    package size_t bodyEndIndex;
+    package size_t handlerIndex;
+    package size_t cleanupEndIndex = size_t.max;
 }
 
 
@@ -1111,12 +1112,11 @@ package void recordExceptionHandlerRelocs(
 ) {
     import std.traits: FieldNameTuple;
 
-    // `bodyStart`, `bodyEnd`, `handler` and `cleanupEnd` are instruction
-    // addresses of the same function.
+    // The other fields are indices of the instructions of the function.
     static foreach (name; FieldNameTuple!ExceptionHandler)
-        static assert(name == "type" || name == "bodyStart"
-            || name == "bodyEnd" || name == "handler"
-            || name == "catchOffset" || name == "cleanupEnd",
+        static assert(name == "type" || name == "catchOffset"
+            || name == "bodyStartIndex" || name == "bodyEndIndex"
+            || name == "handlerIndex" || name == "cleanupEndIndex",
             "ExceptionHandler." ~ name
             ~ " has to say whether it holds an address");
 
@@ -1487,16 +1487,18 @@ private Activation* handleException(
         const plan = isHalt(throwable)
             ? UnwindPlan.init
             : exceptionPlanOf(
-                active.exceptionHandlers[firstHandler .. $], active.pc,
+                active.exceptionHandlers[firstHandler .. $],
+                active.function_.instructions.ptr, active.pc,
                 throwable is null ? null : throwable.classinfo, handlerBuffer);
         const step = plan.finalizers.length != 0
             ? plan.finalizers[0]
             : plan.handler;
         const handler = plan.finalizers.length != 0 || plan.hasHandler
             ? cast(const(ExceptionHandler)*) step.payload : null;
+        const instructions = active.function_.instructions.ptr;
         if (handler is null || (active.end !is null
-                && (handler.handler < active.start
-                    || handler.handler >= active.end))) {
+                && (instructions + handler.handlerIndex < active.start
+                    || instructions + handler.handlerIndex >= active.end))) {
             if (active.parent is null) {
                 if (throwable is null)
                     return null;
@@ -1507,15 +1509,15 @@ private Activation* handleException(
             continue;
         }
 
-        if (handler.cleanupEnd !is null) {
+        if (handler.cleanupEndIndex != size_t.max) {
             auto state = cast(DispatchState*) frames.backendEntry;
             state.nextHandler = handler - active.exceptionHandlers.ptr + 1;
             try {
                 unwindFinally(throwable, () {
                     state.current = active;
-                    dispatch(handler.handler, active.frame,
+                    dispatch(instructions + handler.handlerIndex, active.frame,
                         active.returnPlace, active.function_, frames, vm,
-                        handler.cleanupEnd);
+                        instructions + handler.cleanupEndIndex);
                 });
             } catch (Throwable chained) {
                 throwable = chained;
@@ -1528,7 +1530,7 @@ private Activation* handleException(
         if (handler.catchOffset != size_t.max)
             *cast(void**)(active.frame + handler.catchOffset) =
                 cast(void*) throwable;
-        active.pc = handler.handler;
+        active.pc = instructions + handler.handlerIndex;
         return active;
     }
 }
@@ -1649,6 +1651,7 @@ private enum handlerBufferLength = 16;
 
 private UnwindPlan exceptionPlanOf(
     const(ExceptionHandler)[] handlers,
+    const(Instruction)* instructions,
     const(Instruction)* pc,
     TypeInfo_Class actual,
     return scope ref ExceptionCandidate[handlerBufferLength] buffer,
@@ -1657,11 +1660,12 @@ private UnwindPlan exceptionPlanOf(
     ExceptionCandidate[] overflow;
 
     foreach (ref handler; handlers) {
-        if (pc < handler.bodyStart || pc >= handler.bodyEnd)
+        if (pc < instructions + handler.bodyStartIndex
+                || pc >= instructions + handler.bodyEndIndex)
             continue;
         auto candidate = ExceptionCandidate(
             null,
-            handler.cleanupEnd is null
+            handler.cleanupEndIndex == size_t.max
                 ? ExceptionCandidate.Kind.catch_
                 : ExceptionCandidate.Kind.finally_,
             cast(TypeInfo_Class) handler.type,
@@ -4789,6 +4793,60 @@ package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
     return false;
 }
 
+// Turns every index that a complete `Function` holds for one of its own
+// instructions into the instruction's address: the target of each branch
+// (`branchTargetField`) and the cleanup range of each call site, and checks
+// the four places of each exception handler. Returns null, or why an index is out of
+// range. A cleanup may branch to its exclusive end, which can be one past the
+// last instruction: the VM stops at that address before it reads an
+// instruction. The function must not move or grow its instructions after
+// this call.
+package string bindInstructionReferences(ref Function function_) {
+    import std.conv: text;
+
+    auto instructions = function_.instructions;
+    const(Instruction)* addressOf(in size_t index) {
+        return instructions.ptr + index;
+    }
+    bool isCleanupEndBranch(in size_t index, in size_t target) {
+        foreach (handler; function_.exceptionHandlers)
+            if (handler.cleanupEndIndex == target
+                    && index >= handler.handlerIndex && index < target)
+                return true;
+
+        return false;
+    }
+
+    foreach (index, ref instruction; instructions) {
+        auto target = branchTargetField(instruction);
+        if (target is null)
+            continue;
+
+        if (!(*target < instructions.length
+                || (*target == instructions.length
+                    && isCleanupEndBranch(index, *target))))
+            return text("branch target ", *target, " is out of range");
+
+        *target = cast(size_t) addressOf(*target);
+    }
+
+    foreach (handler; function_.exceptionHandlers) {
+        if (!(handler.handlerIndex < instructions.length
+                || handler.cleanupEndIndex != size_t.max))
+            return "a catch handler is followed by the code after the "
+                ~ "statement, or by the function's closing instruction";
+
+    }
+
+    foreach (ref site; function_.callSites)
+        if (site.cleanupStartIndex != size_t.max) {
+            site.cleanupStart = cast(void*) addressOf(site.cleanupStartIndex);
+            site.cleanupEnd = cast(void*) addressOf(site.cleanupEndIndex);
+        }
+
+    return null;
+}
+
 // The field of `instruction` that holds the instruction of the same function
 // where control continues, or null.
 package size_t* branchTargetField(ref Instruction instruction) {
@@ -5398,8 +5456,10 @@ static if (jitSupported) {
     // differ. The function compiler does not know it: a compiled function is
     // the same for each setting. When the functions count their
     // events, this replaces the handler of each counted event by its counting
-    // twin: a call, or a branch whose target is at or before it. It reads
-    // the finished instructions, so their branch targets must be addresses.
+    // twin: a call, or a branch whose target is at or before it. It always
+    // sets the heat, state, counts and `jit` fields of the function, and
+    // sets `jitName` only when the JIT and the perf map are on. It reads the
+    // finished instructions, so their branch targets must be addresses.
     // `name` is only evaluated when the perf map is on.
     package void prepareForExecution(Function* function_,
         in JitSetting setting,
@@ -5407,6 +5467,7 @@ static if (jitSupported) {
         lazy const(char)[] name)
     {
         function_.jitHeat = setting.jitStartHeat;
+        function_.jitState = cast(uint) JitTier.interpreted;
         function_.jitCounts = setting.enabled;
         function_.jit = jit;
         if (!setting.enabled)

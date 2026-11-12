@@ -156,10 +156,7 @@ public ExecutionReport executeBackend(
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
     import snakebite.backends: makeBackend;
-    import snakebite.run.program: run;
-    import snakebite.run.program: StartupReport, runDruntimeMain;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import core.memory: GC;
 
     import std.stdio: stdin, stdout, stderr;
 
@@ -179,18 +176,43 @@ public ExecutionReport executeBackend(
     import snakebite.backends.statistics: ExecutionClock;
     const running = ExecutionClock.start(backend.compilationStatistics);
     auto start = &backend.startData();
+    return runStartData(
+        *start, backend.compilationStatistics, running, stopWatch,
+        program.testHooks, program.startsAsProject, hostArguments,
+        collectGarbage, endsProcess);
+}
+
+// Runs the program of `start` and reports on it. `running` began before the
+// backend made `start`, and `latency` before the backend was made. It takes
+// no backend: whatever made `start` and `compilation`, compiled or loaded,
+// can call it. `startsAsProject` false is a snippet. The function holds the
+// `GuestModules.Entry` of `start` until it returns, as the runtime of a
+// program with a C entry point ends with it.
+ExecutionReport runStartData(
+    ref imported!"snakebite.start.data".StartData start,
+    ref const imported!"snakebite.backends.statistics".CompilationStatistics
+        compilation,
+    in imported!"snakebite.backends.statistics".ExecutionClock running,
+    ref imported!"std.datetime.stopwatch".StopWatch latency,
+    in imported!"snakebite.image.dependency".TestHooks testHooks,
+    in bool startsAsProject,
+    in string[] hostArguments,
+    in bool collectGarbage,
+    in bool endsProcess,
+) {
+    import core.memory: GC;
     import snakebite.run.modules: GuestModules;
-    const entry = GuestModules.Entry(*start, backend.compilationStatistics);
+    import snakebite.run.program: run, StartupReport, runDruntimeMain;
+
+    const entry = GuestModules.Entry(start, compilation);
     StartupReport startup;
     int status;
-    // Snippet callers construct Programs that do not start as a project,
-    // and a program with a C `main` is not started as a project either.
-    if (!program.startsAsProject || start.hasCEntryPoint || start.betterC)
-        status = run(*start, backend.compilationStatistics, hostArguments);
+    // A program with a C `main` is not started as a project either.
+    if (!startsAsProject || start.hasCEntryPoint || start.betterC)
+        status = run(start, compilation, hostArguments);
     else {
         startup = runDruntimeMain(
-            *start, backend.compilationStatistics, program.testHooks,
-            hostArguments, endsProcess);
+            start, compilation, testHooks, hostArguments, endsProcess);
         status = startup.status;
     }
     const programDuration = running.peek
@@ -202,10 +224,10 @@ public ExecutionReport executeBackend(
         GC.collect;
     return ExecutionReport(
         status,
-        stopWatch.peek,
+        latency.peek,
         startup.constructorDuration,
         startup.moduleInfoDuration,
         programDuration,
-        backend.compilationStatistics,
+        compilation,
     );
 }
