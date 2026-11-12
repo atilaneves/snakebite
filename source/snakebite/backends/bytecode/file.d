@@ -14,20 +14,21 @@ private:
 
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.backends.bytecode.relocation:
-    Place, Plain, Reloc, Relocated, SetBy, Target;
+    DatumRef, Place, Plain, Reloc, Relocated, SetBy, Target;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
 import snakebite.backends.bytecode.vm:
     AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
     Function, hostCodeAt, hostCodeOffset, Instruction, JitSetting,
     prepareForExecution, Role, Roles, rolesOf, withoutCount;
-import snakebite.failure.report: SnakebiteException;
+import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
 import snakebite.start.data:
-    dependencyModulesOf, FunctionHandle, MainStart, ModuleStart, StartData;
+    dependencyModulesOf, FunctionHandle, GateStorage, MainStart, ModuleStart,
+    StartData;
 import std.conv: text;
 import std.meta: AliasSeq;
 import std.traits: FieldNameTuple, Unqual;
@@ -286,6 +287,19 @@ private struct Archive {
                 if (blocksAt(m) is set)
                     return [m, block, offset];
         throw refusal("a word points at data that the program does not hold");
+    }
+
+    // What a gate (storage of a variable of the program, as `GateStorage`
+    // holds) is: its datum in the blocks of the program, or a host symbol.
+    Target.Kind gateTarget(in GateStorage gate, out size_t[3] reference) {
+        if (gate.where.set !is null) {
+            reference = blocksPosition(
+                gate.where.set, gate.where.block, gate.where.offset);
+            return Target.Kind.staticData;
+        }
+        const position = symbolPosition(gate.ptr);
+        reference = [position[0], position[1], 0];
+        return Target.Kind.hostSymbol;
     }
 
     void* dataAt(in size_t[3] position) {
@@ -578,8 +592,6 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             return [position[0], position[1], 0];
         case handler:
             throw refusal("a word needs a relocation of kind handler");
-        case tlsDescriptor:
-            throw refusal("a word needs a relocation of kind tlsDescriptor");
         case frontendString:
             throw refusal("a word needs a relocation of kind frontendString");
         case callback:
@@ -609,9 +621,6 @@ private size_t addressOf(
         case handler:
             throw new SnakebiteException(
                 "the program file holds a relocation of kind handler");
-        case tlsDescriptor:
-            throw new SnakebiteException(
-                "the program file holds a relocation of kind tlsDescriptor");
         case frontendString:
             throw new SnakebiteException(
                 "the program file holds a relocation of kind frontendString");
@@ -1071,9 +1080,33 @@ private void transferStart(ref Archive archive, ref ModuleStart record) {
     transferHandles(archive, record.sharedDestructors);
     transferHandles(archive, record.threadDestructors);
     transferHandles(archive, record.unitTests);
-    if (archive.isWriting && (record.sharedGates.length != 0
-            || record.threadGates.length != 0))
-        throw refusal("a module has the gate of a destructor");
+    transferGates(archive, record.sharedGates);
+    transferGates(archive, record.threadGates);
+}
+
+// A gate is the storage of a variable: a target and a length.
+private void transferGates(ref Archive archive, ref GateStorage[] gates) {
+    const count = archive.length(gates.length);
+    if (!archive.isWriting)
+        gates = new GateStorage[count];
+    foreach (ref gate; gates) {
+        Target.Kind kind;
+        size_t[3] reference;
+        size_t length;
+        if (archive.isWriting) {
+            length = gate.length;
+            kind = archive.gateTarget(gate, reference);
+        }
+        archive.transfer(kind);
+        archive.scalar(reference);
+        archive.scalar(length);
+        if (!archive.isWriting) {
+            gate.bytes = (cast(ubyte*) addressOf(archive, kind, reference))[0 .. length];
+            if (kind == Target.Kind.staticData)
+                gate.where = DatumRef(archive.blocksAt(reference[0]),
+                    reference[1], reference[2]);
+        }
+    }
 }
 
 
@@ -1091,7 +1124,7 @@ private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
     if (archive.isWriting) {
         const compiled = cast(const(Function)*) handle.compiledCode;
         if (compiled is null)
-            throw refusal("a start function is not one of the bytecode backend");
+            internalFailure("a start function is not one of the bytecode backend");
         position = archive.positionOf(compiled);
     }
     archive.scalar(position);

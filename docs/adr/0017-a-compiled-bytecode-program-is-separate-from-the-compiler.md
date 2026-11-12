@@ -81,7 +81,9 @@ process, and `Program` holds them:
   same value.
 - The thread-local variables have one table of slots (`TlsSlots`) for each
   thread. A slot is for a variable, and a thread has one table, not one per
-  D module.
+  D module. The descriptor of a variable (`TlsDescriptor`) is a datum of the
+  blocks of its D module; `NativeData` keeps only the index from the
+  declaration to it.
 - The signatures (`SignatureTable`) are interned by layout. A `Signature*`
   is only meaningful with others of the same `Program`.
 - The call plans, their symbol resolver and the callback bridge are in
@@ -96,13 +98,8 @@ compiler's `NativeData`, which keys them with frontend types.
 
 ### What is not yet in a Module
 
-These are not yet owned by the `Module` of the D module that defines them:
-
-- The TLS descriptor records. `NativeData` holds them in a table keyed by
-  the variable declaration (`_tlsDescriptors`,
-  `language/statics/data.d:70`). An instruction holds a pointer to one.
-  The initial bytes that a descriptor points to are in the blocks of the
-  `Module`, but the descriptor is not.
+No datum of a D module is left outside its `Module`, except the shared data
+above.
 
 The type data are in the blocks. A `TypeInfo` object of a declared type
 (struct, class, interface, enum), the class information of a guest class

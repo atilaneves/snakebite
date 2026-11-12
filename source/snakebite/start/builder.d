@@ -13,7 +13,7 @@ import snakebite.start.data:
 alias CompiledFunction =
     FunctionHandle delegate(imported!"dmd.func".FuncDeclaration);
 alias StaticStorage =
-    void[] delegate(imported!"dmd.declaration".VarDeclaration);
+    imported!"snakebite.native.staticstore".Placed delegate(imported!"dmd.declaration".VarDeclaration);
 alias ModuleStorage =
     ModuleStart* delegate(imported!"dmd.dmodule".Module);
 

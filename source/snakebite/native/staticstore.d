@@ -72,7 +72,7 @@ public struct StaticBlocks {
     }
 
     // Where an address of this process lies in the blocks, or false. Only the
-    // places of words use it: a datum is named by its `DatumRef`.
+    // places of words use it: any other datum is named by its `DatumRef`.
     private bool locate(
         in void* address, out size_t block, out size_t offset,
     ) const @trusted pure nothrow @nogc {

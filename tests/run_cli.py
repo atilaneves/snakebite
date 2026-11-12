@@ -2402,21 +2402,192 @@ def test_saved_program_with_guest_class_of_host_base_with_interface_runs_as_the_
         """})
 
 
-# A save never writes a file that loads into a different state: a program
-# that holds what a file cannot hold yet is refused, and no file is left.
-def test_save_of_unsupported_program_fails_and_writes_no_file(
+def test_saved_program_with_thread_local_variables_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int counter = 1;
+        int[3] table = [1, 2, 3];
+        int* pointer;
+        struct Holder { static int count = 5; }
+        int next() { static int calls; return ++calls; }
+        int main() {
+            counter += 2;
+            pointer = &table[2];
+            next();
+            return counter + *pointer + Holder.count + next();
+        }
+        """})
+
+
+def test_saved_program_with_host_thread_local_variables_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import std.getopt: arraySep, optionChar;
+        int main() {
+            optionChar = '+';
+            arraySep = ",";
+            return (optionChar == '+') + cast(int) arraySep.length;
+        }
+        """})
+
+
+def test_saved_program_with_module_constructors_and_destructors_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import other: Other;
+        int perThread;
+        shared int shared_;
+        shared static this() { shared_ = 3; printf("shared start\\n"); }
+        static this() { perThread = 5; printf("thread start\\n"); }
+        static ~this() { printf("thread end %d\\n", perThread); }
+        shared static ~this() { printf("shared end %d\\n", shared_); }
+        int main() { return perThread + shared_ + Other.value; }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        struct Other { static int value; }
+        shared static this() { printf("other shared start\\n"); }
+        static this() { Other.value = 1; printf("other thread start\\n"); }
+        static ~this() { printf("other thread end\\n"); }
+        shared static ~this() { printf("other shared end\\n"); }
+        """,
+    })
+
+
+def test_saved_program_with_unit_tests_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        unittest { printf("first test\\n"); }
+        unittest { printf("second test\\n"); }
+        int main() { return 4; }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        unittest { printf("other test\\n"); }
+        """,
+    })
+
+
+def test_saved_program_with_destructor_gates_of_a_template_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "main.d": """
+        module main;
+        import other: Counted;
+        int main() {
+            Counted!int counted;
+            Counted!long other;
+            return counted.live + other.live;
+        }
+        """,
+        "other.d": """
+        module other;
+        import core.stdc.stdio: printf;
+        struct Counted(T) {
+            static int live = 1;
+            static ~this() { printf("gated thread end\\n"); }
+            shared static ~this() { printf("gated shared end\\n"); }
+        }
+        """,
+    })
+
+
+def test_saved_program_with_a_second_thread_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.thread: Thread;
+        int perThread;
+        static this() { perThread += 5; printf("thread start %d\\n", perThread); }
+        static ~this() { printf("thread end %d\\n", perThread); }
+        void work() { perThread += 1; printf("work %d\\n", perThread); }
+        int main() {
+            auto thread = new Thread(&work);
+            thread.start;
+            thread.join;
+            return perThread;
+        }
+        """})
+
+
+def test_saved_program_with_destructor_gate_and_a_second_thread_runs_as_compiled(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import core.thread: Thread;
+        struct Counted(T) {
+            static int live;
+            static ~this() { printf("tmpl dtor %d\\n", live); }
+        }
+        alias C = Counted!int;
+        void work() { C.live = 7; printf("work %d\\n", C.live); }
+        int main() {
+            auto thread = new Thread(&work);
+            thread.start;
+            thread.join;
+            printf("main %d\\n", C.live);
+            return C.live;
+        }
+        """})
+
+
+def test_saved_program_uses_its_dependency_image_after_the_load_returns(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "dependency" / "dub.sdl",
+          f'name "{dub_name("saved-image-dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dependency" / "source" / "dep.d", """
+        module dep;
+        int counter = 3;
+        int thrice(int x) { return x * 3; }
+        """)
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": dub_project_recipe("saved-image-app")
+            + f'dependency "{dub_name("saved-image-dep")}"'
+            + ' path="../dependency"\n',
+        "source/main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import dep: counter, thrice;
+        shared static ~this() { counter += 1; printf("end %d\\n", thrice(counter)); }
+        int main() { return 0; }
+        """,
+    })
+
+
+# A save never writes a file for a program that does not compile: it fails,
+# and no file is left.
+def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
     tmp_path: Path,
 ) -> None:
     write(tmp_path / "app" / "main.d", """
         module main;
-        int threadLocal = 1;
-        int main() { return threadLocal + 2; }
+        int main() { return undefinedName + 2; }
         """)
     target = tmp_path / "program.sbc"
     saved = run_sb("--backend=bytecode", "--no-optimise-image",
                    f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
     assert saved.returncode != 0, output(saved)
-    assert "cannot save the program" in saved.stderr, output(saved)
+    assert "undefined identifier `undefinedName`" in saved.stderr, output(saved)
     assert not target.exists()
     assert not Path(f"{target}.partial").exists()
 

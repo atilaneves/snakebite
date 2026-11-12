@@ -96,8 +96,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     // Declared before what points into it, so that it is destroyed after.
     // What the compiler fills: the signatures of the layouts, and the rest of
-    // the compiled code and data of the program.
-    package Program compiledProgram;
+    // the compiled code and data of the program. The constructor makes it in
+    // place.
+    package Program compiledProgram = void;
     private NativeData _nativeData;
     private PlanCache _plans;
     // The machinery that runs the compiled functions. A `Function` points
@@ -162,7 +163,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     public this(const SourceProgram program, in JitSetting jit = JitSetting.init) {
         super(program);
-        compiledProgram = Program(program.dependencyImage);
+        // In place: the program's tables of thread-local variables keep the
+        // address of its resolver.
+        import core.lifetime: emplace;
+
+        emplace(&compiledProgram, program.dependencyImage);
         _compilation.hasCompiler = true;
         _plans = PlanCache(&compiledProgram.plans,
             &_program.isRootOwned);
@@ -311,10 +316,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         _runner.call(compiled, returnPlace, args);
     }
 
-    public override void[] staticStorage(
+    public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
-        return _nativeData.storageOf(variable).bytes;
+        return _nativeData.storageOf(variable);
     }
 
     // The handle is a `StartFunction`. Until its function is compiled it
@@ -4771,8 +4776,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // storage, which is what a resolved address here would bake in.
     private Address staticAddressOf(VarDeclaration variable) {
         if (variable.isThreadLocalStorage)
-            return Address(Target.Kind.tlsDescriptor,
-                _bytecode._nativeData.tlsDescriptorOf(variable));
+            return _bytecode._nativeData.addressOfTlsDescriptor(variable);
         return _bytecode._nativeData.addressOfStorage(variable);
     }
 

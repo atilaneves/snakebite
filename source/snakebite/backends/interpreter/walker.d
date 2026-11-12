@@ -95,7 +95,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
         return _startData;
     }
 
-    public override void[] staticStorage(
+    public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
         return _shared.nativeData.storageOf(variable);
@@ -398,7 +398,8 @@ private struct Shared {
         plans = PlanCache(&planStore,
             &this.program.isRootOwned);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        store = StaticStore(() => heapNew!TlsSlots);
+        const resolver = &planStore.resolver;
+        store = StaticStore(() => heapNew!TlsSlots(resolver));
         nativeData = NativeData(&store, &this.program.isRootOwned,
             (variable) => this.program.linkedVariableOf(variable),
             &constantSymbolAddress,

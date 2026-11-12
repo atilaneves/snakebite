@@ -26,8 +26,9 @@ public abstract class FunctionHandle {
 }
 
 
-// The storage of one gate variable (see `ModuleStart.sharedGates`).
-public alias GateStorage = void[];
+// The storage of one gate variable (see `ModuleStart.sharedGates`) and the
+// datum it is, from the place that reserved it.
+public alias GateStorage = imported!"snakebite.native.staticstore".Placed;
 
 
 public struct ModuleStart {

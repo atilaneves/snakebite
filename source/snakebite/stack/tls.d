@@ -5,6 +5,7 @@ private:
 
 
 import snakebite.failure.report: internalFailure;
+import snakebite.ffi.symbol: Resolver;
 
 
 // A thread-local guest variable's compile-time-constant description
@@ -30,11 +31,10 @@ public struct TlsDescriptor {
     public size_t size;
     // Set when the variable's storage is native (a dependency image's
     // own thread-local, or an `extern` one): the linker name that
-    // `nativeAddress` resolves, on each thread, to that thread's copy in
-    // the image's TLS block. No copy is made from a template then, so
-    // native code and guest code on one thread reach the same bytes.
+    // `Resolver.resolveThreadLocal` answers, on each thread, with that
+    // thread's copy in the image's TLS block. No copy is made from a template then,
+    // so native code and guest code on one thread reach the same bytes.
     public string nativeName;
-    public void* delegate(in char[] name) nativeAddress;
 }
 
 
@@ -58,8 +58,16 @@ public struct TlsSlots {
 
     private Entry[] _table;
     private size_t _count;
+    // What a descriptor with a `nativeName` resolves its symbol with, on this
+    // thread. The resolver of the program that the table belongs to, which
+    // must outlive the table.
+    private const(Resolver)* _resolver;
 
     @disable this(this);
+
+    public this(const(Resolver)* resolver) {
+        _resolver = resolver;
+    }
 
     ~this() {
         import core.memory: GC;
@@ -94,7 +102,7 @@ public struct TlsSlots {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
             // would be that thread's copy.
-            entry.bytes = descriptor.nativeAddress(descriptor.nativeName);
+            entry.bytes = _resolver.resolveThreadLocal(descriptor.nativeName);
             assert(entry.bytes !is null, descriptor.nativeName);
         } else {
             import core.memory: GC;
