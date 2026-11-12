@@ -155,6 +155,19 @@ private struct Pool {
         return offset < claimed
             ? &guestEntries[offset / callbackEntryBytes] : null;
     }
+
+    // The slot that `entry` runs, which a chunk of this pool holds.
+    const(Slot) slotOf(in const(void)* entry) const {
+        auto lock = cast(Mutex) mutex;
+        lock.lock;
+        scope(exit) lock.unlock;
+
+        foreach (chunk; chunks)
+            if (entry >= chunk.base && entry < chunk.base + chunkBytes)
+                return chunk.slots[(cast(const(ubyte)*) entry - chunk.base)
+                    / callbackEntryBytes];
+        assert(false, "an entry that no chunk of the pool holds");
+    }
 }
 
 
@@ -595,10 +608,9 @@ public struct CallbackBridge {
     private SharedTable!(Adjusted, const(void)*) _adjustedEntries;
     private SharedTable!(const(void)*, const(void)*) _wordOfEntry;
     private SharedTable!(const(void)*, Adjusted) _adjustedGuestEntries;
-    // An adjusted entry that forwards to host code: the host code and the
-    // adjustment, and the signature that made the entry. A backend that
-    // saves its program asks for them (`adjustedHostTarget`).
-    private SharedTable!(const(void)*, Adjusted) _adjustedHostEntries;
+    // The signature that made an adjusted entry that forwards to host code.
+    // The host code and the adjustment are in the slot of the entry. A
+    // backend that saves its program asks for them (`adjustedHostTarget`).
     private SharedTable!(const(void)*, NativeSignature) _adjustedHostSignatures;
     private CallbackHandler _handler;
     private void* _owner;
@@ -786,6 +798,11 @@ public struct CallbackBridge {
         return contains(address) ? GuestTarget(address, 0) : GuestTarget.init;
     }
 
+    // Whether `entry` is an entry that `adjustedEntryOf` made for host code.
+    public bool isAdjustedHostEntry(const(void)* entry) const {
+        return (entry in _adjustedHostSignatures) !is null;
+    }
+
     // Whether `entry` is an entry that `adjustedEntryOf` made for host code,
     // and if so the host code, the adjustment and the signature it was made
     // with.
@@ -793,12 +810,12 @@ public struct CallbackBridge {
         const(void)* entry, out const(void)* word, out ptrdiff_t adjustment,
         out const(NativeSignature)* signature,
     ) const {
-        const found = entry in _adjustedHostEntries;
-        if (found is null)
-            return false;
-        word = found.word;
-        adjustment = found.offset;
         signature = entry in _adjustedHostSignatures;
+        if (signature is null)
+            return false;
+        const slot = _pool.slotOf(entry);
+        word = slot.nativeAddress;
+        adjustment = slot.contextAdjustment;
         return true;
     }
 
@@ -846,7 +863,6 @@ public struct CallbackBridge {
         if (contains(word)) {
             _adjustedGuestEntries.insert(reserved, key);
         } else {
-            _adjustedHostEntries.insert(reserved, key);
             _adjustedHostSignatures.insert(reserved, cast() signature);
         }
         return *_adjustedEntries.insert(key, reserved);

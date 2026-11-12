@@ -80,6 +80,11 @@ public struct PlanCache {
             : _store.callbacks.guestTarget(address);
     }
 
+    public bool isAdjustedHostEntry(const(void)* entry) const {
+        return _store.callbacks !is null
+            && _store.callbacks.isAdjustedHostEntry(entry);
+    }
+
     public bool adjustedHostTarget(
         const(void)* entry, out const(void)* word, out ptrdiff_t adjustment,
         out const(NativeSignature)* signature,

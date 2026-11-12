@@ -96,10 +96,10 @@ public Header readHeader(const(ubyte)[] contents) {
 }
 
 
-// Reads the program of the file whose bytes are `contents` into `program` and
-// wires `runner` to it; `image` is the dependency image that `program` was
-// made with, or null. Both are as a compile leaves them, once the compile is
-// done: the load calls the functions that a compile calls, in the same order.
+// Reads the program of the file whose bytes are `contents` into `program`, a
+// new program made with `image` (the dependency image that the file was made
+// with, or null) and wired to `runner`. Once the load is done, they are as a
+// compile leaves them: every function is bound and prepared for execution.
 public void loadProgram(
     const(ubyte)[] contents, ref Program program, ref Runner runner,
     in DependencyImage* image,
@@ -141,10 +141,10 @@ public void loadProgram(
 // each one again with `adjustedEntryOf`, as a compile does. `source` is the
 // archive that the body was written to; a read archive is its own source.
 private void transferHostEntries(ref Archive archive, ref Archive source) {
-    size_t[] symbols = source._hostEntrySymbols;
-    size_t[] distances = source._hostEntryDistances;
-    ptrdiff_t[] adjustments = source._hostEntryAdjustments;
-    NativeSignature[] signatures = source._hostEntrySignatures;
+    auto symbols = source._hostEntrySymbols;
+    auto distances = source._hostEntryDistances;
+    auto adjustments = source._hostEntryAdjustments;
+    auto signatures = source._hostEntrySignatures;
     archive.transfer(symbols);
     archive.transfer(distances);
     archive.transfer(adjustments);
@@ -642,7 +642,8 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             return [position[0], position[1], 0];
         case callbackEntry:
             // The entry of a guest function, with the receiver adjustment of
-            // an interface method.
+            // an interface method, or an entry that forwards to host code
+            // with an adjustment.
             const guest = archive._program.plans.callbacks.guestTarget(
                 cast(const(void)*) target.address);
             size_t[3] hostEntry;
