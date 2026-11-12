@@ -13,7 +13,7 @@ import snakebite.failure.report: internalFailure;
 import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.signature: Shape;
-import snakebite.backends.bytecode.program: Program;
+import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
     IdentityPlan, identityPlan, ComparisonPlan, comparisonPlan;
@@ -49,6 +49,7 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.dclass: ClassDeclaration;
     import dmd.declaration: Declaration;
+    import dmd.dmodule: SourceModule = Module;
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
     import snakebite.program: SourceProgram = Program;
@@ -88,6 +89,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // relocates, unlike an associative array's own storage, which can
     // rehash as more entries go in.
     private Function*[FuncDeclaration] _compiled;
+    // The module of `compiledProgram` that each D module has which defines
+    // a compiled function or a datum. Under the compiler lock.
+    private Module*[SourceModule] _modules;
     // The functions in `_compiled` whose body is complete, read without a
     // lock: the first guest call of a thread can be the one that a GC
     // finalizer makes, and it cannot wait for a lock that another thread
@@ -139,7 +143,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, &callLowering);
+            &classRuntimeInfo, &callLowering,
+            (module_) => &moduleForD(module_).blocks);
         _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
             (name) => _plans.resolve(name), &callableAddress,
             &classRuntimeInfo,
@@ -732,13 +737,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // callee is only ever dereferenced when the VM actually runs
             // the call, which cannot happen before `compile`/`call` returns
             // from the top-level compile that reached here.
-            auto placeholder = compiledProgram.newFunction;
+            auto owner = moduleFor(function_);
+            auto placeholder = owner.newFunction;
             _compiled[function_] = placeholder;
             // A rejected body must not stay cached as an empty function
             // that a later call would run.
             scope(failure) {
                 _compiled.remove(function_);
-                compiledProgram.discardFunction(placeholder);
+                owner.discardFunction(placeholder);
             }
             registerGuestWord(function_, placeholder);
 
@@ -761,6 +767,27 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             result = placeholder;
         });
         return result;
+    }
+
+    // The module of `compiledProgram` for the D module that declares
+    // `declaration`, made at its first use. Under the compiler lock.
+    private Module* moduleFor(Declaration declaration) {
+        import snakebite.frontend.dmd.functions: moduleOf;
+
+        auto owner = moduleOf(declaration);
+        assert(owner !is null, "a compiled declaration has a D module");
+        return moduleForD(owner);
+    }
+
+    // The module of `compiledProgram` for the D module `owner`, made at its
+    // first use. Under the compiler lock.
+    private Module* moduleForD(SourceModule owner) {
+        if (auto found = owner in _modules)
+            return *found;
+
+        auto created = compiledProgram.newModule();
+        _modules[owner] = created;
+        return created;
     }
 }
 
@@ -5937,7 +5964,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileConstant(Expression expression) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, expression));
+        emitBytes(_bytecode._nativeData.value(_valueType, expression, _function));
     }
 
     override void visit(IntegerExp expression) {
@@ -5956,7 +5983,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, bytes));
+        emitBytes(_bytecode._nativeData.value(_valueType, bytes, _function));
     }
 
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
@@ -8220,7 +8247,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address in the native constant pool of `value`.
     private Address constantWord(in size_t value) {
         return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1]).ptr);
+            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function).ptr);
     }
 
     // A frame slot that holds the value of `pointer`. A plain local is that
@@ -8308,10 +8335,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (operand.op == EXP.null_) {
             const size_t zero;
             return Address(Target.Kind.constantPool,
-                _bytecode._nativeData.value(type, (&zero)[0 .. 1]).ptr);
+                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function).ptr);
         }
         return Address(Target.Kind.constantPool,
-            _bytecode._nativeData.value(type, operand).ptr);
+            _bytecode._nativeData.value(type, operand, _function).ptr);
     }
 
     private bool isConstantOperand(

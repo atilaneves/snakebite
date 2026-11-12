@@ -9,16 +9,46 @@ import snakebite.native.value: TypeFacts;
 import snakebite.stack.tls: TlsSlots;
 
 
-// The storage that holds the static data and constants of a program while
-// it runs. It holds no frontend type: what fills it is in `NativeData`.
-public struct StaticStore {
-    // Holds a `PerThread`: a copy would share storage with the original.
+// The blocks that hold static data, and the free space in them. A block
+// never moves: slots can hold addresses of other slots. The blocks are in
+// the GC heap, so that the GC scans what the data point to, and live as
+// long as this does.
+public struct StaticBlocks {
+    // A copy would share the free space with the original.
     @disable this(this);
 
     // Written under the compiler lock only, like every miss that fills
     // them.
     private void[][] _blocks;
     private void[] _available;
+
+    // The caller holds the compiler lock.
+    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
+        // Slots cannot move: constants can hold addresses of other slots.
+        const needed = facts.size + facts.alignment - 1;
+        if (_available.length < needed) {
+            import std.algorithm: max;
+
+            _available = new void[max(4096, needed)];
+            _blocks ~= _available;
+        }
+        const start = -cast(size_t) _available.ptr & (facts.alignment - 1);
+        auto bytes = _available[start .. start + facts.size];
+        _available = _available[start + facts.size .. $];
+        return bytes;
+    }
+}
+
+
+// The storage that holds the static data and constants of a program while
+// it runs. It holds no frontend type: what fills it is in `NativeData`.
+public struct StaticStore {
+    // Holds a `PerThread`: a copy would share storage with the original.
+    @disable this(this);
+
+    // The blocks of the data that no D module owns, or all of the data when
+    // the owner of this gives no other blocks.
+    private StaticBlocks _blocks;
     // The copies are outside the GC heap, as read-only data is in compiled
     // D, and are freed with this object.
     private void*[] _stringBlocks;
@@ -40,19 +70,8 @@ public struct StaticStore {
     }
 
     // The caller holds the compiler lock.
-    public void[] reserve(in TypeFacts facts) {
-        // Slots cannot move: constants can hold addresses of other slots.
-        const needed = facts.size + facts.alignment - 1;
-        if (_available.length < needed) {
-            import std.algorithm: max;
-
-            _available = new void[max(4096, needed)];
-            _blocks ~= _available;
-        }
-        const start = -cast(size_t) _available.ptr & (facts.alignment - 1);
-        auto bytes = _available[start .. start + facts.size];
-        _available = _available[start + facts.size .. $];
-        return bytes;
+    public void[] reserve(in TypeFacts facts) @safe pure nothrow {
+        return _blocks.reserve(facts);
     }
 
     // Takes ownership of a `malloc`ed block. The caller holds the compiler

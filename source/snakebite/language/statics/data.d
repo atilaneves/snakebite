@@ -4,9 +4,10 @@ module snakebite.language.statics.data;
 private:
 
 
+import dmd.dmodule: Module;
 import snakebite.failure.report: internalFailure;
 import snakebite.frontend.typefacts;
-import snakebite.native.staticstore: StaticStore;
+import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value:
     arrayLengthOffset, arrayPointerOffset, arrayValueSize, checkedLoadIntegral,
     checkedStoreIntegral, delegateContextOffset, delegateFunctionOffset,
@@ -51,6 +52,9 @@ public struct NativeData {
     // the owner of this gives at construction and keeps alive longer.
     private const(void)*[StringText] _stringTexts;
     private StaticStore* _store;
+    // The blocks of the D module that defines a variable, or null when
+    // every datum goes to `_store`. Called under the compiler lock.
+    private StaticBlocks* delegate(Module) _blocksOf;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006). A `shared`/`__gshared`/`immutable` variable's storage
     // is published once it is resolved or initialised; until then only
@@ -73,6 +77,7 @@ public struct NativeData {
         ThreadLocalAddress threadLocalAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         LoweringCall call,
+        StaticBlocks* delegate(Module) blocksOf = null,
     ) {
         _isRootOwned = isRootOwned;
         _linkedVariable = linkedVariable;
@@ -81,6 +86,7 @@ public struct NativeData {
         _classInfo = classInfo;
         _callLowering = call;
         _store = store;
+        _blocksOf = blocksOf;
     }
 
     private void callLowering(
@@ -219,31 +225,52 @@ public struct NativeData {
         return bytes;
     }
 
+    // The constant goes to the blocks of the D module of `owner`, when there
+    // is one: the function whose instructions refer to it, or the field it
+    // initializes. Without `owner` it goes to `_store`.
     public const(void)[] value(
         Type type,
         Expression expression,
+        Dsymbol owner = null,
     ) {
         const facts = typeFacts(type);
-        auto bytes = reserve(facts);
+        auto bytes = reserve(facts, owner);
         write(type, facts, expression, bytes.ptr);
         return bytes;
     }
 
-    public const(void)[] value(Type type, in void[] representation) {
+    public const(void)[] value(
+        Type type,
+        in void[] representation,
+        Dsymbol owner = null,
+    ) {
         import core.stdc.string: memcpy;
 
         const facts = typeFacts(type);
         assert(representation.length == facts.size);
-        auto bytes = reserve(facts);
+        auto bytes = reserve(facts, owner);
         memcpy(bytes.ptr, representation.ptr, bytes.length);
         return bytes;
     }
 
-    private void[] reserve(in TypeFacts facts) {
+    // Space for a datum goes to the blocks of the D module of `owner`, when
+    // `owner` is given and there are such blocks: a variable, the constants
+    // of a function and the initial bytes of a field. Any other datum (no
+    // `owner`, or no blocks) goes to `_store`.
+    private void[] reserve(in TypeFacts facts, Dsymbol owner = null) {
         import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.frontend.dmd.functions: moduleOf;
 
         void[] bytes;
-        withCompilerLock({ bytes = _store.reserve(facts); });
+        withCompilerLock({
+            if (owner !is null && _blocksOf !is null) {
+                if (auto module_ = moduleOf(owner)) {
+                    bytes = _blocksOf(module_).reserve(facts);
+                    return;
+                }
+            }
+            bytes = _store.reserve(facts);
+        });
         return bytes;
     }
 
@@ -380,7 +407,7 @@ public struct NativeData {
         if (auto pending = variable in _pendingStatics)
             return *pending;
 
-        auto bytes = reserve(facts);
+        auto bytes = reserve(facts, variable);
         _pendingStatics[variable] = bytes;
         scope (exit) _pendingStatics.remove(variable);
 
@@ -439,6 +466,7 @@ public struct NativeData {
                 : value(
                     field.type,
                     newInFrontend!getConstInitializer(field, false),
+                    field,
                 );
             if (field.isBitFieldDeclaration !is null) {
                 const access = bitfieldAccess(field);
