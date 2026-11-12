@@ -2622,6 +2622,25 @@ def test_saved_program_uses_its_dependency_image_after_the_load_returns(
     })
 
 
+# A template instance that only a speculative check made, such as
+# `is(typeof(...))`, has an error in its body that the frontend gagged. The
+# native compiler generates no code for it, so the save compiles none.
+def test_saved_program_with_a_speculative_template_instance_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        void check(T)() { T value; value.missing(); }
+        enum works(T) = is(typeof(check!T));
+        int main() {
+            static assert(!works!int);
+            printf("done\\n");
+            return 0;
+        }
+        """})
+
+
 # A save never writes a file for a program that does not compile: it fails,
 # and no file is left.
 def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(

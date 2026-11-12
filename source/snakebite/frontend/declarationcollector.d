@@ -66,6 +66,7 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
     import dmd.dsymbolsem: include;
     import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
+    import dmd.templatesem: needsCodegen;
     import dmd.expression: FuncExp;
     import dmd.func: CtorDeclaration, DtorDeclaration,
         FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
@@ -78,8 +79,12 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     // through `TemplateInstance` below.
     override void visit(TemplateDeclaration declaration) {}
 
+    // The native compiler generates code for an instance only when
+    // `needsCodegen` says so; it says no for an instance with errors, and for
+    // one that only a speculative check, such as `is(typeof(...))`, made.
     override void visit(TemplateInstance instance) {
-        if (instance.members !is null)
+        if (instance.members !is null && instance.inst is instance
+                && instance.needsCodegen)
             foreach (member; *instance.members)
                 member.accept(this);
     }
