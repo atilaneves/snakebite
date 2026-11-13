@@ -14,6 +14,9 @@ import dmd.mtype: Type;
 import object: TypeInfo_Class;
 import snakebite.native.signature: Shape;
 import snakebite.native.staticstore: Placed;
+import snakebite.backends.bytecode.emitted: ColdRange, CompileBuffer,
+    copyOperandsOf, EmittedCode, indirectCopyWidths, inlineOperandsOf, Operand,
+    Operands, PendingExceptionHandler;
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.language.traversal.lowering: LoweringVisitor;
 import snakebite.language.operators.comparison:
@@ -80,8 +83,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
     import snakebite.program: SourceProgram = Program;
-    import snakebite.language.call.selection: CallSelection;
-    import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
     import snakebite.backends.bytecode.runner:
@@ -90,24 +91,23 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.failure.report: SnakebiteException;
-    import snakebite.language.statics.data: NativeData;
+    import snakebite.language.statics.world: StaticWorld;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
-    import snakebite.language.statics.typeinfo: RuntimeTypes;
 
     // Declared before what points into it, so that it is destroyed after.
     // What the compiler fills: the signatures of the layouts, and the rest of
     // the compiled code and data of the program. The constructor makes it in
     // place.
     package Program compiledProgram = void;
-    private NativeData _nativeData;
-    private PlanCache _plans;
+    // The static data, type information, class information, call plans and
+    // callable addresses of the program.
+    private StaticWorld _world;
     // The machinery that runs the compiled functions. A `Function` points
     // to its JIT instance, so the address of this field must never change.
-    // Declared after `compiledProgram`, `_nativeData` and `_plans`, so that it
-    // is destroyed before them: its states release through `_nativeData`,
+    // Declared after `compiledProgram` and `_world`, so that it is destroyed
+    // before them: its states release through `_world.data`,
     // and its callback entry reads `compiledProgram.plans`.
     private Runner _runner = void;
-    private CallSelection _callSelection;
     // The index from a declaration to its function, which `compiledProgram`
     // owns. Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -133,13 +133,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // the same `rawPlanOf` a bounds hook already goes through, so this
     // costs nothing new besides the one symbol lookup.
     private const(CallPlan)* _allocatorPlan;
-    private RuntimeTypes _runtimeTypes;
-    // Guest classes never reach dmd's own code generator, so nothing ever
-    // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
-    // real linked data - this builds the same shapes by hand instead, once
-    // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
-    // reuses the one already built.
-    private snakebite.language.statics.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
     // The number of callees that compile only so that their callers can
     // copy them, nested inside each other. Greater than zero while such a
@@ -157,30 +150,24 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
 
-    // Whether the compiler records relocs. It is off: nothing reads the
-    // relocs yet, and recording them costs compile time and memory.
-    public bool recordRelocs;
-
-    public this(const SourceProgram program, in JitSetting jit = JitSetting.init) {
+    // With `recordsAddresses`, the compiler records each word that holds an
+    // address, so that `save` can write the program. It is off for a run:
+    // the records cost compile time and memory.
+    public this(
+        const SourceProgram program, in JitSetting jit = JitSetting.init,
+        bool recordsAddresses = false,
+    ) {
         super(program);
         // In place: the program's tables of thread-local variables keep the
         // address of its resolver.
         import core.lifetime: emplace;
 
-        emplace(&compiledProgram, program.dependencyImage);
+        emplace(&compiledProgram, program.dependencyImage, recordsAddresses);
         _compilation.hasCompiler = true;
-        _plans = PlanCache(&compiledProgram.plans,
-            &_program.isRootOwned);
-        _callSelection.linksFunctions = program.definesLinkableFunctions;
-        _nativeData = NativeData(&compiledProgram.store, &_program.isRootOwned,
-            (variable) => _program.linkedVariableOf(variable),
-            &constantSymbolAddress,
-            (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, (type) => _runtimeTypes.get(type),
-            (module_) => &moduleForD(module_).blocks, &callableKind);
-        _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
-            (name) => _plans.resolve(name), &callableAddress,
-            &classRuntimeInfo, &_nativeData);
+        _world = StaticWorld(program, &compiledProgram.store,
+            &compiledProgram.plans,
+            StaticWorld.Backend(&guestWord, null, null,
+                (module_) => &moduleForD(module_).blocks));
         wire(compiledProgram, _runner, jit);
     }
 
@@ -202,16 +189,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         import snakebite.backends.bytecode.file: Header, saveProgram;
         import snakebite.image.preparation: generatorKey;
 
-        if (_compiled.length != 0)
-            internalFailure("a save starts with nothing compiled");
-        bool holdsData = !compiledProgram.store.isEmpty;
-        foreach (module_; compiledProgram._modules)
-            holdsData = holdsData || !module_.blocks.isEmpty;
-        if (holdsData)
-            internalFailure("a save starts with no static data, which has "
-                ~ "no records of its addresses otherwise");
-        recordRelocs = true;
-        _nativeData.recordRelocs = true;
+        if (!compiledProgram.recordsAddresses)
+            internalFailure("a save needs a program that records addresses");
 
         scope collector = new EagerCompileCollector(this);
         foreach (module_; _program.rootModules)
@@ -232,48 +211,37 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // no function is new. The delegate that filled a site is then dropped, and
     // the relocations of the call sites are recorded again.
     private void fillGuestCallSites() {
-        import snakebite.backends.bytecode.vm: CallSite, recordCallSiteRelocs;
+        import snakebite.backends.bytecode.vm: CallSite, recordRelocs;
         import snakebite.backends.bytecode.relocation: Place, Reloc;
-
-        size_t count() {
-            size_t total;
-            foreach (module_; compiledProgram._modules)
-                total += module_._functions.length;
-            return total;
-        }
 
         size_t before;
         do {
-            before = count;
-            // The lists grow while the loops run.
-            for (size_t m = 0; m < compiledProgram._modules.length; ++m)
-                for (size_t f = 0;
-                        f < compiledProgram._modules[m]._functions.length; ++f)
-                    foreach (ref site;
-                            compiledProgram._modules[m]._functions[f].callSites)
-                        if (site.kind == CallSite.Kind.guest
-                                && site.prepareGuest !is null) {
-                            site.cacheCallee;
-                            site.prepareGuest = null;
-                        }
-        } while (count != before);
+            before = compiledProgram.functionCount;
+            compiledProgram.eachFunction((function_) {
+                foreach (ref site; function_.callSites)
+                    if (site.kind == CallSite.Kind.guest
+                            && site.prepareGuest !is null) {
+                        site.cacheCallee;
+                        site.prepareGuest = null;
+                    }
+            });
+        } while (compiledProgram.functionCount != before);
 
-        foreach (module_; compiledProgram._modules)
-            foreach (function_; module_._functions) {
-                Reloc[] kept;
-                foreach (reloc; function_.relocs)
-                    if (reloc.place.section != Place.Section.callSite)
-                        kept ~= reloc;
-                foreach (index, ref site; function_.callSites)
-                    recordCallSiteRelocs(kept, index, site);
-                function_.relocs = kept;
-            }
+        compiledProgram.eachFunction((function_) {
+            Reloc[] kept;
+            foreach (reloc; function_.relocs)
+                if (reloc.place.section != Place.Section.callSite)
+                    kept ~= reloc;
+            foreach (index, ref site; function_.callSites)
+                recordRelocs(kept, index, site);
+            function_.relocs = kept;
+        });
     }
 
     // How many chunks of callback entries this instance's bridge has.
     version(unittest)
     public size_t callbackChunkCount() {
-        return _plans.callbackChunkCount;
+        return _world.plans.callbackChunkCount;
     }
 
     // The owner ends the instance. The JIT code stays while host code holds
@@ -281,15 +249,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // life of the process (see `Runner.end`).
     protected override void release() {
         _runner.end;
-    }
-
-    private void* constantSymbolAddress(
-        Declaration symbol,
-    ) {
-        if (auto function_ = symbol.isFuncDeclaration)
-            return callableAddress(function_, 0);
-
-        return _plans.resolve(nativeSymbolName(symbol));
     }
 
     version(unittest)
@@ -319,7 +278,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
-        return _nativeData.storageOf(variable);
+        return _world.data.storageOf(variable);
     }
 
     // The handle is a `StartFunction`. Until its function is compiled it
@@ -364,11 +323,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     package bool hasNativeSymbol(FuncDeclaration function_) {
-        return _plans.hasNativeSymbol(function_);
+        return _world.plans.hasNativeSymbol(function_);
     }
 
     package bool hasIndependentNativeSymbol(FuncDeclaration function_) {
-        return _plans.hasIndependentNativeSymbol(function_);
+        return _world.plans.hasIndependentNativeSymbol(function_);
     }
 
     package bool isGuestFunction(FuncDeclaration function_) const {
@@ -376,8 +335,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     package FuncDeclaration definitionOf(FuncDeclaration function_) {
-        return _callSelection.definitionOf(
-            function_, (declaration) => _program.linkedFunctionOf(declaration));
+        return _world.definitionOf(function_);
     }
 
     package Checks checks() const {
@@ -396,7 +354,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
-        _plans.registerGuestFunction(compiled, function_);
+        _world.plans.registerGuestFunction(compiled, function_);
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
@@ -415,73 +373,31 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         // `SharedTable`, ADR-0006), so two threads racing here store the
         // same value; the store just needs to be visible to a later
         // reader.
-        auto plan = planOf(_plans, DruntimeHook.gcMalloc);
+        auto plan = planOf(_world.plans, DruntimeHook.gcMalloc);
         atomicStore!(MemoryOrder.rel)(_allocatorPlan, plan);
         return plan;
     }
 
-    // The native metadata a guest class needs at run time: an instance
-    // vtable, a per-interface vtable and the `.init` bytes `_d_newclassT`'s
-    // real body would otherwise copy from a linked symbol this project's
-    // compiler never emits. Built by `snakebite.language.statics.classinfo`,
-    // shared with the interpreter's own version of this same question;
-    // only how a vtable slot gets its callable value is this backend's
-    // own.
-    package TypeInfo_Class classRuntimeInfo(
-        ClassDeclaration declaration,
-    ) {
-        import snakebite.language.statics.classinfo:
-            classRuntimeInfo_ = classRuntimeInfo, Hooks;
-
-        if (auto found = _classRuntime.find(declaration))
-            return *found;
-
-        return _classRuntime.build(() => classRuntimeInfo_(
-            declaration,
-            _classRuntime,
-            Hooks(
-                &callableAddress,
-                &_runtimeTypes.linkedClassInfo,
-                (decl) => _runtimeTypes.rtInfo(decl),
-                null,
-                &_nativeData,
-            ),
-        ));
+    package TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
+        return _world.classRuntimeInfo(declaration);
     }
 
-    // Function pointers can reach host code inside aggregates or through
-    // pointers to guest data, where the call barrier cannot replace them.
-    private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.dsymbolsem: isAbstract;
-
-        // getOverloads can leave an alias in a function-pointer constant.
-        method = definitionOf(method.toAliasFunc);
-        if (method.isAbstract)
-            return null;
-        const(void)* word;
-        const hasNativeSymbol = _plans.hasNativeSymbol(method);
-        if (_callSelection.usesNativeVariadicAddress(
-                method, hasNativeSymbol))
-            return _plans.addressOf(method);
-        if (_callSelection.usesGuestBody(method, &isGuestFunction,
-                hasNativeSymbol, hasIndependentNativeSymbol(method))) {
-            // Metadata and callback entries need a complete callable body,
-            // even when an inlining attempt asks for their addresses. A
-            // rejection here can leave metadata cached by a recursive read
-            // of the class whose methods are still being compiled.
-            const speculating = _speculating;
-            _speculating = 0;
-            scope(exit) _speculating = speculating;
-            word = compileFunction(method);
-            registerGuestWord(method, cast(const(Function)*) word);
-            _callbackRoots ~= cast(const(Function)*) word;
-            if (_compilationDepth == 0)
-                prepareCallbackBodies;
-            if (_callSelection.storesGuestWord(
-                    method, hasNativeSymbol, adjustment))
-                return cast(void*) word;
-        }
-        return _plans.callableAddress(word, method, adjustment);
+    // The compiled function of `method`, as the word that stands for its
+    // guest body.
+    private const(void)* guestWord(FuncDeclaration method) {
+        // Metadata and callback entries need a complete callable body,
+        // even when an inlining attempt asks for their addresses. A
+        // rejection here can leave metadata cached by a recursive read
+        // of the class whose methods are still being compiled.
+        const speculating = _speculating;
+        _speculating = 0;
+        scope(exit) _speculating = speculating;
+        const compiled = compileFunction(method);
+        registerGuestWord(method, compiled);
+        _callbackRoots ~= compiled;
+        if (_compilationDepth == 0)
+            prepareCallbackBodies;
+        return compiled;
     }
 
     // The address that a function body names with `&f`, a function literal
@@ -495,8 +411,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
         if (_speculating != 0)
             throw new SpeculationRejected;
-        const address = callableAddress(method, adjustment);
-        return Address(callableKind(address), address);
+        const address = _world.callableAddress(method, adjustment);
+        return Address(_world.callableKind(address), address);
     }
 
     // The address of a copy of the C string `text` that the process store owns.
@@ -519,21 +435,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     private imported!"snakebite.native.address".Address[string]
         _adoptedStrings;
-
-    // What `callableAddress` returned: a guest function, the callback entry
-    // that host code calls for one, or code of the host.
-    private imported!"snakebite.native.address".Target.Kind
-    callableKind(in void* address) {
-        import snakebite.native.address: Target;
-
-        if (address is null || _plans.isGuestWord(address))
-            return Target.Kind.functionWord;
-        if (_plans.guestTarget(address).word !is null)
-            return Target.Kind.callbackEntry;
-        if (_plans.isAdjustedHostEntry(address))
-            return Target.Kind.callbackEntry;
-        return Target.Kind.hostSymbol;
-    }
 
     // A callback can first execute during GC finalization. Compile every
     // guest function reachable from it before exposing it to host
@@ -868,10 +769,17 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-            if (_runner.jitSetting.perfMap || recordRelocs)
+            if (_runner.jitSetting.perfMap || compiledProgram.recordsAddresses)
                 placeholder.mangledName = function_.mangledNameOf;
-            prepareForExecution(placeholder, _runner.jitSetting,
-                _runner.jitInstance, placeholder.mangledName);
+            // Branch targets and call site cleanup ranges become addresses
+            // only now: the passes of the compile read them as indices.
+            if (const reason = Program.complete(
+                    placeholder, _runner.jitSetting, _runner.jitInstance)) {
+                import std.conv: text;
+
+                internalFailure(
+                    text(reason, " in `", function_.toString, "`"));
+            }
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
@@ -961,8 +869,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
         Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
-        branchTargetField, recordCallSiteRelocs,
-        recordExceptionHandlerRelocs, recordFunctionRelocs, rolesOf,
+        branchTargetField, recordRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1043,7 +950,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     alias visit = LoweringVisitor.visit;
 
     extern(D) protected override CallSelection* callSelection() {
-        return &_bytecode._callSelection;
+        return &_bytecode._world.callSelection;
     }
 
     extern(D):
@@ -1070,38 +977,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private enum noReturnAddress = size_t.max;
     private size_t _returnAddress = noReturnAddress;
 
-    // Each active compiler owns its capacity. Published slices keep their GC
-    // allocation; no later compile can reuse it, including a nested compile.
-    private static struct CompileBuffer(T) {
-        private T[] _storage;
-        T[] data;
-        alias data this;
 
-        void opOpAssign(string op)(T value) if (op == "~") {
-            const count = data.length;
-            if (count == _storage.length) {
-                const capacity = count == 0 ? 4 : count * 2;
-                if (capacity <= count || capacity > size_t.max / T.sizeof)
-                    internalFailure("compile buffer capacity overflows");
-                auto storage = new T[capacity];
-                storage[0 .. count] = data[];
-                _storage = storage;
-            }
-            _storage[count] = value;
-            data = _storage[0 .. count + 1];
-        }
-    }
-
-    private CompileBuffer!Instruction _instructions;
-    private long[] _constants;
-    // Every word of the instructions and constants that holds an address.
-    private Reloc[] _relocs;
-    private CompileBuffer!CallSite _callSites;
-    private AssertSite[] _assertSites;
     private size_t _haltSite = size_t.max;
-    private PendingExceptionHandler[] _exceptionHandlers;
     private size_t _tempSize;
     private uint _tempAlignment;
+    // The code that this compiler emitted so far, and its passes.
+    private EmittedCode _code;
     private CompileBuffer!(InlineBody.FrameRange) _allocations;
     private bool _exposesFrame;
     private CompileBuffer!(InlineBody.FrameRange) _exposedFrames;
@@ -1124,12 +1005,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // window of the call, or `size_t.max`. The first code that computes the
     // receiver takes it.
     private size_t _receiverDest = size_t.max;
-    // Temporaries made for an operand and read by its one parent.
-    private CompileBuffer!size_t _operandTemps;
-    // The offset and size of every temporary `reserveTemp` made, in
-    // increasing order of offset.
-    private CompileBuffer!size_t _tempStarts;
-    private CompileBuffer!size_t _tempSizes;
     private struct Temporary {
         size_t base;
         size_t site;
@@ -1172,14 +1047,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ScopeFrame[] scopePath;
     }
 
-    private struct PendingExceptionHandler {
-        private TypeInfo_Class _type;
-        private size_t _bodyStart;
-        private size_t _bodyEnd;
-        private size_t _handler;
-        private size_t _catchOffset;
-        private size_t _cleanupEnd = size_t.max;
-    }
 
     // Where `runPendingFinallyBodies` last inlined a `finally` for a
     // `return`, and which `try`/`finally` (by its index into
@@ -1354,26 +1221,26 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure("every `default` a jump targets was compiled");
 
         bindDeferredArguments;
-        forwardCopies;
-        removeEmptyLifetimes;
+        _code.forwardCopies;
+        _code.removeEmptyLifetimes;
         // Dispatch tests no end of stream: the last instruction ends the
         // activation.
-        if (_instructions.length == 0
-                || (_instructions[$ - 1].handler !is &opReturn
-                    && _instructions[$ - 1].handler !is &opReturnVoid
-                    && _instructions[$ - 1].handler !is &opJump))
+        if (_code.instructions.length == 0
+                || (_code.instructions[$ - 1].handler !is &opReturn
+                    && _code.instructions[$ - 1].handler !is &opReturnVoid
+                    && _code.instructions[$ - 1].handler !is &opJump))
             emit(&opReturnVoid, 0, 0, 0);
         auto inlineBody = inlineBodyOfBuilt;
         const resultPlace = redirectReturns;
         // A cold entry uses the complete original frame, including its
         // return-place slot. Nested copies already reserve that frame.
-        if (inlineBody !is null && _cold.length != 0) {
+        if (inlineBody !is null && _code.cold.length != 0) {
             inlineBody.frameSize = _tempSize;
             inlineBody.frameAlignment = _tempAlignment;
         }
 
         ExceptionHandler[] exceptionHandlers;
-        foreach (pending; _exceptionHandlers) {
+        foreach (pending; _code.exceptionHandlers) {
             ExceptionHandler handler;
             handler.type = pending._type;
             handler.catchOffset = pending._catchOffset;
@@ -1384,18 +1251,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             exceptionHandlers ~= handler;
         }
 
-        optimizeStaticLoads;
-        fuseReturns;
-        fuseLoadCopies;
-        assignRegisters;
-        specialiseHandlers(_instructions);
+        _code.optimizeStaticLoads;
+        _code.fuseReturns;
+        _code.fuseLoadCopies;
+        _code.assignRegisters;
+        specialiseHandlers(_code.instructions);
 
-        if (_bytecode.recordRelocs) {
-            foreach (index, ref site; _callSites)
-                recordCallSiteRelocs(_relocs, index, site);
+        if (_bytecode.compiledProgram.recordsAddresses) {
+            foreach (index, ref site; _code.callSites)
+                recordRelocs(_code.relocs, index, site);
             foreach (index, ref handler; exceptionHandlers)
-                recordExceptionHandlerRelocs(_relocs, index, handler,
-                    _bytecode._nativeData.addressOfData(
+                recordRelocs(_code.relocs, index, handler,
+                    _bytecode._world.data.addressOfData(
                         cast(const(void)*) handler.type).target);
         }
 
@@ -1418,7 +1285,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_layout.variadicCursor != size_t.max)
             parameterOffsets ~= _layout.variadicCursor;
         auto result = Function(
-            _instructions, _constants, _callSites, _assertSites,
+            _code.instructions, _code.constants, _code.callSites, _code.assertSites,
             exceptionHandlers,
             _tempSize, _tempAlignment,
             _closureOffset, contextOffset,
@@ -1439,19 +1306,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // string literal. It outlives every `Function`.
         result.hostCall = _layout.hostCall(
             cast(string) _function.toString);
-        result.relocs = _relocs;
-        if (_bytecode.recordRelocs)
-            recordFunctionRelocs(result.relocs, result);
+        result.relocs = _code.relocs;
+        if (_bytecode.compiledProgram.recordsAddresses)
+            recordRelocs(result.relocs, 0, result);
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
-        result.fixWindowFacts();
-        // Branch targets and call site cleanup ranges become addresses only
-        // now: the passes above read them as indices.
-        import std.conv: text;
-
-        if (auto reason = bindInstructionReferences(result))
-            internalFailure(text(reason, " in `", _function.toString, "`"));
         return result;
     }
 
@@ -1463,202 +1323,48 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const zero = reserveTemp(pointerFacts);
         emit(&opConstant, zero, addConstant(0), size_t.sizeof);
-        _assertSites ~= AssertSite(
+        _code.assertSites ~= AssertSite(
             "internal error: control reached the end of a non-void function",
             _function.loc.filename.fromStringz.idup,
             _function.loc.linnum,
         );
-        emit(&opAssert, zero, _assertSites.length - 1, size_t.sizeof);
-    }
-
-    // How a copied instruction names frame storage. `ignored` marks a field
-    // that holds no storage operand.
-    private enum Operand { ignored, storage, constant, callSite }
-
-    private static struct Operands {
-        Operand destination;
-        Operand source;
-        // The right operand of a three-address instruction, held in
-        // `sourceWidth`.
-        Operand right;
-    }
-
-    // The operand roles of every handler a copied function may use, and
-    // `false` for any other. A handler outside this list never gets copied,
-    // so a new opcode starts as not copyable.
-    private static bool inlineOperandsOf(
-        Instruction.Handler handler, out Operands roles,
-    ) {
-        import std.meta: AliasSeq;
-
-        enum S = Operand.storage;
-        enum N = Operand.ignored;
-        static foreach (operation; AliasSeq!(
-            opCopy, opLoadIndirect, opStoreIndirect, opAdd, opSubtract,
-            opMultiply, opBitAnd, opBitOr, opBitXor, opShiftLeft,
-            opShiftRightLogical, opShiftRightArithmetic, opLessThanSigned,
-            opLessThanUnsigned, opLessOrEqualSigned, opLessOrEqualUnsigned,
-            opGreaterThanSigned, opGreaterThanUnsigned,
-            opGreaterOrEqualSigned, opGreaterOrEqualUnsigned, opEqual,
-            opNotEqual, opFrameAddress,
-            opCopyFixed!1, opCopyFixed!2, opCopyFixed!4, opCopyFixed!8,
-            opCopyFixed!16,
-        )) {
-            if (handler is &operation) {
-                roles = Operands(S, S);
-                return true;
-            }
-        }
-        static foreach (index, operation; threeAddressHandlers) {
-            if (handler is &operation) {
-                roles = Operands(S, S, S);
-                return true;
-            }
-            // The constant form holds the address of a native constant in
-            // `sourceWidth`; it does not move.
-            if (handler is &threeAddressConstantHandlers[index]) {
-                roles = Operands(S, S, N);
-                return true;
-            }
-        }
-        static foreach (operation; AliasSeq!(
-            opIndexSlice, opIndexStatic, opIndexPointer,
-        )) {
-            if (handler is &operation) {
-                roles = Operands(S, S, S);
-                return true;
-            }
-        }
-        // A fused compare-and-branch: the left operand is in `destination`
-        // and the branch target in `sourceWidth`, which the caller of this
-        // method moves as it moves every branch target.
-        if (isFusedBranch(handler)) {
-            roles = Operands(S, fusesConstant(handler) ? N : S);
-            return true;
-        }
-        static foreach (width; indirectCopyWidths) {
-            if (handler is &opLoadIndirectFixed!width
-                    || handler is &opStoreIndirectFixed!width) {
-                roles = Operands(S, S);
-                return true;
-            }
-        }
-        static foreach (kind; [
-            CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
-        ])
-            static foreach (destSize; [1UL, 2, 4, 8])
-                static foreach (sourceSize; [1UL, 2, 4, 8])
-                    if (handler is &opCastFixedAs!(kind, destSize, sourceSize)) {
-                        roles = Operands(S, S);
-                        return true;
-                    }
-        static foreach (operation; AliasSeq!(
-            opNegate, opComplement, opLogicalNot, opCastToBool,
-            opCastWidenSigned, opCastWidenUnsigned, opStaticLoad, opZero,
-            opThrow, opBranchTrue, opBranchFalse,
-        )) {
-            if (handler is &operation) {
-                roles = Operands(S, N);
-                return true;
-            }
-        }
-        if (handler is &opConstant) {
-            roles = Operands(S, Operand.constant);
-            return true;
-        }
-        if (handler is &opReturn) {
-            roles = Operands(N, S);
-            return true;
-        }
-        if (handler is &opJump || handler is &opReturnVoid) {
-            roles = Operands(N, N);
-            return true;
-        }
-        return false;
+        emit(&opAssert, zero, _code.assertSites.length - 1, size_t.sizeof);
     }
 
     // The copied call sites: failure hooks and cold throw continuations.
     private size_t _hookSites;
 
-    private struct ColdRange {
-        size_t first, end, siteFirst, siteEnd, hooks;
-    }
-    private ColdRange[] _cold;
     private ColdRange[] _openCold;
-
-    private bool inCold(in size_t index) const {
-        foreach (range; _cold)
-            if (index >= range.first && index < range.end)
-                return true;
-        return false;
-    }
-
-
-    // `inlineOperandsOf`, and the handlers whose `width` or `source` field is
-    // not a plain operand. The operand analyses of `classify` read only
-    // `inlineOperandsOf`, because their reading of `width` does not fit these.
-    private static bool copyOperandsOf(
-        Instruction.Handler handler, out Operands roles,
-    ) {
-        enum S = Operand.storage;
-        enum N = Operand.ignored;
-        if (inlineOperandsOf(handler, roles))
-            return true;
-        if (handler is &opColdThrow) {
-            roles = Operands(S, Operand.callSite);
-            return true;
-        }
-        if (handler is &opCall) {
-            roles = Operands(N, Operand.callSite);
-            return true;
-        }
-        // The left array is read from `destination`, which then takes the
-        // result; `width` is an element size.
-        if (handler is &opArrayEqual || handler is &opStaticArrayEqual) {
-            roles = Operands(S, S);
-            return true;
-        }
-        CheckedAccess access;
-        bool constantValue;
-        if (checkedIndexKind(handler, access, constantValue)) {
-            // A check has no value operand, and a constant value is the
-            // address of a native constant.
-            roles = Operands(
-                access == CheckedAccess.check || constantValue ? N : S, S);
-            return true;
-        }
-        return false;
-    }
 
     // The copyable form of the function this compiler just finished, or
     // null. Called once the instructions are final except for fusing and
     // the resolution of branch targets to addresses.
     private InlineBody* inlineBodyOfBuilt() {
         size_t coldSites, coldHooks;
-        foreach (range; _cold) {
+        foreach (range; _code.cold) {
             coldSites += range.siteEnd - range.siteFirst;
             coldHooks += range.hooks;
         }
-        if (_callSites.length - coldSites != _hookSites - coldHooks
-                || _assertSites.length != 0
-                || _exceptionHandlers.length != 0
+        if (_code.callSites.length - coldSites != _hookSites - coldHooks
+                || _code.assertSites.length != 0
+                || _code.exceptionHandlers.length != 0
                 || _closureOffset != size_t.max
                 || _layout.returnPlace.offset != size_t.max
                 || _layout.variadicTypes != size_t.max
                 || _layout.variadicCursor != size_t.max
-                || _instructions.length > Bytecode.maxInlineInstructions)
+                || _code.instructions.length > Bytecode.maxInlineInstructions)
             return null;
-        foreach (i, instruction; _instructions) {
+        foreach (i, instruction; _code.instructions) {
             Operands roles;
-            if (!inCold(i) && !copyOperandsOf(instruction.handler, roles))
+            if (!_code.inCold(i) && !copyOperandsOf(instruction.handler, roles))
                 return null;
         }
-        auto instructions = _instructions.dup;
+        auto instructions = _code.instructions.dup;
         CallSite[] sites;
-        auto siteMap = new size_t[_callSites.length];
-        foreach (index, site; _callSites) {
+        auto siteMap = new size_t[_code.callSites.length];
+        foreach (index, site; _code.callSites) {
             bool cold;
-            foreach (range; _cold)
+            foreach (range; _code.cold)
                 cold |= index >= range.siteFirst && index < range.siteEnd;
             if (cold)
                 continue;
@@ -1669,16 +1375,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             sites ~= site;
         }
         foreach (i, ref instruction; instructions)
-            if (!inCold(i) && (instruction.handler is &opCall
+            if (!_code.inCold(i) && (instruction.handler is &opCall
                     || instruction.handler is &opColdThrow))
                 instruction.source = siteMap[instruction.source];
-        if (_cold.length != 0) {
+        if (_code.cold.length != 0) {
             auto bytecode = _bytecode;
             auto function_ = _function;
             const selfSite = sites.length;
             sites ~= CallSite.guest(
                 deferred(() => bytecode.compileFunction(function_)), null, 0);
-            foreach (range; _cold) {
+            foreach (range; _code.cold) {
                 instructions[range.first] = Instruction(
                     &opColdThrow, 0, selfSite, range.first);
                 foreach (i; range.first + 1 .. range.end)
@@ -1686,12 +1392,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         }
         Reloc[] relocs;
-        foreach (reloc; _relocs)
+        foreach (reloc; _code.relocs)
             if (reloc.place.section != Place.Section.instruction
-                    || !inCold(reloc.place.index))
+                    || !_code.inCold(reloc.place.index))
                 relocs ~= reloc;
         return new InlineBody(
-            instructions, _constants.dup, _tempSize, _tempAlignment,
+            instructions, _code.constants.dup, _tempSize, _tempAlignment,
             relocs, sites, _allocations.dup, _exposesFrame,
             _exposedFrames.dup);
     }
@@ -1799,34 +1505,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (place.offset != size_t.max) {
             // The value was written through the place already.
             const written = indirectStorage(place.offset);
-            foreach (ref instruction; _instructions)
+            foreach (ref instruction; _code.instructions)
                 if (instruction.handler is &opReturn
                         && instruction.source == written)
                     instruction.handler = &opReturnVoid;
             return place;
         }
 
-        auto targets = new bool[_instructions.length + 1];
-        foreach (ref instruction; _instructions)
-            if (auto target = branchTargetField(instruction))
-                targets[*target] = true;
-        foreach (handler; _exceptionHandlers) {
-            targets[handler._bodyStart] = true;
-            targets[handler._bodyEnd] = true;
-            targets[handler._handler] = true;
-            if (handler._cleanupEnd != size_t.max)
-                targets[handler._cleanupEnd] = true;
-        }
-        foreach (site; _callSites)
-            if (site.cleanupStartIndex != size_t.max) {
-                targets[site.cleanupStartIndex] = true;
-                targets[site.cleanupEndIndex] = true;
-            }
+        auto targets = new bool[_code.instructions.length + 1];
+        _code.markTargets(targets);
 
         size_t slot = size_t.max;
-        foreach (index; 1 .. _instructions.length) {
-            auto instruction = &_instructions[index];
-            auto previous = &_instructions[index - 1];
+        foreach (index; 1 .. _code.instructions.length) {
+            auto instruction = &_code.instructions[index];
+            auto previous = &_code.instructions[index - 1];
             if (instruction.handler !is &opReturn || targets[index]
                     || instruction.source != previous.destination
                     || (instruction.source & (1UL << 63)) != 0)
@@ -1836,7 +1528,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const forwardsCall = (previous.handler is &opCallWindowFrame
                     || previous.handler is &opCallIndirectWindowFrame
                     || previous.handler is &opCall)
-                && _callSites[previous.source].returnWidth == instruction.width;
+                && _code.callSites[previous.source].returnWidth == instruction.width;
             if (!forwardsCall && !writesWholeWord(*previous, instruction.width)
                     && !copiesValue(*previous, instruction.width))
                 continue;
@@ -1974,7 +1666,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         && isFrameOperand(arg.callerOffset)
                         && !bodyWrites(body_, arg.calleeOffset, arg.width))
                     _deferredBindings ~= DeferredBinding(
-                        _instructions.length,
+                        _code.instructions.length,
                         Arg(arg.callerOffset, base + arg.calleeOffset,
                             arg.width));
                 emit(&opCopy, base + arg.calleeOffset, arg.callerOffset,
@@ -2031,9 +1723,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
         }
 
-        const constantBase = _constants.length;
-        _constants ~= body_.constants;
-        const start = _instructions.length;
+        const constantBase = _code.constants.length;
+        _code.constants ~= body_.constants;
+        const start = _code.instructions.length;
         size_t next = start;
         foreach (i, instruction; instructions) {
             positions[i] = next;
@@ -2085,9 +1777,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 site.args = site.args.dup;
                 foreach (ref arg; site.args)
                     arg.callerOffset = place(arg.callerOffset);
-                _callSites ~= site;
+                _code.callSites ~= site;
                 ++_hookSites;
-                copied.source = _callSites.length - 1;
+                copied.source = _code.callSites.length - 1;
             }
             if (roles.right == Operand.storage)
                 copied.sourceWidth = place(copied.sourceWidth);
@@ -2098,7 +1790,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             }
             if (auto target = branchTargetField(copied))
                 *target = positions[*target];
-            _instructions ~= copied;
+            _code.instructions ~= copied;
         }
 
         foreach (ref binding; _deferredBindings[deferredStart .. $]) {
@@ -2118,12 +1810,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 case function_, callSite, exceptionHandler, datum:
                     internalFailure("a copied body has no call or catch site");
             }
-            _relocs ~= reloc;
+            _code.relocs ~= reloc;
         }
     }
 
     // Bound handler growth while letting LDC inline small unaligned copies.
-    private enum indirectCopyWidths = [1, 2, 4, 8, 16, 32];
 
     private void emit(
         Instruction.Handler handler,
@@ -2168,7 +1859,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                                 &opCastFixedAs!(kind, destSize, sourceSize);
             }
         }
-        _instructions ~= Instruction(
+        _code.instructions ~= Instruction(
             handler, destination, source, width, sourceWidth);
     }
 
@@ -2215,7 +1906,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (!_bytecode.recordRelocs)
+        if (!_bytecode.compiledProgram.recordsAddresses)
             return;
         Roles roles;
         const known = rolesOf(handler, roles);
@@ -2226,149 +1917,24 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure(text("this handler holds no address in `", field,
                 "`"));
         if (!address.isNull)
-            _relocs ~= Reloc(
-                Place(Place.Section.instruction, field, _instructions.length),
+            _code.relocs ~= Reloc(
+                Place(Place.Section.instruction, field, _code.instructions.length),
                 address.target);
     }
 
     private size_t addConstant(in long value) {
-        _constants ~= value;
-        return _constants.length - 1;
+        _code.constants ~= value;
+        return _code.constants.length - 1;
     }
 
     private size_t addConstant(in Address address) {
-        if (_bytecode.recordRelocs && !address.isNull)
-            _relocs ~= Reloc(
+        if (_bytecode.compiledProgram.recordsAddresses && !address.isNull)
+            _code.relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
-                _constants.length),
+                _code.constants.length),
             address.target);
         return addConstant(cast(long) address.word);
     }
-
-    private void optimizeStaticLoads() {
-        foreach (ref instruction; _instructions) {
-            if (instruction.handler is &opStaticLoad) {
-                static foreach (width; 1 .. 17)
-                    if (instruction.width == width)
-                        instruction.handler = &opCopyFixed!(width, true);
-            }
-        }
-    }
-
-    // The arrays of `assignRegisters`, kept for the next compile on the same
-    // thread so that the pass allocates nothing once they are big enough. A
-    // compile runs on one thread and the pass does not call out, so thread
-    // local storage is enough.
-    private static uint[] _mentionsStorage;
-    private static bool[] _isTargetStorage;
-    private static bool[] _readsRegisterStorage;
-    private static bool[] _writesRegisterStorage;
-    private static bool[] _fusedStorage;
-
-    // The first `length` elements of `storage`, set to `T.init`. A short
-    // `storage` doubles at least, so a run of larger compiles allocates
-    // O(log n) times.
-    private static T[] zeroed(T)(ref T[] storage, in size_t length)
-        @safe nothrow pure
-    {
-        if (storage.length < length)
-            storage = new T[length > storage.length * 2
-                ? length : storage.length * 2];
-        else
-            storage[0 .. length] = T.init;
-        return storage[0 .. length];
-    }
-
-    // Keeps the result of an arithmetic instruction in a register when the
-    // next instruction is its only reader: the operand temporary is read by
-    // that instruction alone, and the next instruction is not a branch
-    // target, an exception handler entry or a cleanup bound.
-    private void assignRegisters() {
-        const count = _instructions.length;
-        if (count < 2)
-            return;
-        // Only operand temporaries are ever looked up, so a value that is
-        // not one is not counted. `_operandTemps` grows in increasing offset
-        // order (`_tempSize` never shrinks), so the position of an offset in
-        // it, found by binary search, is a dense index. Cost does not depend
-        // on the frame size.
-        import std.range: assumeSorted;
-
-        auto mentions = zeroed(_mentionsStorage, _operandTemps.length);
-        auto isTarget = zeroed(_isTargetStorage, count + 1);
-        size_t tempIndex(in size_t offset) {
-            const index = _operandTemps.data.assumeSorted.lowerBound(offset).length;
-            return index < _operandTemps.length
-                    && _operandTemps[index] == offset
-                ? index : _operandTemps.length;
-        }
-        void mention(in size_t operand) {
-            const index = tempIndex(operand);
-            if (index < mentions.length)
-                mentions[index]++;
-        }
-        foreach (ref instruction; _instructions) {
-            mention(instruction.destination);
-            if (instruction.source != instruction.destination)
-                mention(instruction.source);
-            if (instruction.sourceWidth != instruction.source
-                    && instruction.sourceWidth != instruction.destination)
-                mention(instruction.sourceWidth);
-            // A temp that holds an address is mentioned by every indirect
-            // operand that reads through it. A field that is not an operand
-            // can only add mentions, which only stops a pairing.
-            static foreach (field; ["destination", "source", "sourceWidth"])
-                if (mixin("instruction." ~ field) & (1UL << 63))
-                    mention((mixin("instruction." ~ field) >> 32)
-                        & 0x7fff_ffffUL);
-            if (auto field = branchTargetField(instruction)) {
-                if (*field < isTarget.length)
-                    isTarget[*field] = true;
-            }
-        }
-        markScopeTargets(isTarget);
-
-        auto readsRegister = zeroed(_readsRegisterStorage, count);
-        auto writesRegister = zeroed(_writesRegisterStorage, count);
-        auto fused = zeroed(_fusedStorage, count);
-        foreach (index; 0 .. count - 1) {
-            auto producer = &_instructions[index];
-            auto consumer = &_instructions[index + 1];
-            if (isTarget[index + 1])
-                continue;
-            const family = registerFamily(producer.handler, producer.width);
-            if (family == RegisterFamily.none)
-                continue;
-            const temp = producer.destination;
-            const tempSlot = tempIndex(temp);
-            if (tempSlot == mentions.length || mentions[tempSlot] != 2)
-                continue;
-            if (consumer.width != producer.width)
-                continue;
-            if (registerFamily(consumer.handler, consumer.width) == family) {
-                if (consumer.source != temp || consumer.sourceWidth == temp
-                        || consumer.destination == temp)
-                    continue;
-            } else if (fusedRegisterFamily(consumer.handler, consumer.width)
-                    == family) {
-                if (consumer.destination != temp || consumer.source == temp)
-                    continue;
-                fused[index + 1] = true;
-            } else
-                continue;
-            writesRegister[index] = true;
-            readsRegister[index + 1] = true;
-        }
-        foreach (index, ref instruction; _instructions) {
-            if (fused[index]) {
-                instruction.handler = fusedRegisterForm(instruction.handler);
-            } else if (readsRegister[index] || writesRegister[index]) {
-                instruction.handler = registerForm(instruction.handler,
-                    readsRegister[index], writesRegister[index]);
-            }
-        }
-    }
-
 
     // A pointer store cannot change a value whose allocation has never
     // supplied an address. Check the complete caller, including loop backs
@@ -2407,11 +1973,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         foreach (range; _exposedFrames)
             foreach (i, allocation; _allocations)
-                if (overlaps(range.offset, range.size,
+                if (EmittedCode.overlaps(range.offset, range.size,
                         allocation.offset, allocation.size))
                     exposed[i] = true;
 
-        foreach (instruction; _instructions) {
+        foreach (instruction; _code.instructions) {
             const handler = instruction.handler;
             if (handler is null)
                 continue;
@@ -2432,7 +1998,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 if (handler is &operation)
                     call = true;
             if (call) {
-                const site = _callSites[instruction.source];
+                const site = _code.callSites[instruction.source];
                 if (instruction.destination != discardResult
                         && site.returnWidth != 0
                         && !expose(instruction.destination))
@@ -2504,7 +2070,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     : withAddressSlot(operand, rebase(addressSlotOf(operand)));
             }
             foreach (ref instruction;
-                    _instructions[binding.start .. binding.end]) {
+                    _code.instructions[binding.start .. binding.end]) {
                 Operands roles;
                 if (!copyOperandsOf(instruction.handler, roles))
                     internalFailure("a deferred inline body has known operands");
@@ -2514,7 +2080,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     instruction.source = place(instruction.source);
                 else if (roles.source == Operand.callSite)
                     foreach (ref argument;
-                            _callSites[instruction.source].args)
+                            _code.callSites[instruction.source].args)
                         argument.callerOffset = place(argument.callerOffset);
                 if (roles.right == Operand.storage)
                     instruction.sourceWidth = place(instruction.sourceWidth);
@@ -2524,731 +2090,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                         | rebase(instruction.width & low);
                 }
             }
-            _instructions[binding.copy].handler = null;
+            _code.instructions[binding.copy].handler = null;
         }
-    }
-
-    // Copy forwarding. A temporary that one instruction fills and one copy
-    // empties makes the producer write the copy's destination instead; a
-    // copy into a temporary that one instruction reads makes that
-    // instruction read the copy's source instead. A temporary counts only
-    // when `reserveTemp` made it, and a pass counts every access that
-    // overlaps it: an instruction field, a call argument or a catch
-    // offset. The VM can write storage with no instruction naming it (the
-    // closure pointer), so `reserveStorage` makes that and the pass never
-    // sees it.
-    private void forwardCopies() {
-        const count = _instructions.length;
-        if (count < 2 || _tempStarts.length == 0)
-            return;
-
-        auto isTarget = new bool[count + 1];
-        foreach (ref instruction; _instructions) {
-            if (instruction.handler is null)
-                continue;
-            if (auto field = branchTargetField(instruction))
-                if (*field <= count)
-                    isTarget[*field] = true;
-        }
-        markScopeTargets(isTarget);
-
-        auto state = CopyForwarding(
-            _instructions, _tempStarts, _tempSizes, isTarget);
-        foreach (ref site; _callSites) {
-            foreach (arg; site.args)
-                state.count(arg.callerOffset, arg.width, 1);
-            foreach (arg; site.nativeArgs)
-                state.count(arg.callerOffset, arg.width, 1);
-            foreach (arg; site.value.surplus)
-                state.count(arg.callerOffset, arg.width, 1);
-            if (site.kind == CallSite.Kind.indirect
-                    || site.kind == CallSite.Kind.value)
-                state.count(site.calleeSlotOffset, size_t.sizeof, 1);
-        }
-        foreach (handler; _exceptionHandlers)
-            if (handler._catchOffset != size_t.max)
-                state.count(handler._catchOffset, size_t.sizeof, 1);
-        state.run;
-    }
-
-    // Marks the instructions that an exception handler or a cleanup range
-    // starts or ends at. `isTarget` has one more element than there are
-    // instructions.
-    private void markScopeTargets(bool[] isTarget) {
-        void mark(in size_t index) {
-            if (index < isTarget.length)
-                isTarget[index] = true;
-        }
-        foreach (range; _cold)
-            mark(range.first);
-        foreach (handler; _exceptionHandlers) {
-            mark(handler._bodyStart);
-            mark(handler._bodyEnd);
-            mark(handler._handler);
-            mark(handler._cleanupEnd);
-        }
-        foreach (ref site; _callSites)
-            if (site.cleanupStartIndex != size_t.max) {
-                mark(site.cleanupStartIndex);
-                mark(site.cleanupEndIndex);
-            }
-    }
-
-    // How the pass treats the operands of a handler.
-    private static struct Access {
-        enum Kind {
-            // Not known well enough to change a field.
-            opaque,
-            // Reads its operands, then writes `destination` alone and reads
-            // nothing from it.
-            pureWriter,
-            // Reads `destination` and writes it with a result of the same
-            // width.
-            inPlace,
-            // Writes none of its storage operands.
-            reader,
-        }
-
-        Kind kind;
-        // Which fields name storage. A handler outside the role table may
-        // name storage in every field.
-        Operands roles;
-        // The handler uses the address of its source, not its value.
-        bool takesAddress;
-        // `width` holds the frame offset of an index in its low 32 bits.
-        bool widthIsSlot;
-        // The role table knows the handler, so each operand names one object
-        // of `width` bytes at most.
-        bool known;
-        // The width of a copy, or 0.
-        size_t copyWidth;
-        // The bytes that the handler touches through `destination` or
-        // `source` whatever the width of the instruction, or 0.
-        size_t destinationExtent;
-        size_t sourceExtent;
-
-        bool isWriter() const {
-            return kind == Kind.pureWriter || kind == Kind.inPlace;
-        }
-
-        bool namesStorage(in Field field) const {
-            final switch (field) {
-                case Field.destination:
-                    return roles.destination == Operand.storage;
-                case Field.source:
-                    return roles.source == Operand.storage;
-                case Field.right:
-                    return roles.right == Operand.storage;
-            }
-        }
-
-        // The fields from which the handler only reads a value, as a bit
-        // mask of `1 << Field`.
-        uint readOnlyFields() const {
-            if (kind == Kind.opaque || takesAddress)
-                return 0;
-            uint mask;
-            foreach (field; allFields) {
-                if (namesStorage(field)
-                        && !(field == Field.destination && isWriter))
-                    mask |= 1 << cast(int) field;
-            }
-            return mask;
-        }
-    }
-
-    private static Access accessOf(in Instruction.Handler handler) {
-        // A direct-mapped cache of `classify`, thread-local: a handler never
-        // changes what it is.
-        static struct Entry {
-            Instruction.Handler handler;
-            Access access;
-        }
-        enum entries = 256;
-        static Entry[entries] cache;
-
-        auto entry = &cache[(cast(size_t) handler >> 4) % entries];
-        if (entry.handler !is handler) {
-            entry.access = classify(handler);
-            entry.handler = cast(Instruction.Handler) handler;
-        }
-        return entry.access;
-    }
-
-    private static Access classify(Instruction.Handler handler) {
-        import std.meta: AliasSeq;
-
-        Access access;
-        access.known = inlineOperandsOf(handler, access.roles);
-        if (!access.known) {
-            enum S = Operand.storage;
-            access.roles = Operands(S, S, S);
-        }
-        access.widthIsSlot = widthHoldsIndexSlot(handler);
-
-        with (Access.Kind) {
-            static foreach (operation; AliasSeq!(
-                opConstant, opZero, opStaticLoad,
-            ))
-                if (handler is &operation)
-                    access.kind = pureWriter;
-            // These write an address.
-            static foreach (operation; AliasSeq!(
-                opFrameAddress, opIndexSlice, opIndexStatic, opIndexPointer,
-            ))
-                if (handler is &operation) {
-                    access.kind = pureWriter;
-                    access.destinationExtent = size_t.sizeof;
-                }
-            static foreach (width; copyWidths)
-                if (handler is &opCopyFixed!width) {
-                    access.kind = pureWriter;
-                    access.copyWidth = width;
-                }
-            static foreach (width; indirectCopyWidths) {
-                if (handler is &opLoadIndirectFixed!width) {
-                    access.kind = pureWriter;
-                    access.sourceExtent = size_t.sizeof;
-                }
-                if (handler is &opStoreIndirectFixed!width) {
-                    access.kind = reader;
-                    access.destinationExtent = size_t.sizeof;
-                }
-            }
-            static foreach (kind; [
-                CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
-            ])
-                static foreach (destSize; [1UL, 2, 4, 8])
-                    static foreach (sourceSize; [1UL, 2, 4, 8])
-                        if (handler
-                                is &opCastFixedAs!(kind, destSize, sourceSize)) {
-                            access.kind = pureWriter;
-                            access.destinationExtent = destSize;
-                            access.sourceExtent = sourceSize;
-                        }
-            static foreach (index, operation; threeAddressHandlers) {
-                if (handler is &operation
-                        || handler is &threeAddressConstantHandlers[index]) {
-                    access.kind = pureWriter;
-                    // A comparison writes one byte whatever its operand
-                    // width.
-                    static if (index >= firstComparisonHandler)
-                        access.destinationExtent = 1;
-                }
-            }
-            static foreach (operation; AliasSeq!(
-                opAdd, opSubtract, opMultiply, opBitAnd, opBitOr, opBitXor,
-                opShiftLeft, opShiftRightLogical, opShiftRightArithmetic,
-                opNegate, opComplement, opLogicalNot, opCastToBool,
-                opFloatAdd, opFloatSubtract, opFloatMultiply, opFloatDivide,
-                opFloatNegate,
-            ))
-                if (handler is &operation)
-                    access.kind = inPlace;
-            static foreach (operation; AliasSeq!(
-                opReturn, opBranchFalse, opBranchTrue,
-            ))
-                if (handler is &operation)
-                    access.kind = reader;
-            if (isFusedBranch(handler))
-                access.kind = reader;
-        }
-        // The address of the operand matters, not only its value.
-        static foreach (operation; AliasSeq!(
-            opFrameAddress, opIndexSlice, opIndexStatic, opIndexPointer,
-        ))
-            if (handler is &operation)
-                access.takesAddress = true;
-        return access;
-    }
-
-    private enum copyWidths = [1, 2, 4, 8, 16];
-
-    private static immutable Field[3] allFields = [
-        Field.destination, Field.source, Field.right,
-    ];
-
-    // The bytes that a writer writes to `destination`.
-    private static size_t writtenSize(
-        in Instruction instruction, in Access access,
-    ) {
-        return access.destinationExtent != 0
-            ? access.destinationExtent : instruction.width;
-    }
-
-    // The bytes that an instruction reads or writes through `field`. A
-    // handler outside the role table is assumed to touch one object at the
-    // field's base.
-    private static size_t extentOf(
-        in Instruction instruction, in Access access, in Field field,
-    ) {
-        if (field == Field.destination && access.destinationExtent != 0)
-            return access.destinationExtent;
-        if (field == Field.source && access.sourceExtent != 0)
-            return access.sourceExtent;
-        if (!access.known || access.takesAddress)
-            return 1;
-        return instruction.width == 0 ? 1 : instruction.width;
-    }
-
-    private static ref size_t operandOf(ref Instruction instruction, in Field field) {
-        final switch (field) {
-            case Field.destination: return instruction.destination;
-            case Field.source: return instruction.source;
-            case Field.right: return instruction.sourceWidth;
-        }
-    }
-
-    private static bool overlaps(
-        in size_t a, in size_t aWidth, in size_t b, in size_t bWidth,
-    ) {
-        return a < b + bWidth && b < a + aWidth;
-    }
-
-    // The analysis state of copy forwarding: for each temporary, how many
-    // accesses overlap it.
-    private static struct CopyForwarding {
-        Instruction[] instructions;
-        // The temporaries, in increasing order of offset, and their sizes.
-        const(size_t)[] starts;
-        const(size_t)[] sizes;
-        long[] counts;
-        // The end of the last temporary.
-        size_t tempsEnd;
-        // An instruction that control may enter from outside the previous one.
-        const(bool)[] isTarget;
-
-        this(
-            Instruction[] instructions, const(size_t)[] starts,
-            const(size_t)[] sizes, const(bool)[] isTarget,
-        ) {
-            this.instructions = instructions;
-            this.starts = starts;
-            this.sizes = sizes;
-            this.isTarget = isTarget;
-            tempsEnd = starts[$ - 1] + sizes[$ - 1];
-            counts = new long[starts.length];
-            foreach (ref instruction; instructions)
-                if (instruction.handler !is null)
-                    adjust(instruction, 1);
-        }
-
-        void run() {
-            foreach (index; 1 .. instructions.length) {
-                if (instructions[index].handler is null || isTarget[index])
-                    continue;
-                if (redirectProducer(index))
-                    continue;
-                forwardSource(index);
-            }
-        }
-
-        // Adds `delta` to every temporary that the `extent` bytes from `base`
-        // overlap, or to the temporary at the address slot of an indirect
-        // `base`.
-        void count(in size_t base, in size_t extent, in long delta) {
-            if (!isFrameOperand(base)) {
-                countFrame(addressSlotOf(base), size_t.sizeof, delta);
-                return;
-            }
-            countFrame(base, extent, delta);
-        }
-
-        private void countFrame(
-            in size_t base, in size_t extent, in long delta,
-        ) {
-            if (base >= tempsEnd || base + extent <= starts[0])
-                return;
-            // The first temporary that ends after `base`.
-            size_t low;
-            size_t high = starts.length;
-            while (low < high) {
-                const middle = (low + high) / 2;
-                if (starts[middle] + sizes[middle] <= base)
-                    low = middle + 1;
-                else
-                    high = middle;
-            }
-            const end = base + extent;
-            for (size_t at = low; at < starts.length && starts[at] < end; ++at)
-                counts[at] += delta;
-        }
-
-        // Counts or uncounts every access of `instruction`.
-        private void adjust(ref Instruction instruction, in long delta) {
-            const access = accessOf(instruction.handler);
-            foreach (field; allFields) {
-                if (access.namesStorage(field))
-                    count(operandOf(instruction, field),
-                        extentOf(instruction, access, field), delta);
-            }
-            if (access.widthIsSlot)
-                countFrame(cast(uint) instruction.width, size_t.sizeof, delta);
-        }
-
-        private void set(
-            ref Instruction instruction, in Field field, in size_t value,
-        ) {
-            adjust(instruction, -1);
-            operandOf(instruction, field) = value;
-            adjust(instruction, 1);
-        }
-
-        private void drop(ref Instruction instruction) {
-            adjust(instruction, -1);
-            instruction.handler = null;
-        }
-
-        // The index into `starts` of the temporary at `offset`, or the
-        // length of `starts`.
-        private size_t tempAt(in size_t offset) const {
-            size_t low;
-            size_t high = starts.length;
-            while (low < high) {
-                const middle = (low + high) / 2;
-                if (starts[middle] < offset)
-                    low = middle + 1;
-                else
-                    high = middle;
-            }
-            return low < starts.length && starts[low] == offset
-                ? low : starts.length;
-        }
-
-        // The size of the temporary at `offset`, or 0.
-        private size_t sizeOf(in size_t offset) const {
-            const at = tempAt(offset);
-            return at == starts.length ? 0 : sizes[at];
-        }
-
-        // How many accesses overlap the temporary at `offset`.
-        private long mentions(in size_t offset) const {
-            const at = tempAt(offset);
-            return at == starts.length ? 0 : counts[at];
-        }
-
-        // The number of fields of `instruction` that have `temp` as base or
-        // as address slot.
-        private size_t fieldsNaming(ref Instruction instruction, in size_t temp) {
-            const access = accessOf(instruction.handler);
-            size_t found;
-            foreach (field; allFields) {
-                if (!access.namesStorage(field))
-                    continue;
-                const operand = operandOf(instruction, field);
-                if ((isFrameOperand(operand) ? operand : addressSlotOf(operand))
-                        == temp)
-                    ++found;
-            }
-            return found;
-        }
-
-        // `copy` empties a temporary that a run of earlier instructions
-        // fills. The run is one pure writer, then in-place operations on the
-        // same temporary, with constants loaded in between. They write the
-        // destination of the copy, and the copy goes.
-        private bool redirectProducer(in size_t copyIndex) {
-            auto copy = &instructions[copyIndex];
-            const width = accessOf(copy.handler).copyWidth;
-            if (width == 0 || width > size_t.sizeof)
-                return false;
-            const temp = copy.source;
-            const destination = copy.destination;
-            const direct = isFrameOperand(destination);
-            if (!isFrameOperand(temp) || sizeOf(temp) != width
-                    || destination == temp
-                    || (direct && overlaps(destination, width, temp, width)))
-                return false;
-
-            // One mention of the temporary is the copy.
-            long need = mentions(temp);
-            if (need < 2)
-                return false;
-            --need;
-            size_t[] run;
-            size_t writer = size_t.max;
-            enum maxScan = 16;
-            for (size_t at = copyIndex; at > 0 && copyIndex - at < maxScan;) {
-                --at;
-                auto candidate = &instructions[at];
-                if (candidate.handler is null || isTarget[at + 1])
-                    return false;
-                const found = fieldsNaming(*candidate, temp);
-                if (found == 0) {
-                    // Only a load of a constant to a frame slot elsewhere may
-                    // sit in between. It is not between an indirect
-                    // destination and its writer: it could write the address
-                    // slot or the pointee.
-                    if (!direct
-                            || (candidate.handler !is &opConstant
-                                && candidate.handler !is &opZero)
-                            || !isFrameOperand(candidate.destination)
-                            || overlaps(candidate.destination, candidate.width,
-                                destination, width))
-                        return false;
-                    continue;
-                }
-                if (found != 1 || need == 0)
-                    return false;
-                --need;
-                const access = accessOf(candidate.handler);
-                if (candidate.destination == temp
-                        && access.kind == Access.Kind.pureWriter
-                        && writtenSize(*candidate, access) == width) {
-                    if (need != 0)
-                        return false;
-                    writer = at;
-                    break;
-                }
-                if (candidate.destination != temp
-                        || access.kind != Access.Kind.inPlace
-                        || candidate.width != width
-                        || !readsAwayFrom(*candidate, access, temp,
-                            destination, width))
-                    return false;
-                run ~= at;
-            }
-            if (writer == size_t.max)
-                return false;
-
-            auto first = &instructions[writer];
-            if (!direct && (run.length != 0
-                    || !decodesIndirect(first.handler, Field.destination)))
-                return false;
-            // A copy now writes over a source that it reads, which a copy
-            // through the temporary did not.
-            if (accessOf(first.handler).copyWidth != 0
-                    && partlyOverlaps(first.source, destination, width))
-                return false;
-
-            set(*first, Field.destination, destination);
-            foreach (at; run)
-                set(instructions[at], Field.destination, destination);
-            drop(*copy);
-            return true;
-        }
-
-        // Whether every frame operand that `instruction` reads besides
-        // `destination` is a plain frame offset away from both `temp` and
-        // the `width` bytes at `destination`.
-        private bool readsAwayFrom(
-            ref Instruction instruction, in Access access, in size_t temp,
-            in size_t destination, in size_t width,
-        ) {
-            foreach (field; [Field.source, Field.right]) {
-                if (!access.namesStorage(field))
-                    continue;
-                const operand = operandOf(instruction, field);
-                if (!isFrameOperand(operand) || operand == temp
-                        || overlaps(operand, width, destination, width))
-                    return false;
-            }
-            return true;
-        }
-
-        // Whether `source` partly overlaps the `width` bytes at
-        // `destination`, which a copy cannot do and a copy through a
-        // temporary could.
-        private static bool partlyOverlaps(
-            in size_t source, in size_t destination, in size_t width,
-        ) {
-            return isFrameOperand(source) && isFrameOperand(destination)
-                && source != destination
-                && overlaps(source, width, destination, width);
-        }
-
-        // A cast in place over a temporary that a copy has just filled
-        // writes all of it, so the copy is dead once the cast reads the
-        // copy's source.
-        private bool forwardIntoCast(
-            ref Instruction producer, ref Instruction consumer,
-            in size_t temp, in size_t value, in size_t width, in size_t size,
-        ) {
-            static foreach (kind; [
-                CastKind.narrow, CastKind.widenSigned, CastKind.widenUnsigned,
-            ])
-                static foreach (destSize; [1UL, 2, 4, 8])
-                    static foreach (sourceSize; [1UL, 2, 4, 8])
-                        if (consumer.handler
-                                is &opCastFixedAs!(kind, destSize, sourceSize)) {
-                            if (consumer.destination != temp
-                                    || consumer.source != temp
-                                    || width != sourceSize
-                                    || destSize != size
-                                    || (!isFrameOperand(value)
-                                        && !decodesIndirect(consumer.handler,
-                                            Field.source)))
-                                return false;
-                            set(consumer, Field.source, value);
-                            drop(producer);
-                            return true;
-                        }
-            return false;
-        }
-
-        // `producer` copies a temporary that the next instruction reads. That
-        // instruction reads the copy's source instead, and the copy goes.
-        private bool forwardSource(in size_t consumerIndex) {
-            auto producer = &instructions[consumerIndex - 1];
-            auto consumer = &instructions[consumerIndex];
-            const width = accessOf(producer.handler).copyWidth;
-            if (width == 0)
-                return false;
-            const temp = producer.destination;
-            const value = producer.source;
-            const size = sizeOf(temp);
-            if (!isFrameOperand(temp) || size < width)
-                return false;
-            // The copy of a wide value feeds a return alone.
-            if (width > size_t.sizeof && consumer.handler !is &opReturn)
-                return false;
-
-            if (forwardIntoCast(*producer, *consumer, temp, value, width, size))
-                return true;
-
-            const access = accessOf(consumer.handler);
-            const readOnly = access.readOnlyFields;
-            long named;
-            Field[3] patched;
-            size_t patchedCount;
-            foreach (field; allFields) {
-                if (!access.namesStorage(field))
-                    continue;
-                const current = operandOf(*consumer, field);
-                const isSlot = !isFrameOperand(current);
-                if ((isSlot ? addressSlotOf(current) : current) != temp)
-                    continue;
-                ++named;
-                if (isSlot) {
-                    // An address slot read by a handler that decodes operands.
-                    if (access.kind == Access.Kind.opaque
-                            || !isFrameOperand(value)
-                            || size_t.sizeof > width)
-                        return false;
-                } else if (field == Field.destination
-                        && access.kind == Access.Kind.pureWriter) {
-                    // The consumer overwrites the temporary.
-                    continue;
-                } else {
-                    if (!(readOnly & (1 << cast(int) field))
-                            || extentOf(*consumer, access, field) > width)
-                        return false;
-                    if (!isFrameOperand(value)
-                            && !decodesIndirect(consumer.handler, field))
-                        return false;
-                }
-                patched[patchedCount++] = field;
-            }
-            if (patchedCount == 0 || mentions(temp) != 1 + named)
-                return false;
-            // The consumer writes where it now reads, which a copy through
-            // the temporary did not allow.
-            if (access.copyWidth != 0
-                    && partlyOverlaps(value, consumer.destination,
-                        consumer.width))
-                return false;
-
-            foreach (field; patched[0 .. patchedCount]) {
-                const current = operandOf(*consumer, field);
-                set(*consumer, field, isFrameOperand(current)
-                    ? value : withAddressSlot(current, value));
-            }
-            drop(*producer);
-            return true;
-        }
-    }
-
-    private void fuseLoadCopies() {
-        foreach (index, ref instruction; _instructions) {
-            if (index + 1 == _instructions.length)
-                break;
-            const next = &_instructions[index + 1];
-            // Keep both writes and the separate copy as a branch target.
-            static foreach (loadWidth; indirectCopyWidths) {
-                if (instruction.handler is &opLoadIndirectFixed!loadWidth) {
-                    static foreach (copyWidth; [1, 2, 4, 8, 16]) {
-                        if (next.handler is &opCopyFixed!copyWidth)
-                            instruction.handler = &opLoadThenCopy!(
-                                loadWidth, copyWidth);
-                    }
-                }
-            }
-        }
-    }
-
-    private void fuseReturns() {
-        import std.meta: AliasSeq;
-
-        foreach (index, ref instruction; _instructions) {
-            if (index + 1 == _instructions.length)
-                break;
-            const next = &_instructions[index + 1];
-            if (next.handler !is &opReturn
-                    || next.source != instruction.destination
-                    || next.width != instruction.width)
-                continue;
-
-            // Keep the separate return as a possible branch target. The
-            // fused path must still write the producer's destination.
-            static foreach (operation; AliasSeq!(
-                opConstant, opCopy, opLoadIndirect, opFrameAddress,
-                opCopyFixed!1, opCopyFixed!2, opCopyFixed!4,
-                opCopyFixed!8, opCopyFixed!16,
-            )) {
-                if (instruction.handler is &operation)
-                    instruction.handler = &opThenReturn!operation;
-            }
-            static foreach (width; indirectCopyWidths) {
-                if (instruction.handler is &opLoadIndirectFixed!width)
-                    instruction.handler = &opThenReturn!(opLoadIndirectFixed!width);
-            }
-            static foreach (width; 1 .. 17) {
-                if (instruction.handler is &opCopyFixed!(width, true))
-                    instruction.handler = &opThenReturn!(
-                        opCopyFixed!(width, true));
-            }
-        }
-    }
-
-    // Empty lifetimes have no runtime work. Remove their placeholders
-    // before indices become pointers, including exception and cleanup bounds.
-    private void removeEmptyLifetimes() {
-        auto offsets = new size_t[_instructions.length + 1];
-        size_t count;
-        foreach (index, instruction; _instructions) {
-            offsets[index] = count;
-            if (instruction.handler !is null) {
-                _instructions[count++] = instruction;
-            }
-        }
-        offsets[$ - 1] = count;
-        _instructions.length = count;
-
-        foreach (ref reloc; _relocs)
-            if (reloc.place.section == Place.Section.instruction)
-                reloc.place.index = offsets[reloc.place.index];
-
-        foreach (ref range; _cold) {
-            range.first = offsets[range.first];
-            range.end = offsets[range.end];
-        }
-        foreach (ref instruction; _instructions) {
-            auto target = branchTargetField(instruction);
-            if (target !is null)
-                *target = offsets[*target];
-        }
-        foreach (ref handler; _exceptionHandlers) {
-            handler._bodyStart = offsets[handler._bodyStart];
-            handler._bodyEnd = offsets[handler._bodyEnd];
-            handler._handler = offsets[handler._handler];
-            if (handler._cleanupEnd != size_t.max)
-                handler._cleanupEnd = offsets[handler._cleanupEnd];
-        }
-        foreach (ref site; _callSites)
-            if (site.cleanupStartIndex != size_t.max) {
-                site.cleanupStartIndex = offsets[site.cleanupStartIndex];
-                site.cleanupEndIndex = offsets[site.cleanupEndIndex];
-            }
     }
 
     // Grows this compiled function's own frame past whatever `_layout`
@@ -3260,8 +2103,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t reserveTemp(in TypeFacts facts) {
         const offset = reserveStorage(facts);
         if (facts.size != 0) {
-            _tempStarts ~= offset;
-            _tempSizes ~= facts.size;
+            _code.tempStarts ~= offset;
+            _code.tempSizes ~= facts.size;
         }
         return offset;
     }
@@ -3365,18 +2208,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (!reachable(child))
                 continue;
 
-            resolveContinues(_instructions.length);
+            resolveContinues(_code.instructions.length);
             _finished = false;
             compileStatement(child);
         }
         const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
-        resolveContinues(_instructions.length);
+        resolveContinues(_code.instructions.length);
 
         const breakable = _breakables[$ - 1];
         _breakables = _breakables[0 .. $ - 1];
         _loops = _loops[0 .. $ - 1];
 
-        const afterLoop = _instructions.length;
+        const afterLoop = _code.instructions.length;
         foreach (index; breakable.pendingBreakJumps)
             patchTarget(index, afterLoop);
 
@@ -3394,7 +2237,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `compileFor`'s does for its increment.
     override void visit(DoStatement statement) {
         auto label = consumeLabel(statement); // auto: const(Identifier) will not implicitly convert back
-        const bodyStart = _instructions.length;
+        const bodyStart = _code.instructions.length;
 
         _loops ~= LoopContext(label, size_t.max, null, _scopePaths.enclosing(statement));
         _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
@@ -3405,7 +2248,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const hadContinue = _loops[$ - 1].pendingContinueJumps.length > 0;
         _finished = false;
 
-        const conditionIndex = _instructions.length;
+        const conditionIndex = _code.instructions.length;
         resolveContinues(conditionIndex);
         _loops = _loops[0 .. $ - 1];
 
@@ -3422,7 +2265,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opJump, bodyStart, 0, 0);
         }
 
-        const afterLoop = _instructions.length;
+        const afterLoop = _code.instructions.length;
         foreach (index; breakable.pendingBreakJumps)
             patchTarget(index, afterLoop);
 
@@ -3438,7 +2281,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `gotoTarget` is unset when dmd did not need to rewrite the labelled
     // statement, so the label names `statement.statement` itself then.
     override void visit(LabelStatement statement) {
-        const target = _instructions.length;
+        const target = _code.instructions.length;
         _labelTargets[statement] = target;
         size_t remaining;
         foreach (pending; _pendingLabelJumps)
@@ -3492,17 +2335,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // DMD AST nodes stay mutable through this plan for code generation.
         auto plan = catchPlanOf(
             statement,
-            catch_ => _bytecode._runtimeTypes.unqualifiedClassInfo(catch_.type),
+            catch_ => _bytecode._world.types.unqualifiedClassInfo(catch_.type),
         );
         const finallyDepthAtStart = _pendingFinallyBodies.length;
-        const bodyStart = _instructions.length;
+        const bodyStart = _code.instructions.length;
         compileStatement(statement._body);
         const bodyFinished = _finished;
-        const bodyEnd = _instructions.length;
+        const bodyEnd = _code.instructions.length;
 
         size_t skipHandlers = size_t.max;
         if (!bodyFinished) {
-            skipHandlers = _instructions.length;
+            skipHandlers = _code.instructions.length;
             emit(&opJump, 0, 0, 0);
         }
 
@@ -3517,12 +2360,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const catchCount = plan.clauses.length;
         foreach (i, clause; plan.clauses) {
             auto catch_ = clause.syntax;
-            const handler = _instructions.length;
+            const handler = _code.instructions.length;
             const catchOffset = catch_.var is null
                 ? size_t.max
                 : _layout.offsetOf(catch_.var);
             foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepthAtStart))
-                _exceptionHandlers ~= PendingExceptionHandler(
+                _code.exceptionHandlers ~= PendingExceptionHandler(
                     clause.type, range.start, range.end, handler, catchOffset,
                 );
 
@@ -3538,16 +2381,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             allHandlersFinished &= _finished;
 
             if (!_finished && i + 1 != catchCount) {
-                skipRemainingHandlers ~= _instructions.length;
+                skipRemainingHandlers ~= _code.instructions.length;
                 emit(&opJump, 0, 0, 0);
             }
         }
 
-        const afterHandlers = _instructions.length;
+        const afterHandlers = _code.instructions.length;
         if (skipHandlers != size_t.max)
-            _instructions[skipHandlers].destination = afterHandlers;
+            _code.instructions[skipHandlers].destination = afterHandlers;
         foreach (index; skipRemainingHandlers)
-            _instructions[index].destination = afterHandlers;
+            _code.instructions[index].destination = afterHandlers;
 
         _finished = bodyFinished && allHandlersFinished;
     }
@@ -3555,22 +2398,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(TryFinallyStatement statement) {
         _pendingFinallyBodies ~= statement.finalbody;
         const finallyDepth = _pendingFinallyBodies.length;
-        const bodyStart = _instructions.length;
+        const bodyStart = _code.instructions.length;
         compileStatement(statement._body);
-        const bodyEnd = _instructions.length;
+        const bodyEnd = _code.instructions.length;
         const bodyFinished = _finished;
         _pendingFinallyBodies.length -= 1;
 
         // Exceptional entry runs this range inside native try/finally so
         // druntime owns exception chaining and Error precedence.
-        const handler = _instructions.length;
+        const handler = _code.instructions.length;
         _finished = false;
         compileFinallyBody(statement.finalbody);
         const cleanupFinished = _finished;
-        const cleanupEnd = _instructions.length;
+        const cleanupEnd = _code.instructions.length;
         emit(&opRangeEnd, 0, 0, 0);
         foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepth))
-            _exceptionHandlers ~= PendingExceptionHandler(
+            _code.exceptionHandlers ~= PendingExceptionHandler(
                 typeid(Throwable), range.start, range.end, handler,
                 size_t.max, cleanupEnd,
             );
@@ -3628,8 +2471,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitThrowBegin() {
-        _openCold ~= ColdRange(_instructions.length, 0,
-            _callSites.length, 0, _hookSites);
+        _openCold ~= ColdRange(_code.instructions.length, 0,
+            _code.callSites.length, 0, _hookSites);
     }
 
     protected override size_t visitThrowOperand(
@@ -3661,12 +2504,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opThrow, offset, 0, 0, 0);
         auto range = _openCold[$ - 1];
         _openCold.length--;
-        range.end = _instructions.length;
-        range.siteEnd = _callSites.length;
+        range.end = _code.instructions.length;
+        range.siteEnd = _code.callSites.length;
         range.hooks = _hookSites - range.hooks;
         // A nested throw belongs to this complete operand range.
         if (_openCold.length == 0)
-            _cold ~= range;
+            _code.cold ~= range;
         _finished = true;
     }
 
@@ -3728,12 +2571,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 case_.exp, literalOffset, facts.size);
             emit(&opEqual, testOffset, literalOffset, facts.size);
 
-            const branchIndex = _instructions.length;
+            const branchIndex = _code.instructions.length;
             emit(&opBranchTrue, testOffset, 0, 1);
             jumpToCase(case_, branchIndex);
         }
 
-        const defaultJumpIndex = _instructions.length;
+        const defaultJumpIndex = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
         _breakables ~= Breakable(label, null, _scopePaths.enclosing(statement));
         final switch (plan.noMatch) with (SwitchPlan.NoMatch) {
@@ -3749,7 +2592,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const bodyFinished = _finished;
         const hadBreak = _breakables[$ - 1].pendingBreakJumps.length > 0;
 
-        const afterSwitch = _instructions.length;
+        const afterSwitch = _code.instructions.length;
         foreach (index; _breakables[$ - 1].pendingBreakJumps)
             patchTarget(index, afterSwitch);
 
@@ -3800,7 +2643,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         runPendingFinallyBodies(unwind);
 
-        const index = _instructions.length;
+        const index = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
         jumpToCase(target, index);
         _finished = true;
@@ -3819,7 +2662,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         );
         runPendingFinallyBodies(unwind);
 
-        const index = _instructions.length;
+        const index = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
         jumpToDefault(statement.sw, index);
         _finished = true;
@@ -3839,7 +2682,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_finished)
             return;
 
-        const index = _instructions.length;
+        const index = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
         if (auto known = target in _labelTargets)
             patchTarget(index, *known);
@@ -3878,7 +2721,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (_finished)
             return;
 
-        const index = _instructions.length;
+        const index = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
         _breakables[target].pendingBreakJumps ~= index;
         _finished = true;
@@ -3900,9 +2743,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const index = bodies.length - offset - 1;
             assert(bodies[index] is finalizer.body);
             _pendingFinallyBodies = bodies[0 .. index].dup;
-            const start = _instructions.length;
+            const start = _code.instructions.length;
             compileFinallyBody(finalizer.body);
-            _finallyHoles ~= FinallyHole(start, _instructions.length, index);
+            _finallyHoles ~= FinallyHole(start, _code.instructions.length, index);
             if (_finished)
                 return;
         }
@@ -4031,10 +2874,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // `messageExpression` would be if `failure` were.
                 auto failure = assertFailureOf(expression, _function);
                 if (failure.messageExpression is null) {
-                    _assertSites ~= AssertSite(
+                    _code.assertSites ~= AssertSite(
                         failure.message, failure.file, failure.line);
                     emit(&opAssert, conditionOffset,
-                        _assertSites.length - 1, width);
+                        _code.assertSites.length - 1, width);
                 } else
                     compileUnlessHolds(conditionOffset, width, never,
                         () => compileAssertMessage(expression, failure));
@@ -4050,8 +2893,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // nothing.
     private size_t haltSite() {
         if (_haltSite == size_t.max) {
-            _assertSites ~= AssertSite("", "", 0, _bytecode.haltAction);
-            _haltSite = _assertSites.length - 1;
+            _code.assertSites ~= AssertSite("", "", 0, _bytecode.haltAction);
+            _haltSite = _code.assertSites.length - 1;
         }
 
         return _haltSite;
@@ -4071,10 +2914,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const branchIndex = _instructions.length;
+        const branchIndex = _code.instructions.length;
         emit(&opBranchTrue, conditionOffset, 0, width);
         failure();
-        patchTarget(branchIndex, _instructions.length);
+        patchTarget(branchIndex, _code.instructions.length);
     }
 
     // `assert(c, m())`: druntime's own `_d_assert_msg` builds and throws the
@@ -4095,9 +2938,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(_bytecode.adoptedString(file), size_t.sizeof),
             constantArgument(expression.loc.linnum, uint.sizeof),
         ];
-        auto plan = planOf(_bytecode._plans, DruntimeHook.assertMessage);
-        _callSites ~= CallSite.native(plan, args, 0);
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.assertMessage);
+        _code.callSites ~= CallSite.native(plan, args, 0);
+        emit(&opCall, discardResult, _code.callSites.length - 1, 0);
     }
 
     // `-checkaction=C`: the C runtime aborts the process.
@@ -4130,9 +2973,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(
                 _bytecode.adoptedString(call.function_), size_t.sizeof),
         ];
-        auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
-        _callSites ~= CallSite.native(plan, args, 0);
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.cAssertFail);
+        _code.callSites ~= CallSite.native(plan, args, 0);
+        emit(&opCall, discardResult, _code.callSites.length - 1, 0);
     }
 
     // The message of a failed assertion runs only then.
@@ -4199,11 +3042,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileClassInvariantCall(
         in size_t objectOffset,
     ) {
-        auto plan = planOf(_bytecode._plans, DruntimeHook.classInvariant);
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.classInvariant);
 
-        _callSites ~= CallSite.native(
+        _code.callSites ~= CallSite.native(
             plan, [Arg(objectOffset, 0, size_t.sizeof)], 0);
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
+        emit(&opCall, discardResult, _code.callSites.length - 1, 0);
     }
 
     // Only the branch taken at run time ever executes - the other one, if
@@ -4228,7 +3071,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (statement.elsebody is null) {
             foreach (branchIndex; branchIndices)
-                patchTarget(branchIndex, _instructions.length);
+                patchTarget(branchIndex, _code.instructions.length);
             _finished = false;
             return;
         }
@@ -4243,22 +3086,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // appends a trailing instruction for it to land on.
         size_t jumpIndex = size_t.max;
         if (!ifFinished) {
-            jumpIndex = _instructions.length;
+            jumpIndex = _code.instructions.length;
             emit(&opJump, 0, 0, 0);
         }
         foreach (branchIndex; branchIndices)
-            patchTarget(branchIndex, _instructions.length);
+            patchTarget(branchIndex, _code.instructions.length);
 
         compileStatement(statement.elsebody);
         const elseFinished = _finished;
         if (jumpIndex != size_t.max)
-            _instructions[jumpIndex].destination = _instructions.length;
+            _code.instructions[jumpIndex].destination = _code.instructions.length;
 
         _finished = ifFinished && elseFinished;
     }
 
     private void compileCtfeBlockWithLabels(IfStatement statement) {
-        const skipIndex = _instructions.length;
+        const skipIndex = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
 
         _finished = false;
@@ -4267,10 +3110,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         size_t endIndex = size_t.max;
         if (statement.elsebody !is null && !bodyFinished) {
-            endIndex = _instructions.length;
+            endIndex = _code.instructions.length;
             emit(&opJump, 0, 0, 0);
         }
-        patchTarget(skipIndex, _instructions.length);
+        patchTarget(skipIndex, _code.instructions.length);
 
         _finished = false;
         if (statement.elsebody !is null)
@@ -4278,7 +3121,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const elseFinished = _finished;
 
         if (endIndex != size_t.max)
-            patchTarget(endIndex, _instructions.length);
+            patchTarget(endIndex, _code.instructions.length);
 
         _finished = bodyFinished && statement.elsebody !is null && elseFinished;
     }
@@ -4330,7 +3173,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // position whenever nothing else already made it reachable.
         const guarded = statement.condition !is null
             && !isTriviallyTrueCondition(statement.condition);
-        const conditionIndex = _instructions.length;
+        const conditionIndex = _code.instructions.length;
         size_t[] branchIndices;
         if (guarded)
             branchIndices = compileConditionBranch(statement.condition);
@@ -4342,7 +3185,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _breakables = _breakables[0 .. $ - 1];
         _finished = false;
 
-        const incrementIndex = _instructions.length;
+        const incrementIndex = _code.instructions.length;
         resolveContinues(incrementIndex);
         _loops = _loops[0 .. $ - 1];
 
@@ -4354,7 +3197,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         emit(&opJump, conditionIndex, 0, 0);
 
-        const afterLoop = _instructions.length;
+        const afterLoop = _code.instructions.length;
         foreach (branchIndex; branchIndices)
             patchTarget(branchIndex, afterLoop);
 
@@ -4408,7 +3251,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (target != size_t.max) {
             emit(&opJump, target, 0, 0);
         } else {
-            _loops[index].pendingContinueJumps ~= _instructions.length;
+            _loops[index].pendingContinueJumps ~= _code.instructions.length;
             emit(&opJump, 0, 0, 0);
         }
 
@@ -4417,7 +3260,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void resolveContinues(in size_t target) {
         foreach (index; _loops[$ - 1].pendingContinueJumps)
-            _instructions[index].destination = target;
+            _code.instructions[index].destination = target;
         _loops[$ - 1].pendingContinueJumps = [];
     }
 
@@ -4482,7 +3325,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void recordCaseTarget(CaseStatement case_) {
-        const target = _instructions.length;
+        const target = _code.instructions.length;
         _caseTargets[case_] = target;
 
         size_t i = 0;
@@ -4510,7 +3353,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void recordDefaultTarget(SwitchStatement switch_) {
-        const target = _instructions.length;
+        const target = _code.instructions.length;
         _defaultTargets[switch_] = target;
 
         size_t i = 0;
@@ -4532,7 +3375,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // currency `bindInstructionReferences` later turns into a real address, via
     // the same field each opcode keeps it in (`branchTargetField`).
     private void patchTarget(in size_t instructionIndex, in size_t target) {
-        auto field = branchTargetField(_instructions[instructionIndex]);
+        auto field = branchTargetField(_code.instructions[instructionIndex]);
         if (field is null)
             internalFailure("patchTarget met an instruction without a branch target");
         *field = target;
@@ -4609,7 +3452,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // and compiling the cleanup while the failure unwinds could throw a
         // second exception, which ends the process.
         _expressions.run(position, cast(const(void)*) root, {
-            marker = _instructions.length;
+            marker = _code.instructions.length;
             emit(null, 0, 0, 0);
             firstTemporary = _temporaries.length;
         }, {
@@ -4626,7 +3469,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
 
         const slot = reserveTemp(pointerFacts);
-        _instructions[marker] = Instruction(&opTemporaryBegin, slot, 0, 0);
+        _code.instructions[marker] = Instruction(&opTemporaryBegin, slot, 0, 0);
         finishLifetime(slot, firstTemporary);
     }
 
@@ -4634,19 +3477,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t marker,
         in size_t firstTemporary,
     ) {
-        const jump = _instructions.length;
+        const jump = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
         foreach_reverse (temporary; _temporaries[firstTemporary .. $]) {
-            _callSites[temporary.site].cleanupStartIndex = _instructions.length;
+            _code.callSites[temporary.site].cleanupStartIndex = _code.instructions.length;
             _emittingCleanup = true;
             compileEffect(temporary.destructor);
             _emittingCleanup = false;
-            _callSites[temporary.site].cleanupEndIndex = _instructions.length;
+            _code.callSites[temporary.site].cleanupEndIndex = _code.instructions.length;
             emit(&opRangeEnd, 0, 0, 0);
         }
         _temporaries.length = firstTemporary;
         _temporaries.assumeSafeAppend;
-        _instructions[jump].destination = _instructions.length;
+        _code.instructions[jump].destination = _code.instructions.length;
         emit(&opTemporaryEnd, marker, 0, 0);
     }
 
@@ -4661,8 +3504,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression destructor,
     ) {
         const base = variableStorage(variable);
-        const site = _callSites.length;
-        _callSites ~= CallSite.temporary;
+        const site = _code.callSites.length;
+        _code.callSites ~= CallSite.temporary;
         _temporaries ~= Temporary(base, site, destructor);
         emit(&opTemporaryRegister, base, site, 0);
         return base;
@@ -4786,8 +3629,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // storage, which is what a resolved address here would bake in.
     private Address staticAddressOf(VarDeclaration variable) {
         if (variable.isThreadLocalStorage)
-            return _bytecode._nativeData.addressOfTlsDescriptor(variable);
-        return _bytecode._nativeData.addressOfStorage(variable);
+            return _bytecode._world.data.addressOfTlsDescriptor(variable);
+        return _bytecode._world.data.addressOfStorage(variable);
     }
 
     private Instruction.Handler staticLoadHandler(VarDeclaration variable) {
@@ -6032,7 +4875,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileConstant(Expression expression) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, expression, _function));
+        emitBytes(_bytecode._world.data.value(_valueType, expression, _function));
     }
 
     override void visit(IntegerExp expression) {
@@ -6051,7 +4894,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, bytes, _function));
+        emitBytes(_bytecode._world.data.value(_valueType, bytes, _function));
     }
 
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
@@ -6110,7 +4953,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // class runtime information so its address remains valid.
         if (auto symbol = expression.var.isSymbolDeclaration) {
             if (symbol.type.isTypeStruct !is null) {
-                emitBytes(_bytecode._nativeData.initialValue(
+                emitBytes(_bytecode._world.data.initialValue(
                     _valueType, expression.loc));
                 return;
             }
@@ -6118,14 +4961,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto declaration = symbol.dsym.isAggregateDeclaration;
             assert(declaration !is null,
                 "an initializer symbol names an aggregate");
-            const initial = _bytecode._runtimeTypes.initializer(declaration);
+            const initial = _bytecode._world.types.initializer(declaration);
 
             import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) initial.length), size_t.sizeof);
             emit(&opConstant, _destination + arrayPointerOffset,
-                addConstant(_bytecode._nativeData.addressOfData(initial.ptr)),
+                addConstant(_bytecode._world.data.addressOfData(initial.ptr)),
                 size_t.sizeof);
             return;
         }
@@ -6353,7 +5196,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         if (auto typeInfo =
-                expression.typeInfoAddressedBy(_bytecode._runtimeTypes)) {
+                expression.typeInfoAddressedBy(_bytecode._world.types)) {
             emitTypeInfoConstant(typeInfo);
             return;
         }
@@ -6990,7 +5833,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const object = reserveTemp(
                 TypeFacts(declaration.structsize, alignment));
             emit(&opStaticLoad, object,
-                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
+                _bytecode._world.data.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opFrameAddress, _destination, object, size_t.sizeof);
         }
@@ -7005,7 +5848,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 runtime.m_init.length, declaration.alignsize == 0
                     ? 1 : declaration.alignsize));
             emit(&opStaticLoad, image,
-                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
+                _bytecode._world.data.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opStoreIndirect, _destination, image,
                 runtime.m_init.length);
@@ -7078,10 +5921,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto deletion = planDelete(expression);
         const object = reserveTemp(pointerFacts);
         evalInto(deletion.object, object, size_t.sizeof);
-        auto plan = planOf(_bytecode._plans, deletion.hook);
-        _callSites ~= CallSite.native(plan,
+        auto plan = planOf(_bytecode._world.plans, deletion.hook);
+        _code.callSites ~= CallSite.native(plan,
             [Arg(object, 0, size_t.sizeof)], 0);
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
+        emit(&opCall, discardResult, _code.callSites.length - 1, 0);
     }
 
     // `null` is all-zero bytes whatever it means - a pointer, a class
@@ -7132,7 +5975,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t width = size_t.max,
     ) {
         emitTypeInfoConstant(
-            _bytecode._runtimeTypes.get(type), destination, width);
+            _bytecode._world.types.get(type), destination, width);
     }
 
     private void emitTypeInfoConstant(
@@ -7142,7 +5985,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
-            addConstant(_bytecode._nativeData.addressOfData(
+            addConstant(_bytecode._world.data.addressOfData(
                 cast(const(void)*) info)),
             width == size_t.max ? _width : width);
     }
@@ -7188,8 +6031,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         const never = reserveTemp(pointerFacts);
         emit(&opConstant, never, addConstant(0), size_t.sizeof);
-        _assertSites ~= AssertSite(message, file, line);
-        emit(&opAssert, never, _assertSites.length - 1, size_t.sizeof);
+        _code.assertSites ~= AssertSite(message, file, line);
+        emit(&opAssert, never, _code.assertSites.length - 1, size_t.sizeof);
         _finished = true;
     }
 
@@ -7235,7 +6078,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
         const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
-        auto plan = planOf(_bytecode._plans, hook);
+        auto plan = planOf(_bytecode._world.plans, hook);
 
         const arrayOffset = compileAddress(expression.e1);
 
@@ -7243,7 +6086,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const valueOffset = reserveTemp(valueFacts);
         evalInto(expression.e2, valueOffset, valueFacts.size);
 
-        _callSites ~= CallSite.native(
+        _code.callSites ~= CallSite.native(
             plan,
             [
                 Arg(arrayOffset, 0, size_t.sizeof),
@@ -7251,7 +6094,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ],
             0,
         );
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
+        emit(&opCall, discardResult, _code.callSites.length - 1, 0);
 
         if (_destination != discardResult)
             emit(&opLoadIndirect, _destination, arrayOffset, arrayValueSize);
@@ -7341,7 +6184,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const object = _destination;
         evalInto(expression.e1, object, size_t.sizeof);
 
-        const nullIndex = _instructions.length;
+        const nullIndex = _code.instructions.length;
         emit(&opBranchFalse, object, 0, size_t.sizeof);
 
         const objectInfo = reserveTemp(pointerFacts);
@@ -7349,7 +6192,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opLoadIndirect, objectInfo, objectInfo, size_t.sizeof);
         const targetInfo = reserveTemp(pointerFacts);
         emitTypeInfoConstant(
-            _bytecode._runtimeTypes.unqualifiedClassInfo(expression.to),
+            _bytecode._world.types.unqualifiedClassInfo(expression.to),
             targetInfo, size_t.sizeof);
 
         // The `final` rule of druntime's `_d_cast`: no class derives from a
@@ -7358,29 +6201,29 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // the runtime rule as for `_d_isbaseof`.
         if ((to.sym.storage_class & STC.final_) != 0) {
             emit(&opEqual, objectInfo, targetInfo, size_t.sizeof);
-            const exactIndex = _instructions.length;
+            const exactIndex = _code.instructions.length;
             emit(&opBranchTrue, objectInfo, 0, 1);
             emit(&opZero, object, 0, size_t.sizeof);
-            _instructions[nullIndex].source = _instructions.length;
-            _instructions[exactIndex].source = _instructions.length;
+            _code.instructions[nullIndex].source = _code.instructions.length;
+            _code.instructions[exactIndex].source = _code.instructions.length;
             _finished = false;
             return true;
         }
 
         enum resultWidth = int.sizeof;
         const result = reserveTemp(pointerFacts);
-        auto plan = planOf(_bytecode._plans, DruntimeHook.isBaseOf);
-        _callSites ~= CallSite.native(plan, [
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.isBaseOf);
+        _code.callSites ~= CallSite.native(plan, [
             Arg(objectInfo, 0, size_t.sizeof),
             Arg(targetInfo, 0, size_t.sizeof),
         ], resultWidth);
-        emit(&opCall, result, _callSites.length - 1, 0);
+        emit(&opCall, result, _code.callSites.length - 1, 0);
 
-        const successIndex = _instructions.length;
+        const successIndex = _code.instructions.length;
         emit(&opBranchTrue, result, 0, resultWidth);
         emit(&opZero, object, 0, size_t.sizeof);
-        _instructions[nullIndex].source = _instructions.length;
-        _instructions[successIndex].source = _instructions.length;
+        _code.instructions[nullIndex].source = _code.instructions.length;
+        _code.instructions[successIndex].source = _code.instructions.length;
         _finished = false;
         return true;
     }
@@ -8314,7 +7157,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address in the native constant pool of `value`.
     private Address constantWord(in size_t value) {
         const placed =
-            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function);
+            _bytecode._world.data.value(Type.tuns64, (&value)[0 .. 1], _function);
         return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
@@ -8381,7 +7224,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (offset != size_t.max)
             return offset;
         const temp = reserveTemp(facts);
-        _operandTemps ~= temp;
+        _code.operandTemps ~= temp;
         if (floating || isReference(operand.type)
                 || operand.op == EXP.null_)
             evalInto(operand, temp, width);
@@ -8403,10 +7246,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (operand.op == EXP.null_) {
             const size_t zero;
             const placed =
-                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function);
+                _bytecode._world.data.value(type, (&zero)[0 .. 1], _function);
             return Address(Target.Kind.constantPool, placed.ptr, placed.where);
         }
-        const placed = _bytecode._nativeData.value(type, operand, _function);
+        const placed = _bytecode._world.data.value(type, operand, _function);
         return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
@@ -8554,7 +7397,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 branchOnChecked(binary.e2, jumpWhen, branches,
                     FullExpressionScope.Position.logicalOperand, Yes.plain);
                 foreach (index; decided)
-                    patchTarget(index, _instructions.length);
+                    patchTarget(index, _code.instructions.length);
             }
             return;
         }
@@ -8602,7 +7445,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         const offset = compileCondition(condition, position, true);
-        branches ~= _instructions.length;
+        branches ~= _code.instructions.length;
         emit(jumpWhen ? &opBranchTrue : &opBranchFalse, offset, 0,
             conditionWidth(condition));
     }
@@ -8644,7 +7487,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const kind = floating ? CompareKind.floating
             : facts.isUnsigned || isReference(comparison.e1.type)
                 ? CompareKind.unsigned : CompareKind.signed;
-        branches ~= _instructions.length;
+        branches ~= _code.instructions.length;
         if (!rightConstant.isNull)
             emit(fusedBranchHandler(operation, kind, jumpWhen, true),
                 leftOffset, rightConstant, facts.size);
@@ -9446,12 +8289,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const value = destOffset;
             compileValue(FullExpressionScope.Position.condition,
                 expression.e1, value, 1);
-            const shortIndex = _instructions.length;
+            const shortIndex = _code.instructions.length;
             emit(plan.andAnd ? &opBranchFalse : &opBranchTrue, value, 0, 1);
             compileValue(FullExpressionScope.Position.logicalOperand,
                 expression.e2, value, 1);
             _finished = false;
-            _instructions[shortIndex].source = _instructions.length;
+            _code.instructions[shortIndex].source = _code.instructions.length;
             return;
         }
         const leftOffset = compileCondition(expression.e1,
@@ -9460,7 +8303,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             && operandOf(expression.e1, 1, false) == leftOffset;
         const leftWidth = conditionWidth(expression.e1);
 
-        const branchIndex = _instructions.length;
+        const branchIndex = _code.instructions.length;
         auto shortCircuit = plan.andAnd ? &opBranchFalse : &opBranchTrue;
         emit(shortCircuit, leftOffset, 0, leftWidth);
 
@@ -9471,7 +8314,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 expression.e2, { compileEffect(expression.e2); });
             // The operand can end in a throw, but the branch skips it.
             _finished = false;
-            _instructions[branchIndex].source = _instructions.length;
+            _code.instructions[branchIndex].source = _code.instructions.length;
             if (needsValue) {
                 if (!leftInPlace)
                     emit(&opCastToBool, leftOffset, 0, leftWidth);
@@ -9489,17 +8332,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opCastToBool, rightOffset, 0, rightWidth);
         if (destOffset != rightOffset)
             emit(&opCopy, destOffset, rightOffset, 1);
-        const jumpIndex = _instructions.length;
+        const jumpIndex = _code.instructions.length;
         emit(&opJump, 0, 0, 0);
 
         // Short-circuited: the left side decided the answer by itself.
-        _instructions[branchIndex].source = _instructions.length;
+        _code.instructions[branchIndex].source = _code.instructions.length;
         if (!leftInPlace)
             emit(&opCastToBool, leftOffset, 0, leftWidth);
         if (destOffset != leftOffset)
             emit(&opCopy, destOffset, leftOffset, 1);
 
-        _instructions[jumpIndex].destination = _instructions.length;
+        _code.instructions[jumpIndex].destination = _code.instructions.length;
     }
 
     // `cond ? a : b`: only the branch the condition selects at run time
@@ -9510,7 +8353,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const conditionOffset = compileCondition(expression.econd);
         const conditionWidth_ = conditionWidth(expression.econd);
 
-        const branchIndex = _instructions.length;
+        const branchIndex = _code.instructions.length;
         emit(&opBranchFalse, conditionOffset, 0, conditionWidth_);
 
         _finished = false;
@@ -9518,16 +8361,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const ifFinished = _finished;
         size_t jumpIndex = size_t.max;
         if (!ifFinished) {
-            jumpIndex = _instructions.length;
+            jumpIndex = _code.instructions.length;
             emit(&opJump, 0, 0, 0);
         }
 
-        _instructions[branchIndex].source = _instructions.length;
+        _code.instructions[branchIndex].source = _code.instructions.length;
         _finished = false;
         evalInto(expression.e2, destOffset, width);
         const elseFinished = _finished;
         if (jumpIndex != size_t.max)
-            _instructions[jumpIndex].destination = _instructions.length;
+            _code.instructions[jumpIndex].destination = _code.instructions.length;
         _finished = ifFinished && elseFinished;
     }
 
@@ -9589,13 +8432,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             evalInto(expression.e1, destOffset, width);
             if (plan.referenceOffset == 0)
                 return;
-            const skip = _instructions.length;
+            const skip = _code.instructions.length;
             emit(&opBranchFalse, destOffset, 0, width);
             const adjustment = reserveTemp(pointerFacts);
             emit(&opConstant, adjustment,
                 addConstant(plan.referenceOffset), size_t.sizeof);
             emit(&opAdd, destOffset, adjustment, size_t.sizeof);
-            patchTarget(skip, _instructions.length);
+            patchTarget(skip, _code.instructions.length);
             return;
         }
 
@@ -9817,9 +8660,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         compileClassVtableSlot(
             expression, objectOffset, callee, calleeSlotOffset);
         site.value.signature = valueCall.signature;
-        const siteIndex = _callSites.length;
+        const siteIndex = _code.callSites.length;
         const windowed = site.windowSlot != size_t.max;
-        _callSites ~= site;
+        _code.callSites ~= site;
         const place = nativeResultPlace(destOffset, isVoidCallee, returnFacts);
         emit(windowed ? indirectWindowCallHandler(place) : &opCall,
             place, siteIndex, 0);
@@ -9938,18 +8781,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? DruntimeHook.newArrayUninitialized
             : newInFrontend!isZeroInit(elementType, Loc.initial)
             ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
-        auto plan = planOf(_bytecode._plans, hook);
+        auto plan = planOf(_bytecode._world.plans, hook);
 
         const length = reserveTemp(pointerFacts);
         evalInto((*expression.arguments)[0], length, size_t.sizeof);
         const info = reserveTemp(pointerFacts);
         emitRuntimeTypeInfoConstant(
             expression.type, info, size_t.sizeof);
-        _callSites ~= CallSite.native(
+        _code.callSites ~= CallSite.native(
             plan,
             [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
             2 * size_t.sizeof);
-        emit(&opCall, destOffset, _callSites.length - 1, 0);
+        emit(&opCall, destOffset, _code.callSites.length - 1, 0);
         return true;
     }
 
@@ -9964,7 +8807,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (destOffset == discardResult)
             return false;
         Instruction.Handler handler;
-        final switch (_bytecode._callSelection.floatIntrinsicOf(expression, callee))
+        final switch (_bytecode._world.callSelection.floatIntrinsicOf(expression, callee))
             with (CallSelection.FloatIntrinsic) {
             case none: return false;
             case sqrt: handler = &opFloatSqrt; break;
@@ -10195,7 +9038,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
-        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
             callee, &_bytecode.isGuestFunction, hasNativeSymbol,
             _bytecode.hasIndependentNativeSymbol(callee),
         ), site);
@@ -10207,7 +9050,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             compileNativeCall(
                 callee, type, arguments, loc, initialArgs,
-                destOffset, hasNativeSymbol);
+                destOffset);
             return;
         case builtin:
             compileBuiltinCall(type, arguments, loc,
@@ -10294,11 +9137,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        const siteIndex = _callSites.length;
+        const siteIndex = _code.callSites.length;
         // The delegate outlives this compiler, so it captures the backend
         // and not `this`.
         auto bytecode = _bytecode;
-        _callSites ~= CallSite.guest(
+        _code.callSites ~= CallSite.guest(
             deferred(() => bytecode.compileFunction(callee)), args,
             returnShape.returnFacts.size,
         );
@@ -10393,7 +9236,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         windowEnd = size_t.max;
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
-        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
             callee, &_bytecode.isGuestFunction,
             _bytecode.hasNativeSymbol(callee),
             _bytecode.hasIndependentNativeSymbol(callee),
@@ -10510,11 +9353,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         });
         _windowDepth = outer;
 
-        const siteIndex = _callSites.length;
+        const siteIndex = _code.callSites.length;
         // The delegate outlives this compiler, so it captures the backend
         // and not `this`.
         auto bytecode = _bytecode;
-        _callSites ~= CallSite.guest(
+        _code.callSites ~= CallSite.guest(
             deferred(() => bytecode.compileFunction(callee)), args,
             returnShape.returnFacts.size, window,
         );
@@ -10588,12 +9431,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args ~= compileBarrierArgument(value);
         });
 
-        _callSites ~= site(args, returnShape.resultIsReceiver
+        _code.callSites ~= site(args, returnShape.resultIsReceiver
             ? 0 : returnShape.returnFacts.size);
         emit(&opCall,
             nativeResultPlace(destOffset, returnShape.isVoid,
                 returnShape.returnFacts),
-            _callSites.length - 1, 0);
+            _code.callSites.length - 1, 0);
         if (returnShape.resultIsReceiver)
             emitReceiverResult(
                 returnShape, destOffset, initialArgs[0].callerOffset);
@@ -10613,7 +9456,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Loc loc,
         Arg[] initialArgs,
         in size_t destOffset,
-        in bool hasNativeSymbol,
     ) {
         import snakebite.ffi.call: CallAdapter;
 
@@ -10629,10 +9471,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // execution reaches it, and fails if the symbol is still
                 // absent.
                 return CallSite.native(
-                    hasNativeSymbol
-                        ? preparation.prepare(_bytecode._plans, callee)
-                        : preparation.prepareUnbound(
-                            _bytecode._plans, callee),
+                    preparation.plan(_bytecode._world.plans, callee),
                     args, returnWidth);
             });
     }
@@ -10883,9 +9722,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             isDelegateCall, /* mayUseWindow */ true);
         site.kind = CallSite.Kind.value;
         site.value.signature = valueCall.signature;
-        const siteIndex = _callSites.length;
+        const siteIndex = _code.callSites.length;
         const windowed = site.windowSlot != size_t.max;
-        _callSites ~= site;
+        _code.callSites ~= site;
         const place = nativeResultPlace(
             destOffset, isVoidCallee, returnShape.returnFacts);
         emit(windowed ? indirectWindowCallHandler(place) : &opCall,
@@ -10944,8 +9783,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const nativePlan = isVariadic
             ? preparation.prepareWithoutCode(
-                _bytecode._plans, hasContext)
-            : _bytecode._plans.signatureOf(functionType, hasContext);
+                _bytecode._world.plans, hasContext)
+            : _bytecode._world.plans.signatureOf(functionType, hasContext);
         auto site = CallSite.indirect(
             calleeOffset, guestArgs, nativeArgs, returnWidth, nativePlan,
             hasContext);
@@ -10995,7 +9834,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto site = CallSite.indirect(
             calleeOffset, args, args, returnWidth,
-            _bytecode._plans.signatureOf(functionType, hasContext),
+            _bytecode._world.plans.signatureOf(functionType, hasContext),
             hasContext);
         site.useWindow(window);
         return site;
@@ -11101,7 +9940,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (plan.kind == FailurePlan.Kind.ignore)
             return;
 
-        const branchIndex = _instructions.length;
+        const branchIndex = _code.instructions.length;
         emitBranch();
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
@@ -11125,7 +9964,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     [indexArgument(), lengthArgument()], loc);
                 break;
         }
-        patchTarget(branchIndex, _instructions.length);
+        patchTarget(branchIndex, _code.instructions.length);
     }
 
     // `-check=nullderef`: dmd's glue layer branches around druntime's
@@ -11164,7 +10003,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = planOf(_bytecode._plans, hook);
+        auto plan = planOf(_bytecode._world.plans, hook);
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,
@@ -11179,9 +10018,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Arg(fileOffset, 0, size_t.sizeof),
             Arg(lineOffset, 0, uint.sizeof),
         ] ~ extraArgs;
-        _callSites ~= CallSite.native(plan, args, 0);
+        _code.callSites ~= CallSite.native(plan, args, 0);
         ++_hookSites;
-        emit(&opCall, discardResult, _callSites.length - 1, 0);
+        emit(&opCall, discardResult, _code.callSites.length - 1, 0);
     }
 
     // Fails through the druntime hook unless `smaller <= larger`, unsigned.
@@ -11248,22 +10087,22 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const conditionOffset = compiler.compileCondition(expression.econd);
             const conditionWidth = compiler.conditionWidth(expression.econd);
             const result = compiler.reserveTemp(compiler.pointerFacts);
-            const branchIndex = compiler._instructions.length;
+            const branchIndex = compiler._code.instructions.length;
             compiler.emit(&opBranchFalse, conditionOffset, 0, conditionWidth);
 
             const thenOffset = resolve(
                 FullExpressionScope.lvalueOf(expression.e1));
             compiler.emit(&opCopy, result, thenOffset, size_t.sizeof);
-            const jumpIndex = compiler._instructions.length;
+            const jumpIndex = compiler._code.instructions.length;
             compiler.emit(&opJump, 0, 0, 0);
 
-            compiler._instructions[branchIndex].source =
-                compiler._instructions.length;
+            compiler._code.instructions[branchIndex].source =
+                compiler._code.instructions.length;
             const elseOffset = resolve(
                 FullExpressionScope.lvalueOf(expression.e2));
             compiler.emit(&opCopy, result, elseOffset, size_t.sizeof);
-            compiler._instructions[jumpIndex].destination =
-                compiler._instructions.length;
+            compiler._code.instructions[jumpIndex].destination =
+                compiler._code.instructions.length;
             return result;
         }
 
@@ -11496,7 +10335,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 compiler.emitTypeInfoConstant(
                     typeInfoObjectOf(
-                        typeInfo, compiler._bytecode._runtimeTypes),
+                        typeInfo, compiler._bytecode._world.types),
                     result, size_t.sizeof,
                 );
                 return result;
@@ -11580,8 +10419,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const typeInfoOffset = reserveTemp(pointerFacts);
         emit(&opConstant, typeInfoOffset, addConstant(0), size_t.sizeof);
 
-        const siteIndex = _callSites.length;
-        _callSites ~= CallSite.native(
+        const siteIndex = _code.callSites.length;
+        _code.callSites ~= CallSite.native(
             _bytecode.allocatorPlan,
             [
                 Arg(sizeOffset, 0, size_t.sizeof),

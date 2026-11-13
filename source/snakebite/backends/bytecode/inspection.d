@@ -11,7 +11,7 @@ private:
 import snakebite.backends.bytecode.relocation: Place, Reloc;
 import snakebite.native.address: Target;
 import snakebite.backends.bytecode.vm: Function, Instruction, Roles,
-    jitCompiled, rolesOf;
+    jitCompiled, rolesOf, wordAt;
 import std.conv: text;
 
 public const(Reloc)[] relocsOf(const(Function)* function_) {
@@ -64,57 +64,13 @@ public string[] handlerRoleMismatches() {
 public string[] misplacedRelocs(const(Function)* function_) {
     string[] found;
     foreach (reloc; function_.relocs) {
-        size_t value;
-        if (!wordAt(function_, reloc.place, value))
+        const word = wordAt(*function_, reloc.place);
+        if (word is null)
             found ~= text(reloc.place, " is outside the function");
-        else if (value != reloc.target.address)
-            found ~= text(reloc.place, " holds ", value, ", not ",
+        else if (*word != reloc.target.address)
+            found ~= text(reloc.place, " holds ", *word, ", not ",
                 reloc.target.address);
     }
     return found;
 }
 
-private bool wordAt(
-    const(Function)* fn, in Place place, out size_t value,
-) {
-    const index = place.index;
-    final switch (place.section) with (Place.Section) {
-        case function_:
-            value = cast(size_t) fn.signature;
-            return place.field == Place.Field.signature;
-        case instruction:
-            if (index >= fn.instructions.length)
-                return false;
-            const instruction = fn.instructions[index];
-            switch (place.field) with (Place.Field) {
-                case destination: value = instruction.destination; return true;
-                case source: value = instruction.source; return true;
-                case sourceWidth: value = instruction.sourceWidth; return true;
-                default: return false;
-            }
-        case constant:
-            if (index >= fn.constants.length)
-                return false;
-            value = cast(size_t) fn.constants[index];
-            return place.field == Place.Field.word;
-        case callSite:
-            if (index >= fn.callSites.length)
-                return false;
-            const site = &fn.callSites[index];
-            switch (place.field) with (Place.Field) {
-                case callee: value = cast(size_t) site.callee; return true;
-                case nativePlan: value = cast(size_t) site.nativePlan; return true;
-                case valueSignature:
-                    value = cast(size_t) site.value.signature;
-                    return true;
-                default: return false;
-            }
-        case exceptionHandler:
-            if (index >= fn.exceptionHandlers.length)
-                return false;
-            value = cast(size_t) cast(void*) fn.exceptionHandlers[index].type;
-            return place.field == Place.Field.type;
-        case datum:
-            return false;
-    }
-}

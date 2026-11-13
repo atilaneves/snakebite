@@ -228,8 +228,7 @@ private void withCompiledProgram(
 ) {
     auto guestModule = parseSnippet(source);
     auto program = Program([guestModule]);
-    auto backend = ownedBackend!Bytecode(program);
-    backend.recordRelocs = true;
+    auto backend = ownedBackend!Bytecode(program, true);
     foreach (checksum; checksums) {
         long result;
         backend.call(findFunction(guestModule, checksum.entryPoint),

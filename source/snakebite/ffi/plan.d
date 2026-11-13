@@ -414,9 +414,35 @@ public struct PlanCache {
         return *_plans.insert(function_, keptPlanOf(function_, null, false));
     }
 
-    // The plan of one call site of a C-style or untyped D variadic callee,
-    // kept like `of` keeps one (see `variadicOf`).
-    public const(CallPlan)* variadicKeptOf(
+    // The plan of one call site of the named host function `function_`,
+    // which the caller keeps with the site. This is the one question for
+    // such a call. With `isVariadicCall` the callee is variadic and the
+    // plan depends on `extraArgumentTypes`, the types of the extra arguments
+    // of the site. A callee that this process cannot call (its symbol is
+    // absent, or `ffi` cannot lay out its signature) gets a plan too,
+    // because an unused branch can refer to one: the plan holds the
+    // failure, and `CallPlanStore.bound` throws it when execution reaches
+    // the call.
+    public const(CallPlan)* ofSite(
+        FuncDeclaration function_,
+        in bool isVariadicCall,
+        scope Type[] extraArgumentTypes,
+    ) {
+        if (hasNativeSymbol(function_))
+            return isVariadicCall
+                ? variadicOf(function_, extraArgumentTypes)
+                : of(function_);
+        return isVariadicCall
+            ? unboundVariadicOf(function_, extraArgumentTypes)
+            : unboundOf(function_);
+    }
+
+    // The plan of one call site of an `extern(C)` C-style or `extern(D)`
+    // untyped variadic callee (`calleeOf`'s own doc), kept like `of` keeps
+    // one. The plan depends on the extra argument types of that call, not on
+    // `function_` alone, so it is not cached by declaration: each call of
+    // this makes a plan, and the caller keeps the plan with its call site.
+    private const(CallPlan)* variadicOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
     ) {
@@ -424,7 +450,7 @@ public struct PlanCache {
         return keptPlanOf(function_, extraArgumentTypes, true);
     }
 
-    // As `variadicKeptOf`, for a call through a value of `type`, whose code
+    // As `variadicOf`, for a call through a value of `type`, whose code
     // is not known: the plan has no code to call.
     public const(CallPlan)* variadicKeptWithoutCode(
         TypeFunction type, bool hasContext,
@@ -440,7 +466,7 @@ public struct PlanCache {
     // The plan holds the failure text that `of` throws for the callee, and
     // `callplanstore.bound` throws it at the call if the symbol is still
     // absent then.
-    public const(CallPlan)* unboundOf(FuncDeclaration function_) {
+    private const(CallPlan)* unboundOf(FuncDeclaration function_) {
         if (auto cached = function_ in _unboundPlans)
             return *cached;
 
@@ -449,8 +475,8 @@ public struct PlanCache {
             unboundPlanOf(function_, null, false));
     }
 
-    // As `unboundOf`, for one call site of a variadic callee (`variadicKeptOf`).
-    public const(CallPlan)* unboundVariadicOf(
+    // As `unboundOf`, for one call site of a variadic callee (`variadicOf`).
+    private const(CallPlan)* unboundVariadicOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
     ) {
@@ -494,37 +520,7 @@ public struct PlanCache {
         return _store.planAt(signature, symbol, address);
     }
 
-    // As `.of`, but for one call site of an `extern(C)` C-style or
-    // `extern(D)` untyped variadic callee (`calleeOf`'s own doc):
-    // the plan depends on that call's own extra argument types, not on
-    // `function_` alone, so this
-    // never caches by declaration the way `_plans` does - it prepares a
-    // fresh plan on every call. A caller keeps the returned plan itself,
-    // alongside the call site it belongs to, to avoid paying that cost
-    // more than once per site: the interpreter keeps it next to the
-    // `CallExp` (`Evaluator.CallSitePlan`), and the bytecode compiler
-    // calls this only once, while compiling the one `CallSite` a guest
-    // `CallExp` ever produces.
-    // No frontend lock: never cached (this method's own doc), so every
-    // call touches dmd, but only through `calleeOf` (`shapeOf`/
-    // `_shapeOf`), which forces every dmd forward reference it could
-    // still need itself, up front (`signatureOf`'s own doc). This is
-    // still a compile-time-triggered path: a caller reaches it once per
-    // call site, not once per guest call.
-    public CallPlan variadicOf(
-        FuncDeclaration function_,
-        scope Type[] extraArgumentTypes,
-    ) {
-        countPreparation;
-        string symbol;
-        auto signature = calleeOf(function_, extraArgumentTypes, true, symbol);
-        void* address = symbol.length == 0 ? null : resolve(symbol);
-        if (address is null)
-            throw unresolved(function_, symbol);
-        return planOf(signature, address, _store.callbacks);
-    }
-
-    // As `variadicOf`, for a call through an address. A caller that
+    // The plan of one execution of a variadic call through an address. A caller that
     // executes it once drops it, as the interpreter does for each
     // execution of the call.
     public CallPlan variadicAtAddress(

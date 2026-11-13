@@ -14,13 +14,14 @@ private:
 
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.backends.bytecode.relocation:
-    HostCode, Place, Plain, Reloc, Relocated, SetBy;
+    classificationOf, eachRelocated, HostCode, isClassified, Place, Plain,
+    Reloc, Relocated, SetBy;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
 import snakebite.native.address: DatumRef, Target;
 import snakebite.backends.bytecode.vm:
-    AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
+    AssertSite, CallSite, ExceptionHandler,
     Function, hostCodeAt, hostCodeOffset, Instruction, JitSetting,
-    prepareForExecution, Role, Roles, rolesOf, withoutCount;
+    Role, Roles, rolesOf, withoutCount, wordAt;
 import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
@@ -124,15 +125,12 @@ public void loadProgram(
     transferHostEntries(file, file);
     transferBody(file, program, &runner);
 
-    foreach (module_; program._modules)
-        foreach (function_; module_._functions) {
-            function_.fixWindowFacts;
-            if (const reason = bindInstructionReferences(*function_))
-                throw new SnakebiteException(
-                    "the program file is not valid: " ~ reason);
-            prepareForExecution(function_, runner.jitSetting,
-                runner.jitInstance, function_.mangledName);
-        }
+    program.eachFunction((function_) {
+        if (const reason = Program.complete(
+                function_, runner.jitSetting, runner.jitInstance))
+            throw new SnakebiteException(
+                "the program file is not valid: " ~ reason);
+    });
 }
 
 
@@ -458,18 +456,6 @@ private struct Archive {
 }
 
 
-// Whether `T` is a type of the VM whose fields have to say how they reach the
-// file.
-private enum isClassified(T) = is(T == struct)
-    && (moduleName!T == "snakebite.backends.bytecode.vm"
-        || moduleName!T == "snakebite.backends.bytecode.program");
-
-private template moduleName(T) {
-    import std.traits: moduleName_ = moduleName;
-
-    enum moduleName = moduleName_!T;
-}
-
 // Data with no address in it: scalars, and arrays and structs of those. A
 // type that is not of the VM has to be this to be written as it is.
 private template isPureData(T) {
@@ -494,23 +480,6 @@ private bool fieldsArePure(T)() {
         if (!isPureData!(Unqual!Field))
             return false;
     return true;
-}
-
-// The classification of field `index` of `T`: `Plain`, `Relocated`, `HostCode`
-// or `SetBy`.
-// A field with none, or with two, stops the build.
-private template classificationOf(T, size_t index) {
-    import std.meta: Filter;
-
-    alias attributes = __traits(getAttributes, T.tupleof[index]);
-    enum isKind(alias attribute) = is(typeof(attribute) == Plain)
-        || is(typeof(attribute) == Relocated)
-        || is(typeof(attribute) == HostCode)
-        || is(typeof(attribute) == SetBy);
-    alias kinds = Filter!(isKind, attributes);
-    static assert(kinds.length == 1, T.stringof ~ "." ~ FieldNameTuple!T[index]
-        ~ " has to say how it reaches the file: @plain, @relocated, @hostCode or @setBy");
-    enum classificationOf = kinds[0];
 }
 
 // Whether field `index` shares bytes with an earlier field of the union.
@@ -688,24 +657,6 @@ private size_t addressOf(
 }
 
 
-// Calls `visit` with each field of `record` that holds an address, and its
-// word.
-private void eachRelocated(T)(
-    ref const T record, scope void delegate(in Relocated, size_t) visit,
-) {
-    static foreach (index, name; FieldNameTuple!T) {{
-        enum classification = classificationOf!(T, index);
-        alias Field = typeof(T.tupleof[index]);
-        static if (is(typeof(classification) == Relocated)) {
-            visit(classification, wordOf(record.tupleof[index]));
-        }
-        else static if (is(typeof(classification) == Plain)
-                && isClassified!(Unqual!Field))
-            eachRelocated(record.tupleof[index], visit);
-    }}
-}
-
-
 // `function_` as a file holds it: a copy with the instructions the way the
 // file means them (the handler of the instruction without a count, an
 // instruction address as an index, an address left to its relocation), and
@@ -782,87 +733,14 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
 
 // Puts the address of a relocation at its place in `function_`.
 private void applyReloc(ref Function target, in Reloc reloc) {
-    const place = reloc.place;
-    const address = reloc.target.address;
-    bool done;
-    final switch (place.section) with (Place.Section) {
-        case function_:
-            done = assignRelocated(target, place.field, address);
-            break;
-        case instruction:
-            if (place.index < target.instructions.length)
-                done = assignOperand(
-                    target.instructions[place.index], place.field, address);
-            break;
-        case constant:
-            if (place.index < target.constants.length
-                    && place.field == Place.Field.word) {
-                target.constants[place.index] = cast(long) address;
-                done = true;
-            }
-            break;
-        case callSite:
-            if (place.index < target.callSites.length)
-                done = assignRelocated(target.callSites[place.index],
-                    place.field, address);
-            break;
-        case exceptionHandler:
-            if (place.index < target.exceptionHandlers.length)
-                done = assignRelocated(target.exceptionHandlers[place.index],
-                    place.field, address);
-            break;
-        case datum:
-            break;
-    }
-    if (!done)
+    auto word = wordAt(target, reloc.place);
+    if (word is null)
         throw new SnakebiteException(
             "the program file holds a relocation with no place");
+    *word = reloc.target.address;
 }
 
-// Sets the operand of `instruction` at `field`, if an operand sits there.
-private bool assignOperand(
-    ref Instruction instruction, in Place.Field field, in size_t address,
-) {
-    final switch (field) with (Place.Field) {
-        case destination:
-            instruction.destination = address;
-            return true;
-        case source:
-            instruction.source = address;
-            return true;
-        case sourceWidth:
-            instruction.sourceWidth = address;
-            return true;
-        case word:
-        case callee:
-        case nativePlan:
-        case valueSignature:
-        case type:
-        case signature:
-            return false;
-    }
-}
 
-// Sets the field of `record` that is relocated at `field`, to `word`.
-private bool assignRelocated(T)(ref T record, in Place.Field field, in size_t word) {
-    static foreach (index, name; FieldNameTuple!T) {{
-        enum classification = classificationOf!(T, index);
-        alias Field = typeof(T.tupleof[index]);
-        static if (is(typeof(classification) == Relocated)) {
-            static if (is(Field == U*, U) || is(Field == class)) {
-                if (classification.field == field) {
-                    record.tupleof[index] = cast(Field) cast(void*) word;
-                    return true;
-                }
-            }
-        } else static if (is(typeof(classification) == Plain)
-                && isClassified!(Unqual!Field)) {
-            if (assignRelocated(record.tupleof[index], field, word))
-                return true;
-        }
-    }}
-    return false;
-}
 
 
 private void transferBody(
@@ -938,20 +816,19 @@ private void transferPlans(ref Archive archive, ref Program program) {
 // callback bridge, before any function is read: a word that refers to the entry
 // of a function needs the signature.
 private void transferSignatures(ref Archive archive, ref Program program) {
-    foreach (module_; program._modules)
-        foreach (function_; module_._functions) {
-            NativeSignature signature;
-            if (archive.isWriting) {
-                const registered =
-                    program.plans.callbacks.signatureOf(function_);
-                if (registered is null)
-                    internalFailure("a function has no registered signature");
-                signature = cast(NativeSignature) *registered;
-            }
-            archive.transfer(signature);
-            if (!archive.isWriting)
-                program.plans.callbacks.register(function_, signature);
+    program.eachFunction((function_) {
+        NativeSignature signature;
+        if (archive.isWriting) {
+            const registered =
+                program.plans.callbacks.signatureOf(function_);
+            if (registered is null)
+                internalFailure("a function has no registered signature");
+            signature = cast(NativeSignature) *registered;
         }
+        archive.transfer(signature);
+        if (!archive.isWriting)
+            program.plans.callbacks.register(function_, signature);
+    });
 }
 
 

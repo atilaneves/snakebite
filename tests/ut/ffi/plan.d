@@ -2433,7 +2433,7 @@ unittest {
 
 
 // The variadic shapes below (issue #334 step 5) exercise `CallPlan.
-// prepareVariadic`/`PlanCache.variadicOf`: an `extern(C)` C-style
+// prepareVariadic`/`PlanCache.ofSite`: an `extern(C)` C-style
 // variadic callee's plan depends on one call site's own extra
 // arguments, not on the callee's declaration alone (ADR-0010's
 // C-variadics paragraph). Each host function is real, compiled code in
@@ -2526,7 +2526,7 @@ private extern(C) long snakebite_ut_variadic_mixed_pair(int tag, ...) {
 // same information a backend reads off the very same `CallExp`
 // (`Evaluator.callVariadicNative`, the bytecode compiler's
 // `compileNativeCall`) to build its own plan through `PlanCache.
-// variadicOf`.
+// ofSite`.
 private struct VariadicCallSite {
     FuncDeclaration function_;
     Type[] extraArgumentTypes;
@@ -2609,7 +2609,7 @@ unittest {
         arguments[i] = &value;
 
     int result;
-    cache.variadicOf(site.function_, site.extraArgumentTypes)
+    cache.ofSite(site.function_, true, site.extraArgumentTypes)
         .call(&result, arguments[]);
 
     // 1 (`first`, unweighted) + sum((i + 1) * (i + 2)) for i in 0 .. 9,
@@ -2637,7 +2637,7 @@ unittest {
         arguments[i] = &value;
 
     double result;
-    cache.variadicOf(site.function_, site.extraArgumentTypes)
+    cache.ofSite(site.function_, true, site.extraArgumentTypes)
         .call(&result, arguments[]);
 
     // 1.0 (`first`, unweighted) + sum((i + 1) * (i + 2)) for i in 0 .. 8,
@@ -2675,7 +2675,7 @@ unittest {
         arguments[i] = &value;
 
     double result;
-    cache.variadicOf(site.function_, site.extraArgumentTypes)
+    cache.ofSite(site.function_, true, site.extraArgumentTypes)
         .call(&result, arguments[]);
 
     // Same weighted total as `called.variadic.nineDoublesOneSpills`: the
@@ -2710,7 +2710,7 @@ unittest {
     int tag = 3;
     VariadicMixedPair value = VariadicMixedPair(7, 2.5);
     long result;
-    cache.variadicOf(site.function_, site.extraArgumentTypes).call(&result, [
+    cache.ofSite(site.function_, true, site.extraArgumentTypes).call(&result, [
         cast(const void*) &tag, cast(const void*) &value,
     ]);
 
@@ -2760,7 +2760,7 @@ unittest {
     int countOne = 1;
     int valueOne = 41;
     int resultOne;
-    cache.variadicOf(siteOne.function_, siteOne.extraArgumentTypes).call(
+    cache.ofSite(siteOne.function_, true, siteOne.extraArgumentTypes).call(
         &resultOne,
         [cast(const void*) &countOne, cast(const void*) &valueOne],
     );
@@ -2768,7 +2768,7 @@ unittest {
     int countThree = 3;
     int[3] valuesThree = [1, 2, 3];
     int resultThree;
-    cache.variadicOf(siteThree.function_, siteThree.extraArgumentTypes).call(
+    cache.ofSite(siteThree.function_, true, siteThree.extraArgumentTypes).call(
         &resultThree,
         [
             cast(const void*) &countThree,
@@ -2808,7 +2808,7 @@ unittest {
     int value = 7;
     double scale = 3.5;
     int result;
-    cache.variadicOf(site.function_, site.extraArgumentTypes).call(&result, [
+    cache.ofSite(site.function_, true, site.extraArgumentTypes).call(&result, [
         cast(const void*) &bufferPtr,
         cast(const void*) &n,
         cast(const void*) &formatPtr,
@@ -2901,7 +2901,7 @@ unittest {
         arguments[2 + i] = &value;
 
     int result;
-    cache.variadicOf(site.function_, site.extraArgumentTypes)
+    cache.ofSite(site.function_, true, site.extraArgumentTypes)
         .call(&result, arguments[]);
 
     result.should == 28;
@@ -2942,7 +2942,7 @@ unittest {
     int countOne = 1;
     int valueOne = 41;
     int resultOne;
-    cache.variadicOf(siteOne.function_, siteOne.extraArgumentTypes).call(
+    cache.ofSite(siteOne.function_, true, siteOne.extraArgumentTypes).call(
         &resultOne,
         [
             cast(const void*) &vArgumentsOne,
@@ -2956,7 +2956,7 @@ unittest {
     int countThree = 3;
     int[3] valuesThree = [1, 2, 3];
     int resultThree;
-    cache.variadicOf(siteThree.function_, siteThree.extraArgumentTypes).call(
+    cache.ofSite(siteThree.function_, true, siteThree.extraArgumentTypes).call(
         &resultThree,
         [
             cast(const void*) &vArgumentsThree,
@@ -3074,7 +3074,7 @@ unittest {
     PlanPoint point = PlanPoint(3, 4);
 
     int result;
-    cache.variadicOf(site.function_, site.extraArgumentTypes).call(&result, [
+    cache.ofSite(site.function_, true, site.extraArgumentTypes).call(&result, [
         cast(const void*) &vArguments,
         cast(const void*) &destPtr,
         cast(const void*) &point,

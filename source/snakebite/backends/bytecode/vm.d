@@ -228,7 +228,8 @@ public struct CallSite {
     // signature the call site expects of its callee: null for every call
     // that is neither through a value nor virtual.
     public struct ValueArguments {
-        @relocated(Place.Section.callSite, Place.Field.valueSignature)
+        @relocated(Place.Section.callSite, Place.Field.valueSignature,
+            Target.Kind.signature)
         package const(Signature)* signature;
         @plain package Arg[] surplus;
         @plain package const(Shape)[] surplusShapes;
@@ -239,7 +240,8 @@ public struct CallSite {
     @plain package Arg[] args;
     @plain package Arg[] nativeArgs;
     @plain package size_t returnWidth;
-    @relocated(Place.Section.callSite, Place.Field.callee)
+    @relocated(Place.Section.callSite, Place.Field.callee,
+        Target.Kind.functionWord)
     package const(Function)* callee;
     // Null in a compiled program that is saved: every site is filled first.
     @plain package const(Function)* delegate() prepareGuest;
@@ -409,7 +411,8 @@ public struct CallSite {
         return true;
     }
 
-    @relocated(Place.Section.callSite, Place.Field.nativePlan)
+    @relocated(Place.Section.callSite, Place.Field.nativePlan,
+        Target.Kind.nativePlan)
     package const(CallPlan)* nativePlan;
 
     // A `native` site whose plan is zero to three word arguments and no
@@ -956,7 +959,8 @@ package struct AssertSite {
 // `cleanupEndIndex` is `size_t.max` when there is no cleanup end.
 package struct ExceptionHandler {
     // A class of the program (a datum) or a class of the host (a symbol).
-    @relocated(Place.Section.exceptionHandler, Place.Field.type)
+    @relocated(Place.Section.exceptionHandler, Place.Field.type,
+        Target.Kind.staticData)
     package TypeInfo_Class type;
     @plain package size_t catchOffset;
     @plain package size_t bodyStartIndex;
@@ -987,7 +991,8 @@ public struct Function {
     // it declares before it; `size_t.max` for any other function.
     @plain package size_t cursorOffset = size_t.max;
     @plain package size_t declaredParameters;
-    @relocated(Place.Section.function_, Place.Field.signature)
+    @relocated(Place.Section.function_, Place.Field.signature,
+        Target.Kind.signature)
     package const(Signature)* signature;
     @plain package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
@@ -998,7 +1003,7 @@ public struct Function {
     @plain package const(char)[] mangledName;
     // Every word of this function that holds a process address, except the
     // handler of each instruction. The compiler records them only when
-    // `Bytecode.recordRelocs` is set. A file holds the list; a load applies
+    // the program records addresses (`Program.recordsAddresses`). A file holds the list; a load applies
     // it and drops it.
     @plain package Reloc[] relocs;
     // `size_t.max` unless this function lays out call windows. Otherwise
@@ -1040,88 +1045,73 @@ public struct Function {
 }
 
 
-// The process addresses that the tables of a function hold. Each recorder
-// names every field of its type that holds an address, and a `static assert`
-// makes a new field say which kind it is, so that no address stays unrecorded
-// by accident.
-
-private void recordAddress(
-    ref Reloc[] relocs, in Place.Section section, in size_t index,
-    in Place.Field field, in Target.Kind kind, in size_t address,
+// Records the process addresses that `record` holds: a `Function`, or entry
+// `index` of its call sites or of its exception handlers. The `@relocated`
+// attribute of a field says where the word sits and what it points at. A
+// field with no attribute stops the build (`classificationOf`), so no address
+// stays unrecorded by accident. The handler of an instruction and the entry
+// of a builtin call are code of the host executable: the file holds them by
+// themselves and they have no `Reloc`.
+// `known` is the target of one of the words, for a word that points at a
+// datum: only the caller knows the datum.
+package void recordRelocs(T)(
+    ref Reloc[] relocs, in size_t index, in T record,
+    in Target known = Target.init,
 ) {
-    if (address != 0)
-        relocs ~= Reloc(Place(section, field, index), Target(kind, address));
+    import snakebite.backends.bytecode.relocation: eachRelocated, Relocated;
+
+    eachRelocated(record, (in Relocated relocated, size_t word) {
+        if (word == 0)
+            return;
+        relocs ~= Reloc(Place(relocated.section, relocated.field, index),
+            known.address == word ? cast() known : Target(relocated.kind, word));
+    });
 }
 
-package void recordCallSiteRelocs(
-    ref Reloc[] relocs, in size_t index, in CallSite site,
-) {
-    import std.traits: FieldNameTuple;
+// The word of `compiled` at `place`, or null when the function has no such
+// place. This is the one map from a place to a word: a load writes through
+// it and a test reads through it.
+package inout(size_t)* wordAt(ref inout Function compiled, in Place place) {
+    import snakebite.backends.bytecode.relocation: relocatedWord;
 
-    // Address fields with a `Reloc`: `callee`, `nativePlan` and
-    // `value.signature`. `builtinEntry` is code of the host executable, so
-    // the file holds it by itself and it has no `Reloc`. `prepareGuest` is a
-    // delegate that is null once a save has filled the call sites, so it is
-    // plain. The instruction addresses `cleanupStart` and `cleanupEnd` follow
-    // from the two indexes. The call caches are filled at run time, so the
-    // compiled bytecode has no addresses in them.
-    enum plainFields = AliasSeq!(
-        "kind", "value", "args", "nativeArgs", "returnWidth", "fast",
-        "prepareGuest",
-        "calleeSlotOffset", "hasContext", "cleanupStartIndex",
-        "cleanupEndIndex", "cleanupStart", "cleanupEnd", "windowSlot",
-        "windowDisp", "windowScratch", "windowEnd", "windowAlignment",
-        "directState", "directTarget", "directSwapped", "directOrder",
-        "directLoads", "indirectTarget",
-    );
-    enum addressFields = AliasSeq!(
-        "callee", "nativePlan", "builtinEntry",
-    );
-    static foreach (name; FieldNameTuple!CallSite)
-        static assert(staticIndexOf!(name, plainFields) >= 0
-            || staticIndexOf!(name, addressFields) >= 0,
-            "CallSite." ~ name ~ " has to say whether it holds an address");
-    static foreach (name; FieldNameTuple!(CallSite.ValueArguments))
-        static assert(name == "signature" || name == "surplus"
-            || name == "surplusShapes",
-            "CallSite.ValueArguments." ~ name
-            ~ " has to say whether it holds an address");
-
-    enum section = Place.Section.callSite;
-    recordAddress(relocs, section, index, Place.Field.callee,
-        Target.Kind.functionWord, cast(size_t) site.callee);
-    recordAddress(relocs, section, index, Place.Field.nativePlan,
-        Target.Kind.nativePlan, cast(size_t) site.nativePlan);
-    recordAddress(relocs, section, index, Place.Field.valueSignature,
-        Target.Kind.signature, cast(size_t) site.value.signature);
+    const index = place.index;
+    final switch (place.section) with (Place.Section) {
+        case function_:
+            return relocatedWord(compiled, place.field);
+        case instruction:
+            if (index >= compiled.instructions.length)
+                return null;
+            return operandAt(compiled.instructions[index], place.field);
+        case constant:
+            if (index >= compiled.constants.length
+                    || place.field != Place.Field.word)
+                return null;
+            return cast(inout(size_t)*) &compiled.constants[index];
+        case callSite:
+            if (index >= compiled.callSites.length)
+                return null;
+            return relocatedWord(compiled.callSites[index], place.field);
+        case exceptionHandler:
+            if (index >= compiled.exceptionHandlers.length)
+                return null;
+            return relocatedWord(
+                compiled.exceptionHandlers[index], place.field);
+        case datum:
+            return null;
+    }
 }
 
-package void recordFunctionRelocs(
-    ref Reloc[] relocs, in Function function_,
+// The operand of `instruction` at `field`, or null when `field` names no
+// operand.
+private inout(size_t)* operandAt(
+    ref inout Instruction instruction, in Place.Field field,
 ) {
-    // `signature` is the only address field of the `Function` itself.
-    recordAddress(relocs, Place.Section.function_, 0, Place.Field.signature,
-        Target.Kind.signature, cast(size_t) function_.signature);
-}
-
-package void recordExceptionHandlerRelocs(
-    ref Reloc[] relocs, in size_t index, in ExceptionHandler handler,
-    in Target type,
-) {
-    import std.traits: FieldNameTuple;
-
-    // The other fields are indices of the instructions of the function.
-    static foreach (name; FieldNameTuple!ExceptionHandler)
-        static assert(name == "type" || name == "catchOffset"
-            || name == "bodyStartIndex" || name == "bodyEndIndex"
-            || name == "handlerIndex" || name == "cleanupEndIndex",
-            "ExceptionHandler." ~ name
-            ~ " has to say whether it holds an address");
-
-    if (type.address != 0)
-        relocs ~= Reloc(
-            Place(Place.Section.exceptionHandler, Place.Field.type, index),
-            type);
+    switch (field) with (Place.Field) {
+        case destination: return &instruction.destination;
+        case source: return &instruction.source;
+        case sourceWidth: return &instruction.sourceWidth;
+        default: return null;
+    }
 }
 
 
