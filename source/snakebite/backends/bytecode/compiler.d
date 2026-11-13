@@ -208,7 +208,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // no function is new. The delegate that filled a site is then dropped, and
     // the relocations of the call sites are recorded again.
     private void fillGuestCallSites() {
-        import snakebite.backends.bytecode.vm: CallSite, recordCallSiteRelocs;
+        import snakebite.backends.bytecode.vm: CallSite, recordRelocs;
         import snakebite.backends.bytecode.relocation: Place, Reloc;
 
         size_t before;
@@ -230,7 +230,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 if (reloc.place.section != Place.Section.callSite)
                     kept ~= reloc;
             foreach (index, ref site; function_.callSites)
-                recordCallSiteRelocs(kept, index, site);
+                recordRelocs(kept, index, site);
             function_.relocs = kept;
         });
     }
@@ -866,8 +866,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
         Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
-        branchTargetField, recordCallSiteRelocs,
-        recordExceptionHandlerRelocs, recordFunctionRelocs, rolesOf,
+        branchTargetField, recordRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1297,9 +1296,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (_bytecode.compiledProgram.recordsAddresses) {
             foreach (index, ref site; _callSites)
-                recordCallSiteRelocs(_relocs, index, site);
+                recordRelocs(_relocs, index, site);
             foreach (index, ref handler; exceptionHandlers)
-                recordExceptionHandlerRelocs(_relocs, index, handler,
+                recordRelocs(_relocs, index, handler,
                     _bytecode._world.data.addressOfData(
                         cast(const(void)*) handler.type).target);
         }
@@ -1346,7 +1345,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             cast(string) _function.toString);
         result.relocs = _relocs;
         if (_bytecode.compiledProgram.recordsAddresses)
-            recordFunctionRelocs(result.relocs, result);
+            recordRelocs(result.relocs, 0, result);
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
