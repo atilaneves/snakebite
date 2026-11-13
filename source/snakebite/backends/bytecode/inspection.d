@@ -109,15 +109,6 @@ private bool wordAt(
                     return true;
                 default: return false;
             }
-        case assertSite:
-            if (index >= fn.assertSites.length)
-                return false;
-            const site = &fn.assertSites[index];
-            switch (place.field) with (Place.Field) {
-                case message: value = cast(size_t) site.message.ptr; return true;
-                case file: value = cast(size_t) site.file.ptr; return true;
-                default: return false;
-            }
         case exceptionHandler:
             if (index >= fn.exceptionHandlers.length)
                 return false;

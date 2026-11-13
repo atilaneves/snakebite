@@ -16,8 +16,6 @@ public struct Target {
         hostSymbol,
         // A compiled function, as a function pointer or a delegate holds it.
         functionWord,
-        // A string that the frontend owns, such as a file name.
-        frontendString,
         // A copy of a string literal that the process store owns.
         adoptedString,
         // A value in the native constant pool.

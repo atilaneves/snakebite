@@ -4,8 +4,8 @@ module snakebite.backends.bytecode.file;
 // A compiled program in a file: a header, the signatures of the program and
 // the list of its modules. The file holds the types of the VM as they are:
 // one `transfer` template walks them, and the same body writes a file and
-// reads one. A field says where it is declared (`plain`, `relocated`, `setBy`)
-// how it reaches the file, and a field that says nothing stops the build.
+// reads one. A field says where it is declared (`plain`, `relocated`, `hostCode`,
+// `setBy`) how it reaches the file, and a field that says nothing stops the build.
 // Handlers are distances from one handler of `vm.d`, so a file belongs to the
 // build that wrote it.
 //
@@ -142,6 +142,7 @@ public void loadProgram(
 // each one again with `adjustedEntryOf`, as a compile does. `source` is the
 // archive that the body was written to; a read archive is its own source.
 private void transferHostEntries(ref Archive archive, ref Archive source) {
+    // `auto`: `transfer` assigns to the array when the archive reads.
     auto symbols = source._hostEntrySymbols;
     auto distances = source._hostEntryDistances;
     auto adjustments = source._hostEntryAdjustments;
@@ -661,9 +662,6 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             const position = archive.symbolPosition(
                 cast(const(void)*) target.address);
             return [position[0], position[1], 0];
-        case frontendString:
-            // The strings of an assertion are in the file as bytes.
-            internalFailure("a word needs a relocation of kind frontendString");
     }
 }
 
@@ -686,9 +684,6 @@ private size_t addressOf(
             return cast(size_t) archive.dataAt(reference);
         case adoptedString:
             return cast(size_t) archive.stringAt(reference);
-        case frontendString:
-            throw new SnakebiteException(
-                "the program file holds a relocation of kind frontendString");
     }
 }
 
@@ -721,10 +716,6 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
     bool[size_t[3]] listed;
     Reloc[] kept;
     foreach (reloc; function_.relocs) {
-        // The strings of an assertion are in the file as bytes.
-        if (reloc.place.section == Place.Section.assertSite
-                && reloc.target.kind == Target.Kind.frontendString)
-            continue;
         // Names the target now, so that the file holds it.
         referenceOf(archive, reloc.target);
         listed[[cast(size_t) reloc.place.section,
@@ -820,7 +811,6 @@ private void applyReloc(ref Function target, in Reloc reloc) {
                 done = assignRelocated(target.exceptionHandlers[place.index],
                     place.field, address);
             break;
-        case assertSite:
         case datum:
             break;
     }
@@ -847,8 +837,6 @@ private bool assignOperand(
         case callee:
         case nativePlan:
         case valueSignature:
-        case message:
-        case file:
         case type:
         case signature:
             return false;
@@ -1193,4 +1181,3 @@ private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
         handle = new StartFunction(
             archive._runner, archive.functionAt(position[0], position[1]));
 }
-

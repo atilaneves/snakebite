@@ -80,6 +80,8 @@ public struct PlanCache {
             : _store.callbacks.guestTarget(address);
     }
 
+    // Whether `entry` is an adjusted entry that the callback bridge made for a
+    // host function.
     public bool isAdjustedHostEntry(const(void)* entry) const {
         return _store.callbacks !is null
             && _store.callbacks.isAdjustedHostEntry(entry);

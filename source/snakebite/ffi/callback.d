@@ -166,7 +166,7 @@ private struct Pool {
             if (entry >= chunk.base && entry < chunk.base + chunkBytes)
                 return chunk.slots[(cast(const(ubyte)*) entry - chunk.base)
                     / callbackEntryBytes];
-        assert(false, "an entry that no chunk of the pool holds");
+        internalFailure("an entry that no chunk of the pool holds");
     }
 }
 
