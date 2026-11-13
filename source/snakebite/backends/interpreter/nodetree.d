@@ -40,7 +40,8 @@ package enum TreeFlow : ubyte { normal, break_, continue_, return_, generic }
 
 // A function's tree, with what the evaluator's per-function fields hold while
 // the function runs. A tree node reads none of those fields; the nodes that
-// hand control to the evaluator set them first (`syncTree`).
+// hand control to the evaluator name the tree and the frame of the call, and
+// the evaluator sets them first.
 package struct TreeRoot {
     private const(imported!"snakebite.language.layout.frame".FrameLayout)* _layout;
     // The statements of the body: one node, a short sequence whose
@@ -2255,8 +2256,7 @@ private final class ContextStore(E) : Node {
         _ev = ev; _step = step; _root = ev._treeRoot;
     }
     public override void executeInto(ubyte* frame, ubyte* dest) {
-        _ev.syncTree(_root, frame);
-        _ev.applyVthisStep(_step, dest);
+        _ev.applyTreeVthisStep(_root, frame, _step, dest);
     }
 }
 
@@ -3542,24 +3542,11 @@ private final class GenericStatement(E) : Node {
         _label = _root.loopLabelOf(statement);
     }
     public override TreeFlow executeStmt(ubyte* frame) {
-        _ev.syncTree(_root, frame);
-        // The evaluator runs the statement as it runs one outside the tree:
-        // with no expression named until the statement opens one, and with
-        // the label that the statement has.
-        *faultSlotOf(frame) = null;
-        auto previousLabel = _ev._pendingLoopLabel;
-        _ev._pendingLoopLabel = _label;
-        scope(exit) _ev._pendingLoopLabel = previousLabel;
-        _statement.accept(_ev);
-        return _ev._controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
+        return _ev.runTreeStatement(_root, frame, _statement, _label, null);
     }
     // The evaluator seeks the label as it seeks the target of a `goto`.
     public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
-        _ev.syncTree(_root, frame);
-        _ev._controlFlow.seek(label);
-        const flow = executeStmt(frame);
-        assert(!_ev._controlFlow.seeking, "the statement holds the label");
-        return flow;
+        return _ev.runTreeStatement(_root, frame, _statement, _label, label);
     }
 }
 
@@ -3596,8 +3583,7 @@ private final class GenericCondition(E) : BoolNode {
         _root = ev._treeRoot;
     }
     public override bool executeBool(ubyte* frame) {
-        _ev.syncTree(_root, frame);
-        return _ev.conditionHolds(_condition, _position);
+        return _ev.treeConditionHolds(_root, frame, _condition, _position);
     }
 }
 
@@ -3620,11 +3606,10 @@ private final class Uninitialised(E) : Node {
     private TreeFlow run(ubyte* frame, const(void)* label) {
         // Building reads the function's layout and return type from the
         // evaluator, and the nodes it makes name this tree.
-        _ev.syncTree(_root, frame);
-        auto outer = _ev._treeRoot;
-        _ev._treeRoot = _root;
-        scope(exit) _ev._treeRoot = outer;
-        auto node = buildStatement(_ev, _statement, _slot);
+        Node node;
+        _ev.buildTreeNodes(_root, frame, {
+            node = buildStatement(_ev, _statement, _slot);
+        });
         *_slot = node;
         return label is null
             ? node.executeStmt(frame) : node.enterAt(frame, label);

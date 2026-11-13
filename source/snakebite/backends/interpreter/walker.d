@@ -1617,6 +1617,64 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             && alignment <= fastFrameLead;
     }
 
+    // The entries of the node tree. A node that hands control to the
+    // evaluator gives the state of its call, which is the tree and the frame,
+    // to one of them. The evaluator makes its fields describe that call
+    // before it does the work (`syncTree`), so no node has an order of calls
+    // to keep.
+
+    // Runs `step` of the initialisation of a context for a tree node.
+    package void applyTreeVthisStep(
+        TreeRoot* root, ubyte* frame, InitStep step, ubyte* dest,
+    ) {
+        syncTree(root, frame);
+        applyVthisStep(step, dest);
+    }
+
+    // Runs `statement`, which the tree does not cover, as the evaluator runs
+    // one outside the tree: with no expression named until the statement
+    // opens one, and with `loopLabel`, the label of the statement when it is
+    // a labelled loop. With `target`, the evaluator first seeks that label
+    // in the statement, as it seeks the target of a `goto`.
+    package TreeFlow runTreeStatement(
+        TreeRoot* root, ubyte* frame, Statement statement,
+        Identifier loopLabel, const(void)* target,
+    ) {
+        syncTree(root, frame);
+        if (target !is null)
+            _controlFlow.seek(target);
+        *faultSlotOf(frame) = null;
+        auto previousLabel = _pendingLoopLabel;
+        _pendingLoopLabel = loopLabel;
+        scope(exit) _pendingLoopLabel = previousLabel;
+        statement.accept(this);
+        assert(target is null || !_controlFlow.seeking,
+            "the statement holds the label");
+        return _controlFlow.hasTransfer ? TreeFlow.generic : TreeFlow.normal;
+    }
+
+    // Whether `condition`, which the tree does not cover, holds.
+    package bool treeConditionHolds(
+        TreeRoot* root, ubyte* frame, Expression condition,
+        in FullExpressionScope.Position position,
+    ) {
+        syncTree(root, frame);
+        return conditionHolds(condition, position);
+    }
+
+    // Runs `build`, which makes nodes of `root`. Building reads the layout
+    // and the return type of the function from the evaluator, and the nodes
+    // name the tree.
+    extern(D) package void buildTreeNodes(
+        TreeRoot* root, ubyte* frame, scope void delegate() build,
+    ) {
+        syncTree(root, frame);
+        auto outer = _treeRoot;
+        _treeRoot = root;
+        scope(exit) _treeRoot = outer;
+        build();
+    }
+
     // Evaluates `expression` into `place` for a tree node whose value the
     // evaluator makes.
     package void evaluateTreeValue(
@@ -1743,7 +1801,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // node synced gives the fields back when it ends, as the original
     // evaluator's calls do, so the fields never describe a call that has
     // ended.
-    package void syncTree(TreeRoot* root, ubyte* frame) {
+    private void syncTree(TreeRoot* root, ubyte* frame) {
         if (_innermostFrame !is frame) {
             claim(root, frame);
             return;
