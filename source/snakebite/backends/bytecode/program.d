@@ -4,7 +4,8 @@ module snakebite.backends.bytecode.program;
 private:
 
 import snakebite.backends.bytecode.relocation: plain, setBy;
-import snakebite.backends.bytecode.vm: Function;
+import snakebite.backends.bytecode.vm: bindInstructionReferences, Function,
+    JitSetting, prepareForExecution;
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
 import snakebite.image.dependency: DependencyImage;
@@ -30,10 +31,16 @@ public struct Program {
     // `image` is the dependency image that symbols resolve in, or null. The
     // owner must outlive this, and must construct it in place: the tables of
     // thread-local variables keep the address of the resolver of `plans`.
-    public this(const(DependencyImage)* image) {
+    // With `recordsAddresses`, each word of the program that holds an
+    // address has a record, so that a file can hold the program.
+    public this(const(DependencyImage)* image, bool recordsAddresses = false) {
         plans = CallPlanStore(image);
         const resolver = &plans.resolver;
-        store = StaticStore(() => heapNew!TlsSlots(resolver));
+        store = StaticStore(() => heapNew!TlsSlots(resolver), recordsAddresses);
+    }
+
+    public bool recordsAddresses() const @safe pure nothrow @nogc {
+        return store.recordsAddresses;
     }
 
     // The interned parameter signatures of the layouts. A `Signature*` of
@@ -64,6 +71,35 @@ public struct Program {
         auto module_ = new Module;
         _modules ~= module_;
         return module_;
+    }
+
+    public size_t functionCount() const @safe pure nothrow @nogc {
+        size_t total;
+        foreach (module_; _modules)
+            total += module_._functions.length;
+        return total;
+    }
+
+    // Each function of the program, in the order of the modules. `visit` can
+    // add modules and functions; the walk reaches them too.
+    public void eachFunction(scope void delegate(Function*) visit) {
+        for (size_t m = 0; m < _modules.length; ++m)
+            for (size_t f = 0; f < _modules[m]._functions.length; ++f)
+                visit(_modules[m]._functions[f]);
+    }
+
+    // Makes a function whose tables are filled ready to run on the runner
+    // that has `jit` and `jitInstance`: a compile and a load both end with
+    // this. Returns null, or the reason why the function is not valid.
+    public static string complete(JitInstance)(
+        Function* function_, in JitSetting jit, JitInstance jitInstance,
+    ) {
+        function_.fixWindowFacts;
+        if (const reason = bindInstructionReferences(*function_))
+            return reason;
+        prepareForExecution(function_, jit, jitInstance,
+            function_.mangledName);
+        return null;
     }
 }
 

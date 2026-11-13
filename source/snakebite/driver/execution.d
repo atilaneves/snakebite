@@ -193,7 +193,7 @@ public void saveProgram(
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode: Bytecode;
 
-    auto backend = Owned!Bytecode(new Bytecode(program, jit));
+    auto backend = Owned!Bytecode(new Bytecode(program, jit, true));
     backend.save(path, workingDirectory);
 }
 

@@ -218,11 +218,16 @@ public struct StaticStore {
     // This thread's own copies of the thread-local variables, never shared,
     // so `TlsSlots.slotFor` takes no lock.
     private PerThread!(TlsSlots*) _tls;
+    // Whether each word of the program that holds an address has a record,
+    // so that a file can hold the program. It does not change: a word that
+    // was written before would have no record.
+    public immutable bool recordsAddresses;
 
     // `newTlsSlots` makes the table of thread-local variables that a thread
     // gets on its first use of the store.
-    public this(TlsSlots* delegate() newTlsSlots) {
+    public this(TlsSlots* delegate() newTlsSlots, bool recordsAddresses = false) {
         _tls = PerThread!(TlsSlots*)(newTlsSlots);
+        this.recordsAddresses = recordsAddresses;
     }
 
     ~this() {

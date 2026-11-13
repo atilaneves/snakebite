@@ -124,15 +124,12 @@ public void loadProgram(
     transferHostEntries(file, file);
     transferBody(file, program, &runner);
 
-    foreach (module_; program._modules)
-        foreach (function_; module_._functions) {
-            function_.fixWindowFacts;
-            if (const reason = bindInstructionReferences(*function_))
-                throw new SnakebiteException(
-                    "the program file is not valid: " ~ reason);
-            prepareForExecution(function_, runner.jitSetting,
-                runner.jitInstance, function_.mangledName);
-        }
+    program.eachFunction((function_) {
+        if (const reason = Program.complete(
+                function_, runner.jitSetting, runner.jitInstance))
+            throw new SnakebiteException(
+                "the program file is not valid: " ~ reason);
+    });
 }
 
 
@@ -938,20 +935,19 @@ private void transferPlans(ref Archive archive, ref Program program) {
 // callback bridge, before any function is read: a word that refers to the entry
 // of a function needs the signature.
 private void transferSignatures(ref Archive archive, ref Program program) {
-    foreach (module_; program._modules)
-        foreach (function_; module_._functions) {
-            NativeSignature signature;
-            if (archive.isWriting) {
-                const registered =
-                    program.plans.callbacks.signatureOf(function_);
-                if (registered is null)
-                    internalFailure("a function has no registered signature");
-                signature = cast(NativeSignature) *registered;
-            }
-            archive.transfer(signature);
-            if (!archive.isWriting)
-                program.plans.callbacks.register(function_, signature);
+    program.eachFunction((function_) {
+        NativeSignature signature;
+        if (archive.isWriting) {
+            const registered =
+                program.plans.callbacks.signatureOf(function_);
+            if (registered is null)
+                internalFailure("a function has no registered signature");
+            signature = cast(NativeSignature) *registered;
         }
+        archive.transfer(signature);
+        if (!archive.isWriting)
+            program.plans.callbacks.register(function_, signature);
+    });
 }
 
 

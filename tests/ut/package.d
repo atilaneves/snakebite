@@ -47,9 +47,13 @@ public mixin template planCache() {
 
 // A handle on a new backend of type `B` for `program`. A `Bytecode` backend
 // gets the JIT setting of this run of `bin/ut`.
-public Owned!B ownedBackend(B)(const Program program) {
+// With `recordsAddresses`, a `Bytecode` backend records each word that holds
+// an address.
+public Owned!B ownedBackend(B)(
+    const Program program, bool recordsAddresses = false,
+) {
     static if (is(B == Bytecode))
-        return Owned!B(new Bytecode(program, testJit));
+        return Owned!B(new Bytecode(program, testJit, recordsAddresses));
     else
         return Owned!B(program);
 }

@@ -61,8 +61,10 @@ public struct NativeData {
     private StaticStore* _store;
     // Whether a write of an address into a datum is recorded in the datum
     // (`StaticBlocks.recordAddress`), so that the data can be stored in a
-    // file. Set before the first datum.
-    public bool recordRelocs;
+    // file.
+    private bool recordRelocs() const @safe pure nothrow @nogc {
+        return _store.recordsAddresses;
+    }
     // The blocks that hold a datum of this, for `recordRelocs`. Under the
     // compiler lock only.
     private StaticBlocks*[] _knownBlocks;

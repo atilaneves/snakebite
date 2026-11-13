@@ -998,7 +998,7 @@ public struct Function {
     @plain package const(char)[] mangledName;
     // Every word of this function that holds a process address, except the
     // handler of each instruction. The compiler records them only when
-    // `Bytecode.recordRelocs` is set. A file holds the list; a load applies
+    // the program records addresses (`Program.recordsAddresses`). A file holds the list; a load applies
     // it and drops it.
     @plain package Reloc[] relocs;
     // `size_t.max` unless this function lays out call windows. Otherwise

@@ -147,17 +147,19 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // after preparation, including during GC finalization (ADR-0006).
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
 
-    // Whether the compiler records relocs. It is off: nothing reads the
-    // relocs yet, and recording them costs compile time and memory.
-    public bool recordRelocs;
-
-    public this(const SourceProgram program, in JitSetting jit = JitSetting.init) {
+    // With `recordsAddresses`, the compiler records each word that holds an
+    // address, so that `save` can write the program. It is off for a run:
+    // the records cost compile time and memory.
+    public this(
+        const SourceProgram program, in JitSetting jit = JitSetting.init,
+        bool recordsAddresses = false,
+    ) {
         super(program);
         // In place: the program's tables of thread-local variables keep the
         // address of its resolver.
         import core.lifetime: emplace;
 
-        emplace(&compiledProgram, program.dependencyImage);
+        emplace(&compiledProgram, program.dependencyImage, recordsAddresses);
         _compilation.hasCompiler = true;
         _world = StaticWorld(program, &compiledProgram.store,
             &compiledProgram.plans,
@@ -184,16 +186,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         import snakebite.backends.bytecode.file: Header, saveProgram;
         import snakebite.image.preparation: generatorKey;
 
-        if (_compiled.length != 0)
-            internalFailure("a save starts with nothing compiled");
-        bool holdsData = !compiledProgram.store.isEmpty;
-        foreach (module_; compiledProgram._modules)
-            holdsData = holdsData || !module_.blocks.isEmpty;
-        if (holdsData)
-            internalFailure("a save starts with no static data, which has "
-                ~ "no records of its addresses otherwise");
-        recordRelocs = true;
-        _world.data.recordRelocs = true;
+        if (!compiledProgram.recordsAddresses)
+            internalFailure("a save needs a program that records addresses");
 
         scope collector = new EagerCompileCollector(this);
         foreach (module_; _program.rootModules)
@@ -217,39 +211,28 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         import snakebite.backends.bytecode.vm: CallSite, recordCallSiteRelocs;
         import snakebite.backends.bytecode.relocation: Place, Reloc;
 
-        size_t count() {
-            size_t total;
-            foreach (module_; compiledProgram._modules)
-                total += module_._functions.length;
-            return total;
-        }
-
         size_t before;
         do {
-            before = count;
-            // The lists grow while the loops run.
-            for (size_t m = 0; m < compiledProgram._modules.length; ++m)
-                for (size_t f = 0;
-                        f < compiledProgram._modules[m]._functions.length; ++f)
-                    foreach (ref site;
-                            compiledProgram._modules[m]._functions[f].callSites)
-                        if (site.kind == CallSite.Kind.guest
-                                && site.prepareGuest !is null) {
-                            site.cacheCallee;
-                            site.prepareGuest = null;
-                        }
-        } while (count != before);
+            before = compiledProgram.functionCount;
+            compiledProgram.eachFunction((function_) {
+                foreach (ref site; function_.callSites)
+                    if (site.kind == CallSite.Kind.guest
+                            && site.prepareGuest !is null) {
+                        site.cacheCallee;
+                        site.prepareGuest = null;
+                    }
+            });
+        } while (compiledProgram.functionCount != before);
 
-        foreach (module_; compiledProgram._modules)
-            foreach (function_; module_._functions) {
-                Reloc[] kept;
-                foreach (reloc; function_.relocs)
-                    if (reloc.place.section != Place.Section.callSite)
-                        kept ~= reloc;
-                foreach (index, ref site; function_.callSites)
-                    recordCallSiteRelocs(kept, index, site);
-                function_.relocs = kept;
-            }
+        compiledProgram.eachFunction((function_) {
+            Reloc[] kept;
+            foreach (reloc; function_.relocs)
+                if (reloc.place.section != Place.Section.callSite)
+                    kept ~= reloc;
+            foreach (index, ref site; function_.callSites)
+                recordCallSiteRelocs(kept, index, site);
+            function_.relocs = kept;
+        });
     }
 
     // How many chunks of callback entries this instance's bridge has.
@@ -783,10 +766,17 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-            if (_runner.jitSetting.perfMap || recordRelocs)
+            if (_runner.jitSetting.perfMap || compiledProgram.recordsAddresses)
                 placeholder.mangledName = function_.mangledNameOf;
-            prepareForExecution(placeholder, _runner.jitSetting,
-                _runner.jitInstance, placeholder.mangledName);
+            // Branch targets and call site cleanup ranges become addresses
+            // only now: the passes of the compile read them as indices.
+            if (const reason = Program.complete(
+                    placeholder, _runner.jitSetting, _runner.jitInstance)) {
+                import std.conv: text;
+
+                internalFailure(
+                    text(reason, " in `", function_.toString, "`"));
+            }
             _complete.insert(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
@@ -1305,7 +1295,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assignRegisters;
         specialiseHandlers(_instructions);
 
-        if (_bytecode.recordRelocs) {
+        if (_bytecode.compiledProgram.recordsAddresses) {
             foreach (index, ref site; _callSites)
                 recordCallSiteRelocs(_relocs, index, site);
             foreach (index, ref handler; exceptionHandlers)
@@ -1355,18 +1345,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.hostCall = _layout.hostCall(
             cast(string) _function.toString);
         result.relocs = _relocs;
-        if (_bytecode.recordRelocs)
+        if (_bytecode.compiledProgram.recordsAddresses)
             recordFunctionRelocs(result.relocs, result);
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
-        result.fixWindowFacts();
-        // Branch targets and call site cleanup ranges become addresses only
-        // now: the passes above read them as indices.
-        import std.conv: text;
-
-        if (auto reason = bindInstructionReferences(result))
-            internalFailure(text(reason, " in `", _function.toString, "`"));
         return result;
     }
 
@@ -2130,7 +2113,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (!_bytecode.recordRelocs)
+        if (!_bytecode.compiledProgram.recordsAddresses)
             return;
         Roles roles;
         const known = rolesOf(handler, roles);
@@ -2152,7 +2135,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t addConstant(in Address address) {
-        if (_bytecode.recordRelocs && !address.isNull)
+        if (_bytecode.compiledProgram.recordsAddresses && !address.isNull)
             _relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _constants.length),
