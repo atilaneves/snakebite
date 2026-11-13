@@ -80,8 +80,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import dmd.func: FuncDeclaration;
     import dmd.root.string: toDString;
     import snakebite.program: SourceProgram = Program;
-    import snakebite.language.call.selection: CallSelection;
-    import snakebite.language.statics.classinfo;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
     import snakebite.backends.bytecode.runner:
@@ -90,24 +88,23 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.frontend.checks: Checks;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.failure.report: SnakebiteException;
-    import snakebite.language.statics.data: NativeData;
+    import snakebite.language.statics.world: StaticWorld;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
-    import snakebite.language.statics.typeinfo: RuntimeTypes;
 
     // Declared before what points into it, so that it is destroyed after.
     // What the compiler fills: the signatures of the layouts, and the rest of
     // the compiled code and data of the program. The constructor makes it in
     // place.
     package Program compiledProgram = void;
-    private NativeData _nativeData;
-    private PlanCache _plans;
+    // The static data, type information, class information, call plans and
+    // callable addresses of the program.
+    private StaticWorld _world;
     // The machinery that runs the compiled functions. A `Function` points
     // to its JIT instance, so the address of this field must never change.
-    // Declared after `compiledProgram`, `_nativeData` and `_plans`, so that it
-    // is destroyed before them: its states release through `_nativeData`,
+    // Declared after `compiledProgram` and `_world`, so that it is destroyed
+    // before them: its states release through `_world.data`,
     // and its callback entry reads `compiledProgram.plans`.
     private Runner _runner = void;
-    private CallSelection _callSelection;
     // The index from a declaration to its function, which `compiledProgram`
     // owns. Keyed by pointer, not by value: a call site compiled while
     // `function_` itself is still mid-compile - direct or mutual
@@ -133,13 +130,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // the same `rawPlanOf` a bounds hook already goes through, so this
     // costs nothing new besides the one symbol lookup.
     private const(CallPlan)* _allocatorPlan;
-    private RuntimeTypes _runtimeTypes;
-    // Guest classes never reach dmd's own code generator, so nothing ever
-    // emits their `TypeInfo_Class`, instance vtable or `.init` bytes as
-    // real linked data - this builds the same shapes by hand instead, once
-    // per `ClassDeclaration`, and every later `new`/virtual call/`typeid`
-    // reuses the one already built.
-    private snakebite.language.statics.classinfo.ClassRuntimeCache _classRuntime;
     private size_t _compilationDepth;
     // The number of callees that compile only so that their callers can
     // copy them, nested inside each other. Greater than zero while such a
@@ -169,18 +159,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
         emplace(&compiledProgram, program.dependencyImage);
         _compilation.hasCompiler = true;
-        _plans = PlanCache(&compiledProgram.plans,
-            &_program.isRootOwned);
-        _callSelection.linksFunctions = program.definesLinkableFunctions;
-        _nativeData = NativeData(&compiledProgram.store, &_program.isRootOwned,
-            (variable) => _program.linkedVariableOf(variable),
-            &constantSymbolAddress,
-            (name) => _plans.resolveThreadLocal(name),
-            &classRuntimeInfo, (type) => _runtimeTypes.get(type),
-            (module_) => &moduleForD(module_).blocks, &callableKind);
-        _runtimeTypes = RuntimeTypes(&_program.isRootOwned,
-            (name) => _plans.resolve(name), &callableAddress,
-            &classRuntimeInfo, &_nativeData);
+        _world = StaticWorld(program, &compiledProgram.store,
+            &compiledProgram.plans,
+            StaticWorld.Backend(&guestWord, null, null,
+                (module_) => &moduleForD(module_).blocks));
         wire(compiledProgram, _runner, jit);
     }
 
@@ -211,7 +193,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             internalFailure("a save starts with no static data, which has "
                 ~ "no records of its addresses otherwise");
         recordRelocs = true;
-        _nativeData.recordRelocs = true;
+        _world.data.recordRelocs = true;
 
         scope collector = new EagerCompileCollector(this);
         foreach (module_; _program.rootModules)
@@ -273,7 +255,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // How many chunks of callback entries this instance's bridge has.
     version(unittest)
     public size_t callbackChunkCount() {
-        return _plans.callbackChunkCount;
+        return _world.plans.callbackChunkCount;
     }
 
     // The owner ends the instance. The JIT code stays while host code holds
@@ -281,15 +263,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // life of the process (see `Runner.end`).
     protected override void release() {
         _runner.end;
-    }
-
-    private void* constantSymbolAddress(
-        Declaration symbol,
-    ) {
-        if (auto function_ = symbol.isFuncDeclaration)
-            return callableAddress(function_, 0);
-
-        return _plans.resolve(nativeSymbolName(symbol));
     }
 
     version(unittest)
@@ -319,7 +292,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
-        return _nativeData.storageOf(variable);
+        return _world.data.storageOf(variable);
     }
 
     // The handle is a `StartFunction`. Until its function is compiled it
@@ -364,11 +337,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     package bool hasNativeSymbol(FuncDeclaration function_) {
-        return _plans.hasNativeSymbol(function_);
+        return _world.plans.hasNativeSymbol(function_);
     }
 
     package bool hasIndependentNativeSymbol(FuncDeclaration function_) {
-        return _plans.hasIndependentNativeSymbol(function_);
+        return _world.plans.hasIndependentNativeSymbol(function_);
     }
 
     package bool isGuestFunction(FuncDeclaration function_) const {
@@ -376,8 +349,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     package FuncDeclaration definitionOf(FuncDeclaration function_) {
-        return _callSelection.definitionOf(
-            function_, (declaration) => _program.linkedFunctionOf(declaration));
+        return _world.definitionOf(function_);
     }
 
     package Checks checks() const {
@@ -396,7 +368,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
-        _plans.registerGuestFunction(compiled, function_);
+        _world.plans.registerGuestFunction(compiled, function_);
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
@@ -415,73 +387,31 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         // `SharedTable`, ADR-0006), so two threads racing here store the
         // same value; the store just needs to be visible to a later
         // reader.
-        auto plan = planOf(_plans, DruntimeHook.gcMalloc);
+        auto plan = planOf(_world.plans, DruntimeHook.gcMalloc);
         atomicStore!(MemoryOrder.rel)(_allocatorPlan, plan);
         return plan;
     }
 
-    // The native metadata a guest class needs at run time: an instance
-    // vtable, a per-interface vtable and the `.init` bytes `_d_newclassT`'s
-    // real body would otherwise copy from a linked symbol this project's
-    // compiler never emits. Built by `snakebite.language.statics.classinfo`,
-    // shared with the interpreter's own version of this same question;
-    // only how a vtable slot gets its callable value is this backend's
-    // own.
-    package TypeInfo_Class classRuntimeInfo(
-        ClassDeclaration declaration,
-    ) {
-        import snakebite.language.statics.classinfo:
-            classRuntimeInfo_ = classRuntimeInfo, Hooks;
-
-        if (auto found = _classRuntime.find(declaration))
-            return *found;
-
-        return _classRuntime.build(() => classRuntimeInfo_(
-            declaration,
-            _classRuntime,
-            Hooks(
-                &callableAddress,
-                &_runtimeTypes.linkedClassInfo,
-                (decl) => _runtimeTypes.rtInfo(decl),
-                null,
-                &_nativeData,
-            ),
-        ));
+    package TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
+        return _world.classRuntimeInfo(declaration);
     }
 
-    // Function pointers can reach host code inside aggregates or through
-    // pointers to guest data, where the call barrier cannot replace them.
-    private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.dsymbolsem: isAbstract;
-
-        // getOverloads can leave an alias in a function-pointer constant.
-        method = definitionOf(method.toAliasFunc);
-        if (method.isAbstract)
-            return null;
-        const(void)* word;
-        const hasNativeSymbol = _plans.hasNativeSymbol(method);
-        if (_callSelection.usesNativeVariadicAddress(
-                method, hasNativeSymbol))
-            return _plans.addressOf(method);
-        if (_callSelection.usesGuestBody(method, &isGuestFunction,
-                hasNativeSymbol, hasIndependentNativeSymbol(method))) {
-            // Metadata and callback entries need a complete callable body,
-            // even when an inlining attempt asks for their addresses. A
-            // rejection here can leave metadata cached by a recursive read
-            // of the class whose methods are still being compiled.
-            const speculating = _speculating;
-            _speculating = 0;
-            scope(exit) _speculating = speculating;
-            word = compileFunction(method);
-            registerGuestWord(method, cast(const(Function)*) word);
-            _callbackRoots ~= cast(const(Function)*) word;
-            if (_compilationDepth == 0)
-                prepareCallbackBodies;
-            if (_callSelection.storesGuestWord(
-                    method, hasNativeSymbol, adjustment))
-                return cast(void*) word;
-        }
-        return _plans.callableAddress(word, method, adjustment);
+    // The compiled function of `method`, as the word that stands for its
+    // guest body.
+    private const(void)* guestWord(FuncDeclaration method) {
+        // Metadata and callback entries need a complete callable body,
+        // even when an inlining attempt asks for their addresses. A
+        // rejection here can leave metadata cached by a recursive read
+        // of the class whose methods are still being compiled.
+        const speculating = _speculating;
+        _speculating = 0;
+        scope(exit) _speculating = speculating;
+        const compiled = compileFunction(method);
+        registerGuestWord(method, compiled);
+        _callbackRoots ~= compiled;
+        if (_compilationDepth == 0)
+            prepareCallbackBodies;
+        return compiled;
     }
 
     // The address that a function body names with `&f`, a function literal
@@ -495,8 +425,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
         if (_speculating != 0)
             throw new SpeculationRejected;
-        const address = callableAddress(method, adjustment);
-        return Address(callableKind(address), address);
+        const address = _world.callableAddress(method, adjustment);
+        return Address(_world.callableKind(address), address);
     }
 
     // The address of a copy of the C string `text` that the process store owns.
@@ -519,21 +449,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     private imported!"snakebite.native.address".Address[string]
         _adoptedStrings;
-
-    // What `callableAddress` returned: a guest function, the callback entry
-    // that host code calls for one, or code of the host.
-    private imported!"snakebite.native.address".Target.Kind
-    callableKind(in void* address) {
-        import snakebite.native.address: Target;
-
-        if (address is null || _plans.isGuestWord(address))
-            return Target.Kind.functionWord;
-        if (_plans.guestTarget(address).word !is null)
-            return Target.Kind.callbackEntry;
-        if (_plans.isAdjustedHostEntry(address))
-            return Target.Kind.callbackEntry;
-        return Target.Kind.hostSymbol;
-    }
 
     // A callback can first execute during GC finalization. Compile every
     // guest function reachable from it before exposing it to host
@@ -1043,7 +958,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     alias visit = LoweringVisitor.visit;
 
     extern(D) protected override CallSelection* callSelection() {
-        return &_bytecode._callSelection;
+        return &_bytecode._world.callSelection;
     }
 
     extern(D):
@@ -1395,7 +1310,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 recordCallSiteRelocs(_relocs, index, site);
             foreach (index, ref handler; exceptionHandlers)
                 recordExceptionHandlerRelocs(_relocs, index, handler,
-                    _bytecode._nativeData.addressOfData(
+                    _bytecode._world.data.addressOfData(
                         cast(const(void)*) handler.type).target);
         }
 
@@ -3492,7 +3407,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // DMD AST nodes stay mutable through this plan for code generation.
         auto plan = catchPlanOf(
             statement,
-            catch_ => _bytecode._runtimeTypes.unqualifiedClassInfo(catch_.type),
+            catch_ => _bytecode._world.types.unqualifiedClassInfo(catch_.type),
         );
         const finallyDepthAtStart = _pendingFinallyBodies.length;
         const bodyStart = _instructions.length;
@@ -4095,7 +4010,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(_bytecode.adoptedString(file), size_t.sizeof),
             constantArgument(expression.loc.linnum, uint.sizeof),
         ];
-        auto plan = planOf(_bytecode._plans, DruntimeHook.assertMessage);
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.assertMessage);
         _callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
@@ -4130,7 +4045,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(
                 _bytecode.adoptedString(call.function_), size_t.sizeof),
         ];
-        auto plan = planOf(_bytecode._plans, DruntimeHook.cAssertFail);
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.cAssertFail);
         _callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
     }
@@ -4199,7 +4114,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileClassInvariantCall(
         in size_t objectOffset,
     ) {
-        auto plan = planOf(_bytecode._plans, DruntimeHook.classInvariant);
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.classInvariant);
 
         _callSites ~= CallSite.native(
             plan, [Arg(objectOffset, 0, size_t.sizeof)], 0);
@@ -4786,8 +4701,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // storage, which is what a resolved address here would bake in.
     private Address staticAddressOf(VarDeclaration variable) {
         if (variable.isThreadLocalStorage)
-            return _bytecode._nativeData.addressOfTlsDescriptor(variable);
-        return _bytecode._nativeData.addressOfStorage(variable);
+            return _bytecode._world.data.addressOfTlsDescriptor(variable);
+        return _bytecode._world.data.addressOfStorage(variable);
     }
 
     private Instruction.Handler staticLoadHandler(VarDeclaration variable) {
@@ -6032,7 +5947,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileConstant(Expression expression) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, expression, _function));
+        emitBytes(_bytecode._world.data.value(_valueType, expression, _function));
     }
 
     override void visit(IntegerExp expression) {
@@ -6051,7 +5966,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
         requireDestination(expression);
-        emitBytes(_bytecode._nativeData.value(_valueType, bytes, _function));
+        emitBytes(_bytecode._world.data.value(_valueType, bytes, _function));
     }
 
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
@@ -6110,7 +6025,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // class runtime information so its address remains valid.
         if (auto symbol = expression.var.isSymbolDeclaration) {
             if (symbol.type.isTypeStruct !is null) {
-                emitBytes(_bytecode._nativeData.initialValue(
+                emitBytes(_bytecode._world.data.initialValue(
                     _valueType, expression.loc));
                 return;
             }
@@ -6118,14 +6033,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto declaration = symbol.dsym.isAggregateDeclaration;
             assert(declaration !is null,
                 "an initializer symbol names an aggregate");
-            const initial = _bytecode._runtimeTypes.initializer(declaration);
+            const initial = _bytecode._world.types.initializer(declaration);
 
             import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) initial.length), size_t.sizeof);
             emit(&opConstant, _destination + arrayPointerOffset,
-                addConstant(_bytecode._nativeData.addressOfData(initial.ptr)),
+                addConstant(_bytecode._world.data.addressOfData(initial.ptr)),
                 size_t.sizeof);
             return;
         }
@@ -6353,7 +6268,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         requireDestination(expression);
 
         if (auto typeInfo =
-                expression.typeInfoAddressedBy(_bytecode._runtimeTypes)) {
+                expression.typeInfoAddressedBy(_bytecode._world.types)) {
             emitTypeInfoConstant(typeInfo);
             return;
         }
@@ -6990,7 +6905,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const object = reserveTemp(
                 TypeFacts(declaration.structsize, alignment));
             emit(&opStaticLoad, object,
-                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
+                _bytecode._world.data.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opFrameAddress, _destination, object, size_t.sizeof);
         }
@@ -7005,7 +6920,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 runtime.m_init.length, declaration.alignsize == 0
                     ? 1 : declaration.alignsize));
             emit(&opStaticLoad, image,
-                _bytecode._nativeData.addressOfData(runtime.m_init.ptr),
+                _bytecode._world.data.addressOfData(runtime.m_init.ptr),
                 runtime.m_init.length);
             emit(&opStoreIndirect, _destination, image,
                 runtime.m_init.length);
@@ -7078,7 +6993,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto deletion = planDelete(expression);
         const object = reserveTemp(pointerFacts);
         evalInto(deletion.object, object, size_t.sizeof);
-        auto plan = planOf(_bytecode._plans, deletion.hook);
+        auto plan = planOf(_bytecode._world.plans, deletion.hook);
         _callSites ~= CallSite.native(plan,
             [Arg(object, 0, size_t.sizeof)], 0);
         emit(&opCall, discardResult, _callSites.length - 1, 0);
@@ -7132,7 +7047,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t width = size_t.max,
     ) {
         emitTypeInfoConstant(
-            _bytecode._runtimeTypes.get(type), destination, width);
+            _bytecode._world.types.get(type), destination, width);
     }
 
     private void emitTypeInfoConstant(
@@ -7142,7 +7057,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
-            addConstant(_bytecode._nativeData.addressOfData(
+            addConstant(_bytecode._world.data.addressOfData(
                 cast(const(void)*) info)),
             width == size_t.max ? _width : width);
     }
@@ -7235,7 +7150,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
         const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
-        auto plan = planOf(_bytecode._plans, hook);
+        auto plan = planOf(_bytecode._world.plans, hook);
 
         const arrayOffset = compileAddress(expression.e1);
 
@@ -7349,7 +7264,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opLoadIndirect, objectInfo, objectInfo, size_t.sizeof);
         const targetInfo = reserveTemp(pointerFacts);
         emitTypeInfoConstant(
-            _bytecode._runtimeTypes.unqualifiedClassInfo(expression.to),
+            _bytecode._world.types.unqualifiedClassInfo(expression.to),
             targetInfo, size_t.sizeof);
 
         // The `final` rule of druntime's `_d_cast`: no class derives from a
@@ -7369,7 +7284,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         enum resultWidth = int.sizeof;
         const result = reserveTemp(pointerFacts);
-        auto plan = planOf(_bytecode._plans, DruntimeHook.isBaseOf);
+        auto plan = planOf(_bytecode._world.plans, DruntimeHook.isBaseOf);
         _callSites ~= CallSite.native(plan, [
             Arg(objectInfo, 0, size_t.sizeof),
             Arg(targetInfo, 0, size_t.sizeof),
@@ -8314,7 +8229,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address in the native constant pool of `value`.
     private Address constantWord(in size_t value) {
         const placed =
-            _bytecode._nativeData.value(Type.tuns64, (&value)[0 .. 1], _function);
+            _bytecode._world.data.value(Type.tuns64, (&value)[0 .. 1], _function);
         return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
@@ -8403,10 +8318,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (operand.op == EXP.null_) {
             const size_t zero;
             const placed =
-                _bytecode._nativeData.value(type, (&zero)[0 .. 1], _function);
+                _bytecode._world.data.value(type, (&zero)[0 .. 1], _function);
             return Address(Target.Kind.constantPool, placed.ptr, placed.where);
         }
-        const placed = _bytecode._nativeData.value(type, operand, _function);
+        const placed = _bytecode._world.data.value(type, operand, _function);
         return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
@@ -9938,7 +9853,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? DruntimeHook.newArrayUninitialized
             : newInFrontend!isZeroInit(elementType, Loc.initial)
             ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
-        auto plan = planOf(_bytecode._plans, hook);
+        auto plan = planOf(_bytecode._world.plans, hook);
 
         const length = reserveTemp(pointerFacts);
         evalInto((*expression.arguments)[0], length, size_t.sizeof);
@@ -9964,7 +9879,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (destOffset == discardResult)
             return false;
         Instruction.Handler handler;
-        final switch (_bytecode._callSelection.floatIntrinsicOf(expression, callee))
+        final switch (_bytecode._world.callSelection.floatIntrinsicOf(expression, callee))
             with (CallSelection.FloatIntrinsic) {
             case none: return false;
             case sqrt: handler = &opFloatSqrt; break;
@@ -10195,7 +10110,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
-        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
             callee, &_bytecode.isGuestFunction, hasNativeSymbol,
             _bytecode.hasIndependentNativeSymbol(callee),
         ), site);
@@ -10393,7 +10308,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         windowEnd = size_t.max;
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
-        const decision = CallSelection.atCallSite(_bytecode._callSelection.decisionOf(
+        const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
             callee, &_bytecode.isGuestFunction,
             _bytecode.hasNativeSymbol(callee),
             _bytecode.hasIndependentNativeSymbol(callee),
@@ -10630,9 +10545,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // absent.
                 return CallSite.native(
                     hasNativeSymbol
-                        ? preparation.prepare(_bytecode._plans, callee)
+                        ? preparation.prepare(_bytecode._world.plans, callee)
                         : preparation.prepareUnbound(
-                            _bytecode._plans, callee),
+                            _bytecode._world.plans, callee),
                     args, returnWidth);
             });
     }
@@ -10944,8 +10859,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const nativePlan = isVariadic
             ? preparation.prepareWithoutCode(
-                _bytecode._plans, hasContext)
-            : _bytecode._plans.signatureOf(functionType, hasContext);
+                _bytecode._world.plans, hasContext)
+            : _bytecode._world.plans.signatureOf(functionType, hasContext);
         auto site = CallSite.indirect(
             calleeOffset, guestArgs, nativeArgs, returnWidth, nativePlan,
             hasContext);
@@ -10995,7 +10910,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto site = CallSite.indirect(
             calleeOffset, args, args, returnWidth,
-            _bytecode._plans.signatureOf(functionType, hasContext),
+            _bytecode._world.plans.signatureOf(functionType, hasContext),
             hasContext);
         site.useWindow(window);
         return site;
@@ -11164,7 +11079,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = planOf(_bytecode._plans, hook);
+        auto plan = planOf(_bytecode._world.plans, hook);
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,
@@ -11496,7 +11411,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 compiler.emitTypeInfoConstant(
                     typeInfoObjectOf(
-                        typeInfo, compiler._bytecode._runtimeTypes),
+                        typeInfo, compiler._bytecode._world.types),
                     result, size_t.sizeof,
                 );
                 return result;

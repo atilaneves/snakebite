@@ -60,10 +60,10 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
             != FailurePlan.Kind.ignore;
         _evaluators = ExecutionStates!(Evaluator!false)(
             () => heapNew!(Evaluator!false)(_shared),
-            () => _shared.nativeData.release);
+            () => _shared.world.data.release);
         _checkedEvaluators = ExecutionStates!(Evaluator!true)(
             () => heapNew!(Evaluator!true)(_shared),
-            () => _shared.nativeData.release);
+            () => _shared.world.data.release);
         _shared.prepare = (function_) {
             prepareOnEvaluator(function_);
         };
@@ -72,7 +72,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     // How many chunks of callback entries this instance's bridge has.
     version(unittest)
     public size_t callbackChunkCount() {
-        return _shared.plans.callbackChunkCount;
+        return _shared.world.plans.callbackChunkCount;
     }
 
     protected override void release() {
@@ -98,7 +98,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"dmd.declaration".VarDeclaration variable,
     ) {
-        return _shared.nativeData.storageOf(variable);
+        return _shared.world.data.storageOf(variable);
     }
 
     // The interpreter runs a declaration, so the declaration names it.
@@ -275,7 +275,6 @@ private struct Shared {
     import snakebite.host.threads: heapNew;
     import snakebite.ffi.callplanstore: CallPlanStore;
     import dmd.dclass: ClassDeclaration;
-    import dmd.declaration: Declaration;
     import dmd.func: FuncDeclaration;
     import dmd.mtype: Type;
     import dmd.expression: StructLiteralExp;
@@ -283,16 +282,12 @@ private struct Shared {
     import snakebite.ffi: CallPlan;
     import snakebite.failure.unwind: ExceptionCandidate;
     import snakebite.program: Program;
-    import snakebite.language.call.selection: CallSelection;
-    import snakebite.language.statics.classinfo: ClassRuntimeCache;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
-    import snakebite.language.statics.typeinfo: RuntimeTypes;
     import snakebite.language.context.chain: ClosurePlan, Hop;
     import snakebite.language.context.source: ContextSource;
-    import snakebite.ffi: PlanCache;
     import dmd.declaration: VarDeclaration;
     import snakebite.native.value: TypeFacts;
-    import snakebite.language.statics.data: NativeData;
+    import snakebite.language.statics.world: StaticWorld;
     import snakebite.native.value: BitfieldAccess;
     import snakebite.host.sharedtable: SharedTable;
 
@@ -304,18 +299,10 @@ private struct Shared {
     // of its static data, its plans and its callback bridge.
     StaticStore store;
     CallPlanStore planStore;
-    NativeData nativeData;
-    RuntimeTypes runtimeTypes;
-    // How to reach each already-compiled function this guest calls,
-    // worked out on that function's first call and reused by every call
-    // after it.
-    PlanCache plans;
-    // Whether a callee's own body is preferred does not change while a
-    // program runs. Call-site decisions stay with the evaluator: delegate
-    // arguments and the active nesting context are checked per call.
-    CallSelection callSelection;
-    ClassRuntimeCache classRuntime;
-    // The reverse of `classRuntime`: which declaration a generated
+    // The static data, type information, class information, call plans and
+    // callable addresses of the program.
+    StaticWorld world;
+    // The reverse of `world.classRuntimeInfo`: which declaration a generated
     // `TypeInfo_Class` stands for. An object's own dynamic type is read
     // straight out of its native layout (word 0's vtable, slot 0 - the
     // same place a real compiled object keeps its `classinfo`), the same
@@ -395,21 +382,18 @@ private struct Shared {
         this.program = program;
         this.callGuest = callGuest;
         planStore = CallPlanStore(program.dependencyImage);
-        plans = PlanCache(&planStore,
-            &this.program.isRootOwned);
-        callSelection.linksFunctions = program.definesLinkableFunctions;
         const resolver = &planStore.resolver;
         store = StaticStore(() => heapNew!TlsSlots(resolver));
-        nativeData = NativeData(&store, &this.program.isRootOwned,
-            (variable) => this.program.linkedVariableOf(variable),
-            &constantSymbolAddress,
-            (name) => plans.resolveThreadLocal(name),
-            &classRuntimeInfo, (type) => runtimeTypes.get(type));
-        runtimeTypes = RuntimeTypes(&this.program.isRootOwned,
-            (name) => plans.resolve(name),
-            &callableAddress,
-            &classRuntimeInfo, &nativeData);
-        facts = PreparedFacts(&nativeData, &runtimeTypes, &signatures);
+        world = StaticWorld(program, &store, &planStore,
+            StaticWorld.Backend(
+                &guestWord,
+                (method, address) {
+                    callableDeclarations.insert(address, method);
+                },
+                (declaration, info) {
+                    declarationOf.insert(cast(const(void)*) info, declaration);
+                }));
+        facts = PreparedFacts(&world.data, &world.types, &signatures);
     }
 
     // The guest function a registered entry word stands for. A word that
@@ -423,101 +407,19 @@ private struct Shared {
                 "recorded guest function");
     }
 
-    private FuncDeclaration definitionOf(FuncDeclaration function_) {
-        return callSelection.definitionOf(
-            function_, (declaration) => program.linkedFunctionOf(declaration));
-    }
+    // The word of a guest function is its declaration. The function is
+    // prepared before host code can call it.
+    private const(void)* guestWord(FuncDeclaration method) {
+        const(void)* word = cast(void*) method;
+        if (!world.plans.isGuestWord(word)) {
+            import snakebite.ffi.plan: nativeSignatureOf;
 
-    private void* constantSymbolAddress(Declaration symbol) {
-        import snakebite.frontend.dmd.mangle: nativeSymbolName;
-
-        if (auto function_ = symbol.isFuncDeclaration)
-            return callableAddress(function_, 0);
-
-        return plans.resolve(nativeSymbolName(symbol));
-    }
-
-    // A guest class's native metadata. This vtable is real native layout
-    // that native code reaching a guest object can call through directly
-    // (an unoverridden base method, a template instantiated natively
-    // over a guest type, ...), and that an evaluator's own virtual call
-    // also reads directly, so every slot stays a real callable address,
-    // never a `FuncDeclaration` only an evaluator knows how to walk.
-    TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        if (auto found = classRuntime.find(declaration))
-            return *found;
-
-        return buildClassRuntimeInfo(declaration);
-    }
-
-    // Apart from `classRuntimeInfo`: the delegates below capture `this`, so
-    // a function that holds them allocates a closure when it starts, and
-    // the lookup of a class that exists must not allocate.
-    private TypeInfo_Class buildClassRuntimeInfo(ClassDeclaration declaration) {
-        import snakebite.language.statics.classinfo:
-            classRuntimeInfo_ = classRuntimeInfo, Hooks;
-
-        return classRuntime.build(() => classRuntimeInfo_(
-            declaration,
-            classRuntime,
-            Hooks(
-                &callableAddress,
-                &runtimeTypes.linkedClassInfo,
-                (decl) => runtimeTypes.rtInfo(decl),
-                (decl, info) {
-                    declarationOf.insert(cast(const(void)*) info, decl);
-                },
-                &nativeData,
-            ),
-        ));
-    }
-
-    // A guest function's callable address: a class vtable slot's own
-    // entry (adjusted for the interface offset the slot carries), or the
-    // value `visit(FuncExp)`, `storeDelegateValue` and
-    // `constantSymbolAddress` store for a plain function pointer or a
-    // delegate's function word (`adjustment` 0, no vtable involved).
-    // Program-wide, like the vtable slot itself (ADR-0006): a guest
-    // function's own callability does not depend on which thread asks
-    // for it, so every evaluator forwards here instead of keeping its
-    // own answer.
-    private void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.dsymbolsem: isAbstract;
-
-        // getOverloads can leave an alias in a function-pointer constant.
-        method = definitionOf(method.toAliasFunc);
-        if (method.isAbstract)
-            return null;
-
-        const(void)* word;
-        const hasNativeSymbol = plans.hasNativeSymbol(method);
-        if (callSelection.usesNativeVariadicAddress(method, hasNativeSymbol))
-            return plans.addressOf(method);
-        if (callSelection.usesGuestBody(method,
-                (callee) => program.isInterpreted(callee),
-                hasNativeSymbol,
-                plans.hasIndependentNativeSymbol(method))) {
-            word = cast(void*) method;
-            if (!plans.isGuestWord(word)) {
-                import snakebite.ffi.plan: nativeSignatureOf;
-
-                entryDeclarations.insert(word, method);
-                plans.registerEntry(word, nativeSignatureOf(method));
-            }
-            if (prepare !is null && method !in prepared)
-                prepare(method);
-            if (callSelection.storesGuestWord(
-                    method, hasNativeSymbol, adjustment))
-                return cast(void*) word;
+            entryDeclarations.insert(word, method);
+            world.plans.registerEntry(word, nativeSignatureOf(method));
         }
-        auto address = plans.callableAddress(word, method, adjustment);
-        // The reverse lookup only ever needs the unadjusted address: an
-        // adjusted one is a vtable slot's own entry, reached only through
-        // a virtual call, which already knows its declaration and never
-        // asks `calleeOf`.
-        if (adjustment == 0)
-            callableDeclarations.insert(address, method);
-        return address;
+        if (prepare !is null && method !in prepared)
+            prepare(method);
+        return word;
     }
 }
 
@@ -802,10 +704,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) public this(Shared* shared_) {
         _shared = shared_;
         _program = shared_.program;
-        _nativeData = &shared_.nativeData;
-        _runtimeTypes = &shared_.runtimeTypes;
-        _plans = &shared_.plans;
-        _callSelection = &shared_.callSelection;
+        _nativeData = &shared_.world.data;
+        _runtimeTypes = &shared_.world.types;
+        _plans = &shared_.world.plans;
+        _callSelection = &shared_.world.callSelection;
         _layouts = Cache!(LayoutKey, FrameLayout)(&shared_.layouts);
         _calls = Cache!(FuncDeclaration, CallShape)(&shared_.calls);
         _valueCalls = Cache!(CallExp, ValueCall)(&shared_.valueCalls);
@@ -2224,7 +2126,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 if (!_plans.canPlan(function_))
                     return;
 
-                _shared.callableAddress(function_, 0);
+                _shared.world.callableAddress(function_, 0);
                 enqueue(function_);
             }),
             (variable) => attempt({ prepareVariable(variable); }),
@@ -6747,7 +6649,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // builds the native TypeInfo_Class metadata druntime needs for
     // allocation and classinfo, once per program.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        return _shared.classRuntimeInfo(declaration);
+        return _shared.world.classRuntimeInfo(declaration);
     }
 
     // `Shared.callableAddress` needs no per-thread state (the vtable slot
@@ -6761,7 +6663,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private void* callableAddress(
         FuncDeclaration method, ptrdiff_t adjustment,
     ) {
-        return _shared.callableAddress(method, adjustment);
+        return _shared.world.callableAddress(method, adjustment);
     }
 
     // The guest declaration `info` was generated for, or `null` for a

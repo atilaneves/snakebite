@@ -57,6 +57,12 @@ data. The bytecode compiler fills it on demand. It is
 The module qualifies the name, and inside the bytecode compiler the source
 one is `SourceProgram`.
 
+**Static world**:
+The static data, the type information, the class information, the plans and
+the callable address of each function of one program. One shared module
+builds these and connects them; a backend gives only the storage and the
+word that stands for the guest body of a function.
+
 **Resolver**:
 The single component that turns a mangled symbol name into a host
 address.

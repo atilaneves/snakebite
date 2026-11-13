@@ -7113,7 +7113,7 @@ private Node buildNewStorage(E)(
 private const(void)[] classImageOf(E)(E ev, NewExp expression) {
     import dmd.typesem: toBasetype;
 
-    return ev._shared.classRuntimeInfo(
+    return ev._shared.world.classRuntimeInfo(
         expression.newtype.toBasetype.isTypeClass.sym).m_init;
 }
 
