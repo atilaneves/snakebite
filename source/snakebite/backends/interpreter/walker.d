@@ -1535,7 +1535,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (CallSelection.atCallSite(decision, site).route
                 == CallSelection.Route.native)
             callee.plan = cachedCallPlan(site, function_,
-                () => preparation.prepare(*_plans, function_));
+                () => sitePlan(preparation, function_));
 
         // The slots in the order that the native callee takes them
         // (`CallAdapter.Arguments.nativeOrder`): the `TypeInfo` tuple of a
@@ -2234,7 +2234,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto adapter = CallAdapter.Arguments.of(
                 typeFunctionOf(callee), arguments);
             cachedCallPlan(site, callee,
-                () => adapter.prepare(*_plans, callee));
+                () => sitePlan(adapter, callee));
         } else
             callPlanOf(site, callee);
     }
@@ -2272,6 +2272,18 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
 
         runForEffect(expression);
+    }
+
+    // The plan of a call site, made when execution reaches the call or when
+    // a callback is prepared: a callee that this process cannot call fails
+    // here.
+    private const(CallPlan)* sitePlan(
+        ref imported!"snakebite.ffi.call".CallAdapter.Arguments arguments,
+        FuncDeclaration callee,
+    ) {
+        import snakebite.ffi.callplanstore: CallPlanStore;
+
+        return CallPlanStore.bound(arguments.plan(*_plans, callee));
     }
 
     private const(CallPlan)* callPlanOf(
@@ -7317,7 +7329,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             typeFunctionOf(function_), arguments,
         );
         const plan = cachedCallPlan(callSite, function_,
-            () => preparation.prepare(*_plans, function_));
+            () => sitePlan(preparation, function_));
         bindArguments(function_, arguments, callSite.loc, frame, layout, true);
 
         const mark = _frames.mark;

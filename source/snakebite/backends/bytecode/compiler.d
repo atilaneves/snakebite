@@ -9050,7 +9050,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
             compileNativeCall(
                 callee, type, arguments, loc, initialArgs,
-                destOffset, hasNativeSymbol);
+                destOffset);
             return;
         case builtin:
             compileBuiltinCall(type, arguments, loc,
@@ -9456,7 +9456,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Loc loc,
         Arg[] initialArgs,
         in size_t destOffset,
-        in bool hasNativeSymbol,
     ) {
         import snakebite.ffi.call: CallAdapter;
 
@@ -9472,10 +9471,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // execution reaches it, and fails if the symbol is still
                 // absent.
                 return CallSite.native(
-                    hasNativeSymbol
-                        ? preparation.prepare(_bytecode._world.plans, callee)
-                        : preparation.prepareUnbound(
-                            _bytecode._world.plans, callee),
+                    preparation.plan(_bytecode._world.plans, callee),
                     args, returnWidth);
             });
     }

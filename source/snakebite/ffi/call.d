@@ -128,29 +128,16 @@ public struct CallAdapter {
             return _declaredOffset + _type.parameterList.length;
         }
 
-        // Called only when the backend has no plan for this call site.
-        // A repeated interpreter call must not rebuild the extra-type list.
-        public const(CallPlan)* prepare(
+        // The plan of this call site for `callee` (`PlanCache.ofSite`).
+        public const(CallPlan)* plan(
             ref PlanCache plans, FuncDeclaration callee,
         ) {
             import dmd.astenums: VarArg;
 
-            if (_type.parameterList.varargs != VarArg.variadic)
-                return plans.of(callee);
-            return plans.variadicKeptOf(callee, extraTypes);
-        }
-
-        // As `prepare`, for a callee whose symbol may not be in this process:
-        // the plan is unbound, and a call of it fails with the failure that
-        // `prepare` throws (`PlanCache.unboundOf`).
-        public const(CallPlan)* prepareUnbound(
-            ref PlanCache plans, FuncDeclaration callee,
-        ) {
-            import dmd.astenums: VarArg;
-
-            if (_type.parameterList.varargs != VarArg.variadic)
-                return plans.unboundOf(callee);
-            return plans.unboundVariadicOf(callee, extraTypes);
+            const variadic =
+                _type.parameterList.varargs == VarArg.variadic;
+            return plans.ofSite(
+                callee, variadic, variadic ? extraTypes : null);
         }
 
         private Type[] extraTypes() {
