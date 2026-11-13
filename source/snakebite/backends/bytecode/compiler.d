@@ -489,9 +489,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // so a speculative compile must not compile it. The rejection leaves
     // only the callee's own compile to unwind: class runtime info, built
     // through `callableAddress` itself, never sees it.
-    private imported!"snakebite.backends.bytecode.relocation".Address
+    private imported!"snakebite.native.address".Address
     operandAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import snakebite.backends.bytecode.relocation: Address;
+        import snakebite.native.address: Address;
 
         if (_speculating != 0)
             throw new SpeculationRejected;
@@ -502,10 +502,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // The address of a copy of the C string `text` that the process store owns.
     // The frontend frees its own strings, and a file holds the bytes of this
     // one. The caller holds the compiler lock.
-    private imported!"snakebite.backends.bytecode.relocation".Address
+    private imported!"snakebite.native.address".Address
     adoptedString(const(char)* text) {
         import core.stdc.string: memcpy, strlen;
-        import snakebite.backends.bytecode.relocation: Address, Target;
+        import snakebite.native.address: Address, Target;
 
         const length = strlen(text);
         if (auto found = text[0 .. length] in _adoptedStrings)
@@ -517,14 +517,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return address;
     }
 
-    private imported!"snakebite.backends.bytecode.relocation".Address[string]
+    private imported!"snakebite.native.address".Address[string]
         _adoptedStrings;
 
     // What `callableAddress` returned: a guest function, the callback entry
     // that host code calls for one, or code of the host.
-    private imported!"snakebite.backends.bytecode.relocation".Target.Kind
+    private imported!"snakebite.native.address".Target.Kind
     callableKind(in void* address) {
-        import snakebite.backends.bytecode.relocation: Target;
+        import snakebite.native.address: Target;
 
         if (address is null || _plans.isGuestWord(address))
             return Target.Kind.functionWord;
@@ -1030,8 +1030,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.language.context.source:
         ContextSource, PairPlan, calleeContextSourceOf, contextSourceOf,
         pairPlanOf;
-    import snakebite.backends.bytecode.relocation:
-        Address, Place, Reloc, Target;
+    import snakebite.backends.bytecode.relocation: Place, Reloc;
+    import snakebite.native.address: Address, Target;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.language.layout.temporary: TemporaryPlan, constructTemporary;
     import snakebite.failure.report: SnakebiteException;

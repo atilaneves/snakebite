@@ -4,6 +4,9 @@ module snakebite.backends.bytecode.relocation;
 private:
 
 
+import snakebite.native.address: Target;
+
+
 // What a compiled function needs to know about every word that holds an
 // address of this process. A stored image has to load into a process whose
 // addresses differ, so each such word names the thing it points at. This
@@ -13,81 +16,6 @@ private:
 // instruction, the entry of a builtin call, the action of a halting check) has
 // no `Reloc`: the file holds it as a distance from one handler, and a field of
 // that kind says so with `hostCode`.
-
-// What an address points at.
-public struct Target {
-    public enum Kind : ubyte {
-        // Data of the program: literals, `.init` images, statics.
-        staticData,
-        // Code of the host process.
-        hostSymbol,
-        // A compiled function, as a function pointer or a delegate holds it.
-        functionWord,
-        // A copy of a string literal that the process store owns.
-        adoptedString,
-        // A value in the native constant pool.
-        constantPool,
-        // A prepared foreign call.
-        nativePlan,
-        // The signature of a function type.
-        signature,
-        // The entry that host code calls to reach a guest function.
-        callbackEntry,
-    }
-
-    public Kind kind;
-    // The address in this process.
-    public size_t address;
-    // For `staticData` and `constantPool`: the datum that the address is the
-    // start of. The compiler knows it where it makes the address, so a save
-    // never searches for it by the value of the address.
-    public DatumRef datum;
-}
-
-// A datum of static data: the blocks that hold it (a `StaticBlocks`, opaque
-// here) and where it starts in them. `set` is null when no blocks hold the
-// datum, as for the image of a class, which the GC heap holds.
-public struct DatumRef {
-    public const(void)* set;
-    public size_t block;
-    public size_t offset;
-}
-
-
-// A process address together with what it points at. It does not convert to
-// `size_t`, so that no address reaches an instruction or a constant without
-// being recorded.
-public struct Address {
-    private Target _target;
-
-    public this(in Target.Kind kind, in size_t address) @safe pure nothrow @nogc {
-        _target = Target(kind, address);
-    }
-
-    public this(in Target.Kind kind, in void* address) @safe pure nothrow @nogc {
-        _target = Target(kind, cast(size_t) address);
-    }
-
-    public this(
-        in Target.Kind kind, in void* address, in DatumRef datum,
-    ) @safe pure nothrow @nogc {
-        _target = Target(kind, cast(size_t) address, datum);
-    }
-
-    public Target target() const @safe pure nothrow @nogc {
-        return _target;
-    }
-
-    // The word that goes into the instruction or constant.
-    package size_t word() const @safe pure nothrow @nogc {
-        return _target.address;
-    }
-
-    public bool isNull() const @safe pure nothrow @nogc {
-        return _target.address == 0;
-    }
-}
-
 
 // Where a word that holds an address sits: in a `Function`, or in a datum of
 // static data.

@@ -14,8 +14,9 @@ private:
 
 import snakebite.backends.bytecode.program: Module, Program;
 import snakebite.backends.bytecode.relocation:
-    DatumRef, HostCode, Place, Plain, Reloc, Relocated, SetBy, Target;
+    HostCode, Place, Plain, Reloc, Relocated, SetBy;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
+import snakebite.native.address: DatumRef, Target;
 import snakebite.backends.bytecode.vm:
     AssertSite, bindInstructionReferences, CallSite, ExceptionHandler,
     Function, hostCodeAt, hostCodeOffset, Instruction, JitSetting,
@@ -972,8 +973,8 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
             datum.canHoldAddress = source.canHoldAddress;
             contents = cast(ubyte[]) blocks.bytesOf(source).dup;
             foreach (link; source.links)
-                contents[link.place.index
-                    .. link.place.index + size_t.sizeof] = 0;
+                contents[link.wordOffset
+                    .. link.wordOffset + size_t.sizeof] = 0;
         }
         archive.scalar(datum.block);
         archive.scalar(datum.offset);
@@ -1022,7 +1023,7 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             StaticBlocks.Link link;
             if (archive.isWriting)
                 link = links[linkIndex];
-            archive.transfer(link.place);
+            archive.scalar(link.wordOffset);
             archive.transfer(link.kind);
             size_t[3] reference;
             if (archive.isWriting)
@@ -1031,14 +1032,12 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             if (archive.isWriting)
                 continue;
             auto bytes = cast(ubyte[]) blocks.bytesOf(blocks.data[index]);
-            const place = link.place;
-            if (place.section != Place.Section.datum
-                    || place.index > bytes.length
-                    || bytes.length - place.index < size_t.sizeof)
+            if (link.wordOffset > bytes.length
+                    || bytes.length - link.wordOffset < size_t.sizeof)
                 throw new SnakebiteException(
                     "the program file holds a relocation with no place");
             const address = addressOf(archive, link.kind, reference);
-            bytes[place.index .. place.index + size_t.sizeof] =
+            bytes[link.wordOffset .. link.wordOffset + size_t.sizeof] =
                 (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
         }
     }

@@ -4,7 +4,7 @@ module snakebite.native.staticstore;
 private:
 
 
-import snakebite.backends.bytecode.relocation: DatumRef, Place, Reloc, Target;
+import snakebite.native.address: DatumRef, Target;
 import snakebite.host.threads: PerThread;
 import snakebite.native.value: TypeFacts;
 import snakebite.stack.tls: TlsSlots;
@@ -36,8 +36,7 @@ public struct StaticBlocks {
         public uint alignment;
         public bool canHoldAddress;
         // The words of the datum that hold an address, when the compiler
-        // records them (`recordAddress`). The offset of a word is the `index`
-        // of its place.
+        // records them (`recordAddress`).
         public Link[] links;
     }
 
@@ -48,7 +47,8 @@ public struct StaticBlocks {
     // that the address was computed from. An offset can be the end of the
     // datum. For any other kind it is `address`.
     public struct Link {
-        public Place place;
+        // The offset in the datum of the word that holds the address.
+        public size_t wordOffset;
         public Target.Kind kind;
         public const(StaticBlocks)* set;
         public size_t block;
@@ -102,8 +102,7 @@ public struct StaticBlocks {
         const found = datumAt(place);
         if (found.index == size_t.max)
             return false;
-        link.place =
-            Place(Place.Section.datum, Place.Field.word, found.offset);
+        link.wordOffset = found.offset;
         _data[found.index].links ~= link;
         return true;
     }
@@ -118,9 +117,9 @@ public struct StaticBlocks {
             return found;
         foreach (recorded; _data[owner.index].links) {
             Link link = recorded;
-            const offset = link.place.index;
+            const offset = link.wordOffset;
             if (offset >= owner.offset && offset - owner.offset < length) {
-                link.place.index = offset - owner.offset;
+                link.wordOffset = offset - owner.offset;
                 found ~= link;
             }
         }

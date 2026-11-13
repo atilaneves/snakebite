@@ -8,7 +8,8 @@ version (unittest):
 private:
 
 
-import snakebite.backends.bytecode.relocation: Place, Reloc, Target;
+import snakebite.backends.bytecode.relocation: Place, Reloc;
+import snakebite.native.address: Target;
 import snakebite.backends.bytecode.vm: Function, Instruction, Roles,
     jitCompiled, rolesOf;
 import std.conv: text;

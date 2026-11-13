@@ -6,7 +6,7 @@ private:
 
 import dmd.dmodule: Module;
 import snakebite.failure.report: internalFailure;
-import snakebite.backends.bytecode.relocation: Address, DatumRef, Target;
+import snakebite.native.address: Address, DatumRef, Target;
 import snakebite.frontend.typefacts;
 import snakebite.native.staticstore: Placed, StaticBlocks, StaticStore;
 import snakebite.native.value:
@@ -331,7 +331,7 @@ public struct NativeData {
             return;
         foreach (blocks; _knownBlocks)
             foreach (link; blocks.linksIn(source.ptr, source.length))
-                recordLink(cast(ubyte*) place + link.place.index, link);
+                recordLink(cast(ubyte*) place + link.wordOffset, link);
     }
 
     // Whether the initial image of `info` is bytes of the host, whose address

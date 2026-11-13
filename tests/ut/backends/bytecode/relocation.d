@@ -6,7 +6,8 @@ import dmd.func: FuncDeclaration;
 import snakebite.program: Program;
 import snakebite.backends.bytecode.inspection:
     handlerRoleMismatches, misplacedRelocs, relocsOf;
-import snakebite.backends.bytecode.relocation: Place, Target;
+import snakebite.backends.bytecode.relocation: Place;
+import snakebite.native.address: Target;
 import snakebite.backends.bytecode.vm:
     Function, registerFormsWithChangedRoles, specialisedHandlersWithoutRoles;
 import snakebite.frontend.compiler: parseSnippet;
