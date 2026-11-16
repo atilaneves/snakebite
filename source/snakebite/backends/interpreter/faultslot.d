@@ -29,7 +29,7 @@ public const(void)** faultSlotOf(ubyte* frame) @system @nogc nothrow pure {
 
 // A function and the full expression in it that runs, or none.
 public struct FaultSite {
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
 
     public FuncDeclaration function_;
     public const(void)* expression;

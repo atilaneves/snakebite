@@ -2,14 +2,10 @@ module snakebite.backends.interpreter.preparedfacts;
 
 private:
 
-import dmd.declaration: VarDeclaration;
-import dmd.expression: CallExp, CastExp, StructLiteralExp, StringExp;
-import dmd.func: FuncDeclaration;
-import dmd.mtype: Type;
-import dmd.astenums: Tfunction, Ttuple, Terror;
-import dmd.typesem: baseElemOf;
+import snakebite.frontend.ast: CallExp, CastExp, FuncDeclaration, Loc,
+    StringExp, StructLiteralExp, Terror, Tfunction, Ttuple, Type,
+    VarDeclaration;
 import snakebite.frontend.typefacts: baseType;
-import dmd.location: Loc;
 import snakebite.language.statics.typeinfo: RuntimeTypes;
 import snakebite.language.storage.lifetime: AggregateInitPlan, planStructLiteral;
 import snakebite.language.operators.casts: CastPlan, classify;
@@ -121,7 +117,7 @@ package struct PreparedFacts {
     }
 
     package void prepareCast(CastExp expression) {
-        import dmd.astenums: Tvoid;
+        import snakebite.frontend.ast: Tvoid;
 
         if (expression.type is null || expression.type.baseType.ty == Tvoid)
             return;
