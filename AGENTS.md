@@ -73,6 +73,46 @@ and only have `Omit` for the ones verified to fail.
 
 Measure with the existing tools. Do not write a new benchmark harness.
 
+### Closing a performance gap
+
+When the goal is to catch a faster backend, choose experiments from evidence
+of why that backend is faster. A tiny prototype limits implementation scope;
+it does not limit the size of the cause to investigate.
+
+Before assigning or starting an implementation, record in the relevant issue:
+
+1. The owner's goal and ONE benchmark selected from the available measurements.
+   State the measured gap, versions, conditions, and comparison limits.
+2. The hot code actually executed by both backends. An emitted code listing
+   alone does not establish execution. Record missing evidence as unresolved;
+   the next task then gathers that evidence before implementation.
+3. The specific difference that could explain the gap, the evidence for its
+   cost, and the guarantees a transfer must preserve. Separate observations
+   from hypotheses. Use the relevant ADRs to identify those guarantees.
+4. One small experiment that tests that cause, its predicted code change, and
+   the result that would reject the hypothesis. Rank causes by evidence and
+   potential contribution to the gap, rather than ease of implementation.
+5. The existing measurement command and correctness checks. Measure execution,
+   compilation, and whole-process time separately. State which compilation
+   work each reported timer includes and excludes.
+
+The coordinating agent checks this record before dispatching an implementer.
+Give the implementer the evidence and hypothesis, not only a proposed edit.
+After each result, revise the causal explanation and select the next experiment
+from it. Keep untested ideas as a backlog, not an automatic execution queue.
+
+Report local speedups separately from progress against the competitor gap.
+Claim gap reduction only from a comparable measurement; do not combine an old
+competitor result with a new prototype result as if measured together.
+
+| Rule | Enforcement |
+| --- | --- |
+| Causal experiment selection | Coordinator checks the issue before coding. |
+
+This is a judgment check, not an automated guarantee.
+
+### Measurement tools
+
 - `bin/bench <project directory or dub package> -w 0 -r 1` times the
   backends and the native `dub test` edit cycle (`bench/source/bench/oracle.d`).
 - `build/bench-corpus.sh` lists the corpus projects. They are already in
