@@ -59,10 +59,10 @@ private enum TypeKind {
 public CastPlan classify(
     imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
 ) {
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    sourceType = sourceType.toBasetype;
-    destType = destType.toBasetype;
+    sourceType = sourceType.baseType;
+    destType = destType.baseType;
 
     return classifyByKind(
         kindOf(sourceType), kindOf(destType), sourceType, destType,

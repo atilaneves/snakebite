@@ -112,7 +112,8 @@ package struct TreeRoot {
 // What the result word of a call of `function_` holds.
 package ResultWord resultWordFor(E)(E ev, FuncDeclaration function_) {
     import dmd.astenums: TY;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     if (typeFunctionOf(function_).isRef)
@@ -378,20 +379,20 @@ private struct Position {
 
 package bool isSlice(Type type) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    return type !is null && type.toBasetype.ty == TY.Tarray;
+    return type !is null && type.baseType.ty == TY.Tarray;
 }
 
 // A call of a `void` function gives no value, and a call of a `noreturn`
 // function never returns to give one: neither result has bytes.
 package bool hasNoResult(Type type) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     if (type is null)
         return false;
-    const ty = type.toBasetype.ty;
+    const ty = type.baseType.ty;
     return ty == TY.Tvoid || ty == TY.Tnoreturn;
 }
 
@@ -5057,7 +5058,8 @@ private void examine(E)(E ev, TreeCallee* callee) {
     import dmd.astenums: STC, TY;
     import dmd.expression: ThisExp;
     import dmd.tokens: EXP;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.delegates: isDualContext;
 
     callee.shape.kind = CalleeShape.Kind.other;
@@ -5078,7 +5080,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
         if (receiver is null
                 || receiver.var !is null && receiver.var !is function_.vthis)
             return null;
-        const kind = dot.e1.type.toBasetype.ty;
+        const kind = dot.e1.type.baseType.ty;
         auto field = dot.var.isVarDeclaration;
         if (kind != TY.Tclass && kind != TY.Tstruct || field is null
                 || field.isBitFieldDeclaration !is null || field.isDataseg)
@@ -5111,7 +5113,7 @@ private void examine(E)(E ev, TreeCallee* callee) {
         auto effect = only.isExpStatement;
         if (effect is null || effect.exp is null || hasPair
                 || effect.exp.op != EXP.assign
-                || function_.type.nextOf.toBasetype.ty != TY.Tvoid
+                || function_.type.nextOf.baseType.ty != TY.Tvoid
                 || function_.parameters is null
                 || function_.parameters.length != 1
                 || callee.slots.length != 1 || callee.slots[0].isRef)
@@ -5528,16 +5530,16 @@ private final class BuiltinOp : Node {
 // call.
 private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     const selected = ev._callSelection.floatIntrinsicOf(call, function_);
     if (selected != CallSelection.FloatIntrinsic.none) {
-        const ty = call.type.toBasetype.ty;
+        const ty = call.type.baseType.ty;
         auto argument = (*call.arguments)[0];
         if ((ty != TY.Tfloat32 && ty != TY.Tfloat64)
-                || argument.type.toBasetype.ty != ty)
+                || argument.type.baseType.ty != ty)
             return null;
         auto operand = buildValue(ev, argument);
         if (operand is null)
@@ -5595,11 +5597,11 @@ private struct Scalar {
 
 private Scalar scalarOf(E)(E ev, Type type) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     if (type is null)
         return Scalar();
-    switch (type.toBasetype.ty) with (TY) {
+    switch (type.baseType.ty) with (TY) {
         case Tbool, Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64,
                 Tuns64, Tchar, Twchar, Tdchar:
             return Scalar(Scalar.Kind.integral, ev.factsOf(type));
@@ -5753,14 +5755,14 @@ private Node buildVariableAddress(E)(E ev, VarDeclaration variable) {
 private Node buildAddress(E)(E ev, Expression expression) {
     import dmd.astenums: TY;
     import dmd.tokens: EXP;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     switch (expression.op) with (EXP) {
         case variable:
             return buildVariableAddress(
                 ev, expression.isVarExp.var.isVarDeclaration);
         case this_: {
-            if (expression.type.toBasetype.ty != TY.Tstruct)
+            if (expression.type.baseType.ty != TY.Tstruct)
                 return null;
             return buildThisValue(ev, thisVariable(ev, expression.isThisExp));
         }
@@ -5769,7 +5771,7 @@ private Node buildAddress(E)(E ev, Expression expression) {
             auto field = dot.var.isVarDeclaration;
             if (field is null || field.isBitFieldDeclaration !is null)
                 return null;
-            const baseKind = dot.e1.type.toBasetype.ty;
+            const baseKind = dot.e1.type.baseType.ty;
             if (baseKind == TY.Tclass || baseKind == TY.Tpointer) {
                 static if (E.nullCheckedEvaluator)
                     return null;
@@ -5856,14 +5858,15 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     import dmd.astenums: TY;
     import snakebite.language.storage.resolver: readsIndexAfterBase;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
 
-    auto element = ev.factsOf(indexed.e1.type.toBasetype.nextOf);
+    auto element = ev.factsOf(indexed.e1.type.baseType.nextOf);
     auto position = buildValue(ev, indexed.e2);
     if (position is null)
         return null;
     const dollar = dollarSlot(ev, indexed.lengthVar);
-    switch (indexed.e1.type.toBasetype.ty) with (TY) {
+    switch (indexed.e1.type.baseType.ty) with (TY) {
         case Tarray: {
             auto array = buildAddress(ev, indexed.e1);
             if (array is null) {
@@ -5886,7 +5889,7 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
             auto array = buildAddress(ev, indexed.e1);
             if (array is null)
                 return null;
-            const length = cast(size_t) indexed.e1.type.toBasetype
+            const length = cast(size_t) indexed.e1.type.baseType
                 .isTypeSArray.dim.toInteger;
             // An array that is read first has calls or effects, so its
             // address is a node.
@@ -6054,7 +6057,7 @@ private bool bindsReference(E)(E ev, AssignExp e) {
 // outside what `Call` runs.
 private Node buildCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.context.source: pairPlanOf;
     import snakebite.frontend.dmd.dispatch: CallReceiver, readsVtable,
@@ -6198,7 +6201,7 @@ private Node bound(N)(TreeCallee* callee, N node) {
 // contexts reaches it through its pair.
 private Node buildThisValue(E)(E ev, VarDeclaration variable) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.context.chain: ClosurePlan;
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
 
@@ -6208,7 +6211,7 @@ private Node buildThisValue(E)(E ev, VarDeclaration variable) {
     auto owner = outerFunctionOf(variable);
     const hops = owner is null ? null : ClosurePlan.receiverHops(owner);
     if (hops.length == 0)
-        return variable.type.toBasetype.ty == TY.Tclass
+        return variable.type.baseType.ty == TY.Tclass
             ? new LoadChain(slot, [0]) : slot;
     size_t[] loads = [0];
     foreach (hop; hops)
@@ -6281,7 +6284,8 @@ private Node buildContext(E)(
 // the callee is outside what the tree reads.
 private Node buildIndirectCall(E)(E ev, CallExp call) {
     import dmd.astenums: TY;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.call.selection: isIndirectDelegateCall;
 
     auto callee = call.e1;
@@ -6289,7 +6293,7 @@ private Node buildIndirectCall(E)(E ev, CallExp call) {
     Node target;
     imported!"dmd.mtype".TypeFunction type;
     if (viaDelegate) {
-        type = callee.type.toBasetype.nextOf.isTypeFunction;
+        type = callee.type.baseType.nextOf.isTypeFunction;
         target = buildDelegate(ev, callee);
     } else {
         // dmd calls a function pointer as `(*pointer)(arguments)`.
@@ -6476,9 +6480,9 @@ private bool buildArgument(E)(
 
 package bool isDelegate(Type type) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    return type !is null && type.toBasetype.ty == TY.Tdelegate;
+    return type !is null && type.baseType.ty == TY.Tdelegate;
 }
 
 // A value of two words: a dynamic array or a delegate.
@@ -6762,7 +6766,8 @@ private Node buildSliceAssignment(E)(
     E ev, AssignExp assignment, SliceExp target,
 ) {
     import dmd.expression: MemorySet;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.resolver: planSlice;
 
     if (planSlice(target).yieldsStaticArray
@@ -6772,7 +6777,7 @@ private Node buildSliceAssignment(E)(
     auto to = buildSliceOf(ev, target);
     if (to is null)
         return null;
-    auto element = assignment.type.toBasetype.nextOf;
+    auto element = assignment.type.baseType.nextOf;
     if (assignment.memset == MemorySet.blockAssign)
         return buildSliceFill(ev, to, element, assignment.e2);
     auto from = buildSlice(ev, assignment.e2);
@@ -6865,7 +6870,8 @@ private Node buildComma(E)(
 private Node buildSliceOf(E)(E ev, SliceExp expression) {
     import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.resolver: planSlice;
 
     const plan = planSlice(expression);
@@ -6873,7 +6879,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
         return null;
     // `a[]` of a dynamic array is `a`: it has no bounds to check.
     if (expression.lwr is null && expression.upr is null
-            && expression.e1.type.toBasetype.ty == TY.Tarray)
+            && expression.e1.type.baseType.ty == TY.Tarray)
         return buildSlice(ev, expression.e1);
     Node lower, upper;
     if (expression.lwr !is null) {
@@ -6886,7 +6892,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
         if (upper is null)
             return null;
     }
-    auto sourceType = expression.e1.type.toBasetype;
+    auto sourceType = expression.e1.type.baseType;
     const stride = ev.factsOf(sourceType.nextOf).size;
     const dollar = dollarSlot(ev, expression.lengthVar);
     Node make(SliceSource source)(
@@ -6976,7 +6982,7 @@ private Node buildZeroPair(E)(E ev, Expression operand) {
 // value of `new int(1)` fills the new storage as a field at offset 0 does.
 private Node buildNew(E)(E ev, NewExp expression) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.lifetime: AggregateInitPlan, driveInit,
         NewPlan, planClassContext, planNew, planPositionalFields;
 
@@ -6992,11 +6998,11 @@ private Node buildNew(E)(E ev, NewExp expression) {
             break;
         case struct_:
             initialisation = planPositionalFields(
-                expression.newtype.toBasetype.isTypeStruct.sym,
+                expression.newtype.baseType.isTypeStruct.sym,
                 expression.member is null ? expression.arguments : null);
             break;
         case scalar: {
-            const stores = expression.type.toBasetype.ty == TY.Tpointer
+            const stores = expression.type.baseType.ty == TY.Tpointer
                 && expression.arguments !is null
                 && expression.arguments.length != 0;
             if (!stores)
@@ -7064,7 +7070,7 @@ private Node buildNewStorage(E)(
     E ev, NewExp expression,
     imported!"snakebite.language.storage.lifetime".NewPlan plan,
 ) {
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.lifetime: NewPlan;
 
     final switch (plan.destination) with (NewPlan.Destination) {
@@ -7086,7 +7092,7 @@ private Node buildNewStorage(E)(
         case stack: {
             assert(plan.objectKind == NewPlan.ObjectKind.class_,
                 "only a class object lives in the frame");
-            auto declaration = expression.newtype.toBasetype.isTypeClass.sym;
+            auto declaration = expression.newtype.baseType.isTypeClass.sym;
             return new FrameObject!E(ev, declaration.structsize,
                 declaration.alignsize == 0 ? 1 : declaration.alignsize,
                 classImageOf(ev, expression));
@@ -7096,10 +7102,10 @@ private Node buildNewStorage(E)(
 
 // The initial bytes of an object of the class that `expression` makes.
 private const(void)[] classImageOf(E)(E ev, NewExp expression) {
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     return ev._shared.world.classRuntimeInfo(
-        expression.newtype.toBasetype.isTypeClass.sym).m_init;
+        expression.newtype.baseType.isTypeClass.sym).m_init;
 }
 
 // The hidden context of a nested aggregate. A nested class made with an
@@ -7192,7 +7198,7 @@ private Node buildThrow(E)(E ev, Expression operand) {
 private Node buildEffect(E)(E ev, Expression expression) {
     import dmd.astenums: TY;
     import dmd.tokens: EXP;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     if (auto declaration = expression.isDeclarationExp)
         return buildDeclaration(ev, declaration);
@@ -7851,9 +7857,9 @@ private Node buildEquality(bool negate, E)(E ev, EqualExp e) {
 private Node buildArrayOperand(E)(E ev, Expression operand) {
     import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    auto type = operand.type.toBasetype;
+    auto type = operand.type.baseType;
     if (type.ty != TY.Tsarray)
         return buildSlice(ev, operand);
     auto address = buildAddress(ev, operand);
@@ -8284,11 +8290,11 @@ private Node buildInitializer(E)(
         return null;
     if (variableIsAggregate) {
         import dmd.astenums: TY;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
 
         // A copy with a postblit is `(variable = value).__postblit()`, which
         // constructs the variable for its effect.
-        if (value.type.toBasetype.ty == TY.Tvoid) {
+        if (value.type.baseType.ty == TY.Tvoid) {
             auto effect = buildEffect(ev, value);
             return effect is null
                 ? null : statementOf(effect, positionOf(ev, declaration));
@@ -8330,11 +8336,11 @@ private Node buildInitializer(E)(
 // register scalar or a slice.
 package bool isAggregate(Type type) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     if (type is null)
         return false;
-    const kind = type.toBasetype.ty;
+    const kind = type.baseType.ty;
     return kind == TY.Tstruct || kind == TY.Tsarray;
 }
 
@@ -9139,7 +9145,7 @@ private Node buildReturnOperand(E)(
     E ev, imported!"dmd.statement".ReturnStatement returned,
 ) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     if (typeFunctionOf(ev._function).isRef) {

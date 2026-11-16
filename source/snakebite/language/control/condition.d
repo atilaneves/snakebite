@@ -56,14 +56,14 @@ package(snakebite) LogicalPlan logicalPlan(
     imported!"dmd.expression".LogicalExp expression,
 ) {
     import dmd.astenums: Tnoreturn, Tvoid;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    const rightType = expression.e2.type.toBasetype.ty;
+    const rightType = expression.e2.type.baseType.ty;
     const hasNoValue = rightType == Tvoid || rightType == Tnoreturn;
     return LogicalPlan(
         expression.op == EXP.andAnd,
         hasNoValue ? LogicalPlan.Right.effect : LogicalPlan.Right.value,
-        expression.type.toBasetype.ty != Tvoid,
+        expression.type.baseType.ty != Tvoid,
     );
 }
 
@@ -76,12 +76,12 @@ package(snakebite) bool isPlainCondition(
     Expression expression, in Flag!"calls" calls = Yes.calls,
 ) {
     import dmd.astenums: STC, Tpointer, VarArg;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     const facts = typeFacts(expression.type);
     const scalar = (facts.isIntegral && isIntegralSize(facts.size))
         || isRealFloatType(expression.type)
-        || expression.type.toBasetype.ty == Tpointer;
+        || expression.type.baseType.ty == Tpointer;
     if (!scalar)
         return false;
 
@@ -157,8 +157,8 @@ package(snakebite) bool isPlainPlace(Expression expression) {
 
 package(snakebite) bool isRealFloatType(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    const ty = type.toBasetype.ty;
+    const ty = type.baseType.ty;
     return ty == Tfloat32 || ty == Tfloat64 || ty == Tfloat80;
 }

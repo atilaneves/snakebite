@@ -166,9 +166,12 @@ public struct RuntimeTypes {
     // answers a qualified type with a qualifier wrapper around it.
     public TypeInfo_Class unqualifiedClassInfo(Type declared) {
         import dmd.astenums: Tclass;
-        import dmd.typesem: mutableOf, toBasetype, unSharedOf;
+        import dmd.typesem: mutableOf, unSharedOf;
+        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.typefacts: baseType;
 
-        auto type = declared.toBasetype.mutableOf.unSharedOf;
+        auto type = newInFrontend!unSharedOf(
+            newInFrontend!mutableOf(baseType(declared)));
         if (type.ty != Tclass)
             internalFailure("a class type has a class type once its qualifiers go");
 
@@ -424,10 +427,26 @@ public struct RuntimeTypes {
         _data.storeFunction(place, _methodAddress(declaration, 0));
     }
 
+    // `initializer` reaches this without the frontend lock, and the build
+    // asks dmd about the struct (`hasPointers`, `argType`), which can
+    // change the frontend's state.
     private TypeInfo_Struct structInfo(StructDeclaration declaration) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
         if (auto cached = declaration in _structs)
             return *cached;
 
+        TypeInfo_Struct info;
+        withCompilerLock({
+            if (auto cached = declaration in _structs)
+                info = *cached;
+            else
+                info = buildStructInfo(declaration);
+        });
+        return info;
+    }
+
+    private TypeInfo_Struct buildStructInfo(StructDeclaration declaration) {
         import dmd.root.string: toDString;
         auto info = _data.newObject!TypeInfo_Struct(declaration);
         _structs.insert(declaration, info);

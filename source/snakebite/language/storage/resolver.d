@@ -10,7 +10,8 @@ import dmd.expression:
     AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, MemorySet,
     SymOffExp;
 import dmd.astenums: Tarray, Tsarray, Tvector;
-import dmd.typesem: isIntegral, toBasetype;
+import dmd.typesem: isIntegral;
+import snakebite.frontend.typefacts: baseType;
 
 // The decisions both backends use for a `SliceExp`: its bounds checks, which
 // dmd makes in its glue layer (`e2ir.d`), and what the slice yields. The
@@ -31,13 +32,13 @@ public struct SlicePlan {
 }
 
 public SlicePlan planSlice(imported!"dmd.expression".SliceExp expression) {
-    const isPointer = expression.e1.type.toBasetype.isTypePointer !is null;
+    const isPointer = expression.e1.type.baseType.isTypePointer !is null;
 
     return SlicePlan(
         !expression.lowerIsLessThanUpper,
         !isPointer && !expression.upperIsInBounds,
         !isPointer,
-        expression.type.toBasetype.isTypeSArray !is null,
+        expression.type.baseType.isTypeSArray !is null,
     );
 }
 
@@ -102,8 +103,8 @@ public struct StorageResolver(Result, Adapter) {
             // dmd represents `v[i]` on a vector `v` by indexing a cast of
             // `v` to its element static array type; the cast shares `v`'s
             // storage, so index into `v` directly.
-            if (cast_.e1.type.toBasetype.ty == Tvector
-                    && expression.type.toBasetype.ty == Tsarray)
+            if (cast_.e1.type.baseType.ty == Tvector
+                    && expression.type.baseType.ty == Tsarray)
                 return resolve(cast_.e1);
         }
 
@@ -182,7 +183,7 @@ public struct StorageResolver(Result, Adapter) {
         }
 
         if (auto length = expression.isArrayLengthExp) {
-            if (length.e1.type.toBasetype.ty != Tarray)
+            if (length.e1.type.baseType.ty != Tarray)
                 return _adapter.storageValue(length);
             auto base = resolve(length.e1);
             return _adapter.storageArrayLength(length, base);
@@ -203,7 +204,7 @@ public struct StorageResolver(Result, Adapter) {
 
         // An enum has its base type's layout: `enum E : int[3]` indexes
         // like `int[3]`.
-        auto indexBase = index.e1.type.toBasetype;
+        auto indexBase = index.e1.type.baseType;
         final switch (indexBase.ty) with (TY) {
             // A trivial index is read after the base, as dmd and LDC both
             // do. For any other index the compilers disagree, so the order

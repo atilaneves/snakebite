@@ -29,7 +29,7 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     // An enum value has the representation of its base type. Keeping
     // that representation here lets every byte-storage caller use the
     // same facts for enum values with floating or string bases.
-    type = representationType(type);
+    type = baseType(type);
 
     if (type.ty == Tarray) {
         forceIfNeeded(
@@ -55,13 +55,15 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     return facts;
 }
 
-private imported!"dmd.mtype".Type representationType(
-    imported!"dmd.mtype".Type type,
-) {
+// dmd's `toBasetype`, for code that runs after the frontend. Only an enum
+// has a base type other than itself, and to find it is frontend work: dmd
+// can resolve the enum's base, and can make, merge and mangle a qualified
+// base even when the enum is resolved. Every other type is its own base,
+// and that answer needs no frontend.
+public imported!"dmd.mtype".Type baseType(imported!"dmd.mtype".Type type) {
     import dmd.typesem: toBasetype;
     import snakebite.frontend.compiler: newInFrontend;
 
-    // DMD can cache a new qualified base even when the enum is resolved.
     if (type.isTypeEnum !is null)
         return newInFrontend!toBasetype(type);
     return type;
@@ -241,7 +243,7 @@ public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
     import dmd.typesem: size;
     import std.conv: text;
 
-    type = representationType(type);
+    type = baseType(type);
     final switch (type.ty) with (TY) {
         // An imaginary value is one `float`/`double`/`real`-shaped
         // component on its own - the same nonzero test a real one
@@ -290,7 +292,7 @@ public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
             Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits,
             Tmixin, Ttag:
             internalFailure(text("`", type.toString, "` cannot be a ",
-                "condition: semantic rejects it, and `toBasetype` ",
+                "condition: semantic rejects it, and `baseType` ",
                 "leaves no enum"));
     }
 }
@@ -374,9 +376,7 @@ public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
         return true;
     }
     if (auto literal = value.isArrayLiteralExp) {
-        import dmd.typesem: toBasetype;
-
-        if (literal.type.toBasetype.isTypeSArray is null)
+        if (literal.type.baseType.isTypeSArray is null)
             return false;
         foreach (i; 0 .. literal.elements.length)
             if (!isStoredLiteral(literal[i]))

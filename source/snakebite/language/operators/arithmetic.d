@@ -44,17 +44,17 @@ package(snakebite) ArithmeticPlan arithmeticPlan(
     imported!"dmd.expression".BinExp expression,
 ) {
     import dmd.astenums: Tpointer;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.native.value: ComplexOperand;
 
     // DMD represents a compound assignment's operation at its target's
     // promoted type, which the assignment's own type does not show.
     auto operationType = expression.isBinAssignExp
         ? expression.e1.type : expression.type;
-    auto type = operationType.toBasetype;
+    auto type = operationType.baseType;
     auto kind = arithmeticKind(type);
     if (kind == ArithmeticPlan.Kind.integral
-            && expression.e1.type.toBasetype.ty == Tpointer)
+            && expression.e1.type.baseType.ty == Tpointer)
         kind = ArithmeticPlan.Kind.pointerDifference;
     auto plan = planOf(type, kind);
     if (kind == ArithmeticPlan.Kind.complex)
@@ -72,10 +72,10 @@ package(snakebite) ArithmeticPlan arithmeticPlan(
 package(snakebite) ArithmeticPlan arithmeticPlan(
     imported!"dmd.expression".UnaExp expression,
 ) {
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import std.conv: text;
 
-    auto type = expression.type.toBasetype;
+    auto type = expression.type.baseType;
     const kind = arithmeticKind(type);
     assert(kind != ArithmeticPlan.Kind.pointerOffset, text("`",
         expression.toString, "`: D has no unary arithmetic on a pointer"));
@@ -86,9 +86,10 @@ package(snakebite) ArithmeticPlan arithmeticPlan(
 // pointee. dmd scales the step `e2` only when the type of `e1` is itself a
 // pointer, and leaves it 1 for an enum of a pointer.
 package(snakebite) size_t pointerPostStep(imported!"dmd.expression".PostExp expression) {
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
 
-    return typeFacts(expression.e1.type.toBasetype.nextOf).size;
+    return typeFacts(expression.e1.type.baseType.nextOf).size;
 }
 
 private ArithmeticPlan planOf(
@@ -106,10 +107,10 @@ private ArithmeticPlan planOf(
 // How arithmetic in `type` combines its operands.
 package(snakebite) ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type type) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import std.conv: text;
 
-    type = type.toBasetype;
+    type = type.baseType;
     final switch (type.ty) with (TY) with (ArithmeticPlan.Kind) {
         case Tbool, Tchar, Twchar, Tdchar, Tint8, Tuns8, Tint16, Tuns16,
             Tint32, Tuns32, Tint64, Tuns64:
@@ -140,7 +141,7 @@ package(snakebite) ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type 
             Tvoid, Tnoreturn, Treference, Tident, Tnone, Terror, Tinstance,
             Ttypeof, Ttuple, Tslice, Treturn, Ttraits, Tmixin, Ttag:
             internalFailure(text("`", type.toString, "` is not arithmetic: ",
-                "semantic rejects it, and `toBasetype` leaves no enum"));
+                "semantic rejects it, and `baseType` leaves no enum"));
     }
 }
 
@@ -148,11 +149,11 @@ private imported!"snakebite.native.value".ComplexOperand complexOperand(
     imported!"dmd.mtype".Type type,
 ) {
     import dmd.astenums: TY;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.native.value: ComplexOperand;
     import std.conv: text;
 
-    type = type.toBasetype;
+    type = type.baseType;
     final switch (type.ty) with (TY) with (ComplexOperand) {
         case Tfloat32, Tfloat64, Tfloat80:
             return real_;

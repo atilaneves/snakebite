@@ -635,11 +635,12 @@ public struct CallSelection {
         import dmd.ctfeexpr: emplaceExp;
         import dmd.expression: IntegerExp, RealExp;
         import dmd.expressionsem: toBool, toInteger;
-        import dmd.typesem: toBasetype, isIntegral, isReal, isUnsigned, size;
+        import dmd.typesem: isIntegral, isReal, isUnsigned, size;
+        import snakebite.frontend.typefacts: baseType;
         import dmd.tokens: EXP;
         import core.stdc.fenv;
 
-        auto type = expression.type.toBasetype;
+        auto type = expression.type.baseType;
         if (!type.isIntegral && !type.isReal)
             return false;
         if (expression.isIntegerExp !is null || expression.isRealExp !is null) {
@@ -773,7 +774,7 @@ public struct CallSelection {
         import dmd.backend.cdef: Vconst;
         import dmd.expressionsem: toInteger, toReal;
         import dmd.astenums: TY;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
 
         // Inner producers must be stored at their own width before use.
         constant.value.exp.type = type;
@@ -783,7 +784,7 @@ public struct CallSelection {
             integer.value = integer.toInteger;
             return;
         }
-        const base = type.toBasetype;
+        const base = type.baseType;
         auto floating = constant.exp.isRealExp;
         if (base.ty == TY.Tfloat32 || base.ty == TY.Tfloat64) {
             // An immediate cast followed by widening can keep excess x87
@@ -1042,14 +1043,14 @@ public struct CallSelection {
         out ParameterType result,
     ) {
         import dmd.astenums: STC, TY, VarArg;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         auto type = typeFunctionOf(function_);
         if (type.isRef || type.parameterList.varargs != VarArg.none
                 || parameters.length != type.parameterList.length)
             return false;
-        auto resultType = type.next.toBasetype;
+        auto resultType = type.next.baseType;
         if (resultType.ty == TY.Tvoid)
             result = ParameterType.void_;
         else if (!parameterTypeOf(resultType, result))
@@ -1064,7 +1065,7 @@ public struct CallSelection {
                 return false;
             ParameterType parameterType;
             if (!parameterTypeOf(
-                    parameter.type.toBasetype, parameterType))
+                    parameter.type.baseType, parameterType))
                 return false;
             parameters[i] = parameterType;
         }
@@ -1248,7 +1249,7 @@ public bool isIndirectDelegateCall(
     imported!"dmd.mtype".Type calleeType,
 ) {
     import dmd.astenums: Tdelegate;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    return calleeType !is null && calleeType.toBasetype.ty == Tdelegate;
+    return calleeType !is null && calleeType.baseType.ty == Tdelegate;
 }

@@ -1,7 +1,7 @@
 module ut.backends.concurrency;
 
 
-import ut;
+import ut.backends;
 import snakebite.program: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.interpreter: Interpreter;
@@ -144,5 +144,127 @@ unittest {
                     ),
                     __FILE__, __LINE__,
                 );
+    }
+}
+
+
+// A `catch` clause with a qualified class type takes the class's
+// `TypeInfo_Class` from the unqualified type. To remove the qualifier is
+// frontend work: dmd can make a new type, merge it and mangle it. While
+// one thread does that, another thread parses, and so merges and mangles
+// under the frontend lock. Each round declares new classes, so that each
+// thread asks dmd for a type that it did not make before.
+private enum qualifiedCatchRounds = 32;
+private enum qualifiedCatchClasses = 16;
+private enum qualifiedCatchThreads = 8;
+private enum busyFrontendParses = 4;
+
+private string qualifiedCatchSource(in size_t round) {
+    string source = text("module ut.backends.qualified_catch_", round, ";\n");
+    foreach (i; 0 .. qualifiedCatchClasses) {
+        const name = text("Failure", round, "_", i);
+        const qualifier = i % 2 == 0 ? "immutable" : "shared const";
+        source ~= text(
+            "class ", name, " : Exception { this() { super(\"boom\"); } }\n",
+            "long f", i, "() { try { throw new ", name, "; } ",
+            "catch (", qualifier, " ", name, " e) { return ", i, "; } }\n",
+        );
+    }
+    return source;
+}
+
+// Frontend work while the guests run: each parse has new declarations, so
+// dmd makes, merges and mangles new types. A parse holds the frontend
+// lock, so only a few parses run in each round: the guests then do not
+// wait for the lock most of the time.
+private string busyFrontendSource(in size_t round, in size_t index) {
+    return text(
+        "module ut.backends.busy_frontend_", round, "_", index, ";\n",
+        "struct S", index, " { int[] values; }\n",
+        "immutable(S", index, ")[] f() { return null; }\n",
+        "shared(const(S", index, ")*)[string] g() { return null; }\n",
+    );
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the race is between a backend and the frontend in one process"),
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE does not catch with a qualified `catch` type"),
+)) {
+    @("qualifiedCatchWhileFrontendWorks." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.atomic: atomicLoad, atomicOp, atomicStore;
+        import core.thread: Thread;
+
+        foreach (round; 0 .. qualifiedCatchRounds) {
+            auto guestModule = parseSnippet(qualifiedCatchSource(round));
+            auto program = Program([guestModule]);
+
+            shared size_t ready = 0;
+            shared bool go = false;
+            shared bool stop = false;
+            Throwable[qualifiedCatchThreads] failures;
+            Throwable frontendFailure;
+
+            auto frontend = new Thread({
+                atomicOp!"+="(ready, 1);
+                while (!atomicLoad(go)) {}
+                try {
+                    foreach (index; 0 .. busyFrontendParses) {
+                        if (atomicLoad(stop))
+                            break;
+                        parseSnippet(busyFrontendSource(round, index));
+                    }
+                } catch (Throwable throwable)
+                    frontendFailure = throwable;
+            });
+            frontend.start;
+
+            auto threads = new Thread[qualifiedCatchThreads];
+            foreach (t; 0 .. qualifiedCatchThreads) {
+                const threadIndex = t;
+                threads[t] = new Thread({
+                    atomicOp!"+="(ready, 1);
+                    while (!atomicLoad(go)) {}
+                    try {
+                        foreach (i; 0 .. qualifiedCatchClasses) {
+                            const index =
+                                (threadIndex + i) % qualifiedCatchClasses;
+                            auto function_ =
+                                findFunction(guestModule, text("f", index));
+                            auto guest = ownedBackend!backend(program);
+                            long result;
+                            guest.call(function_, &result, []);
+                            if (result != index)
+                                throw new Exception(text(
+                                    "f", index, "() returned ", result));
+                        }
+                    } catch (Throwable throwable)
+                        failures[threadIndex] = throwable;
+                });
+                threads[t].start;
+            }
+
+            while (atomicLoad(ready) < qualifiedCatchThreads + 1) {}
+            atomicStore(go, true);
+
+            foreach (thread; threads)
+                thread.join;
+            atomicStore(stop, true);
+            frontend.join;
+
+            if (frontendFailure !is null)
+                throw new UnitTestException(
+                    text("round ", round, ", frontend: ", frontendFailure.msg),
+                    __FILE__, __LINE__);
+            foreach (t; 0 .. qualifiedCatchThreads)
+                if (failures[t] !is null)
+                    throw new UnitTestException(
+                        text("round ", round, ", thread ", t, ": ",
+                            failures[t].msg),
+                        __FILE__, __LINE__);
+        }
     }
 }

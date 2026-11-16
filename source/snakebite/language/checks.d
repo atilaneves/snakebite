@@ -272,7 +272,8 @@ public AssertInvariantPlan assertInvariantPlanOf(
     in imported!"snakebite.frontend.checks".Checks checks,
 ) {
     import dmd.astenums: CHECKENABLE, Tclass, Tpointer, Tstruct;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
 
     auto none = AssertInvariantPlan(AssertInvariantPlan.Kind.none);
 
@@ -282,7 +283,7 @@ public AssertInvariantPlan assertInvariantPlanOf(
             || assertPlanOf(checks).kind != FailurePlan.Kind.raise)
         return none;
 
-    auto type = expression.e1.type.toBasetype;
+    auto type = expression.e1.type.baseType;
 
     // Mirrors `e2ir.d`'s own two conditions exactly: an interface or a
     // C++ class has no `_d_invariant`-compatible invariant of its own, and

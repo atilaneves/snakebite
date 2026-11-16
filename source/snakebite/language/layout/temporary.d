@@ -57,7 +57,7 @@ private bool buildsAggregateValue(
     import dmd.astenums: Tsarray, Tstruct;
     import dmd.expression: Expression;
     import dmd.expressionsem: isLvalue;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
     import dmd.visitor: StoppableVisitor;
     import dmd.visitor.postorder: walkPostorder;
 
@@ -67,7 +67,7 @@ private bool buildsAggregateValue(
         override void visit(Expression expression) {
             if (expression.type is null)
                 return;
-            const ty = expression.type.toBasetype.ty;
+            const ty = expression.type.baseType.ty;
             if ((ty == Tstruct || ty == Tsarray) && !expression.isLvalue)
                 stop = true;
         }

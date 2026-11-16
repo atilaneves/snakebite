@@ -180,12 +180,12 @@ public struct FullExpressionScope {
     ) {
         import snakebite.language.operators.casts: classify;
         import snakebite.native.value: CastKind;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
 
         while (auto cast_ = result.isCastExp) {
             if (cast_.lowering !is null)
                 break;
-            if (!cast_.e1.type.toBasetype.equals(cast_.to.toBasetype)) {
+            if (!cast_.e1.type.baseType.equals(cast_.to.baseType)) {
                 const plan = classify(cast_.e1.type, cast_.type);
                 if (plan.kind != CastKind.copy
                         && !(plan.kind == CastKind.classReference

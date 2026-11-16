@@ -48,14 +48,15 @@ package(snakebite) ComparisonPlan comparisonPlan(
     imported!"dmd.expression".BinExp expression,
 ) {
     import dmd.astenums: TY;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
 
-    auto type = expression.e1.type.toBasetype;
+    auto type = expression.e1.type.baseType;
     auto plan = ComparisonPlan(kindOf(type), typeFacts(type));
     // dmd's `e2ir.d` compares a static array with a dynamic one as two
     // `{length, ptr}` values.
     if (plan.kind == ComparisonPlan.Kind.staticArray
-            && expression.e2.type.toBasetype.ty == TY.Tarray)
+            && expression.e2.type.baseType.ty == TY.Tarray)
         plan.kind = ComparisonPlan.Kind.dynamicArray;
     if (plan.kind == ComparisonPlan.Kind.dynamicArray
             || plan.kind == ComparisonPlan.Kind.staticArray)
@@ -108,7 +109,7 @@ private ComparisonPlan.Kind kindOf(imported!"dmd.mtype".Type type) {
             Treference, Tident, Tnone, Terror, Tinstance, Ttypeof, Ttuple,
             Tslice, Treturn, Ttraits, Tmixin, Ttag:
             internalFailure(text("`", type.toString, "` is not a comparable ",
-                "value: semantic rejects `cent`/`ucent`, and `toBasetype` ",
+                "value: semantic rejects `cent`/`ucent`, and `baseType` ",
                 "leaves no enum"));
     }
 }
@@ -136,9 +137,10 @@ package(snakebite) IdentityPlan identityPlan(
     import dmd.expressionsem: isLvalue, toInteger;
     import dmd.sideeffect: isTrivialExp;
     import dmd.target: target;
-    import dmd.typesem: isFloating, size, toBasetype;
+    import dmd.typesem: isFloating, size;
+    import snakebite.frontend.typefacts: baseType;
 
-    auto type = expression.e1.type.toBasetype;
+    auto type = expression.e1.type.baseType;
     auto width = type.size;
     if (type.isFloating && type.ty == Tfloat80)
         width -= target.realpad;

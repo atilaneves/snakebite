@@ -156,14 +156,14 @@ public DelegateTarget delegateTargetOf(
 ) {
     import dmd.astenums: Tdelegate, Tstruct;
     import snakebite.frontend.dmd.dispatch: usesVtable;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    if (function_ is null || type.toBasetype.ty != Tdelegate)
+    if (function_ is null || type.baseType.ty != Tdelegate)
         return DelegateTarget.init;
 
     if (function_.isThis !is null)
         return DelegateTarget(function_, false, null, receiver,
-            receiver !is null && receiver.type.toBasetype.ty == Tstruct,
+            receiver !is null && receiver.type.baseType.ty == Tstruct,
             receiver !is null && usesVtable(function_,
                 receiver.isSuperExp !is null || receiver.isDotTypeExp !is null),
             contextPair);

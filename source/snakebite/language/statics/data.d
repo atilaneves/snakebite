@@ -236,13 +236,13 @@ public struct NativeData {
     // The struct or enum that declares `type`, or null for any other type: the
     // `.init` image of a declared type is data of the module of the declaration.
     private static Dsymbol declarationOf(Type type) {
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
 
         // The enum first: its base type is the type of its members, not its
         // own declaration.
         if (auto enum_ = type.isTypeEnum)
             return enum_.sym;
-        if (auto struct_ = type.toBasetype.isTypeStruct)
+        if (auto struct_ = type.baseType.isTypeStruct)
             return struct_.sym;
         return null;
     }
@@ -902,7 +902,8 @@ private void storeValue(
     import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray, Tvector;
     import dmd.mtype: Type;
     import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
-    import dmd.typesem: mutableOf, nextOf, size, toBasetype;
+    import dmd.typesem: mutableOf, nextOf, size;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.compiler: newInFrontend;
     import std.conv: text;
 
@@ -925,7 +926,7 @@ private void storeValue(
         return;
     }
 
-    type = type.toBasetype;
+    type = type.baseType;
 
     // DMD represents an integer-to-pointer cast as an integer literal. Its
     // low pointer-width bits are the pointer value in the native layout.
@@ -953,14 +954,14 @@ private void storeValue(
     }
 
     if (auto array = type.isTypeSArray) {
-        auto sourceElement = value.type.toBasetype.nextOf;
+        auto sourceElement = value.type.baseType.nextOf;
         const wholeArray = sourceElement !is null
             && mutableElementsEqual(sourceElement, array.next);
         if (!wholeArray || value.isStringExp is null) {
             const elementSize = array.next.size;
             auto literal = wholeArray ? value.isArrayLiteralExp : null;
             // dmd's default initializer of a `void[N]` is the `ubyte` one.
-            auto storedElement = array.next.toBasetype.ty == TY.Tvoid
+            auto storedElement = array.next.baseType.ty == TY.Tvoid
                 ? Type.tuns8 : array.next;
             foreach (i; 0 .. cast(size_t) array.dim.toInteger)
                 storeValue(storedElement, literal is null ? value : literal[i],

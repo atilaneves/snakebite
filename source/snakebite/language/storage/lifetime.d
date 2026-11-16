@@ -6,7 +6,7 @@ private:
 
 import snakebite.frontend.typefacts: typeFacts, fieldOffset;
 import snakebite.native.value: TypeFacts;
-import dmd.typesem: toBasetype;
+import snakebite.frontend.typefacts: baseType;
 import snakebite.language.call.druntimehook: DruntimeHook;
 
 
@@ -37,7 +37,7 @@ public struct NewPlan {
 }
 
 public NewPlan planNew(imported!"dmd.expression".NewExp expression) {
-    auto type = expression.newtype.toBasetype;
+    auto type = expression.newtype.baseType;
     auto objectKind = type.isTypeClass !is null
         ? NewPlan.ObjectKind.class_
         : type.isTypeStruct !is null
@@ -385,7 +385,7 @@ package(snakebite) VectorInitPlan planVectorInit(
     import dmd.astenums: Tsarray;
 
     const sourceFacts = typeFacts(expression.e1.type);
-    if (expression.e1.type.toBasetype.ty == Tsarray)
+    if (expression.e1.type.baseType.ty == Tsarray)
         return VectorInitPlan(sourceFacts, 1);
 
     // `dim` counts destination lanes, not source units: an array conversion
@@ -438,7 +438,7 @@ public struct DeletePlan {
 }
 
 public DeletePlan planDelete(imported!"dmd.expression".DeleteExp expression) {
-    auto classType = expression.e1.type.toBasetype.isTypeClass;
+    auto classType = expression.e1.type.baseType.isTypeClass;
     assert(classType !is null,
         "the frontend only deletes class and interface operands");
 

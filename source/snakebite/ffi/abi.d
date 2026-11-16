@@ -63,12 +63,13 @@ public ArgumentPlan argumentPlanOf(imported!"dmd.mtype".Type type) {
 
 public ArgumentPlan returnPlanOf(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tcomplex80;
-    import dmd.typesem: size, toBasetype;
+    import dmd.typesem: size;
+    import snakebite.frontend.typefacts: baseType;
 
-    auto baseType = type.toBasetype;
+    auto base = type.baseType;
     // SysV returns `creal` in ST0 and ST1. Its argument form is
     // MEMORY-class, and an aggregate that contains it stays that way.
-    if (baseType.ty == Tcomplex80)
+    if (base.ty == Tcomplex80)
         return ArgumentPlan(
             [Register(Register.Kind.x87, 16),
                 Register(Register.Kind.x87, 16)],
@@ -109,14 +110,14 @@ public ArgumentPlan returnPlanOf(imported!"dmd.mtype".Type type) {
 // apply to it.
 public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums: Tcomplex80;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     // An enum has its base type's native layout and classification -
     // `classify`'s own entry unwraps it the same way for a parameter or
     // a field, and `isX87OnlyAggregate` unwraps it again for itself, so
     // this only has to happen once more here, for `aggregatePlan`'s own
     // fallback below.
-    auto type = unbasedType.toBasetype;
+    auto type = unbasedType.baseType;
 
     // The bare complex value returns in ST0/ST1; aggregate planning still
     // classifies a struct that contains it as MEMORY.
@@ -150,9 +151,10 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
 // stack, at `[rbp+0x10]`, never through a register).
 private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums: Tvoid;
-    import dmd.typesem: size, toBasetype;
+    import dmd.typesem: size;
+    import snakebite.frontend.typefacts: baseType;
 
-    auto type = unbasedType.toBasetype;
+    auto type = unbasedType.baseType;
     if (type.ty == Tvoid)
         return false;
 
@@ -185,9 +187,10 @@ private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
 private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
     import dmd.dsymbolsem: isPOD;
     import dmd.typesem: baseElemOf;
+    import snakebite.frontend.compiler: newInFrontend;
 
-    auto aggregate = type.baseElemOf.isTypeStruct;
-    return aggregate !is null && !aggregate.sym.isPOD();
+    auto aggregate = newInFrontend!baseElemOf(type).isTypeStruct;
+    return aggregate !is null && !newInFrontend!isPOD(aggregate.sym);
 }
 
 // Whether `type` is a static array of one `real`, with no struct around
@@ -198,10 +201,12 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
 private bool isDmdIntegerPairArray(imported!"dmd.mtype".Type unbasedType) {
     version (DigitalMars) {
         import dmd.astenums: Tfloat80, Timaginary80, Tsarray;
-        import dmd.typesem: baseElemOf, size, toBasetype;
+        import dmd.typesem: baseElemOf, size;
+        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.typefacts: baseType;
 
-        auto type = unbasedType.toBasetype;
-        const element = type.baseElemOf.toBasetype.ty;
+        auto type = unbasedType.baseType;
+        const element = newInFrontend!baseElemOf(type).ty;
         return type.ty == Tsarray && type.size == 16
             && (element == Tfloat80 || element == Timaginary80);
     } else
@@ -212,7 +217,8 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
         Tvector, Tvoid;
-    import dmd.typesem: alignsize, isIntegral, isUnsigned, size, toBasetype;
+    import dmd.typesem: alignsize, isIntegral, isUnsigned, size;
+    import snakebite.frontend.typefacts: baseType;
     import std.algorithm: min;
 
     // An enum has its base type's native layout and classification - the
@@ -220,7 +226,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     // `type.ty` check below only matches a base-type case, so an enum
     // argument or return has to be unwrapped once here, before any of
     // them run.
-    auto type = unbasedType.toBasetype;
+    auto type = unbasedType.baseType;
 
     ArgumentPlan plan;
     if (type.ty == Tvoid)
@@ -391,7 +397,8 @@ private void classify(
 ) {
     import dmd.astenums: TY;
     import dmd.expressionsem: toInteger;
-    import dmd.typesem: alignsize, isIntegral, nextOf, size, toBasetype;
+    import dmd.typesem: alignsize, isIntegral, nextOf, size;
+    import snakebite.frontend.typefacts: baseType;
 
     if (memory)
         return;
@@ -404,7 +411,7 @@ private void classify(
     // function's own entry - the only place every path into `classify` (a
     // parameter, a return, a struct field walked recursively from
     // `aggregatePlan` below) passes through.
-    auto type = unbasedType.toBasetype;
+    auto type = unbasedType.baseType;
 
     const bytes = type.size;
     if (offset + bytes > 16) {
