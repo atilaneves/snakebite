@@ -321,8 +321,10 @@ public struct CallSite {
 
     @plain package FastCall fast;
 
+    package enum maxIndirectTargets = 4;
+
     static if (jitSupported && chainedDispatch) {
-        // The first eligible indirect target. The entry publishes the
+        // An eligible indirect target. The entry publishes the
         // callee and adjustment. Only the thread that claims callee writes
         // the other fields.
         package struct IndirectTarget {
@@ -331,21 +333,48 @@ public struct CallSite {
             @plain package ptrdiff_t adjustment;
 
             pragma(inline, true)
-            private void remember(const(void)* entry, const(Function)* callee,
-                in ptrdiff_t adjustment,
+            private const(void)* remember(const(void)* entry,
+                const(Function)* callee, in ptrdiff_t adjustment,
             ) {
                 import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
 
+                const published = atomicLoad!(MemoryOrder.acq)(this.entry);
+                if (published !is null)
+                    return published;
                 if (atomicLoad!(MemoryOrder.raw)(this.callee) !is null
                         || !cas(&this.callee, cast(const(Function)*) null,
                             callee))
-                    return;
+                    return null;
                 this.adjustment = adjustment;
                 atomicStore!(MemoryOrder.rel)(this.entry, entry);
+                return entry;
             }
         }
 
         @plain package IndirectTarget indirectTarget;
+        @setBy("rememberIndirectTarget")
+        package IndirectTarget[maxIndirectTargets - 1] moreIndirectTargets;
+
+        pragma(inline, true)
+        private void rememberIndirectTarget(const(void)* entry,
+            const(Function)* callee, in ptrdiff_t adjustment,
+        ) const {
+            import core.atomic: atomicLoad, MemoryOrder;
+
+            if (atomicLoad!(MemoryOrder.raw)(
+                    moreIndirectTargets[$ - 1].callee) !is null)
+                return;
+            const first = (cast(IndirectTarget*) &indirectTarget)
+                .remember(entry, callee, adjustment);
+            if (first is null || first is entry)
+                return;
+            foreach (ref target; moreIndirectTargets) {
+                const observed = (cast(IndirectTarget*) &target)
+                    .remember(entry, callee, adjustment);
+                if (observed is null || observed is entry)
+                    return;
+            }
+        }
     }
 
     // Compiles the callee of a `guest` site on its first call and keeps it
@@ -2005,8 +2034,7 @@ private const(Instruction)* callIndirectWindow(Destination destination,
     }
 
     static if (jitSupported && chainedDispatch && counted)
-        (cast(CallSite.IndirectTarget*) &site.indirectTarget)
-            .remember(address, callee, adjustment);
+        site.rememberIndirectTarget(address, callee, adjustment);
 
     return enterWindow!(destination, true, counted)(
         pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,

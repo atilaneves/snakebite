@@ -711,7 +711,7 @@ private enum populateSize = 1UL << 17;
 private enum codeAlignment = 16;
 // The most that the code of one instruction can need. Emission checks this much
 // room before each instruction.
-private enum maximumBytesPerInstruction = 1024;
+private enum maximumBytesPerInstruction = 1088;
 // Druntime and Phobos declare none of these: no `memfd_create`, no
 // `MFD_CLOEXEC`, no `MADV_POPULATE_*`, and `core.sys.linux.sys.mman` declares
 // `madvise` only when `_DEFAULT_SOURCE` is true, which it is not for glibc.
@@ -1608,71 +1608,149 @@ private struct Gen {
         }
     }
 
+    static struct WindowArm {
+        const(Function)* callee;
+        const(CallSite.FastCall)* fast;
+        const(void)* entry;
+        ptrdiff_t adjustment;
+        size_t mismatch;
+        size_t grow;
+        size_t tierUp;
+
+        bool hasPlace() const pure nothrow @nogc @safe {
+            return callee.returnPlace.offset != size_t.max;
+        }
+
+        bool hasWindows() const pure nothrow @nogc @safe {
+            return callee.windowSlot != size_t.max;
+        }
+    }
+
+    // The reservation also covers the fallback and any FP seed loads.
+    private enum windowArmBytes = 23 + 35 + 40 + 71 + 31 + 51;
+    private enum handlerJumpBytes = 22;
+    private enum fpSeedBytes = 8 * FpSlots.count;
+    static assert(CallSite.maxIndirectTargets * windowArmBytes
+        + handlerJumpBytes + fpSeedBytes <= maximumBytesPerInstruction);
+    static assert(Activation.sizeof <= byte.max + 1
+        && Instruction.sizeof <= byte.max
+        && FrameStack.fastEndOffset <= byte.max
+        && FrameStack.topOffset <= byte.max
+        && FrameStack.baseOffset <= byte.max
+        && FrameStack.cleanupMarkOffset <= byte.max
+        && DispatchState.frames.offsetof <= byte.max
+        && DispatchState.current.offsetof <= byte.max);
+    static foreach (register; [RAX, R9, R10, R11, FRAME, STATE, ACTIVE, PCREG])
+        static assert((register & 7) != 4);
+    static assert(FRAME < 8 && FpSlots.firstRegister + FpSlots.count <= 8);
+
     bool emitCallWindow(size_t i, in JitOp.CallWindow op,
         Instruction.Handler original)
     {
         import core.atomic: atomicLoad, MemoryOrder;
 
-        const ins = snapshot[i];
-        const site = &callSites[ins.source];
-        const(CallSite.FastCall)* fast;
-        const(Function)* callee;
-        const(void)* entry;
-        ptrdiff_t adjustment;
-        // Only read facts that a handler has published.
-        static if (chainedDispatch) {
-            if (op.indirect) {
-                const target = &site.indirectTarget;
-                entry = atomicLoad!(MemoryOrder.acq)(target.entry);
-                if (entry is null || site.calleeSlotOffset > int.max)
+        const site = &callSites[snapshot[i].source];
+        if (site.windowSlot > int.max || site.windowDisp > int.max
+                || site.windowScratch > int.max)
+            return false;
+
+        WindowArm[CallSite.maxIndirectTargets] arms;
+        auto count = 1;
+        if (op.indirect) {
+            static if (chainedDispatch) {
+                if (site.calleeSlotOffset > int.max)
                     return false;
-                callee = target.callee;
-                adjustment = target.adjustment;
-                if (adjustment < int.min || adjustment > int.max
-                        || (adjustment != 0 && callee.contextOffset > int.max))
-                    return false;
-                fast = &callee.windowFacts;
-            }
-        }
-        if (entry is null) {
-            fast = &site.fast;
+                arms[0] = readIndirectArm(site.indirectTarget);
+                foreach (ref const target; site.moreIndirectTargets) {
+                    const arm = readIndirectArm(target);
+                    if (arm.entry is null)
+                        break;
+                    if (encodableWindowArm(arm))
+                        arms[count++] = arm;
+                }
+            } else
+                return false;
+        } else {
+            const fast = &site.fast;
             if (atomicLoad!(MemoryOrder.acq)(
                     *cast(shared(uint)*) &fast.state)
                     != CallSite.FastCall.State.ready)
                 return false;
-            callee = fast.callee;
+            arms[0] = WindowArm(fast.callee, fast);
         }
-        const hasPlace = callee.returnPlace.offset != size_t.max;
-        const hasWindows = callee.windowSlot != size_t.max;
-        if (site.windowSlot > int.max || site.windowDisp > int.max
-                || site.windowScratch > int.max || fast.frameBytes > int.max
-                || fast.frameOffset > int.max || fast.reachBytes > int.max
-                || (hasPlace && fast.placeStore > int.max)
-                || (hasWindows && (fast.windowStore > int.max
-                    || fast.windowBase > int.max)))
+        if (!encodableWindowArm(arms[0]))
             return false;
 
-        size_t otherTarget;
+        foreach (index, ref arm; arms[0 .. count]) {
+            if (index != 0)
+                patchHere(arms[index - 1].mismatch);
+            if (!emitCallWindowArm(i, op, site, arm))
+                return false;
+        }
+        if (op.indirect)
+            patchHere(arms[count - 1].mismatch);
+        foreach (ref const arm; arms[0 .. count]) {
+            patchHere(arm.grow);
+            if (op.counted)
+                patchHere(arm.tierUp);
+        }
+        jumpToHandler(i, original);
+        return true;
+    }
+
+    static if (chainedDispatch) {
+        static WindowArm readIndirectArm(in ref CallSite.IndirectTarget target) {
+            import core.atomic: atomicLoad, MemoryOrder;
+
+            const entry = atomicLoad!(MemoryOrder.acq)(target.entry);
+            if (entry is null)
+                return WindowArm.init;
+            const callee = target.callee;
+            return WindowArm(callee, &callee.windowFacts, entry,
+                target.adjustment);
+        }
+    }
+
+    static bool encodableWindowArm(in ref WindowArm arm) {
+        if (arm.callee is null)
+            return false;
+        const fast = arm.fast;
+        return arm.adjustment >= int.min && arm.adjustment <= int.max
+            && (arm.adjustment == 0 || arm.callee.contextOffset <= int.max)
+            && fast.frameBytes <= int.max && fast.frameOffset <= int.max
+            && fast.reachBytes <= int.max
+            && (!arm.hasPlace || fast.placeStore <= int.max)
+            && (!arm.hasWindows || (fast.windowStore <= int.max
+                && fast.windowBase <= int.max));
+    }
+
+    bool emitCallWindowArm(size_t i, in JitOp.CallWindow op,
+        const(CallSite)* site, ref WindowArm arm)
+    {
+        const ins = snapshot[i];
+        const entry = arm.entry;
+        const callee = arm.callee;
+        const fast = arm.fast;
+        const adjustment = arm.adjustment;
         if (entry !is null) {
             a.movI(RAX, cast(size_t) entry);
             a.alu(Alu.cmp, 8, RAX, Mem(FRAME, cast(int) site.calleeSlotOffset));
-            otherTarget = jccLocal(CC_NE);
+            arm.mismatch = jccLocal(CC_NE);
         }
         a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
         a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
         a.lea(R11, Mem(R10, cast(int) site.windowDisp));
         a.lea(RAX, Mem(R11, cast(int) fast.reachBytes));
         a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.fastEndOffset));
-        const grow = jccLocal(CC_A);
+        arm.grow = jccLocal(CC_A);
 
         a.movI(PCREG, cast(size_t) callee);
-        size_t tierUp;
         if (op.counted) {
             const heat = Mem(PCREG, Function.jitHeat.offsetof);
             a.ld(4, RAX, heat);
             a.aluRI(Alu.add, 4, RAX, jitStep);
             // Let the counting handler perform the event on carry.
-            tierUp = jccLocal(CC_B);
+            arm.tierUp = jccLocal(CC_B);
             a.st(4, heat, RAX);
         }
         a.st(8, Mem(R11, Activation.function_.offsetof), PCREG);
@@ -1686,7 +1764,7 @@ private struct Gen {
         a.st(8, Mem(R11, Activation.returnPlace.offsetof), RAX);
         a.lea(FRAME, Mem(R11, cast(int) fast.frameOffset));
         a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
-        if (hasPlace)
+        if (arm.hasPlace)
             a.st(8, Mem(FRAME, cast(int) fast.placeStore), RAX);
         if (adjustment != 0) {
             const context = Mem(FRAME, cast(int) callee.contextOffset);
@@ -1694,7 +1772,7 @@ private struct Gen {
             a.aluRI(Alu.add, 8, RAX, cast(int) adjustment);
             a.st(8, context, RAX);
         }
-        if (hasWindows) {
+        if (arm.hasWindows) {
             a.lea(RAX, Mem(R11, cast(int) fast.windowBase));
             a.st(8, Mem(FRAME, cast(int) fast.windowStore), RAX);
         }
@@ -1719,12 +1797,6 @@ private struct Gen {
         a.movRR64(ACTIVE, R11);
         a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
 
-        if (entry !is null)
-            patchHere(otherTarget);
-        patchHere(grow);
-        if (op.counted)
-            patchHere(tierUp);
-        jumpToHandler(i, original);
         return true;
     }
 
