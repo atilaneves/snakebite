@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Checks that each corpus project runs the same from a compile to RAM and from
-# a load of its saved file, with and without the JIT. Arguments select
-# projects (name@version, as in build/corpus-projects.txt).
+# a load of its saved file. The loads run with the JIT and with --no-jit.
+# "Same" means equal exit status and stdout, and equal stderr: the stderr of
+# the --save run followed by the stderr of the load equals the stderr of the
+# run from RAM. Arguments select projects, each one an argument of bin/sb
+# (name@version as in build/bench-corpus.sh, or a directory).
 # Environment: SB (bin/sb), CORE (cpu to pin to, default 0),
-# PROJECT_TIMEOUT (seconds per command, default 1200), WORK (output directory).
+# PROJECT_TIMEOUT (seconds per command, default 1200), WORK (output
+# directory; the saved file of a project that is the same is removed).
 set -uo pipefail
+export LC_ALL=C
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 sb=${SB:-bin/sb}
@@ -16,8 +21,9 @@ mkdir -p "$work"
 if (($#)); then
     projects=("$@")
 else
-    mapfile -t projects < <(sed -e 's/#.*//' -e 's/[[:space:]]*$//' \
-        -e '/^$/d' build/corpus-projects.txt)
+    source build/bench-corpus.sh # the list; sets -e
+    set +e
+    projects=("${benchmarks[@]}")
 fi
 
 # run NAME ARGS...: stdout to NAME.out without the timing report lines of
@@ -31,106 +37,107 @@ run() {
     timeout "$limit" taskset -c "$core" "$sb" "$@" \
         >"$name.raw" 2>"$name.err"
     echo $? >"$name.status"
-    grep -Ev -e '^[A-Za-z ]+:[[:space:]]+[0-9.]+ ms$' -e "$taken" \
+    grep -aEv -e '^[A-Za-z ]+:[[:space:]]+[0-9.]+ ms$' -e "$taken" \
         "$name.raw" >"$name.out" || true
 }
 
-project_dir() {
-    local name=${1%%@*} version=${1#*@}
-    local dir=$HOME/.dub/packages/$name/$version/$name
-    # Like bin/bench: a package that is not on disk is fetched.
-    [[ -d $dir ]] || dub fetch "$name@$version" >/dev/null 2>&1
-    [[ -d $dir ]] && echo "$dir"
-}
-
-same() { # DIR_A DIR_B: status, stdout and stderr equal
+same() { # A B: status, stdout and stderr equal
     local a=$1 b=$2
     cmp -s "$a.status" "$b.status" && cmp -s "$a.out" "$b.out" \
         && cmp -s "$a.err" "$b.err"
 }
 
-# firstdiff A B: the first differing line pair of the stdout, else of the
-# stderr, of two runs.
+# show: one line of text on stdin, made printable and cut.
+show() { tr '\000-\010\013-\037' '?' | cut -c1-200; }
+
+# firstdiff A B: the first difference of the stdout, else of the stderr, else
+# of the exit status, of two runs, on one line.
 firstdiff() {
-    local a=$1 b=$2 ext n
+    local a=$1 b=$2 ext n cmpout short long lines
     for ext in out err; do
         cmp -s "$a.$ext" "$b.$ext" && continue
-        n=$(cmp "$a.$ext" "$b.$ext" 2>&1 | sed -n 's/.*line \([0-9]*\).*/\1/p')
-        if [[ -n $n ]]; then
-            printf '%s line %s:\n  < %s\n  > %s' "$ext" "$n" \
-                "$(sed -n "${n}p" "$a.$ext" | cut -c1-200)" \
-                "$(sed -n "${n}p" "$b.$ext" | cut -c1-200)"
-        else # one file is a prefix of the other
-            printf '%s: one is a prefix of the other' "$ext"
+        cmpout=$(cmp "$a.$ext" "$b.$ext" 2>&1)
+        if [[ $cmpout == *"EOF on "* ]]; then # one is a prefix of the other
+            short=$a long=$b
+            (($(stat -c %s "$b.$ext") < $(stat -c %s "$a.$ext"))) \
+                && short=$b long=$a
+            lines=$(grep -ac '' "$short.$ext")
+            n=$((lines + 1))
+            # A last line without newline is part of the first extra line.
+            [[ -n $(tail -c1 "$short.$ext" | tr -d '\000') ]] && n=$lines
+            printf '%s: %s ends early; first extra line %s: %s' "$ext" \
+                "$short" "$n" "$(sed -n "${n}p" "$long.$ext" | show)"
+        else
+            n=$(sed -n 's/.*line \([0-9]*\).*/\1/p' <<<"$cmpout")
+            printf '%s line %s: < %s | > %s' "$ext" "$n" \
+                "$(sed -n "${n}p" "$a.$ext" | show)" \
+                "$(sed -n "${n}p" "$b.$ext" | show)"
         fi
         return
     done
     printf 'exit status: %s vs %s' "$(<"$a.status")" "$(<"$b.status")"
 }
 
-# firsterror NAME: first line that looks like an error, else first stderr line.
-firsterror() {
-    local l
-    l=$(cat "$1.err" "$1.out" | grep -av '^Warning' \
-        | grep -aiE -m1 'error|failed|cannot be found' | cut -c1-200)
-    [[ -n $l ]] || l=$(head -n1 "$1.err" | cut -c1-200)
-    printf '%s' "$l"
+# lasterr NAME: the last lines of stderr, else of stdout, on one line.
+lasterr() {
+    local f=$1.err
+    [[ -s $f ]] || f=$1.out
+    tail -n3 "$f" | tr '\000-\010\013-\037' '?' | cut -c1-200 | paste -sd'|'
 }
 
 failed=0
+report() { # PROJECT RESULT
+    printf '%-28s %s\n' "$1" "$2"
+    [[ $2 == same ]] || failed=1
+}
+
 for project in "${projects[@]}"; do
-    dir=$(project_dir "$project") || {
-        printf '%-28s load failed: no project directory\n' "$project"
-        failed=1; continue
-    }
     p=$work/${project//[@\/]/_}
     mkdir -p "$p"
+    rm -f "$p/file.sbc"
     common=(--backend=bytecode)
-    run "$p/ram" "${common[@]}" "$dir"
-    run "$p/ram2" "${common[@]}" "$dir"
-    run "$p/save" "${common[@]}" "--save=$p/file.sbc" "$dir"
-    result=same
-    if [[ $(<"$p/ram.status") == 124 ]]; then
-        result="timeout (compile to RAM)"
-    elif ! same "$p/ram" "$p/ram2"; then
-        if [[ $(<"$p/ram.status") != 0 ]]; then
-            result="fails from RAM: exit $(<"$p/ram.status"), $(firsterror "$p/ram")"
-        else
-            result="not comparable: two runs from RAM differ; $(firstdiff "$p/ram" "$p/ram2")"
-        fi
-    elif [[ $(<"$p/save.status") == 124 ]]; then
-        result="timeout (save)"
-    elif [[ $(<"$p/save.status") != "$(<"$p/ram.status")" || ! -s $p/file.sbc ]]; then
-        if [[ $(<"$p/ram.status") != 0 ]]; then
-            result="fails from RAM: exit $(<"$p/ram.status"), $(firsterror "$p/ram")"
-        else
-            result="save failed (see $p/save.err)"
-        fi
-    else
-        parts=()
-        for mode in jit no-jit; do
-            flags=(); [[ $mode == no-jit ]] && flags=(--no-jit)
-            run "$p/$mode" "${flags[@]}" "--load=$p/file.sbc"
-            if [[ $(<"$p/$mode.status") == 124 ]]; then
-                parts+=("timeout ($mode load)")
-            elif ! same "$p/ram" "$p/$mode"; then
-                if [[ $(<"$p/$mode.status") != "$(<"$p/ram.status")" \
-                    && $(<"$p/$mode.status") != 0 \
-                    && ! -s $p/$mode.out && -s $p/$mode.err \
-                    && -z $(<"$p/ram.out") ]]; then
-                    parts+=("load failed ($mode; see $p/$mode.err)")
-                else
-                    parts+=("different ($mode): $(firstdiff "$p/ram" "$p/$mode")")
-                fi
-            fi
-        done
-        if ((${#parts[@]})); then
-            result=$(printf '%s\n' "${parts[@]}")
-            ((${#parts[@]} == 1)) && result="${parts[0]} (the other load is same)"
-        fi
+    run "$p/ram" "${common[@]}" "$project"
+    ram=$(<"$p/ram.status")
+    if [[ $ram == 124 ]]; then
+        report "$project" "timeout (compile to RAM)"; continue
+    elif [[ $ram != 0 ]]; then
+        report "$project" "fails from RAM: exit $ram, $(lasterr "$p/ram")"
+        continue
     fi
-    printf '%-28s %s\n' "$project" "$result"
-    [[ $result == same ]] || failed=1
+    run "$p/ram2" "${common[@]}" "$project"
+    if ! same "$p/ram" "$p/ram2"; then
+        report "$project" \
+            "not comparable: two runs from RAM differ; $(firstdiff "$p/ram" "$p/ram2")"
+        continue
+    fi
+    run "$p/save" "${common[@]}" "--save=$p/file.sbc" "$project"
+    if [[ $(<"$p/save.status") == 124 ]]; then
+        report "$project" "timeout (save)"; continue
+    elif [[ $(<"$p/save.status") != "$ram" || ! -s $p/file.sbc ]]; then
+        report "$project" "save failed (see $p/save.err)"; continue
+    fi
+    results=()
+    for mode in jit no-jit; do
+        flags=(); [[ $mode == no-jit ]] && flags=(--no-jit)
+        run "$p/$mode" "${flags[@]}" "--load=$p/file.sbc"
+        # The stderr of the save run and then of the load.
+        mv "$p/$mode.err" "$p/$mode.load.err"
+        cat "$p/save.err" "$p/$mode.load.err" >"$p/$mode.err"
+        status=$(<"$p/$mode.status")
+        if [[ $status == 124 ]]; then
+            results+=("timeout ($mode load)")
+        elif [[ $status != 0 && ! -s $p/$mode.out ]]; then
+            results+=("load failed ($mode; see $p/$mode.load.err)")
+        elif ! same "$p/ram" "$p/$mode"; then
+            results+=("different ($mode): $(firstdiff "$p/ram" "$p/$mode")")
+        fi
+    done
+    if ((${#results[@]} == 0)); then
+        rm -f "$p/file.sbc"
+        report "$project" same
+    else
+        for r in "${results[@]}"; do report "$project" "$r"; done
+    fi
 done
 echo "outputs: $work"
 exit "$failed"
