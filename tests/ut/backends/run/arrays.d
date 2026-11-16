@@ -1801,6 +1801,16 @@ static foreach (backend; Matrix!()) {
                 assert(ints[u - 1] == 11 && ints[3] == 11 && ints[2] == 0);
                 assert(longs[l - 1] == 13 && longs[4] == 13);
                 assert(ints[k] == 11);
+                int taken;
+                if (flags[k - 1])
+                    taken += 1;
+                if (flags[k])
+                    taken += 2;
+                if (shorts[k + 1])
+                    taken += 4;
+                if (shorts[k])
+                    taken += 8;
+                assert(taken == 5);
             }
         });
     }
@@ -1947,6 +1957,14 @@ static foreach (backend; Matrix!(
                     length = e.length;
                 }
                 check(cast(size_t) int.min);
+                try {
+                    if (a[low - 1])
+                        assert(0);
+                } catch (ArrayIndexError e) {
+                    index = e.index;
+                    length = e.length;
+                }
+                check(int.max);
                 try { auto x = a[u - 1]; }
                 catch (ArrayIndexError e) {
                     index = e.index;

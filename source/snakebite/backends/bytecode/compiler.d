@@ -2807,6 +2807,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const facts = typeFacts(condition.type);
         if (inPlace && !truth.isFloat && truth.offset == 0
                 && truth.secondOffset == TypeFacts.Truth.noSecondWord) {
+            const checkedValue = compileCheckedCondition(
+                condition, position, facts);
+            if (checkedValue != size_t.max)
+                return checkedValue;
             const place = operandPlace(condition, facts.size, false, true);
             if (place != size_t.max)
                 return place;
@@ -2835,6 +2839,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 truth.size);
 
         return offset;
+    }
+
+    private size_t compileCheckedCondition(
+        Expression condition, in FullExpressionScope.Position position,
+        in TypeFacts facts,
+    ) {
+        auto index = condition.isIndexExp;
+        if (index is null)
+            return size_t.max;
+        const array = localSlot(index.e1);
+        CheckedIndex shape;
+        if (array == size_t.max || !checkedLoadShape(index, facts.size, shape)
+                || shape.slot == size_t.max)
+            return size_t.max;
+
+        // The branch needs the element value. The checked load can read it
+        // without allocating a slot for the adjusted index or address.
+        const result = reserveTemp(facts);
+        inFullExpression(position, condition, {
+            emitCheckedIndex(index, shape, CheckedAccess.load, result, array);
+        });
+        return result;
     }
 
     // The branch instructions for `if`, `for` and `while`: the loop or
@@ -6853,9 +6879,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private bool compileCheckedLoad(IndexExp expression) {
         CheckedIndex shape;
-        if (!checkedIndexShape(expression, _width, shape)
-                || !isScalarOperand(expression.type, _width,
-                    isRealFloatType(expression.type)))
+        if (!checkedLoadShape(expression, _width, shape))
             return false;
         const array = placeOf(expression.e1, true);
         if (array == size_t.max)
@@ -6863,6 +6887,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emitCheckedIndex(expression, shape, CheckedAccess.load, _destination,
             array);
         return true;
+    }
+
+    private bool checkedLoadShape(
+        IndexExp expression, in size_t width, out CheckedIndex shape,
+    ) {
+        return checkedIndexShape(expression, width, shape)
+            && isScalarOperand(expression.type, width,
+                isRealFloatType(expression.type));
     }
 
     // `value` must have no side effect: the split store below reads the
