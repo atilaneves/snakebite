@@ -812,7 +812,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 }
 
 
-// What a caller needs to copy a small leaf function into its own
+// What a caller needs to copy a small function into its own
 // instruction stream: the instructions before the compiler fuses them and
 // resolves their branches, so a branch target is still an index.
 package struct InlineBody {
@@ -825,8 +825,6 @@ package struct InlineBody {
     package uint frameAlignment;
     // The addresses in `instructions` and `constants`.
     package Reloc[] relocs;
-    // The sites of the `opCall` instructions of the body: only calls of
-    // druntime hooks, which a failed check makes.
     package CallSite[] callSites;
     package struct FrameRange {
         package size_t offset;
@@ -835,6 +833,13 @@ package struct InlineBody {
     package FrameRange[] allocations;
     package bool exposesFrame;
     package FrameRange[] exposedFrames;
+
+    package const(CallSite)* callWindow() const {
+        foreach (ref site; callSites)
+            if (site.windowSlot != size_t.max)
+                return &site;
+        return null;
+    }
 }
 
 
@@ -1348,7 +1353,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             coldSites += range.siteEnd - range.siteFirst;
             coldHooks += range.hooks;
         }
-        if (_code.callSites.length - coldSites != _hookSites - coldHooks
+        const ordinaryCalls = _code.callSites.length - coldSites
+            - (_hookSites - coldHooks);
+        if (ordinaryCalls > 1
+                || (ordinaryCalls != 0 && _code.cold.length != 0)
                 || _code.assertSites.length != 0
                 || _code.exceptionHandlers.length != 0
                 || _closureOffset != size_t.max
@@ -1357,11 +1365,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || _layout.variadicCursor != size_t.max
                 || _code.instructions.length > Bytecode.maxInlineInstructions)
             return null;
+        size_t delegateCalls;
         foreach (i, instruction; _code.instructions) {
+            if (_code.inCold(i))
+                continue;
             Operands roles;
-            if (!_code.inCold(i) && !copyOperandsOf(instruction.handler, roles))
+            if (!copyOperandsOf(instruction.handler, roles))
                 return null;
+            if (ordinaryCalls != 0) {
+                Instruction probe = instruction;
+                const target = branchTargetField(probe);
+                if (target !is null && *target <= i)
+                    return null;
+            }
+            if (instruction.handler is &opCallIndirectWindowFrame) {
+                const site = &_code.callSites[instruction.source];
+                if (site.kind != CallSite.Kind.value || !site.hasContext)
+                    return null;
+                ++delegateCalls;
+            }
         }
+        if (delegateCalls != ordinaryCalls)
+            return null;
         auto instructions = _code.instructions.dup;
         CallSite[] sites;
         auto siteMap = new size_t[_code.callSites.length];
@@ -1379,6 +1404,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         foreach (i, ref instruction; instructions)
             if (!_code.inCold(i) && (instruction.handler is &opCall
+                    || instruction.handler is &opCallIndirectWindowFrame
                     || instruction.handler is &opColdThrow))
                 instruction.source = siteMap[instruction.source];
         if (_code.cold.length != 0) {
@@ -1437,6 +1463,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool bodyWritesOnlyItsFrame(in InlineBody body_) {
         import std.meta: AliasSeq;
 
+        if (body_.callWindow !is null)
+            return false;
         foreach (instruction; body_.instructions) {
             static foreach (operation; AliasSeq!(
                 opStoreIndirect, opFrameAddress,
@@ -1582,9 +1610,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The index of the checked load that is the only way into the return
     // `returnIndex` of `instructions` and writes the value it returns, or
     // `size_t.max`. The failure code between them ends in a call. It is a
-    // hook that does not return, because `inlineBodyOfBuilt` copies a body
-    // only when all its call sites are failure hooks. A failed load writes
-    // nothing, so the load can write the place of the caller itself.
+    // hook that does not return. A failed load writes nothing, so the
+    // load can write the place of the caller itself.
     private static size_t checkedLoadBefore(
         in Instruction[] instructions, in size_t returnIndex,
     ) {
@@ -1649,6 +1676,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitInlined(
         in InlineBody body_, Arg[] args, in size_t destOffset,
     ) {
+        const window = body_.callWindow;
+        const windowSlot = window is null ? size_t.max : windowBaseSlot;
+        if (window !is null && window.windowEnd > _windowReach)
+            _windowReach = window.windowEnd;
         const base = alignUp(_tempSize, body_.frameAlignment);
         _tempSize = base + body_.frameSize;
         if (body_.frameAlignment > _tempAlignment)
@@ -1664,7 +1695,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 base + range.offset, range.size);
 
         const deferredStart = _deferredBindings.length;
-        bool canDefer = !body_.exposesFrame;
+        bool canDefer = !body_.exposesFrame && window is null;
         foreach (instruction; body_.instructions)
             if (instruction.handler is &opFrameAddress
                     || instruction.handler is &opIndexStatic
@@ -1691,6 +1722,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         const bound = args[0 .. boundCount];
         size_t rebase(in size_t offset) {
+            if (window !is null && offset == window.windowSlot)
+                return windowSlot;
             foreach (arg; bound)
                 if (offset >= arg.calleeOffset
                         && offset < arg.calleeOffset + arg.width)
@@ -1793,8 +1826,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 site.args = site.args.dup;
                 foreach (ref arg; site.args)
                     arg.callerOffset = place(arg.callerOffset);
+                if (copied.handler is &opCallIndirectWindowFrame) {
+                    site.windowSlot = windowSlot;
+                    site.calleeSlotOffset = rebase(site.calleeSlotOffset);
+                    site.nativeArgs = site.args;
+                } else {
+                    ++_hookSites;
+                }
                 _code.callSites ~= site;
-                ++_hookSites;
                 copied.source = _code.callSites.length - 1;
             }
             if (roles.right == Operand.storage)
@@ -8961,7 +9000,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
             if (dest == size_t.max) {
-                const inlinable = _bytecode.inlineBodyOf(callee);
+                const inlinable = inlinableBodyOf(callee);
                 if (inlinable !is null && bodyWritesOnlyItsFrame(*inlinable)) {
                     auto this_ = receiver.expression.isThisExp;
                     if (this_ !is null && this_.type.toBasetype.ty == Tclass)
@@ -9164,7 +9203,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure("a `void` call is only ever evaluated for effect");
 
         const inlinable = calleeType.parameterList.varargs == VarArg.none
-            ? _bytecode.inlineBodyOf(callee) : null;
+            ? inlinableBodyOf(callee) : null;
         if (inlinable is null && calleeType.parameterList.varargs == VarArg.none
                 && windowFits(callee, calleeLayout))
             return compileWindowCall(
@@ -9240,16 +9279,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    private const(InlineBody)* inlinableBodyOf(FuncDeclaration callee) {
+        const body_ = _bytecode.inlineBodyOf(callee);
+        // A copied window keeps its original displacement. An open window
+        // may already hold arguments whose call has yet to run.
+        if (_windowDepth != 0 && body_ !is null && body_.callWindow !is null)
+            return null;
+        return body_;
+    }
+
+    private size_t windowBaseSlot() {
+        if (_windowSlot == size_t.max)
+            // The VM writes it when the function starts, with no
+            // instruction naming it, so copy forwarding must not see it.
+            _windowSlot = reserveStorage(pointerFacts);
+        return _windowSlot;
+    }
+
     // The window of a call to a callee with `layout`, from the windows that are
     // open now. It takes the frame slot that holds where the windows start.
     private CallSite.Window windowOf(
         in FrameLayout layout, in CallAdapter returnShape,
     ) {
-        if (_windowSlot == size_t.max)
-            // The VM writes it when the function starts, with no
-            // instruction naming it, so copy forwarding must not see it.
-            _windowSlot = reserveStorage(pointerFacts);
-
         const scratchBytes = returnShape.isVoid ? 0 :
             (returnShape.returnFacts.size > layout.returnPlace.size
                 ? returnShape.returnFacts.size : layout.returnPlace.size);
@@ -9258,7 +9309,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ? returnShape.returnFacts.alignment
                 : layout.returnPlace.alignment);
         const window = CallSite.Window.of(
-            _windowSlot, _windowDepth, layout.alignment,
+            windowBaseSlot, _windowDepth, layout.alignment,
             parametersEnd(layout), scratchBytes, scratchAlignment);
         if (window.alignment > _tempAlignment)
             _tempAlignment = window.alignment;
@@ -9296,7 +9347,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (type.parameterList.varargs != VarArg.none
                 || layout.hiddenThis.variable is null
                 || !windowFits(callee, layout)
-                || _bytecode.inlineBodyOf(callee) !is null)
+                || inlinableBodyOf(callee) !is null)
             return size_t.max;
         const window = windowOf(layout, CallAdapter.ofType(type));
         windowEnd = window.end;
