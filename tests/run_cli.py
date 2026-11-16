@@ -5798,6 +5798,31 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
         backends=NATIVE_AND_FILE_BACKENDS,
         imports=True,
     ),
+    # `first!(const(Pair)*)` has inline assembler and a root type as a
+    # pointee: the image compiles it over a stand-in for `Pair`, and the call
+    # is native.
+    "inline_asm_instance_with_a_root_pointee": ImageShape(
+        {
+            "deps/peek.d": """
+                module peek;
+                int first(T)(T value) {
+                    asm { nop; }
+                    return *cast(const(int)*) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import peek;
+                struct Pair { int first, second; }
+                int main() {
+                    const pair = Pair(42, 7);
+                    return first(&pair) == 42 ? 0 : 1;
+                }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
     # An instance without inline assembler keeps its guest body: the template
     # decides from the enum at compile time, which its base type would change.
     "root_enum_text": snippet_shape("""
@@ -5915,12 +5940,14 @@ def run_with_stubs(
     )
 
 
+# A backend executes an instance of a dependency template unless its body
+# has inline assembler, so only such an instance is in the image.
 def write_answer_project(directory: Path, value: int = 7) -> None:
     write(
         directory / "deps" / "answers.d",
         f"""
         module answers;
-        int answer(T)() {{ return {value}; }}
+        int answer(T)() {{ asm {{ nop; }} return {value}; }}
         """,
     )
     write(
@@ -6046,7 +6073,7 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
         "deps/missing.d": """
             module missing;
             extern(C) int image_missing_dependency();
-            int answer(T)() { return image_missing_dependency(); }
+            int answer(T)() { asm { nop; } return image_missing_dependency(); }
             """,
         "app/root.d": """
             module root;
@@ -6067,7 +6094,7 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
         tmp_path / "deps" / "missing.d",
         """
         module missing;
-        int answer(T)() { return 5; }
+        int answer(T)() { asm { nop; } return 5; }
         """,
     )
     builds = image_builds(log)

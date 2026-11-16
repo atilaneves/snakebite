@@ -291,8 +291,9 @@ public struct PlanCache {
     // copy of it exists. A bodiless declaration is not one - it names
     // native code, such as a designated test fixture. A template instance
     // is one when an argument, or an argument of an enclosing instance,
-    // comes from a root module. An argument that this cannot classify
-    // leaves the answer to the lookup.
+    // comes from a root module, unless no backend can execute its body: the
+    // image then can hold a copy compiled over stand-ins for the root types.
+    // An argument that this cannot classify leaves the answer to the lookup.
     private bool isInterpretedOnly(
         imported!"dmd.func".FuncDeclaration function_,
     ) {
@@ -305,9 +306,20 @@ public struct PlanCache {
         for (Dsymbol symbol = function_; symbol !is null && !symbol.isModule;
                 symbol = symbol.parent) {
             if (hasRootArgument(symbol, 0))
-                return true;
+                return backendExecutesBody(function_);
         }
         return false;
+    }
+
+    private static bool backendExecutesBody(
+        imported!"dmd.func".FuncDeclaration function_,
+    ) {
+        import snakebite.frontend.compiler: withCompilerQuery;
+        import snakebite.language.call.selection: backendExecutes;
+
+        bool executes;
+        withCompilerQuery({ executes = backendExecutes(function_); });
+        return executes;
     }
 
     private bool hasRootArgument(
