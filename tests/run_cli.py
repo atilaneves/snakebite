@@ -5823,6 +5823,64 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
         backends=NATIVE_AND_FILE_BACKENDS,
         imports=True,
     ),
+    # A nested function has no native copy of its own, so the instance that holds it
+    # is native when the nested function has inline assembler.
+    "inline_asm_in_a_nested_function": ImageShape(
+        {
+            "deps/nested.d": """
+                module nested;
+                int first(T)(T value) {
+                    int inner() { asm { nop; } return 42; }
+                    return inner() + cast(int) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import nested;
+                int main() { return first(0) == 42 ? 0 : 1; }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
+    # The same for a nested function that is `static`.
+    "inline_asm_in_a_static_nested_function": ImageShape(
+        {
+            "deps/nested.d": """
+                module nested;
+                int first(T)(T value) {
+                    static int inner() { asm { nop; } return 42; }
+                    return inner() + cast(int) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import nested;
+                int main() { return first(0) == 42 ? 0 : 1; }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
+    # The same for a function literal.
+    "inline_asm_in_a_function_literal": ImageShape(
+        {
+            "deps/nested.d": """
+                module nested;
+                int first(T)(T value) {
+                    auto inner = () { asm { nop; } return 42; };
+                    return inner() + cast(int) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import nested;
+                int main() { return first(0) == 42 ? 0 : 1; }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
     # An instance without inline assembler keeps its guest body: the template
     # decides from the enum at compile time, which its base type would change.
     "root_enum_text": snippet_shape("""

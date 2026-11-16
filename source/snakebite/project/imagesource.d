@@ -517,16 +517,17 @@ private extern(C++) class Collector
         _current = function_;
         scope(exit) _current = previous;
         if (auto instance = function_.parent.isTemplateInstance) {
-            import snakebite.language.call.selection: backendExecutes;
+            import snakebite.frontend.dmd.functions: backendExecutes;
 
-            // A backend executes every other instance (docs/adr/0009).
+            // A backend executes every other instance (docs/adr/0009); the
+            // walk of the body comes after the cheap tests.
             if (instance.tempdecl !is null
-                    && !backendExecutes(function_)
                     && !_program.isRootOwned(instance.tempdecl)
                     && !isImportCBuiltins(instance.tempdecl.getModule)
                     && !function_.needThis && !function_.isNested
                     && !hasFunctionLocalType(instance)
-                    && isNamedByInstance(function_, instance)) {
+                    && isNamedByInstance(function_, instance)
+                    && !backendExecutes(function_)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
                 _imports[name] = true;
                 import dmd.mtype: Type;

@@ -146,10 +146,15 @@ public struct CallSelection {
     // Routing and constant proofs use the same finished signature. A prepared
     // callback must not walk frontend ownership again, even for a nonconstant
     // operand or a declaration that has no matching wrapper.
+    //
+    // `operation` says that the code generator makes an operation of its own
+    // in place of a call of the declaration. When no wrapper takes it, the
+    // route stays `native` and nothing but compiled code can make the call.
     private struct IntrinsicPlan {
         Decision call = Decision(Route.native);
         const(ParameterType)[] parameters;
         ParameterType result;
+        bool operation;
     }
 
     private SharedTable!(FuncDeclaration, IntrinsicPlan) _intrinsics;
@@ -289,7 +294,7 @@ public struct CallSelection {
     ) {
         import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions:
-            bodyIsSelected, contextOf, typeFunctionOf;
+            backendExecutes, bodyIsSelected, contextOf, typeFunctionOf;
 
         const context = contextOf(function_);
 
@@ -347,15 +352,11 @@ public struct CallSelection {
         // wrong layout. A missing independent symbol leaves the guest body.
         // An ordinary dependency uses its own frontend body when its exact
         // native symbol is absent (ADR-0009, decision 3).
-        bool prefers;
-        if (context.instantiated) {
-            import snakebite.frontend.compiler: withCompilerQuery;
-
-            bool executes;
-            withCompilerQuery({ executes = backendExecutes(function_); });
-            prefers = executes || !hasIndependentNativeSymbol;
-        } else
-            prefers = rootOwned || !hasNativeSymbol;
+        // The body is walked only when a native copy exists: that is the one
+        // case where the answer changes the route.
+        const prefers = context.instantiated
+            ? !hasIndependentNativeSymbol || backendExecutes(function_)
+            : rootOwned || !hasNativeSymbol;
         return Decision(prefers ? Route.guest : Route.native);
     }
 
@@ -444,35 +445,56 @@ public struct CallSelection {
                 ? "" : declaration.intrinsicName[0 .. strlen(declaration.intrinsicName)];
         }
 
-        with (LDCPragma) switch (function_.llvmInternal) {
+        // The one list of LDC's pragmas. Each one that makes the code
+        // generator emit an operation in place of a call is an `operation`;
+        // the others mark a declaration that has, or links to, a symbol.
+        static IntrinsicPlan operation(IntrinsicPlan plan) {
+            plan.operation = true;
+            return plan;
+        }
+
+        with (LDCPragma) final switch (cast(LDCPragma) function_.llvmInternal) {
+            case LLVMnone, LLVMignore, LLVMglobal_crt_ctor, LLVMglobal_crt_dtor,
+                    LLVMno_typeinfo, LLVMextern_weak, LLVMprofile_instr:
+                return IntrinsicPlan.init;
+            case LLVMva_arg, LLVMinline_asm, LLVMinline_ir, LLVMbitop_bt,
+                    LLVMbitop_btc, LLVMbitop_btr, LLVMbitop_bts,
+                    LLVMconvertvector:
+                return operation(IntrinsicPlan.init);
             case LLVMva_start:
-                return IntrinsicPlan(Decision(Route.vaStart, &startVariadicEntry));
-            case LLVMva_end: return builtin(&endVariadicEntry);
+                return operation(
+                    IntrinsicPlan(Decision(Route.vaStart, &startVariadicEntry)));
+            case LLVMva_end: return operation(builtin(&endVariadicEntry));
             case LLVMva_copy:
-                return IntrinsicPlan(Decision(Route.vaCopy, &copyVariadicEntry));
-            case LLVMalloca: return IntrinsicPlan(Decision(Route.alloca));
+                return operation(
+                    IntrinsicPlan(Decision(Route.vaCopy, &copyVariadicEntry)));
+            case LLVMalloca:
+                return operation(IntrinsicPlan(Decision(Route.alloca)));
             case LLVMintrinsic:
-                return builtin(intrinsicEntryOf(function_.mangleOverride));
-            case LLVMfence: return builtin(fenceEntry);
-            case LLVMatomic_load: return builtin(atomicLoadEntryOf(argumentSize));
-            case LLVMatomic_store: return builtin(atomicStoreEntryOf(argumentSize));
+                return operation(
+                    builtin(intrinsicEntryOf(function_.mangleOverride)));
+            case LLVMfence: return operation(builtin(fenceEntry));
+            case LLVMatomic_load:
+                return operation(builtin(atomicLoadEntryOf(argumentSize)));
+            case LLVMatomic_store:
+                return operation(builtin(atomicStoreEntryOf(argumentSize)));
             case LLVMatomic_cmp_xchg:
-                return builtin(atomicCompareExchangeEntryOf(argumentSize));
+                return operation(
+                    builtin(atomicCompareExchangeEntryOf(argumentSize)));
             case LLVMatomic_rmw: {
                 auto instance = function_.parent.isTemplateInstance;
-                return instance is null ? IntrinsicPlan.init
+                return operation(instance is null ? IntrinsicPlan.init
                     : builtin(atomicReadModifyWriteEntryOf(
                         intrinsicNameOf(instance.tempdecl.isTemplateDeclaration),
-                        argumentSize));
+                        argumentSize)));
             }
             case LLVMbitop_vld:
-                return builtin(volatileLoadEntryOf(
-                    representationSize(typeFunctionOf(function_).next)));
+                return operation(builtin(volatileLoadEntryOf(
+                    representationSize(typeFunctionOf(function_).next))));
             case LLVMbitop_vst:
-                return builtin(volatileStoreEntryOf(
+                return operation(builtin(volatileStoreEntryOf(
                     representationSize(
-                        typeFunctionOf(function_).parameterList[1].type)));
-            default: return IntrinsicPlan.init;
+                        typeFunctionOf(function_).parameterList[1].type))));
         }
     }
     else
@@ -495,10 +517,10 @@ public struct CallSelection {
         const name = function_.ident.toString.idup;
         auto entry = keyed ? entryOf(name, parameters, result) : null;
         return entry is null
-            ? IntrinsicPlan.init
+            ? IntrinsicPlan(Decision(Route.native), null, ParameterType.init, true)
             : IntrinsicPlan(
                 Decision(Route.builtin, entry, destinationParameterOf(name)),
-                parameters, result,
+                parameters, result, true,
             );
     }
 
@@ -1125,17 +1147,20 @@ public struct CallSelection {
     }
 }
 
-// Whether a backend can compile and execute the body of `function_`. The call
-// selection and the dependency image ask this one question: an instance of a
-// dependency template that root code instantiates is guest code (ADR-0009),
-// and only an instance for which the answer is no needs a native copy. The
-// body is judged alone: a call of a function that no backend can execute is a
-// native call, which a backend makes. No backend runs inline assembler
-// (ADR-0012), and none runs an operation that only the code generator makes
-// (an LLVM intrinsic, LLVM inline IR, LDC's inline assembler, a dmd
-// intrinsic) when no wrapper takes it (`buildIntrinsicPlan`). The caller holds
-// the frontend lock.
-public bool backendExecutes(imported!"dmd.func".FuncDeclaration function_) {
+// Whether a backend can compile and execute the body of `function_`, which
+// includes the nested functions and function literals in it: they exist only
+// as part of it, and no native copy of one exists. This is the question
+// behind `snakebite.frontend.dmd.functions.backendExecutes`, which keeps the
+// answer and holds the frontend lock. An instance of a dependency template
+// that root code instantiates is guest code (ADR-0009), and only an instance
+// for which the answer is no needs a native copy. A call of another function
+// that no backend can execute is a native call, which a backend makes. No
+// backend runs inline assembler (ADR-0012), and none runs an operation that
+// only the code generator makes when no wrapper takes it
+// (`buildIntrinsicPlan`).
+public bool bodyIsExecutedByBackend(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
     if (function_.hasInlineAsm)
         return false;
     if (function_.fbody is null)
@@ -1149,10 +1174,11 @@ public bool backendExecutes(imported!"dmd.func".FuncDeclaration function_) {
 // namespace, two classes of one name mangle to one symbol.
 private extern(C++) final class UnservedOperationFinder
         : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
+    import dmd.func: FuncDeclaration, FuncLiteralDeclaration;
     import dmd.visitor: SemanticTimeTransitiveVisitor;
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
-    import dmd.expression: DeclarationExp, FuncExp, SymbolExp;
+    import dmd.expression: DeclarationExp, SymbolExp;
     import dmd.statement: ExpStatement;
     import snakebite.language.layout.lowered: LoweredExpressionTypes;
 
@@ -1164,12 +1190,14 @@ private extern(C++) final class UnservedOperationFinder
                 found = true;
     }
 
-    // A function declared in the body has a body of its own, which is
-    // judged alone. Only what a local variable executes belongs here.
+    // A local variable executes its initializer and its destructor. Any
+    // other declaration, a nested function, is walked as part of the body.
     override void visit(DeclarationExp expression) {
         auto variable = expression.declaration.isVarDeclaration;
-        if (variable is null)
+        if (variable is null) {
+            expression.declaration.accept(this);
             return;
+        }
         if (variable._init !is null)
             if (auto initializer = variable._init.isExpInitializer)
                 initializer.exp.accept(this);
@@ -1177,14 +1205,26 @@ private extern(C++) final class UnservedOperationFinder
             variable.edtor.accept(this);
     }
 
-    // The transitive visitor also walks the declaration that an
-    // `ExpStatement` holds, which can be a nested function.
+    // The transitive visitor walks the declaration that an `ExpStatement`
+    // holds without the visit above.
     override void visit(ExpStatement statement) {
         if (statement.exp !is null)
             statement.exp.accept(this);
     }
 
-    override void visit(FuncExp) {}
+    override void visit(FuncDeclaration function_) {
+        if (function_.hasInlineAsm)
+            found = true;
+        else
+            super.visit(function_);
+    }
+
+    override void visit(FuncLiteralDeclaration function_) {
+        if (function_.hasInlineAsm)
+            found = true;
+        else
+            super.visit(function_);
+    }
 
     // A backend executes the lowering in place of the expression.
     static foreach (E; LoweredExpressionTypes) {
@@ -1203,37 +1243,9 @@ private extern(C++) final class UnservedOperationFinder
 private bool isUnservedOperation(imported!"dmd.func".FuncDeclaration callee) {
     if (callee.fbody !is null)
         return false;
-    auto module_ = callee.getModule; // DMD symbol queries are mutable.
-    version (LDC) {
-        if (!isMadeByCodeGenerator(callee))
-            return false;
-    } else {
-        if (!CallSelection.isInlinedByCodeGenerator(callee, module_))
-            return false;
-    }
-    return CallSelection.buildIntrinsicPlan(callee, module_).call.route
-        == CallSelection.Route.native;
-}
-
-// The pragmas of LDC that make the code generator emit the operation of a
-// declaration in place of a call. The others mark a declaration that has, or
-// links to, a symbol.
-version (LDC)
-private bool isMadeByCodeGenerator(imported!"dmd.func".FuncDeclaration callee) {
-    import gen.dpragma: LDCPragma;
-
-    final switch (cast(LDCPragma) callee.llvmInternal) with (LDCPragma) {
-        case LLVMnone, LLVMignore, LLVMglobal_crt_ctor, LLVMglobal_crt_dtor,
-                LLVMno_typeinfo, LLVMextern_weak, LLVMprofile_instr:
-            return false;
-        case LLVMintrinsic, LLVMalloca, LLVMva_start, LLVMva_copy, LLVMva_end,
-                LLVMva_arg, LLVMinline_asm, LLVMinline_ir, LLVMfence,
-                LLVMatomic_store, LLVMatomic_load, LLVMatomic_cmp_xchg,
-                LLVMatomic_rmw, LLVMbitop_bt, LLVMbitop_btc, LLVMbitop_btr,
-                LLVMbitop_bts, LLVMbitop_vld, LLVMbitop_vst,
-                LLVMconvertvector:
-            return true;
-    }
+    const plan = CallSelection.buildIntrinsicPlan(
+        callee, callee.getModule); // DMD symbol queries are mutable.
+    return plan.operation && plan.call.route == CallSelection.Route.native;
 }
 
 // Whether a call site's own argument list has the wrong length for

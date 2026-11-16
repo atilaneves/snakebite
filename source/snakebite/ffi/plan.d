@@ -223,11 +223,13 @@ public struct PlanCache {
     // have no native counterpart.
     // `nativeTarget` reads only a template instance's own already-resolved
     // arguments (an AST structure walk, no forward reference to force),
-    // and `resolve` is a host symbol lookup, not a dmd one - `mangledNameOf`
-    // is the only call here that can still reach into dmd's own mutable
-    // state, and only takes the frontend lock (`snakebite.frontend.
-    // compiler.forceIfNeeded`) while `function_`'s type is not already
-    // complete. `_nativeSymbols` is a `SharedTable` (ADR-0006).
+    // and `resolve` is a host symbol lookup, not a dmd one. Two calls here
+    // can still reach into dmd's own mutable state and take the frontend
+    // lock: `mangledNameOf`, only while `function_`'s type is not already
+    // complete (`snakebite.frontend.compiler.forceIfNeeded`), and
+    // `isInterpretedOnly`, which walks the body of an instance that has a
+    // root type as an argument (`backendExecutes`), once for each
+    // function. `_nativeSymbols` is a `SharedTable` (ADR-0006).
     public bool hasNativeSymbol(
         FuncDeclaration function_,
     ) {
@@ -292,12 +294,14 @@ public struct PlanCache {
     // native code, such as a designated test fixture. A template instance
     // is one when an argument, or an argument of an enclosing instance,
     // comes from a root module, unless no backend can execute its body: the
-    // image then can hold a copy compiled over stand-ins for the root types.
-    // An argument that this cannot classify leaves the answer to the lookup.
+    // image then can hold a copy compiled over stand-ins for the root types,
+    // so the lookup decides. An argument that this cannot classify leaves
+    // the answer to the lookup.
     private bool isInterpretedOnly(
         imported!"dmd.func".FuncDeclaration function_,
     ) {
         import dmd.dsymbol: Dsymbol;
+        import snakebite.frontend.dmd.functions: backendExecutes;
 
         if (_isRootOwned is null || function_.fbody is null)
             return false;
@@ -306,20 +310,9 @@ public struct PlanCache {
         for (Dsymbol symbol = function_; symbol !is null && !symbol.isModule;
                 symbol = symbol.parent) {
             if (hasRootArgument(symbol, 0))
-                return backendExecutesBody(function_);
+                return backendExecutes(function_);
         }
         return false;
-    }
-
-    private static bool backendExecutesBody(
-        imported!"dmd.func".FuncDeclaration function_,
-    ) {
-        import snakebite.frontend.compiler: withCompilerQuery;
-        import snakebite.language.call.selection: backendExecutes;
-
-        bool executes;
-        withCompilerQuery({ executes = backendExecutes(function_); });
-        return executes;
     }
 
     private bool hasRootArgument(

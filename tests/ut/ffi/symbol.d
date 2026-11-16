@@ -486,6 +486,55 @@ unittest {
 }
 
 
+// The image source of a root module that calls `first(0)`, an instance of a
+// template of a dependency module whose body is `body_`.
+private string nestedInstanceImageSource(in string moduleName, in string body_) {
+    const sandbox = Sandbox();
+    sandbox.writeFile("deps/" ~ moduleName ~ ".d",
+        "module " ~ moduleName ~ ";\nint first(T)(T value) {\n" ~ body_ ~ "\n}\n");
+    sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
+        "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n"
+        ~ "int trigger() { return first(0); }\n");
+    auto project = prepareProject(
+        sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")], null,
+        false, optimise: Optimise.no).project;
+    return imageSource(project.program);
+}
+
+
+// A nested function and a function literal exist only as part of the body
+// that holds them, so the instance that holds one with inline assembler is
+// native: no copy of the nested function exists to call.
+@("image.inlineAsmInNestedFunction")
+unittest {
+    const source = nestedInstanceImageSource("image_asm_nested", q{
+        int inner() { asm { nop; } return 42; }
+        return inner() + cast(int) value;
+    });
+    "image_asm_nested.first!int".should.be in source;
+}
+
+
+@("image.inlineAsmInStaticNestedFunction")
+unittest {
+    const source = nestedInstanceImageSource("image_asm_static_nested", q{
+        static int inner() { asm { nop; } return 42; }
+        return inner() + cast(int) value;
+    });
+    "image_asm_static_nested.first!int".should.be in source;
+}
+
+
+@("image.inlineAsmInFunctionLiteral")
+unittest {
+    const source = nestedInstanceImageSource("image_asm_literal", q{
+        auto inner = () { asm { nop; } return 42; };
+        return inner() + cast(int) value;
+    });
+    "image_asm_literal.first!int".should.be in source;
+}
+
+
 // An instance without inline assembler keeps its guest body: the template
 // decides from the enum at compile time, which a stand-in would change.
 @("image.rootTypedInstanceStaysInGuest")
