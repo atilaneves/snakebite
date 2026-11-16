@@ -34,6 +34,8 @@ run() {
 project_dir() {
     local name=${1%%@*} version=${1#*@}
     local dir=$HOME/.dub/packages/$name/$version/$name
+    # Like bin/bench: a package that is not on disk is fetched.
+    [[ -d $dir ]] || dub fetch "$name@$version" >/dev/null 2>&1
     [[ -d $dir ]] && echo "$dir"
 }
 
