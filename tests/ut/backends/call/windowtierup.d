@@ -122,6 +122,9 @@ static foreach (backend; Matrix!()) {
                     &first.add, &second.add, &third.subtract,
                     &fourth.multiply, &fifth.mask, &sixth.negate,
                 ];
+                // The pointer call lets invoke tier up even if the direct
+                // call is inlined into main.
+                auto indirectInvoke = &invoke;
                 foreach (round; 0 .. 3072L) {
                     const index = round % operations.length;
                     long[6] expected = [
@@ -129,6 +132,7 @@ static foreach (backend; Matrix!()) {
                         round * 5, round ^ 7, -round,
                     ];
                     assert(invoke(operations[index], round) == expected[index]);
+                    assert(indirectInvoke(operations[index], round) == expected[index]);
                 }
             }
         }, ["main", "invoke", "add", "subtract", "multiply", "mask"]);

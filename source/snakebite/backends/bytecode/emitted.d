@@ -165,7 +165,7 @@ package bool copyOperandsOf(
     enum N = Operand.ignored;
     if (inlineOperandsOf(handler, roles))
         return true;
-    if (handler is &opColdThrow) {
+    if (handler is &opColdThrow || handler is &opCallIndirectWindowFrame) {
         roles = Operands(S, Operand.callSite);
         return true;
     }
