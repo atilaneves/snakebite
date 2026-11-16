@@ -5,7 +5,8 @@ import ut.backends;
 import dmd.func: FuncDeclaration;
 import snakebite.program: Program;
 import snakebite.backends.bytecode.inspection:
-    handlerRoleMismatches, misplacedRelocs, relocsOf;
+    handlerRoleMismatches, misplacedLocalReferences, misplacedRelocs,
+    relocsOf;
 import snakebite.backends.bytecode.relocation: Place;
 import snakebite.native.address: Target;
 import snakebite.backends.bytecode.vm:
@@ -278,7 +279,10 @@ unittest {
 unittest {
     size_t staticRelocs;
     string[] misplaced;
+    string[] misplacedRecords;
     withCompiledPrograms((name, function_) {
+        foreach (problem; misplacedLocalReferences(function_))
+            misplacedRecords ~= name ~ ": " ~ problem;
         if (name != "relocation_guest.runRemap")
             return;
         foreach (reloc; relocsOf(function_))
@@ -292,4 +296,5 @@ unittest {
     // source. The thread-local variable has descriptor relocs instead.
     (staticRelocs >= 4).should == true;
     misplaced.should == string[].init;
+    misplacedRecords.should == string[].init;
 }
