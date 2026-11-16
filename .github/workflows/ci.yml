@@ -94,3 +94,47 @@ jobs:
         uses: codecov/codecov-action@v5.1.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  array-cache:
+    name: Array allocation cache
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LDC
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Select the installed collector source
+        run: |
+          ldc=$(realpath "$DC")
+          sdk=$(dirname "$(dirname "$ldc")")
+          collector="$sdk/include/d/core/internal/gc/impl/conservative/gc.d"
+          test -f "$collector"
+          echo "SNAKEBITE_ARRAY_CACHE_COLLECTOR_SOURCE=$collector" >> "$GITHUB_ENV"
+          echo "LDC=$ldc" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ldc-bin"
+          ln -s "$ldc" "$RUNNER_TEMP/ldc-bin/ldc"
+          echo "$RUNNER_TEMP/ldc-bin" >> "$GITHUB_PATH"
+
+      - name: Install D compiler for Reggae
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: dmd-2.113.0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.32"
+
+      - name: Install libreadline, strace and patch
+        run: build/ci-install-packages.sh
+
+      - name: Build and check the opt-in collector
+        run: |
+          build/reggae.sh
+          ninja bin/sb
+          nm --defined-only bin/sb | grep -E ' [tT] arrayAllocationTls$'
+          uv run --with pytest==8.4.1 --with pytest-xdist==3.8.0 python -m pytest -q \
+            'tests/run_cli.py::test_array_allocations_survive_fiber_migration[array-cache]'
