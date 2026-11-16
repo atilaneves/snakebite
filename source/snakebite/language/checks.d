@@ -48,9 +48,9 @@ public enum nullDerefCMessage = "null pointer dereference";
 // A flexible array member has length 0 and is indexed past it.
 public FailurePlan boundsPlanOf(
     in Checks checks,
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
-    import dmd.astenums: CHECKENABLE, FileType, TRUST;
+    import snakebite.frontend.ast: CHECKENABLE, FileType, TRUST;
 
     import snakebite.frontend.dmd.functions: moduleOf;
 
@@ -79,7 +79,7 @@ public FailurePlan boundsPlanOf(
 // `HaltExp` of a `switch` default, and under `-checkaction=C` the `assert(0)`
 // there. A backend runs such a node for its effect and gives it no type.
 public bool isUnanalysed(
-    in imported!"dmd.expression".Expression expression,
+    in imported!"snakebite.frontend.ast".Expression expression,
 ) @safe nothrow @nogc {
     return expression.type is null;
 }
@@ -122,10 +122,10 @@ public imported!"snakebite.language.call.druntimehook".DruntimeHook hookOf(
 }
 
 private FailurePlan planFor(
-    in imported!"dmd.astenums".CHECKENABLE enable,
+    in imported!"snakebite.frontend.ast".CHECKENABLE enable,
     in Checks checks,
 ) @safe pure nothrow @nogc {
-    import dmd.astenums: CHECKACTION, CHECKENABLE;
+    import snakebite.frontend.ast: CHECKACTION, CHECKENABLE;
 
     final switch (enable) with (CHECKENABLE) {
         case _default:
@@ -162,15 +162,15 @@ public struct AssertFailure {
     public string message;
     public string file;
     public size_t line;
-    public imported!"dmd.expression".Expression messageExpression;
+    public imported!"snakebite.frontend.ast".Expression messageExpression;
 }
 
 // `function_` is the function that holds the assertion: druntime's failure
 // hook for an assertion directly in a `unittest` block has its own default
 // message.
 public AssertFailure assertFailureOf(
-    imported!"dmd.expression".AssertExp expression,
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".AssertExp expression,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
     import std.string: fromStringz;
 
@@ -194,8 +194,8 @@ public AssertFailure assertFailureOf(
 
 // The message of `expression` when it is not a literal, which the backend
 // evaluates only if the assertion fails.
-public imported!"dmd.expression".Expression messageExpressionOf(
-    imported!"dmd.expression".AssertExp expression,
+public imported!"snakebite.frontend.ast".Expression messageExpressionOf(
+    imported!"snakebite.frontend.ast".AssertExp expression,
 ) {
     const dynamic = expression.msg !is null
         && expression.msg.isStringExp is null;
@@ -208,7 +208,7 @@ public imported!"dmd.expression".Expression messageExpressionOf(
 // itself. It prints the expression, so it is made only when this mode
 // asks for it.
 public const(char)* cAssertionOf(
-    imported!"dmd.expression".AssertExp expression,
+    imported!"snakebite.frontend.ast".AssertExp expression,
 ) {
     auto literal = expression.msg is null ? null : expression.msg.isStringExp;
 
@@ -227,8 +227,8 @@ public struct CAssertCall {
 
 public CAssertCall cAssertCallOf(
     in const(char)* assertion,
-    in imported!"dmd.location".Loc loc,
-    imported!"dmd.func".FuncDeclaration function_,
+    in imported!"snakebite.frontend.ast".Loc loc,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
     import snakebite.frontend.dmd.functions: prettyNameOf;
 
@@ -259,7 +259,7 @@ public struct AssertInvariantPlan {
     }
 
     public Kind kind;
-    public imported!"dmd.func".FuncDeclaration structInvariant;
+    public imported!"snakebite.frontend.ast".FuncDeclaration structInvariant;
 }
 
 // A class reference's invariant call itself goes through
@@ -268,11 +268,11 @@ public struct AssertInvariantPlan {
 // no `FuncDeclaration` to resolve it by, and that module owns its
 // mangled linker symbol.
 public AssertInvariantPlan assertInvariantPlanOf(
-    imported!"dmd.expression".AssertExp expression,
+    imported!"snakebite.frontend.ast".AssertExp expression,
     in imported!"snakebite.frontend.checks".Checks checks,
 ) {
-    import dmd.astenums: CHECKENABLE, Tclass, Tpointer, Tstruct;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: CHECKENABLE, nextOf, Tclass, Tpointer,
+        Tstruct;
     import snakebite.frontend.typefacts: baseType;
 
     auto none = AssertInvariantPlan(AssertInvariantPlan.Kind.none);

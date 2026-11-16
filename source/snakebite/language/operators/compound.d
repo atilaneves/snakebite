@@ -11,8 +11,8 @@ import snakebite.frontend.typefacts: typeFacts;
 // DMD represents the target of a compound assignment at its promoted
 // operation type. The original target type remains on the assignment node;
 // use that pair to remove only this frontend-generated lvalue promotion.
-public imported!"dmd.expression".Expression compoundTarget(
-    imported!"dmd.expression".BinAssignExp expression,
+public imported!"snakebite.frontend.ast".Expression compoundTarget(
+    imported!"snakebite.frontend.ast".BinAssignExp expression,
 ) {
     const type = expression.type.baseType;
     if (sameScalar(expression.e1.type.baseType, type))
@@ -31,7 +31,7 @@ public imported!"dmd.expression".Expression compoundTarget(
 // variable, while the target it promotes is not. The ordinary case is the
 // first comparison alone.
 private bool sameScalar(
-    imported!"dmd.mtype".Type a, in imported!"dmd.mtype".Type b,
+    imported!"snakebite.frontend.ast".Type a, in imported!"snakebite.frontend.ast".Type b,
 ) {
     return a.equals(b) || (a.ty == b.ty && a.isTypeBasic !is null);
 }
@@ -59,7 +59,7 @@ package(snakebite) struct CompoundConversion {
 }
 
 package(snakebite) CompoundConversion compoundConversion(
-    imported!"dmd.expression".BinAssignExp expression,
+    imported!"snakebite.frontend.ast".BinAssignExp expression,
 ) {
     import snakebite.language.operators.arithmetic: arithmeticKind;
     import snakebite.language.operators.casts: classify;
@@ -109,12 +109,11 @@ package(snakebite) bool readsTargetFirst(
 // `double` for any integral target, and runs every operation on a `ulong`
 // target on the x87 stack in `real`. A `double` or `real` step keeps its
 // type.
-private imported!"dmd.mtype".Type operationPrecision(
-    imported!"dmd.mtype".Type targetType,
-    imported!"dmd.mtype".Type operationType,
+private imported!"snakebite.frontend.ast".Type operationPrecision(
+    imported!"snakebite.frontend.ast".Type targetType,
+    imported!"snakebite.frontend.ast".Type operationType,
 ) {
-    import dmd.astenums: TY;
-    import dmd.mtype: Type;
+    import snakebite.frontend.ast: TY, Type;
     import snakebite.frontend.typefacts: baseType;
 
     if (targetType.baseType.ty == TY.Tuns64)

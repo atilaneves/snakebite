@@ -15,16 +15,9 @@ public struct RuntimeTypes {
     // storage with the original until one side grows.
     @disable this(this);
 
-    import dmd.aggregate: AggregateDeclaration;
-    import dmd.dclass: ClassDeclaration;
-    import dmd.denum: EnumDeclaration;
-    import dmd.location: Loc;
-    import dmd.dstruct: StructDeclaration;
-    import dmd.dsymbol: Dsymbol;
-    import dmd.declaration: Declaration;
-    import dmd.expression: Expression;
-    import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type;
+    import snakebite.frontend.ast: AggregateDeclaration, ClassDeclaration,
+        Declaration, Dsymbol, EnumDeclaration, FuncDeclaration,
+        StructDeclaration, Type;
     import object:
         TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
     import snakebite.host.sharedtable: SharedTable;
@@ -75,10 +68,7 @@ public struct RuntimeTypes {
     }
 
     public immutable(void)* rtInfo(AggregateDeclaration declaration) {
-        import dmd.common.outbuffer: OutBuffer;
-        import dmd.dsymbolsem;
-        import dmd.mangle: mangleToBuffer;
-        import dmd.typesem: hasPointers;
+        import snakebite.frontend.ast: OutBuffer;
         import snakebite.frontend.compiler: inFrontend;
 
         bool hasPointerData() {
@@ -148,7 +138,6 @@ public struct RuntimeTypes {
             return *cached;
 
         import snakebite.frontend.compiler: inFrontend, withCompilerLock;
-        import dmd.typesem: merge2;
 
         TypeInfo info;
         withCompilerLock({
@@ -168,8 +157,7 @@ public struct RuntimeTypes {
     // spellings of the class name stand for the same class, whereas `get`
     // answers a qualified type with a qualifier wrapper around it.
     public TypeInfo_Class unqualifiedClassInfo(Type declared) {
-        import dmd.astenums: Tclass;
-        import dmd.typesem: mutableOf, unSharedOf;
+        import snakebite.frontend.ast: Tclass;
         import snakebite.frontend.compiler: inFrontend, withCompilerLock;
         import snakebite.frontend.typefacts: baseType;
 
@@ -193,10 +181,15 @@ public struct RuntimeTypes {
     }
 
     private TypeInfo build(Type type) {
-        import dmd.astenums;
-        import dmd.typesem: mutableOf, nextOf, unSharedOf;
+        import snakebite.frontend.ast: nextOf, Taarray, Tarray, Tbool, Tchar,
+            Tclass, Tcomplex32, Tcomplex64, Tcomplex80, Tdchar, Tdelegate,
+            Tenum, Terror, Tfloat32, Tfloat64, Tfloat80, Tfunction, Tident,
+            Timaginary32, Timaginary64, Timaginary80, Tinstance, Tint128,
+            Tint16, Tint32, Tint64, Tint8, Tmixin, Tnone, Tnoreturn, Tnull,
+            toDString, Tpointer, Treference, Treturn, Tsarray, Tslice, Tstruct,
+            Ttag, Ttraits, Ttuple, Ttypeof, Tuns128, Tuns16, Tuns32, Tuns64,
+            Tuns8, Tvector, Tvoid, Twchar;
         import snakebite.frontend.compiler: inFrontend;
-        import dmd.root.string: toDString;
         import object: TypeInfo_Array, TypeInfo_AssociativeArray,
             TypeInfo_Const, TypeInfo_Delegate, TypeInfo_Enum,
             TypeInfo_Function, TypeInfo_Inout,
@@ -336,8 +329,7 @@ public struct RuntimeTypes {
     }
 
     private TypeInfo linkedInfo(Type type) {
-        import dmd.common.outbuffer: OutBuffer;
-        import dmd.mangle: mangleToBuffer;
+        import snakebite.frontend.ast: OutBuffer;
         import snakebite.frontend.dmd.mangle: completeMangleTargets;
         import snakebite.frontend.compiler: inFrontend;
         import std.conv: text;
@@ -386,7 +378,7 @@ public struct RuntimeTypes {
     // (`classinfo.classRuntimeInfo`) can call this without looping back
     // through that same fabrication path.
     public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
-        import dmd.root.string: toDString;
+        import snakebite.frontend.ast: toDString;
         import snakebite.frontend.dmd.functions: prettyNameOf;
 
         if (isRootOwned(declaration))
@@ -403,7 +395,7 @@ public struct RuntimeTypes {
     }
 
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {
-        import dmd.root.string: toDString;
+        import snakebite.frontend.ast: toDString;
         import snakebite.frontend.dmd.functions: prettyNameOf;
         auto info = _data.newObject!TypeInfo_Enum(declaration);
         _data.storeString(&info.name, prettyNameOf(declaration).toDString);
@@ -466,16 +458,13 @@ public struct RuntimeTypes {
     // itself (through `get`) gets the same object. It goes into `_structs`
     // when it is complete.
     private TypeInfo_Struct buildStructInfo(StructDeclaration declaration) {
-        import dmd.root.string: toDString;
+        import snakebite.frontend.ast: hasPointers, STC, toDString;
         auto info = _data.newObject!TypeInfo_Struct(declaration);
         _building[declaration] = info;
         scope(exit) _building.remove(declaration);
         _data.storeString(&info.mangledName, declaration.type.deco.toDString);
         storeStructInit(info, declaration);
         info.m_align = declaration.alignsize;
-        import dmd.astenums: STC;
-        import dmd.semantic3: semanticTypeInfoMembers, search_toString;
-        import dmd.typesem: hasPointers;
         import snakebite.frontend.compiler: inFrontend;
         inFrontend!"semanticTypeInfoMembers"(declaration);
         if (declaration.xhash !is null)

@@ -4,7 +4,7 @@ module snakebite.language.statics.data;
 private:
 
 
-import dmd.dmodule: Module;
+import snakebite.frontend.ast: Module;
 import snakebite.failure.report: internalFailure;
 import snakebite.native.address: Address, DatumRef, Target;
 import snakebite.frontend.typefacts;
@@ -27,14 +27,9 @@ public struct NativeData {
     // changed it.
     @disable this(this);
 
-    import dmd.aggregate: AggregateDeclaration;
-    import dmd.dclass: ClassDeclaration;
-    import dmd.declaration: Declaration, VarDeclaration;
-    import dmd.dsymbol: Dsymbol;
-    import dmd.expression:
-        ClassReferenceExp, Expression, StringExp, StructLiteralExp;
-    import dmd.location: Loc;
-    import dmd.mtype: Type;
+    import snakebite.frontend.ast: AggregateDeclaration, ClassDeclaration,
+        ClassReferenceExp, Declaration, Dsymbol, Expression, Loc, StringExp,
+        StructLiteralExp, Type, VarDeclaration;
 
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
@@ -631,7 +626,7 @@ public struct NativeData {
     }
 
     private static bool isExtern(VarDeclaration variable) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
 
         return (variable.storage_class & STC.extern_) != 0;
     }
@@ -644,7 +639,6 @@ public struct NativeData {
     // for it, rather than reserving a second time.
     private Placed buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
         import core.stdc.string: memcpy;
-        import dmd.expressionsem: getConstInitializer;
         import snakebite.frontend.compiler: inFrontend;
 
         if (auto pending = variable in _pendingStatics)
@@ -699,7 +693,6 @@ public struct NativeData {
         AggregateDeclaration declaration,
         ubyte* place,
     ) {
-        import dmd.expressionsem: getConstInitializer;
         import snakebite.frontend.compiler: inFrontend;
 
         size_t writtenBitEnd;
@@ -731,7 +724,7 @@ public struct NativeData {
 // Like dmd's `membersToDt`, the first present union member owns its bytes.
 // Packed siblings can share bytes, but not the bits of a selected member.
 private bool fieldImageIncludes(
-    imported!"dmd.declaration".VarDeclaration field,
+    imported!"snakebite.frontend.ast".VarDeclaration field,
     ref size_t writtenBitEnd,
 ) {
     const bitfield = field.isBitFieldDeclaration;
@@ -745,24 +738,23 @@ private bool fieldImageIncludes(
 }
 
 private alias SymbolAddress =
-    void* delegate(imported!"dmd.declaration".Declaration);
+    void* delegate(imported!"snakebite.frontend.ast".Declaration);
 private alias SymbolPlaceOf =
-    Address delegate(imported!"dmd.declaration".Declaration);
+    Address delegate(imported!"snakebite.frontend.ast".Declaration);
 // What kind of target a function address is (`Target.Kind`).
 private alias FunctionKind = Target.Kind delegate(in void* address);
 // This thread's address of a thread-local symbol, by linker name.
 private alias ThreadLocalAddress = void* delegate(in char[] name);
 // The `TypeInfo` object of a type.
-private alias TypeInfoOf = TypeInfo delegate(imported!"dmd.mtype".Type);
+private alias TypeInfoOf = TypeInfo delegate(imported!"snakebite.frontend.ast".Type);
 
 // Whether two element types are the same type once their qualifiers are
 // dropped. `mutableOf` mutates the type's own cache unless the type has no
 // qualifier, so only a qualified one needs the frontend lock.
 private bool mutableElementsEqual(
-    imported!"dmd.mtype".Type first,
-    imported!"dmd.mtype".Type second,
+    imported!"snakebite.frontend.ast".Type first,
+    imported!"snakebite.frontend.ast".Type second,
 ) {
-    import dmd.typesem: mutableOf;
     import snakebite.frontend.compiler: inFrontend;
 
     if (first.mod == 0 && second.mod == 0)
@@ -771,11 +763,10 @@ private bool mutableElementsEqual(
     return inFrontend!"mutableOf"(first).equals(inFrontend!"mutableOf"(second));
 }
 
-private imported!"dmd.expression".Expression initialExpression(
-    imported!"dmd.mtype".Type type,
-    in imported!"dmd.location".Loc loc,
+private imported!"snakebite.frontend.ast".Expression initialExpression(
+    imported!"snakebite.frontend.ast".Type type,
+    in imported!"snakebite.frontend.ast".Loc loc,
 ) {
-    import dmd.typesem: defaultInitLiteral;
     import snakebite.frontend.compiler: inFrontend;
 
     return inFrontend!"defaultInitLiteral"(type, loc);
@@ -785,8 +776,8 @@ private imported!"dmd.expression".Expression initialExpression(
 // offset: the link-time constant that C allows as the initialiser of an
 // integer, `(unsigned long) &variable`.
 private bool isSymbolAddress(
-    imported!"dmd.expression".Expression value,
-    out imported!"dmd.declaration".Declaration symbol,
+    imported!"snakebite.frontend.ast".Expression value,
+    out imported!"snakebite.frontend.ast".Declaration symbol,
     out ulong offset,
 ) {
     while (auto integerCast = value.isCastExp)
@@ -809,16 +800,16 @@ private bool isSymbolAddress(
 }
 
 public void storeValue(
-    imported!"dmd.mtype".Type type,
-    imported!"dmd.expression".Expression value,
+    imported!"snakebite.frontend.ast".Type type,
+    imported!"snakebite.frontend.ast".Expression value,
     void* place,
 ) {
     storeValue(type, typeFacts(type), value, place, null);
 }
 
 private void storeValue(
-    imported!"dmd.mtype".Type type,
-    imported!"dmd.expression".Expression value,
+    imported!"snakebite.frontend.ast".Type type,
+    imported!"snakebite.frontend.ast".Expression value,
     void* place,
     scope SymbolPlaceOf symbolAddress,
     NativeData* nativeData = null,
@@ -827,9 +818,9 @@ private void storeValue(
 }
 
 public void storeValue(
-    imported!"dmd.mtype".Type type,
+    imported!"snakebite.frontend.ast".Type type,
     in TypeFacts facts,
-    imported!"dmd.expression".Expression value,
+    imported!"snakebite.frontend.ast".Expression value,
     void* place,
 ) {
     storeValue(type, facts, value, place, null);
@@ -841,7 +832,7 @@ private struct StringText {
     size_t unitSize;
     const(ubyte)[] units;
 
-    static StringText of(imported!"dmd.expression".StringExp literal) {
+    static StringText of(imported!"snakebite.frontend.ast".StringExp literal) {
         return StringText(
             literal.sz,
             cast(const(ubyte)[]) literal.peekData[0 .. literal.len * literal.sz],
@@ -850,7 +841,7 @@ private struct StringText {
 }
 
 private void copyUnits(
-    imported!"dmd.expression".StringExp literal,
+    imported!"snakebite.frontend.ast".StringExp literal,
     ubyte[] destination,
 ) {
     import core.stdc.string: memcpy;
@@ -872,7 +863,7 @@ private void storeAddress(
 
 private const(void)* stringPointer(
     NativeData* nativeData,
-    imported!"dmd.expression".StringExp literal,
+    imported!"snakebite.frontend.ast".StringExp literal,
 ) {
     return nativeData is null
         ? terminatedCopy(literal).ptr : nativeData.stringData(literal);
@@ -881,7 +872,7 @@ private const(void)* stringPointer(
 // A literal is followed by one zero code unit in memory, so that it converts
 // to a C string. The frontend does not keep one in a literal that it made by
 // folding, so the code units are copied to storage that has it.
-private ubyte[] terminatedCopy(imported!"dmd.expression".StringExp literal) {
+private ubyte[] terminatedCopy(imported!"snakebite.frontend.ast".StringExp literal) {
     // `auto`: the copy is written, so it cannot be `const`.
     auto bytes = new ubyte[(literal.len + 1) * literal.sz];
     copyUnits(literal, bytes[0 .. literal.len * literal.sz]);
@@ -889,18 +880,16 @@ private ubyte[] terminatedCopy(imported!"dmd.expression".StringExp literal) {
 }
 
 private void storeValue(
-    imported!"dmd.mtype".Type type,
+    imported!"snakebite.frontend.ast".Type type,
     in TypeFacts facts,
-    imported!"dmd.expression".Expression value,
+    imported!"snakebite.frontend.ast".Expression value,
     void* place,
     scope SymbolPlaceOf symbolAddress,
     NativeData* nativeData = null,
 ) {
     import core.stdc.string: memcpy, memset;
-    import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray, Tvector;
-    import dmd.mtype: Type;
-    import dmd.expressionsem: toImaginary;
-    import dmd.typesem: mutableOf, nextOf;
+    import snakebite.frontend.ast: nextOf, Tarray, Tdelegate, toImaginary,
+        Tpointer, Tsarray, Tvector, TY, Type;
     import snakebite.frontend.compiler: inFrontend;
     import snakebite.frontend.typefacts:
         baseType, complexValue, integerValue, realValue;
@@ -912,7 +901,7 @@ private void storeValue(
     }
 
     if (facts.isIntegral) {
-        imported!"dmd.declaration".Declaration symbol;
+        imported!"snakebite.frontend.ast".Declaration symbol;
         ulong offset;
         if (isSymbolAddress(value, symbol, offset)) {
             assert(symbolAddress !is null);
@@ -988,7 +977,7 @@ private void storeValue(
     }
 
     if (auto typeId = value.isTypeidExp) {
-        import dmd.dtemplate: isType;
+        import snakebite.frontend.ast: isType;
 
         auto objectType = isType(typeId.obj);
         assert(nativeData !is null && objectType !is null);

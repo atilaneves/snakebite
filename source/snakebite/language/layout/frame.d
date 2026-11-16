@@ -29,10 +29,8 @@ import snakebite.stack.hostcall:
 // its own frame past `size` on top of what this type already reserved.
 package(snakebite) struct FrameLayout {
     import snakebite.native.value: alignUp, TypeFacts;
-    import dmd.declaration: VarDeclaration;
-    import dmd.func: FuncDeclaration;
-    import dmd.expression: ArrayLiteralExp;
-    import dmd.mtype: DmdParameter = Parameter, Type, TypeFunction;
+    import snakebite.frontend.ast: ArrayLiteralExp, FuncDeclaration,
+        DmdParameter = Parameter, Type, TypeFunction, VarDeclaration;
 
     package(snakebite) size_t size;
     package(snakebite) uint alignment = 1;
@@ -173,7 +171,7 @@ package(snakebite) struct FrameLayout {
     ) {
         import snakebite.frontend.dmd.delegates: hasHiddenThis;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
         import std.conv: text;
 
         version(unittest) ++builds;
@@ -203,7 +201,7 @@ package(snakebite) struct FrameLayout {
                 isRefThis = (function_.vthis.storage_class & STC.ref_) != 0;
                 context = function_.vthis;
             } else {
-                import dmd.declaration: ThisDeclaration;
+                import snakebite.frontend.ast: ThisDeclaration;
                 import snakebite.frontend.compiler: inFrontend;
 
                 auto aggregate = function_.isThis();
@@ -307,7 +305,7 @@ package(snakebite) struct FrameLayout {
     private const(Signature)* signatureOf(
         ref SignatureTable table, TypeFunction type,
     ) const {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         Shape[] shapes;
         foreach (parameter; parameters)
@@ -329,7 +327,7 @@ package(snakebite) struct FrameLayout {
     }
 
     private void reserveNativeCursor(TypeFunction type) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         if (type.parameterList.varargs == VarArg.variadic
                 && variadicCursor == size_t.max)
@@ -382,7 +380,7 @@ package(snakebite) struct FrameLayout {
     // packed after a callee's hidden `this` (`of`) or on its own, from
     // nothing but a function pointer's type (`ofParameters`).
     private Parameter packParameter(DmdParameter parameter) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
 
         const isRefParameter = (parameter.storageClass
             & (STC.ref_ | STC.out_)) != 0;
@@ -489,8 +487,7 @@ package(snakebite) struct FrameLayout {
 // Shared between backends because the context has the same native shape
 // regardless of whether a tree walker or bytecode VM consumes it.
 package(snakebite) struct ClosureLayout {
-    import dmd.declaration: VarDeclaration;
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration, VarDeclaration;
     import snakebite.native.value: alignUp, TypeFacts;
 
     package(snakebite) struct Slot {
@@ -504,7 +501,7 @@ package(snakebite) struct ClosureLayout {
     private Slot[VarDeclaration] _slots;
 
     package(snakebite) static ClosureLayout of(FuncDeclaration function_) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
 
         ClosureLayout closure;
         closure.size = size_t.sizeof;
@@ -537,7 +534,7 @@ package(snakebite) struct ClosureLayout {
     }
 }
 
-import dmd.visitor: SemanticTimeTransitiveVisitor;
+import snakebite.frontend.ast: SemanticTimeTransitiveVisitor;
 
 // Decides which locals get a frame slot by walking the statement kinds a
 // function body is built from: `CompoundStatement` and `ScopeStatement`
@@ -569,16 +566,13 @@ import dmd.visitor: SemanticTimeTransitiveVisitor;
 // as a wrong answer.
 extern(C++) private final class LocalsCollector:
     SemanticTimeTransitiveVisitor {
-    import dmd.declaration: VarDeclaration;
-    import dmd.expression: ArrayLiteralExp, DeclarationExp, Expression,
-        IndexExp, NewExp, SliceExp;
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: ArrayLiteralExp, Catch, CompoundStatement,
+        DeclarationExp, DoStatement, Expression, ExpStatement, ForStatement,
+        FuncDeclaration, IfStatement, ImportStatement, IndexExp, LabelStatement,
+        NewExp, ReturnStatement, ScopeStatement, SliceExp, Statement,
+        TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
+        VarDeclaration, WithStatement;
     import snakebite.language.layout.lowered: LoweredExpressionTypes;
-    import dmd.statement:
-        Catch, CompoundStatement, DoStatement, ExpStatement, ForStatement,
-        IfStatement, ImportStatement, LabelStatement, ReturnStatement,
-        ScopeStatement, Statement, TryCatchStatement, TryFinallyStatement,
-        UnrolledLoopStatement, WithStatement;
 
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
@@ -733,7 +727,7 @@ extern(C++) private final class LocalsCollector:
     // A `$` whose length dmd knows at compile time (a static array) is a
     // constant that dmd folds into every use, so it needs no slot.
     private void collectDollar(VarDeclaration dollar) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
 
         if (dollar is null || (dollar.storage_class & STC.manifest) != 0
                 || _layout.hasSlot(dollar))
@@ -779,7 +773,7 @@ extern(C++) private final class LocalsCollector:
         if (variable.isDataseg)
             return;
 
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
         import snakebite.language.layout.temporary: canRetainTemporaries;
         import snakebite.native.value: TypeFacts;
 
@@ -824,11 +818,10 @@ extern(C++) private final class LocalsCollector:
 
 
 // The register class of an argument of `type`, once its facts are known.
-package(snakebite) Shape.Class classOf(imported!"dmd.mtype".Type type) {
-    import dmd.astenums:
-        Tbool, Tchar, Tclass, Tdchar, Tfloat32, Tfloat64, Timaginary32,
-        Timaginary64, Tint16, Tint32, Tint64, Tint8, Tnull, Tpointer, Taarray,
-        Twchar, Tuns16, Tuns32, Tuns64, Tuns8;
+package(snakebite) Shape.Class classOf(imported!"snakebite.frontend.ast".Type type) {
+    import snakebite.frontend.ast: Taarray, Tbool, Tchar, Tclass, Tdchar,
+        Tfloat32, Tfloat64, Timaginary32, Timaginary64, Tint16, Tint32, Tint64,
+        Tint8, Tnull, Tpointer, Tuns16, Tuns32, Tuns64, Tuns8, Twchar;
     import snakebite.frontend.typefacts: baseType;
 
     switch (type.baseType.ty) {
@@ -846,15 +839,14 @@ package(snakebite) Shape.Class classOf(imported!"dmd.mtype".Type type) {
 // The shape of an argument of `type` with `facts`, as a variadic argument
 // that no parameter declares.
 package(snakebite) Shape shapeOf(
-    imported!"dmd.mtype".Type type, in imported!"snakebite.native.value".TypeFacts facts,
+    imported!"snakebite.frontend.ast".Type type, in imported!"snakebite.native.value".TypeFacts facts,
 ) {
     return Shape(facts.size, facts.alignment, classOf(type));
 }
 
 
 package(snakebite) struct ReturnStoragePlan {
-    import dmd.declaration: VarDeclaration;
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration, VarDeclaration;
 
     package(snakebite) bool hasPlace;
     private VarDeclaration _selected;

@@ -36,40 +36,58 @@ public import dmd.dmodule: Module;
 public import dmd.dstruct: StructDeclaration;
 public import dmd.dsymbol: Dsymbol;
 public import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
-public import dmd.expression: AddAssignExp, AddExp, AddrExp, ArrayLiteralExp,
-    AssertExp, AssignExp, AssocArrayLiteralExp, BinAssignExp, BinExp, CallExp,
-    CastExp, CatAssignExp, CatDcharAssignExp, CatElemAssignExp, CatExp,
-    ClassReferenceExp, CmpExp, CommaExp, CondExp, ConstructExp,
-    DeclarationExp, DelegateExp, DeleteExp, DotVarExp, EqualExp, ErrorExp,
-    Expression, FuncExp, HaltExp, IdentityExp, IndexExp, IntegerExp,
-    LogicalExp, LoweredAssignExp, MinAssignExp, MinExp, NewExp, PostExp,
-    RealExp, SliceExp, StringExp, StructLiteralExp, SymOffExp, ThisExp,
-    ThrowExp, TupleExp, TypeidExp, UnaExp, VarExp, VectorExp;
+public import dmd.expression: AddAssignExp, AddExp, AddrExp, AndAssignExp,
+    AndExp, ArrayExp, ArrayLengthExp, ArrayLiteralExp, AssertExp, AssignExp,
+    AssocArrayLiteralExp, BinAssignExp, BinExp, BlitExp, CallExp, CastExp,
+    CatAssignExp, CatDcharAssignExp, CatElemAssignExp, CatExp,
+    ClassReferenceExp, CmpExp, ComExp, CommaExp, ComplexExp, CompoundLiteralExp,
+    CondExp, ConstructExp, CTFEExp, DeclarationExp, DefaultInitExp, DelegateExp,
+    DelegateFuncptrExp, DelegatePtrExp, DeleteExp, DivAssignExp, DivExp,
+    DollarExp, DotExp, DotIdExp, DotTemplateExp, DotTemplateInstanceExp,
+    DotTypeExp, DotVarExp, DsymbolExp, EqualExp, ErrorExp, Expression,
+    FileInitExp, FuncExp, FuncInitExp, GenericExp, HaltExp, IdentifierExp,
+    IdentityExp, ImportExp, IndexExp, InExp, IntegerExp, InterpExp, IntervalExp,
+    IsExp, LineInitExp, LogicalExp, LoweredAssignExp, MinAssignExp, MinExp,
+    MixinExp, ModAssignExp, ModExp, ModuleInitExp, MulAssignExp, MulExp, NegExp,
+    NewAnonClassExp, NewExp, NotExp, NullExp, ObjcClassReferenceExp,
+    OrAssignExp, OrExp, OverExp, PostExp, PowAssignExp, PowExp, PreExp,
+    PrettyFuncInitExp, PtrExp, RealExp, RemoveExp, ScopeExp, ShlAssignExp,
+    ShlExp, ShrAssignExp, ShrExp, SliceExp, StringExp, StructLiteralExp,
+    SuperExp, SymbolExp, SymOffExp, TemplateExp, ThisExp, ThrowExp,
+    ThrownExceptionExp, TraitsExp, TupleExp, TypeExp, TypeidExp, UAddExp,
+    UnaExp, UshrAssignExp, UshrExp, VarExp, VectorArrayExp, VectorExp,
+    VoidInitExp, XorAssignExp, XorExp;
 public import dmd.func: FuncDeclaration;
 public import dmd.identifier: Identifier;
 public import dmd.init: ExpInitializer;
 public import dmd.location: Loc;
 public import dmd.mtype: Parameter, ParameterList, Type, TypeFunction;
 public import dmd.rootobject: RootObject;
-public import dmd.statement: BreakStatement, CaseStatement, Catch,
-    CompoundStatement, ContinueStatement, DefaultStatement, DoStatement,
-    ErrorStatement, ExpStatement, ForStatement, GotoCaseStatement,
+public import dmd.statement: AsmStatement, BreakStatement, CaseRangeStatement,
+    CaseStatement, Catch, CompoundStatement, ConditionalStatement,
+    ContinueStatement, DebugStatement, DefaultStatement, DoStatement,
+    ErrorStatement, ExpStatement, ForeachRangeStatement, ForeachStatement,
+    ForStatement, ForwardingStatement, GccAsmStatement, GotoCaseStatement,
     GotoDefaultStatement, GotoStatement, IfStatement, ImportStatement,
-    LabelStatement, ReturnStatement, ScopeGuardStatement, ScopeStatement,
-    Statement, SwitchErrorStatement, SwitchStatement, ThrowStatement,
-    TryCatchStatement, TryFinallyStatement, UnrolledLoopStatement,
-    WithStatement;
+    InlineAsmStatement, LabelStatement, MixinStatement, PeelStatement,
+    PragmaStatement, ReturnStatement, ScopeGuardStatement, ScopeStatement,
+    Statement, StaticAssertStatement, StaticForeachStatement,
+    SwitchErrorStatement, SwitchStatement, SynchronizedStatement,
+    ThrowStatement, TryCatchStatement, TryFinallyStatement,
+    UnrolledLoopStatement, WhileStatement, WithStatement;
 public import dmd.visitor: SemanticTimeTransitiveVisitor, StoppableVisitor,
     Visitor;
 public import dmd.visitor.statement_rewrite_walker: StatementRewriteWalker;
 
 // Enums and their members.
-public import dmd.astenums: CHECKACTION, CHECKENABLE, FileType, LINK, STC,
-    STMT, StorageClass, TRUST, TY, Taarray, Tarray, Tbool, Tchar, Tclass,
-    Tcomplex80, Tdchar, Tdelegate, Terror, Tfloat32, Tfloat64, Tfloat80,
-    Tfunction, Timaginary32, Timaginary64, Timaginary80, Tint16, Tint32,
-    Tint64, Tint8, Tnoreturn, Tnull, Tpointer, Tsarray, Tstruct, Ttuple,
-    Tuns16, Tuns32, Tuns64, Tuns8, Tvector, Tvoid, Twchar, VarArg;
+public import dmd.astenums: CHECKACTION, CHECKENABLE, FileType, LINK, STC, STMT,
+    StorageClass, Taarray, Tarray, Tbool, Tchar, Tclass, Tcomplex32, Tcomplex64,
+    Tcomplex80, Tdchar, Tdelegate, Tenum, Terror, Tfloat32, Tfloat64, Tfloat80,
+    Tfunction, Tident, Timaginary32, Timaginary64, Timaginary80, Tinstance,
+    Tint128, Tint16, Tint32, Tint64, Tint8, Tmixin, Tnone, Tnoreturn, Tnull,
+    Tpointer, Treference, Treturn, TRUST, Tsarray, Tslice, Tstruct, Ttag,
+    Ttraits, Ttuple, Ttypeof, Tuns128, Tuns16, Tuns32, Tuns64, Tuns8, Tvector,
+    Tvoid, Twchar, TY, VarArg;
 public import dmd.errors: ErrorKind;
 public import dmd.expression: MemorySet;
 public import dmd.tokens: EXP, TOK;
@@ -79,6 +97,8 @@ public import dmd.tokens: EXP, TOK;
 // to be shown safe with no lock by the rule above, or replaced by a function
 // of the frontend package, and then removed from this block.
 public import dmd.common.blake3: blake3;
+public import dmd.constfold: Add, And, Cast, Cmp, Com, Div, Equal, Identity,
+    Min, Mod, Mul, Neg, Not, Or, Shl, Shr, Ushr, Xor;
 public import dmd.ctfeexpr: emplaceExp;
 public import dmd.dsymbolsem: apply, fillVtbl, followInstantiationContext,
     hasPointers, isAbstract, toAlias, toParentP;

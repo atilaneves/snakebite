@@ -4,10 +4,9 @@ module snakebite.language.layout.lowered;
 private:
 
 
-import dmd.expression:
-    ArrayLiteralExp, AssocArrayLiteralExp, CastExp, CatAssignExp, CatExp,
-    CatElemAssignExp, CatDcharAssignExp, ConstructExp, EqualExp,
-    LoweredAssignExp, NewExp;
+import snakebite.frontend.ast: ArrayLiteralExp, AssocArrayLiteralExp, CastExp,
+    CatAssignExp, CatDcharAssignExp, CatElemAssignExp, CatExp, ConstructExp,
+    EqualExp, LoweredAssignExp, NewExp;
 import std.meta: AliasSeq;
 
 

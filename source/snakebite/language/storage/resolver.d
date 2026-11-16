@@ -6,11 +6,9 @@ private:
 import snakebite.failure.report: internalFailure;
 
 
-import dmd.expression:
-    AssignExp, BinAssignExp, CatAssignExp, Expression, IndexExp, MemorySet,
-    SymOffExp;
-import dmd.astenums: Tarray, Tsarray, Tvector;
-import dmd.typesem: isIntegral;
+import snakebite.frontend.ast: AssignExp, BinAssignExp, CatAssignExp,
+    Expression, IndexExp, isIntegral, MemorySet, SymOffExp, Tarray, Tsarray,
+    Tvector;
 import snakebite.frontend.typefacts: baseType;
 
 // The decisions both backends use for a `SliceExp`: its bounds checks, which
@@ -31,7 +29,7 @@ public struct SlicePlan {
     public bool yieldsStaticArray;
 }
 
-public SlicePlan planSlice(imported!"dmd.expression".SliceExp expression) {
+public SlicePlan planSlice(imported!"snakebite.frontend.ast".SliceExp expression) {
     const isPointer = expression.e1.type.baseType.isTypePointer !is null;
 
     return SlicePlan(
@@ -51,8 +49,8 @@ public SlicePlan planSlice(imported!"dmd.expression".SliceExp expression) {
 // before the array expression, also an unspecified order. An index that sees
 // `$` keeps that place too. `isTrivialExp` allocates nothing, which matters
 // because guest finalizers resolve indexes while the collector runs.
-public bool readsIndexAfterBase(imported!"dmd.expression".IndexExp index) {
-    import dmd.sideeffect: isTrivialExp;
+public bool readsIndexAfterBase(imported!"snakebite.frontend.ast".IndexExp index) {
+    import snakebite.frontend.ast: isTrivialExp;
 
     return index.lengthVar is null
         && isTrivialExp(index.e2)
@@ -62,7 +60,7 @@ public bool readsIndexAfterBase(imported!"dmd.expression".IndexExp index) {
 // The frontend proves the index range, including indexes made for foreach.
 // DMD and LDC omit the runtime check for this fact; operand evaluation stays.
 public bool needsIndexBoundsCheck(
-    in imported!"dmd.expression".IndexExp index,
+    in imported!"snakebite.frontend.ast".IndexExp index,
 ) @safe pure nothrow @nogc {
     return !index.indexIsInBounds;
 }
@@ -199,7 +197,7 @@ public struct StorageResolver(Result, Adapter) {
     }
 
     private Result resolveIndex(IndexExp index) {
-        import dmd.astenums: TY;
+        import snakebite.frontend.ast: TY;
         import std.conv: text;
 
         // An enum has its base type's layout: `enum E : int[3]` indexes
@@ -337,7 +335,7 @@ public struct SymbolAddressResolver(Result, Adapter) {
 // declaration is a `TypeInfo` object, so the address is that object and not
 // the address of a variable slot.
 public TypeInfo typeInfoAddressedBy(Types)(
-    imported!"dmd.expression".AddrExp expression, ref Types types,
+    imported!"snakebite.frontend.ast".AddrExp expression, ref Types types,
 ) {
     auto variable = expression.e1.isVarExp;
     auto declaration =
@@ -349,10 +347,10 @@ public TypeInfo typeInfoAddressedBy(Types)(
 // interface is a `TypeInfo_Interface`, but `I.classinfo` is the symbol of
 // the `TypeInfo_Class` that this one holds.
 public TypeInfo typeInfoObjectOf(Types)(
-    imported!"dmd.declaration".TypeInfoDeclaration declaration,
+    imported!"snakebite.frontend.ast".TypeInfoDeclaration declaration,
     ref Types types,
 ) {
-    import dmd.declaration: TypeInfoClassDeclaration;
+    import snakebite.frontend.ast: TypeInfoClassDeclaration;
 
     auto info = types.get(declaration.tinfo);
     if (cast(TypeInfoClassDeclaration) declaration is null)
