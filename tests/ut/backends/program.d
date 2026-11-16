@@ -1,7 +1,7 @@
 module ut.backends.program;
 
 
-import dmd.func: FuncDeclaration;
+import snakebite.frontend.ast: FuncDeclaration;
 import snakebite.program: Program;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.ctfe: Ctfe;

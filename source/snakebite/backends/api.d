@@ -9,16 +9,16 @@ import snakebite.program: Program;
 import snakebite.start.data: FunctionHandle, ModuleStart, StartData;
 
 
-private alias DModule = imported!"dmd.dmodule".Module;
+private alias DModule = imported!"snakebite.frontend.ast".Module;
 
 
 // The handle of a backend that runs a function from its declaration.
 public final class DeclarationHandle: FunctionHandle {
-    private imported!"dmd.func".FuncDeclaration _function;
+    private imported!"snakebite.frontend.ast".FuncDeclaration _function;
     private Backend _backend;
 
     public this(
-        Backend backend, imported!"dmd.func".FuncDeclaration function_,
+        Backend backend, imported!"snakebite.frontend.ast".FuncDeclaration function_,
     ) {
         _backend = backend;
         _function = function_;
@@ -69,8 +69,7 @@ public struct Owned(B : Backend) {
 
 
 public abstract class Backend {
-    import dmd.dmodule: Module;
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
 
     // The program this backend runs. Whether a callee is interpreted or
     // called natively is the program's one decision (`isInterpreted`),
@@ -139,7 +138,7 @@ public abstract class Backend {
     // Module phases use it to do what dmd's glue layer does with the gate
     // of a module destructor.
     public abstract imported!"snakebite.native.staticstore".Placed staticStorage(
-        imported!"dmd.declaration".VarDeclaration variable,
+        imported!"snakebite.frontend.ast".VarDeclaration variable,
     );
 
     // The handle of `function_` in this backend, for `FunctionHandle.call`. A

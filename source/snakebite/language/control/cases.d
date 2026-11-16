@@ -2,12 +2,8 @@ module snakebite.language.control.cases;
 
 private:
 
-import dmd.statement:
-    CaseStatement,
-    DefaultStatement,
-    GotoCaseStatement,
-    GotoDefaultStatement,
-    SwitchStatement;
+import snakebite.frontend.ast: CaseStatement, DefaultStatement,
+    GotoCaseStatement, GotoDefaultStatement, SwitchStatement;
 
 package(snakebite) struct SwitchPlan {
     enum NoMatch { defaultTarget, exit }

@@ -40,8 +40,7 @@ public alias CallInvoker = void delegate(
 // once while a function's frame layout is prepared. Calls then cross this
 // seam using only the native-layout facts kept here.
 public struct CallAdapter {
-    import dmd.func: FuncDeclaration;
-    import dmd.mtype: TypeFunction;
+    import snakebite.frontend.ast: FuncDeclaration, TypeFunction;
     import snakebite.native.value: TypeFacts;
 
     private bool _referenceResult;
@@ -51,14 +50,14 @@ public struct CallAdapter {
     private TypeFacts _returnFacts;
 
     public struct Argument {
-        import dmd.mtype: Parameter;
+        import snakebite.frontend.ast: Parameter;
 
         private bool _reference;
 
         public static Argument of(
             Parameter parameter,
         ) {
-            import dmd.astenums: STC;
+            import snakebite.frontend.ast: STC;
 
             return Argument(
                 (parameter.storageClass & (STC.ref_ | STC.out_)) != 0,
@@ -92,10 +91,8 @@ public struct CallAdapter {
     // Both backends consume the same call-site facts, but one can reuse
     // declared argument storage while the other must emit every argument.
     public struct Arguments {
-        import dmd.arraytypes: Expressions;
-        import dmd.expression: Expression;
-        import dmd.func: FuncDeclaration;
-        import dmd.mtype: Type, TypeFunction;
+        import snakebite.frontend.ast: Expression, Expressions, FuncDeclaration,
+            Type, TypeFunction;
         import snakebite.native.arguments: CallArguments;
         import snakebite.ffi.callplan: CallPlan;
         import snakebite.ffi.plan: PlanCache;
@@ -132,7 +129,7 @@ public struct CallAdapter {
         public const(CallPlan)* plan(
             ref PlanCache plans, FuncDeclaration callee,
         ) {
-            import dmd.astenums: VarArg;
+            import snakebite.frontend.ast: VarArg;
 
             const variadic =
                 _type.parameterList.varargs == VarArg.variadic;
@@ -152,8 +149,7 @@ public struct CallAdapter {
         public CallPlan prepareAtAddress(
             ref PlanCache plans, const(void)* address, bool hasContext,
         ) {
-            import dmd.astenums: VarArg;
-            import dmd.mtype: Type;
+            import snakebite.frontend.ast: Type, VarArg;
 
             assert(_type.parameterList.varargs == VarArg.variadic);
             Type[] extraTypes;
@@ -168,8 +164,7 @@ public struct CallAdapter {
         public const(CallPlan)* prepareWithoutCode(
             ref PlanCache plans, bool hasContext,
         ) {
-            import dmd.astenums: VarArg;
-            import dmd.mtype: Type;
+            import snakebite.frontend.ast: Type, VarArg;
 
             assert(_type.parameterList.varargs == VarArg.variadic);
             Type[] extraTypes;
@@ -246,7 +241,7 @@ public struct CallAdapter {
         }
 
         private Declared declaredValue(in size_t i) {
-            import dmd.astenums: STC;
+            import snakebite.frontend.ast: STC;
 
             auto parameter = _type.parameterList[i]; // Frontend types remain mutable.
             const reference = Argument.of(parameter).isReference
@@ -269,8 +264,7 @@ public struct CallAdapter {
         // same bytes, and the cast of a memory operand is no memory. dmd's
         // code generator does not see that cast either.
         private static Expression memoryOperand(Expression expression) {
-            import dmd.expression: CastExp;
-            import dmd.astenums: TY;
+            import snakebite.frontend.ast: TY;
             import snakebite.frontend.typefacts: baseType;
 
             while (true) {
@@ -344,8 +338,7 @@ public struct CallAdapter {
     public static CallAdapter ofType(
         TypeFunction type,
     ) {
-        import dmd.astenums: Tvoid;
-        import dmd.typesem: nextOf;
+        import snakebite.frontend.ast: nextOf, Tvoid;
 
         CallAdapter adapter;
         adapter._referenceResult = type.isRef;

@@ -60,11 +60,10 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
 // base even when the enum is resolved. Every other type is its own base,
 // and that answer needs no frontend.
 public imported!"dmd.mtype".Type baseType(imported!"dmd.mtype".Type type) {
-    import dmd.typesem: toBasetype;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
     if (type.isTypeEnum !is null)
-        return newInFrontend!toBasetype(type);
+        return inFrontend!"toBasetype"(type);
     return type;
 }
 
@@ -138,10 +137,10 @@ private auto normalized(imported!"dmd.expression".IntegerExp integer) {
 // declaration is resolved. Every other type is sized by a read.
 public auto representationSize(imported!"dmd.mtype".Type type) {
     import dmd.typesem: size;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
     if (sizeNeedsFrontend(type))
-        return newInFrontend!size(type);
+        return inFrontend!"size"(type);
     return type.size;
 }
 
@@ -151,10 +150,10 @@ public auto representationSize(imported!"dmd.mtype".Type type) {
 // are the cases that lock here.
 public uint representationAlignment(imported!"dmd.mtype".Type type) {
     import dmd.typesem: alignsize;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
     if (sizeNeedsFrontend(type))
-        return newInFrontend!alignsize(type);
+        return inFrontend!"alignsize"(type);
     return type.alignsize;
 }
 
@@ -183,16 +182,15 @@ public bool tryTypeFacts(imported!"dmd.mtype".Type type, out TypeFacts facts) {
 
 private bool hasSize(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Sizeok, Tarray, Terror;
-    import dmd.enumsem: getMemtype;
     import dmd.location: Loc;
     import dmd.typesem: nextOf;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
     if (type.ty == Terror)
         return false;
 
     if (auto enumType = type.isTypeEnum) {
-        auto memtype = newInFrontend!getMemtype(enumType.sym, Loc.initial);
+        auto memtype = inFrontend!"getMemtype"(enumType.sym, Loc.initial);
         return memtype !is null && hasSize(memtype);
     }
 
@@ -279,19 +277,18 @@ private bool resolved(imported!"dmd.mtype".Type type) {
 // second write.
 private void forceResolved(imported!"dmd.mtype".Type type) {
     import dmd.location: Loc;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
     if (auto enumType = type.isTypeEnum) {
-        import dmd.enumsem: getMemtype;
 
-        forceResolved(newInFrontend!getMemtype(enumType.sym, Loc.initial));
+        forceResolved(inFrontend!"getMemtype"(enumType.sym, Loc.initial));
         return;
     }
 
     if (auto structType = type.isTypeStruct) {
         import dmd.dsymbolsem: size;
 
-        newInFrontend!size(structType.sym, Loc.initial);
+        inFrontend!"size"(structType.sym, Loc.initial);
         return;
     }
 

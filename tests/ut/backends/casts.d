@@ -2,8 +2,7 @@ module ut.backends.casts;
 
 
 import ut;
-import dmd.expression: CastExp;
-import dmd.func: FuncDeclaration;
+import snakebite.frontend.ast: CastExp, FuncDeclaration;
 import snakebite.language.operators.casts: classify;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction, typeFunctionOf;

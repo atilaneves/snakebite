@@ -16,7 +16,7 @@ import snakebite.language.call.druntimehook: DruntimeHook;
 // object kind is normalized here so consumers do not classify `newtype`
 // independently.
 public struct NewPlan {
-    import dmd.expression: Expression;
+    import snakebite.frontend.ast: Expression;
 
     public enum Destination {
         lowering,
@@ -36,7 +36,7 @@ public struct NewPlan {
     public Expression argumentPrefix;
 }
 
-public NewPlan planNew(imported!"dmd.expression".NewExp expression) {
+public NewPlan planNew(imported!"snakebite.frontend.ast".NewExp expression) {
     auto type = expression.newtype.baseType;
     auto objectKind = type.isTypeClass !is null
         ? NewPlan.ObjectKind.class_
@@ -77,10 +77,7 @@ public NewPlan planNew(imported!"dmd.expression".NewExp expression) {
 // "store bitfield at address" for the field steps, plus its own way of
 // reading a function's context for the `vthis` step.
 public struct InitStep {
-    import dmd.mtype: Type;
-    import dmd.expression: Expression;
-    import dmd.declaration: VarDeclaration;
-    import dmd.dsymbol: Dsymbol;
+    import snakebite.frontend.ast: Dsymbol, Expression, Type, VarDeclaration;
 
     public enum Kind {
         vthis,
@@ -199,7 +196,7 @@ if (isAggregateInitHooks!Hooks)
 // `expression.elements` pairs positionally with `expression.sd.fields`,
 // with a `null` entry for a field the literal leaves out entirely.
 public AggregateInitPlan planStructLiteral(
-    imported!"dmd.expression".StructLiteralExp expression,
+    imported!"snakebite.frontend.ast".StructLiteralExp expression,
 ) {
     assert(expression.elements is null
         || expression.elements.length <= expression.sd.fields.length,
@@ -238,8 +235,8 @@ public AggregateInitPlan planStructLiteral(
 // arguments than fields is a shape dmd's own semantic pass already
 // rejected, so it is asserted rather than checked again by each backend.
 public AggregateInitPlan planPositionalFields(
-    imported!"dmd.dstruct".StructDeclaration sd,
-    imported!"dmd.expression".Expressions* arguments,
+    imported!"snakebite.frontend.ast".StructDeclaration sd,
+    imported!"snakebite.frontend.ast".Expressions* arguments,
 )
 in (arguments is null || arguments.length <= sd.fields.length)
 {
@@ -270,7 +267,7 @@ in (arguments is null || arguments.length <= sd.fields.length)
 // `tryVthisStep` the struct paths above use, reading the enclosing
 // function's own frame instead.
 public AggregateInitPlan planClassContext(
-    imported!"dmd.expression".NewExp expression,
+    imported!"snakebite.frontend.ast".NewExp expression,
 ) {
     auto classType = expression.newtype.isTypeClass;
     if (classType is null)
@@ -292,8 +289,8 @@ public AggregateInitPlan planClassContext(
 // `thisexp`, when given, is the outer object of a nested class and fills
 // `vthis` instead of the enclosing context.
 private InitStep[] vthisStepsOf(
-    imported!"dmd.aggregate".AggregateDeclaration ad,
-    imported!"dmd.expression".Expression thisexp = null,
+    imported!"snakebite.frontend.ast".AggregateDeclaration ad,
+    imported!"snakebite.frontend.ast".Expression thisexp = null,
 ) {
     if (!ad.isNested() || ad.vthis is null)
         return null;
@@ -323,8 +320,8 @@ private InitStep[] vthisStepsOf(
 // situation; when `thisexp`'s type already *is* the lexical parent, that
 // offset comes back zero, so this needs no separate same-type case.
 private InitStep classVthisStep(
-    imported!"dmd.dclass".ClassDeclaration cd,
-    imported!"dmd.expression".Expression thisexp,
+    imported!"snakebite.frontend.ast".ClassDeclaration cd,
+    imported!"snakebite.frontend.ast".Expression thisexp,
 )
 in (cd.isNested() && cd.vthis !is null)
 {
@@ -341,8 +338,8 @@ in (cd.isNested() && cd.vthis !is null)
 }
 
 private InitStep fieldStep(
-    imported!"dmd.declaration".VarDeclaration field,
-    imported!"dmd.expression".Expression source,
+    imported!"snakebite.frontend.ast".VarDeclaration field,
+    imported!"snakebite.frontend.ast".Expression source,
 ) {
     auto sarrayType = field.type.isTypeSArray;
     if (sarrayType !is null && !source.type.equals(field.type)) {
@@ -380,9 +377,9 @@ package(snakebite) struct VectorInitPlan {
 }
 
 package(snakebite) VectorInitPlan planVectorInit(
-    imported!"dmd.expression".VectorExp expression,
+    imported!"snakebite.frontend.ast".VectorExp expression,
 ) {
-    import dmd.astenums: Tsarray;
+    import snakebite.frontend.ast: Tsarray;
 
     const sourceFacts = typeFacts(expression.e1.type);
     if (expression.e1.type.baseType.ty == Tsarray)
@@ -431,13 +428,13 @@ public auto executeAssignment(Target)(
 // from the slot's offset while `_d_callfinalizer` takes the object
 // itself.
 public struct DeletePlan {
-    import dmd.expression: Expression;
+    import snakebite.frontend.ast: Expression;
 
     public DruntimeHook hook;
     public Expression object;
 }
 
-public DeletePlan planDelete(imported!"dmd.expression".DeleteExp expression) {
+public DeletePlan planDelete(imported!"snakebite.frontend.ast".DeleteExp expression) {
     auto classType = expression.e1.type.baseType.isTypeClass;
     assert(classType !is null,
         "the frontend only deletes class and interface operands");

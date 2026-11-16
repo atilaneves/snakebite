@@ -10,8 +10,7 @@ import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 import core.memory: GC;
 import core.sync.mutex: Mutex;
-import dmd.typesem: arrayOf, constOf, immutableOf, sarrayOf, sharedOf;
-import snakebite.frontend.compiler: arenaReport, newInFrontend, parseSnippet;
+import snakebite.frontend.compiler: arenaReport, inFrontend, parseSnippet;
 import snakebite.native.value: TypeFacts;
 import ut.backends;
 
@@ -103,15 +102,15 @@ unittest {
 // pointers that the arena holds.
 @("arenaHoldsNoGCPointers.reportsAPointerIntoTheGCHeap")
 unittest {
-    import dmd.identifier: Identifier;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.ast: Identifier;
+    import snakebite.frontend.compiler: inFrontend;
     import snakebite.memory.gc: lowmem;
 
     {
         arenaReportLock.lock;
         scope(exit) arenaReportLock.unlock;
         // An identifier's name is arena memory the test can write a word to.
-        auto identifier = newInFrontend!(Identifier.idPool)(
+        auto identifier = inFrontend!(Identifier.idPool)(
             "reportsAPointerIntoTheGCHeapWithRoomForAWord");
         auto word = cast(void**) identifier.toChars;
         auto block = new ubyte[64];
@@ -253,14 +252,14 @@ static foreach (shape; AliasSeq!("direct", "staticArray", "dynamicArray")) {
         foreach (member; *module_.members) {
             if (auto declaration = member.isEnumDeclaration) {
                 ++checked;
-                static foreach (qualify; AliasSeq!(constOf, immutableOf, sharedOf)) {{
-                    auto qualified = newInFrontend!qualify(declaration.type);
+                static foreach (qualify; AliasSeq!("constOf", "immutableOf", "sharedOf")) {{
+                    auto qualified = inFrontend!qualify(declaration.type);
                     static if (shape != "direct") {
-                        qualified = newInFrontend!sarrayOf(qualified, 2);
-                        qualified = newInFrontend!sarrayOf(qualified, 3);
+                        qualified = inFrontend!"sarrayOf"(qualified, 2);
+                        qualified = inFrontend!"sarrayOf"(qualified, 3);
                     }
                     static if (shape == "dynamicArray")
-                        qualified = newInFrontend!arrayOf(qualified);
+                        qualified = inFrontend!"arrayOf"(qualified);
                     const facts = typeFacts(qualified);
                     static if (shape == "direct")
                         facts.size.should == int.sizeof;
@@ -294,7 +293,7 @@ unittest {
     foreach (member; *module_.members) {
         if (auto declaration = member.isEnumDeclaration) {
             ++checked;
-            auto qualified = newInFrontend!constOf(declaration.type);
+            auto qualified = inFrontend!"constOf"(declaration.type);
             const truth = truthFacts(qualified);
             truth.size.should == size_t.sizeof;
             arenaReport.should == "";

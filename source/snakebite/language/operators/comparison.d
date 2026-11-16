@@ -45,10 +45,9 @@ package(snakebite) struct ComparisonPlan {
 // This plan records the one operand representation and category that both
 // backends must use for the comparison.
 package(snakebite) ComparisonPlan comparisonPlan(
-    imported!"dmd.expression".BinExp expression,
+    imported!"snakebite.frontend.ast".BinExp expression,
 ) {
-    import dmd.astenums: TY;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf, TY;
     import snakebite.frontend.typefacts: baseType;
 
     auto type = expression.e1.type.baseType;
@@ -69,8 +68,8 @@ package(snakebite) ComparisonPlan comparisonPlan(
     return plan;
 }
 
-private ComparisonPlan.Kind kindOf(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: TY;
+private ComparisonPlan.Kind kindOf(imported!"snakebite.frontend.ast".Type type) {
+    import snakebite.frontend.ast: TY;
     import std.conv: text;
 
     final switch (type.ty) with (TY) with (ComparisonPlan.Kind) {
@@ -131,13 +130,10 @@ package(snakebite) struct IdentityPlan {
 }
 
 package(snakebite) IdentityPlan identityPlan(
-    imported!"dmd.expression".IdentityExp expression,
+    imported!"snakebite.frontend.ast".IdentityExp expression,
 ) {
-    import dmd.astenums: Tclass, Tfloat80, Tnull, Tpointer, Tsarray;
-    import dmd.expressionsem: isLvalue;
-    import dmd.sideeffect: isTrivialExp;
-    import dmd.target: target;
-    import dmd.typesem: isFloating;
+    import snakebite.frontend.ast: isFloating, isLvalue, isTrivialExp, target,
+        Tclass, Tfloat80, Tnull, Tpointer, Tsarray;
     import snakebite.frontend.typefacts:
         baseType, integerValue, representationSize;
 

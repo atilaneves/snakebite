@@ -2,7 +2,7 @@ module ut.ffi.callback;
 
 
 import ut;
-import dmd.func: FuncDeclaration;
+import snakebite.frontend.ast: FuncDeclaration;
 import snakebite.ffi.callback:
     CallbackBridge, CallbackCall, ChunkStrategy;
 import snakebite.ffi.sysv:

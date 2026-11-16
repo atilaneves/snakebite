@@ -3,16 +3,16 @@ module snakebite.language.layout.temporary;
 
 private:
 
-import dmd.astenums: STC;
+import snakebite.frontend.ast: STC;
 
 
 // DMD records the destructor expression on the temporary declaration. Both
 // runtime backends use this predicate before they add their own execution
 // record, so ownership and explicit `nodtor` transfers have one definition.
 private bool ownsTemporaryDestructor(
-    imported!"dmd.declaration".VarDeclaration variable,
-    imported!"dmd.expression".DeclarationExp declaration,
-    imported!"dmd.expression".Expression root,
+    imported!"snakebite.frontend.ast".VarDeclaration variable,
+    imported!"snakebite.frontend.ast".DeclarationExp declaration,
+    imported!"snakebite.frontend.ast".Expression root,
     bool rootOwns = false,
 ) {
     return root !is null && (rootOwns || declaration !is root)
@@ -22,7 +22,7 @@ private bool ownsTemporaryDestructor(
 // Whether `variable` is a temporary that dmd gives a destructor, which runs
 // when the full expression that owns it ends.
 public bool hasTemporaryDestructor(
-    imported!"dmd.declaration".VarDeclaration variable,
+    imported!"snakebite.frontend.ast".VarDeclaration variable,
 ) {
     return (variable.storage_class & STC.temp)
         && variable.edtor !is null
@@ -36,9 +36,9 @@ public bool hasTemporaryDestructor(
 // temporaries for the rest of the call decides from this alone, so a
 // function without such a variable pays nothing.
 public bool canRetainTemporaries(
-    imported!"dmd.declaration".VarDeclaration variable,
+    imported!"snakebite.frontend.ast".VarDeclaration variable,
 ) {
-    import dmd.typesem: hasPointers;
+    import snakebite.frontend.ast: hasPointers;
 
     if (variable._init is null)
         return false;
@@ -52,14 +52,11 @@ public bool canRetainTemporaries(
 }
 
 private bool buildsAggregateValue(
-    imported!"dmd.expression".Expression initializer,
+    imported!"snakebite.frontend.ast".Expression initializer,
 ) {
-    import dmd.astenums: Tsarray, Tstruct;
-    import dmd.expression: Expression;
-    import dmd.expressionsem: isLvalue;
+    import snakebite.frontend.ast: Expression, isLvalue, StoppableVisitor,
+        Tsarray, Tstruct, walkPostorder;
     import snakebite.frontend.typefacts: baseType;
-    import dmd.visitor: StoppableVisitor;
-    import dmd.visitor.postorder: walkPostorder;
 
     extern(C++) static final class Finder: StoppableVisitor {
         alias visit = StoppableVisitor.visit;
@@ -86,8 +83,7 @@ private bool buildsAggregateValue(
 
 
 public struct TemporaryPlan {
-    import dmd.declaration: VarDeclaration;
-    import dmd.expression: DeclarationExp, Expression;
+    import snakebite.frontend.ast: DeclarationExp, Expression, VarDeclaration;
 
     private Expression _destructor;
 
@@ -120,7 +116,7 @@ public struct TemporaryPlan {
 // an unfinished receiver eligible for destruction. DMD's nodtor metadata
 // keeps a transferred value out of the caller's initialization plan.
 public void constructTemporary(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
     scope void delegate() suspend,
     scope void delegate() evaluate,
     scope void delegate() complete,

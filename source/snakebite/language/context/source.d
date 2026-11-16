@@ -12,7 +12,7 @@ import snakebite.failure.report: internalFailure;
 // Where a context pointer that a call or a delegate hands to its callee
 // comes from.
 public struct ContextSource {
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
 
     public enum Kind {
         // No function encloses the callee, so compiled D passes null.
@@ -51,7 +51,7 @@ public struct ContextSource {
 // long as that local does. A callee with one context has no pair, and
 // `variable` is `null`.
 public struct PairPlan {
-    import dmd.declaration: VarDeclaration;
+    import snakebite.frontend.ast: VarDeclaration;
 
     public VarDeclaration variable;
     // Byte offsets in the pair of the receiver (or of the context of the
@@ -63,9 +63,9 @@ public struct PairPlan {
 }
 
 public PairPlan pairPlanOf(
-    imported!"dmd.func".FuncDeclaration caller,
-    imported!"dmd.func".FuncDeclaration callee,
-    imported!"dmd.declaration".VarDeclaration pair,
+    imported!"snakebite.frontend.ast".FuncDeclaration caller,
+    imported!"snakebite.frontend.ast".FuncDeclaration callee,
+    imported!"snakebite.frontend.ast".VarDeclaration pair,
 ) {
     import snakebite.frontend.dmd.delegates: isDualContext;
 
@@ -88,8 +88,8 @@ public PairPlan pairPlanOf(
 // calls them: the call is the `in` contract merged into an override, and
 // the same holds for `out`.
 public ContextSource calleeContextSourceOf(
-    imported!"dmd.func".FuncDeclaration caller,
-    imported!"dmd.func".FuncDeclaration callee,
+    imported!"snakebite.frontend.ast".FuncDeclaration caller,
+    imported!"snakebite.frontend.ast".FuncDeclaration callee,
     ref imported!"snakebite.native.signature".SignatureTable signatures,
 ) {
     import snakebite.frontend.dmd.delegates: nestedContextOwnerOf;
@@ -102,15 +102,15 @@ public ContextSource calleeContextSourceOf(
     return overriderSourceOf(caller, owner, signatures);
 }
 
-private bool isContract(imported!"dmd.func".FuncDeclaration function_) {
-    import dmd.id: Id;
+private bool isContract(imported!"snakebite.frontend.ast".FuncDeclaration function_) {
+    import snakebite.frontend.ast: Id;
 
     return function_.ident == Id.require || function_.ident == Id.ensure;
 }
 
 private bool overrides(
-    imported!"dmd.func".FuncDeclaration function_,
-    imported!"dmd.func".FuncDeclaration base,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration base,
 ) {
     foreach (overridden; function_.foverrides[])
         if (overridden is base || overrides(overridden, base))
@@ -119,8 +119,8 @@ private bool overrides(
 }
 
 private ContextSource overriderSourceOf(
-    imported!"dmd.func".FuncDeclaration caller,
-    imported!"dmd.func".FuncDeclaration owner,
+    imported!"snakebite.frontend.ast".FuncDeclaration caller,
+    imported!"snakebite.frontend.ast".FuncDeclaration owner,
     ref imported!"snakebite.native.signature".SignatureTable signatures,
 ) {
     import snakebite.language.context.chain: ClosurePlan;
@@ -147,8 +147,8 @@ private ContextSource overriderSourceOf(
 // The source, as seen from `caller`, of the context of `owner`: the symbol
 // that encloses a callee, or that a nested aggregate was made in.
 public ContextSource contextSourceOf(
-    imported!"dmd.func".FuncDeclaration caller,
-    imported!"dmd.dsymbol".Dsymbol owner,
+    imported!"snakebite.frontend.ast".FuncDeclaration caller,
+    imported!"snakebite.frontend.ast".Dsymbol owner,
 ) {
     if (owner is null)
         return ContextSource.init;
@@ -167,11 +167,10 @@ public ContextSource contextSourceOf(
 // chain also ends at a class derived from `owner`, whose members have the
 // `this` of `owner` as theirs.
 private ContextSource receiverSourceOf(
-    imported!"dmd.func".FuncDeclaration caller,
-    imported!"dmd.dsymbol".Dsymbol owner,
+    imported!"snakebite.frontend.ast".FuncDeclaration caller,
+    imported!"snakebite.frontend.ast".Dsymbol owner,
 ) {
-    import dmd.dsymbol: Dsymbol;
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: Dsymbol, FuncDeclaration;
     import snakebite.frontend.dmd.delegates: isDualContext;
 
     ContextSource receiverFrom(FuncDeclaration member, const(size_t)[] fields) {

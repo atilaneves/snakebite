@@ -129,7 +129,7 @@ static foreach (backend; Matrix!(
     @("readingCtfeVariableAtRunTimeReportsNoDiagnostic." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        import dmd.errors: diagnostics;
+        import snakebite.frontend.ast: diagnostics;
         import std.algorithm: canFind;
 
         diagnostics = null;

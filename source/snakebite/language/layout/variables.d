@@ -10,20 +10,20 @@ private:
 // replaced each use with its value, so nothing reads a slot. The action runs
 // during traversal so execution does not allocate a variable collection.
 public void forEachRuntimeVariable(
-    imported!"dmd.dsymbol".Dsymbol declaration,
-    scope void delegate(imported!"dmd.declaration".VarDeclaration) action,
+    imported!"snakebite.frontend.ast".Dsymbol declaration,
+    scope void delegate(imported!"snakebite.frontend.ast".VarDeclaration) action,
 ) {
-    import dmd.dsymbolsem: apply;
+    import snakebite.frontend.ast: apply;
 
     declaration.apply(&visitRuntimeVariable, &action);
 }
 
 
 private int visitRuntimeVariable(
-    imported!"dmd.dsymbol".Dsymbol symbol,
+    imported!"snakebite.frontend.ast".Dsymbol symbol,
     void* context,
 ) {
-    import dmd.declaration: VarDeclaration;
+    import snakebite.frontend.ast: VarDeclaration;
 
     alias Action = void delegate(VarDeclaration);
     const action = *cast(Action*) context;
@@ -40,8 +40,8 @@ private int visitRuntimeVariable(
 }
 
 
-private bool isManifest(imported!"dmd.declaration".VarDeclaration variable) {
-    import dmd.astenums: STC;
+private bool isManifest(imported!"snakebite.frontend.ast".VarDeclaration variable) {
+    import snakebite.frontend.ast: STC;
 
     return (variable.storage_class & STC.manifest) != 0;
 }

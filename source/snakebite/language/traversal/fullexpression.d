@@ -90,7 +90,7 @@ public struct FullExpressionScope {
     // and a `throw` operand read after the destructors with both.
     public bool readsResultAfterEnd(
         in Position position,
-        imported!"dmd.expression".Expression result,
+        imported!"snakebite.frontend.ast".Expression result,
     ) const {
         return kindOf(position) == FullExpressionKind.value
             && opens(position) && !_ending && readsLvalue(result);
@@ -101,14 +101,14 @@ public struct FullExpressionScope {
     // of its own.
     public static bool readsLvalueAfterEnd(
         in Position position,
-        imported!"dmd.expression".Expression result,
+        imported!"snakebite.frontend.ast".Expression result,
     ) {
         return kindOf(position) == FullExpressionKind.value
             && readsLvalue(result);
     }
 
     private static bool readsLvalue(
-        imported!"dmd.expression".Expression result,
+        imported!"snakebite.frontend.ast".Expression result,
     ) {
         return isLvalueResult(result) && hasOperandDestructors(result);
     }
@@ -117,12 +117,10 @@ public struct FullExpressionScope {
     // destructor. Inner `toElemDtor` operands consume their own entries;
     // declarations in a called function do not belong to this expression.
     public static bool hasOperandDestructors(
-        imported!"dmd.expression".Expression result,
+        imported!"snakebite.frontend.ast".Expression result,
     ) {
-        import dmd.astenums: STC;
-        import dmd.expression:
-            AssertExp, DeclarationExp, FuncExp, LogicalExp, ThrowExp;
-        import dmd.visitor: SemanticTimeTransitiveVisitor;
+        import snakebite.frontend.ast: AssertExp, DeclarationExp, FuncExp,
+            LogicalExp, SemanticTimeTransitiveVisitor, STC, ThrowExp;
         import snakebite.language.layout.lowered: LoweredExpressionTypes;
 
         extern(C++) static final class Finder: SemanticTimeTransitiveVisitor {
@@ -175,8 +173,8 @@ public struct FullExpressionScope {
     // `readsResultAfterEnd`: dmd's glue code does not copy the value for a
     // cast that keeps the representation, such as `string` to
     // `const(char)[]`.
-    public static imported!"dmd.expression".Expression lvalueOf(
-        imported!"dmd.expression".Expression result,
+    public static imported!"snakebite.frontend.ast".Expression lvalueOf(
+        imported!"snakebite.frontend.ast".Expression result,
     ) {
         import snakebite.language.operators.casts: classify;
         import snakebite.native.value: CastKind;
@@ -295,7 +293,7 @@ public struct FullExpressionScope {
 // through a different element, and a call that returns `ref` through a
 // call. With PIC, `el_picvar` obtains TLS storage through a call, which
 // `elemIsLvalue` excludes. dmd folds `__ctfe` to a constant.
-private bool isLvalueResult(imported!"dmd.expression".Expression result) {
+private bool isLvalueResult(imported!"snakebite.frontend.ast".Expression result) {
     result = FullExpressionScope.lvalueOf(result);
     if (auto comma = result.isCommaExp)
         return isLvalueResult(comma.e2);

@@ -12,7 +12,7 @@ import snakebite.failure.unwind:
 
 public struct CatchPlan {
     public struct Clause {
-        import dmd.statement: Catch;
+        import snakebite.frontend.ast: Catch;
 
         public Catch syntax;
         // `null` for a clause that no D throwable can match.
@@ -24,8 +24,8 @@ public struct CatchPlan {
 }
 
 public CatchPlan catchPlanOf(
-    imported!"dmd.statement".TryCatchStatement statement,
-    scope TypeInfo_Class delegate(imported!"dmd.statement".Catch) typeOf,
+    imported!"snakebite.frontend.ast".TryCatchStatement statement,
+    scope TypeInfo_Class delegate(imported!"snakebite.frontend.ast".Catch) typeOf,
 ) {
     CatchPlan plan;
     foreach (catch_; *statement.catches)
@@ -37,7 +37,7 @@ public CatchPlan catchPlanOf(
 // A C++ class matches by the C++ type of an in-flight C++ exception. A
 // `Throwable` is a D class, so it never matches such a clause, and the
 // clause has no `TypeInfo_Class` to match by.
-private bool catchesCppClass(imported!"dmd.statement".Catch catch_) {
+private bool catchesCppClass(imported!"snakebite.frontend.ast".Catch catch_) {
     import snakebite.frontend.typefacts: baseType;
 
     return catch_.type.baseType.isClassHandle.isCPPclass;
@@ -45,7 +45,7 @@ private bool catchesCppClass(imported!"dmd.statement".Catch catch_) {
 
 public struct UnwindPlan {
     public struct Finalizer {
-        import dmd.statement: Statement;
+        import snakebite.frontend.ast: Statement;
 
         public const(void)* owner;
         public Statement body;

@@ -29,7 +29,7 @@ package(snakebite) struct ShiftPlan {
 
 // The operands of a plain shift are already promoted, so the left
 // operand's own type is the operation type.
-package(snakebite) ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expression) {
+package(snakebite) ShiftPlan shiftPlan(imported!"snakebite.frontend.ast".BinExp expression) {
     const facts = typeFacts(expression.e1.type);
     const direction = expression.isShlExp
         ? ShiftPlan.Direction.left
@@ -41,7 +41,7 @@ package(snakebite) ShiftPlan shiftPlan(imported!"dmd.expression".BinExp expressi
 }
 
 package(snakebite) ShiftPlan shiftPlan(
-    imported!"dmd.expression".BinAssignExp expression,
+    imported!"snakebite.frontend.ast".BinAssignExp expression,
 ) {
     import snakebite.language.operators.compound: compoundTarget;
 
@@ -65,7 +65,7 @@ package(snakebite) ShiftPlan shiftPlan(
 // `>>=` is arithmetic by the signedness of the type under the promotion
 // cast, which is how dmd's code generator picks its instruction.
 private ShiftPlan.Direction directionOf(
-    imported!"dmd.expression".BinAssignExp expression,
+    imported!"snakebite.frontend.ast".BinAssignExp expression,
 ) {
     with (ShiftPlan.Direction) {
         if (expression.isShlAssignExp)

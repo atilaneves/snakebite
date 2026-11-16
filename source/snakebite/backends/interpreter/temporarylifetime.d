@@ -3,8 +3,8 @@ module snakebite.backends.interpreter.temporarylifetime;
 
 private:
 
-import dmd.declaration: VarDeclaration;
-import dmd.expression: DeclarationExp, Expression, StructLiteralExp;
+import snakebite.frontend.ast: DeclarationExp, Expression, StructLiteralExp,
+    VarDeclaration;
 import snakebite.language.layout.temporary: TemporaryPlan;
 import snakebite.stack.temporaries: TemporaryStack;
 import snakebite.language.traversal.fullexpression:
