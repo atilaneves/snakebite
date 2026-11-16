@@ -1190,12 +1190,14 @@ private extern(C++) final class UnservedOperationFinder
                 found = true;
     }
 
-    // A local variable executes its initializer and its destructor. Any
-    // other declaration, a nested function, is walked as part of the body.
+    // A local variable executes its initializer and its destructor. A nested
+    // function is walked as part of the body. Any other declaration is not:
+    // an alias in a local scope can name the enclosing function itself.
     override void visit(DeclarationExp expression) {
         auto variable = expression.declaration.isVarDeclaration;
         if (variable is null) {
-            expression.declaration.accept(this);
+            if (auto nested = expression.declaration.isFuncDeclaration)
+                nested.accept(this);
             return;
         }
         if (variable._init !is null)

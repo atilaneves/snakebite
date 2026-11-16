@@ -535,6 +535,18 @@ unittest {
 }
 
 
+// A local alias of the enclosing function must not send the walk of the body
+// round in a circle.
+@("image.localAliasOfTheEnclosingFunction")
+unittest {
+    const source = nestedInstanceImageSource("image_alias_self", q{
+        alias self = first!T;
+        return cast(int) value;
+    });
+    "image_alias_self.first!int".should.not.be in source;
+}
+
+
 // An instance without inline assembler keeps its guest body: the template
 // decides from the enum at compile time, which a stand-in would change.
 @("image.rootTypedInstanceStaysInGuest")
