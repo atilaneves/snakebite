@@ -5763,9 +5763,10 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
             return atomicLoad(color) == Color.green ? 1 : 0;
         }
         """, 1, NATIVE_AND_FILE_BACKENDS),
-    # On an LDC host the body of `loadUnaligned` calls LLVM inline IR, which
-    # no backend executes: the image holds the instance and the call is
-    # native.
+    # A result check. On an LDC host the body of `loadUnaligned` calls LLVM
+    # inline IR; the result is the same whichever copy of it runs. That the
+    # image holds it is checked by
+    # `test_an_instance_with_inline_ir_needs_an_image`.
     "unaligned_vector_load": snippet_shape("""
         import core.simd: float4, loadUnaligned;
         int answer() {
@@ -5774,8 +5775,8 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
             return cast(int) (vector[0] + vector[1] + vector[2] + vector[3]);
         }
         """, 10, NATIVE_AND_FILE_BACKENDS),
-    # `total!float` has a body that a backend executes, and it calls the
-    # instance of `loadUnaligned`, which only the image runs on an LDC host.
+    # A result check: `total!float` calls `loadUnaligned`, and the result is
+    # the same whichever copy of `total!float` runs.
     "guest_instance_calls_an_image_instance": ImageShape(
         {
             "deps/vectors.d": """
@@ -6059,6 +6060,67 @@ def test_unchanged_project_builds_its_image_once(
         repeated = run_with_stubs(tmp_path, backend, *arguments)
         assert repeated.returncode == 7, output(repeated)
     assert image_builds(log) == 2
+
+
+# A backend executes an instance of a dependency template whose body it can
+# execute, so the image holds none of them: a project with only such
+# instances needs no image and starts no image compiler, and an instance that
+# only the image can run makes one.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_only_an_instance_that_no_backend_executes_needs_an_image(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "deps" / "ordinary.d",
+        """
+        module ordinary;
+        int answer(T)() { return 7; }
+        """,
+    )
+    write(
+        tmp_path / "app" / "root.d",
+        """
+        module root;
+        import ordinary;
+        int main() { return answer!int(); }
+        """,
+    )
+    log = recording_compiler(tmp_path)
+
+    ordinary = run_with_stubs(tmp_path, backend)
+    assert ordinary.returncode == 7, output(ordinary)
+    assert image_builds(log) == 0
+
+    write_answer_project(tmp_path)
+    assembler = run_with_stubs(tmp_path, backend)
+    assert assembler.returncode == 7, output(assembler)
+    assert image_builds(log) == 1
+
+
+# `bin/sb` is built with LDC, so the body of `loadUnaligned` calls LLVM inline
+# IR, which no backend executes: the instance that a project calls is in an
+# image, which a project with no such instance does not need.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_an_instance_with_inline_ir_needs_an_image(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "root.d",
+        """
+        module root;
+        import core.simd: float4, loadUnaligned;
+        int main() {
+            float[5] values = [0, 1, 2, 3, 4];
+            const vector = loadUnaligned(cast(const(float4)*) &values[1]);
+            return cast(int) (vector[0] + vector[1] + vector[2] + vector[3]);
+        }
+        """,
+    )
+    log = recording_compiler(tmp_path)
+
+    result = run_with_stubs(tmp_path, backend)
+    assert result.returncode == 10, output(result)
+    assert image_builds(log) == 1
 
 
 # An edit to a dependency is in the next start's result, and builds the
