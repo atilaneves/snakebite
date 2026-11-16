@@ -374,7 +374,7 @@ package struct JitState {
                 done = g.emitOp(i, ops, originals[i]);
             else {
                 g.fpSlots = FpSlots.init;
-                g.intSlot = IntSlot.init;
+                g.intSlots = IntSlots.init;
             }
             if (g.outOfMemory || (g.fpLoop.backedge && (!done || g.usedKnown)))
                 return Emitted.failed;
@@ -427,9 +427,7 @@ package struct JitState {
             const body = g.labels[entry.index];
             g.labels[entry.index] = g.a.n;
             entry.fpSlots.reload(g.a);
-            if (entry.intSlot.width)
-                g.a.ld(entry.intSlot.width, entry.intSlot.reg,
-                    Mem(FRAME, entry.intSlot.offset));
+            entry.intSlots.reload(g.a);
             g.a.b(0xE9);
             g.a.d32(cast(int) (body - (g.a.n + int.sizeof)));
         }
@@ -1357,10 +1355,68 @@ private struct IntSlot {
     int reg;
 }
 
+private struct IntSlots {
+    @nogc nothrow:
+
+    IntSlot newest;
+    IntSlot older;
+
+    int find(in Mem m, int width) const pure @safe {
+        if (m.base != FRAME)
+            return -1;
+        if (newest.width == width && newest.offset == m.disp)
+            return newest.reg;
+        if (older.width == width && older.offset == m.disp)
+            return older.reg;
+        return -1;
+    }
+
+    int copyRegister() const pure @safe {
+        const lastReg = newest.width ? newest.reg : older.reg;
+        return lastReg == R11 ? SC2 : R11;
+    }
+
+    void forget(in Mem dest, int width, int overwrittenReg = -1) pure @safe {
+        if (dest.base != FRAME) {
+            this = IntSlots.init;
+            return;
+        }
+        if (overwritten(newest, dest.disp, width, overwrittenReg))
+            newest = IntSlot.init;
+        if (overwritten(older, dest.disp, width, overwrittenReg))
+            older = IntSlot.init;
+    }
+
+    static bool overwritten(in IntSlot slot, int offset, int width,
+        int reg) pure @safe
+    {
+        return slot.width && (slot.reg == reg
+            || (slot.offset < offset + width && offset < slot.offset + slot.width));
+    }
+
+    void rememberCopy(in Mem dest, int width, int reg) pure @safe {
+        forget(dest, width, reg);
+        if (newest.width)
+            older = newest;
+        newest = IntSlot(dest.disp, width, reg);
+    }
+
+    bool empty() const pure @safe {
+        return !newest.width && !older.width;
+    }
+
+    void reload(ref Asm a) const {
+        if (newest.width)
+            a.ld(newest.width, newest.reg, Mem(FRAME, newest.offset));
+        if (older.width)
+            a.ld(older.width, older.reg, Mem(FRAME, older.offset));
+    }
+}
+
 private struct ReloadEntry {
     size_t index;
     FpSlots fpSlots;
-    IntSlot intSlot;
+    IntSlots intSlots;
 }
 
 private struct CheckedEntry {
@@ -1405,7 +1461,7 @@ private struct Gen {
     Scratch!ReloadEntry* reloadEntryScratch;
     FpSlots fpSlots;
     FpLoop fpLoop;
-    IntSlot intSlot;
+    IntSlots intSlots;
     CheckedEntry checkedEntry;
     CheckedLoop checkedLoop;
     bool readIntSlot;
@@ -2124,19 +2180,31 @@ private struct Gen {
         if (!fpArithmetic && !fpCompare && !inFpLoop)
             fpSlots = FpSlots.init;
         if (!usesInt)
-            intSlot = IntSlot.init;
+            intSlots = IntSlots.init;
         if (!fpArithmetic && !fpCompare && !usesInt && !inFpLoop)
             return emitTemplate(i, ops, op, original);
 
+        const scalarCopy = !inFpLoop && isScalarCopy(i, op);
+        const carryCopy = scalarCopy && i + 1 < ops.length
+            && isScalarCopy(i + 1, ops[i + 1]);
+        const copyRun = carryCopy
+            || (scalarCopy && i != 0 && isScalarCopy(i - 1, ops[i - 1]));
+        // RAX is the value scratch for an indirect store. R11 is the
+        // address scratch for the right operand of an integer operation.
+        if ((copyRun && intSlots.newest.reg == RAX)
+                || (!copyRun && intSlots.newest.reg == R11))
+            intSlots = IntSlots.init;
+
         const incomingFp = fpSlots;
-        const incomingInt = intSlot;
+        const incomingInt = intSlots;
         readIntSlot = false;
-        const done = emitTemplate(i, ops, op, original);
+        const done = emitTemplate(i, ops, op, original, copyRun, carryCopy);
         if (!done || (fpCompare && !inFpLoop))
             fpSlots = FpSlots.init;
         if (!done || op.kind == JitOp.Kind.jump)
-            intSlot = IntSlot.init;
-        if (done && (!incomingFp.empty || readIntSlot)
+            intSlots = IntSlots.init;
+        const reloadInt = readIntSlot || (carryCopy && !incomingInt.empty);
+        if (done && (!incomingFp.empty || reloadInt)
                 && !(inFpLoop && i == fpLoop.head)) {
             // Only the preceding template's fallthrough can assume these
             // registers are live. All other entries reload the frame.
@@ -2145,13 +2213,18 @@ private struct Gen {
                 outOfMemory = true;
             else
                 entries[reloadEntryCount++] = ReloadEntry(i, incomingFp,
-                    readIntSlot ? incomingInt : IntSlot.init);
+                    reloadInt ? incomingInt : IntSlots.init);
         }
         return done;
     }
 
+    bool isScalarCopy(size_t i, in JitOp op) const {
+        return op.kind == JitOp.Kind.copy
+            && goodWidth(op.width ? op.width : snapshot[i].width);
+    }
+
     bool emitTemplate(size_t i, const(JitOp)[] ops, in JitOp op,
-        Instruction.Handler original)
+        Instruction.Handler original, bool copyRun = false, bool carryCopy = false)
     {
         const ins = snapshot[i];
         final switch (op.kind) with (JitOp.Kind) {
@@ -2181,13 +2254,16 @@ private struct Gen {
             if (size > 64)
                 return false;
             Mem d, s;
-            if (!opnd(ins.destination, R9, d))
+            const validDest = copyRun
+                ? opnd!(/*reusePointer*/ true)(ins.destination, R9, d)
+                : opnd(ins.destination, R9, d);
+            if (!validDest)
                 return false;
-            const scalar = goodWidth(size) && d.base == FRAME;
+            const scalar = goodWidth(size) && (d.base == FRAME || copyRun);
             if (isLiteralCopy(ins, op, size)) {
                 const width = cast(int) size;
                 storeConstant(width, d, constantAt(ins.source, width));
-                intSlot = IntSlot.init;
+                finishCopy(d, width, carryCopy);
                 return true;
             }
             if (op.copy.staticSource) {
@@ -2197,7 +2273,7 @@ private struct Gen {
                 if (goodWidth(size) && known.covers(ins.source, size)) {
                     usedKnown = true;
                     storeConstant(cast(int) size, d, known.bits);
-                    intSlot = IntSlot.init;
+                    finishCopy(d, cast(int) size, carryCopy);
                     return true;
                 }
                 const valid = scalar
@@ -2209,13 +2285,15 @@ private struct Gen {
             if (scalar) {
                 const width = cast(int) size;
                 const cached = cachedInt(s, width);
-                const reg = cached >= 0 ? cached : RAX;
+                const remember = carryCopy && d.base == FRAME;
+                const reg = cached >= 0 ? cached
+                    : remember ? intSlots.copyRegister : RAX;
                 if (cached < 0)
                     a.ld(width, reg, s);
-                storeInt(d, width, reg);
+                storeInt(d, width, reg, remember);
             } else {
                 copyChunks(s, d, size);
-                intSlot = IntSlot.init;
+                intSlots = IntSlots.init;
             }
             return true;
         }
@@ -2271,7 +2349,7 @@ private struct Gen {
                     const carriesIndex = checkedEntry.index == t + 1
                         && !test.leftInR0 && header.width == int.sizeof
                         && header.destination == cast(uint) snapshot[t + 1].width
-                        && intSlot == IntSlot(cast(int) header.destination,
+                        && intSlots.newest == IntSlot(cast(int) header.destination,
                             int.sizeof, RAX);
                     const saved = a.n;
                     if (emitFused(header, test, t + 1,
@@ -2587,15 +2665,25 @@ private struct Gen {
     }
 
     int cachedInt(in Mem m, int w) {
-        if (m.base != FRAME || intSlot.offset != m.disp || intSlot.width != w)
-            return -1;
-        readIntSlot = true;
-        return intSlot.reg;
+        const reg = intSlots.find(m, w);
+        readIntSlot |= reg >= 0;
+        return reg;
     }
 
-    void storeInt(in Mem dest, int w, int reg) {
+    void finishCopy(in Mem dest, int width, bool carryCopy) {
+        if (carryCopy)
+            intSlots.forget(dest, width);
+        else
+            intSlots = IntSlots.init;
+    }
+
+    void storeInt(in Mem dest, int w, int reg, bool rememberCopy = false) {
         a.st(w, dest, reg);
-        intSlot = dest.base == FRAME ? IntSlot(dest.disp, w, reg) : IntSlot.init;
+        if (rememberCopy)
+            intSlots.rememberCopy(dest, w, reg);
+        else
+            intSlots = dest.base == FRAME
+                ? IntSlots(IntSlot(dest.disp, w, reg)) : IntSlots.init;
     }
 
     void emitIntCast(in Mem dest, int width, in Mem src, int sourceWidth,
@@ -2696,7 +2784,7 @@ private struct Gen {
         else
             a.alu(aluOf(p.operation), w, acc, rhs.memory);
         if (p.resultInR0)
-            intSlot = IntSlot.init;
+            intSlots = IntSlots.init;
         else
             storeInt(d, w, acc);
         return true;
@@ -2860,7 +2948,7 @@ private struct Gen {
             a.aluRR(Alu.cmp, w, left, rightReg);
         else
             a.alu(Alu.cmp, w, left, right.memory);
-        intSlot = IntSlot.init;
+        intSlots = IntSlots.init;
     }
 
     static int integerBranchCc(in JitOp.Fused op) {
@@ -3100,7 +3188,7 @@ private struct Gen {
         jccTo(CC_LE, 0, checkedLoop.body);
         checkedLoop = CheckedLoop.init;
         known = KnownConstant.init;
-        intSlot = IntSlot.init;
+        intSlots = IntSlots.init;
         fpSlots = FpSlots.init;
     }
 
