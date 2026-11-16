@@ -55,9 +55,14 @@
   may import another backend's package, and vice versa. Within a single
   backend package, modules can and should import each other, including
   package-private code.
-* Only `snakebite.backends.bytecode.compiler` may import DMD frontend
-  modules. The bytecode VM and all project modules that it imports must
-  compile without DMD frontend import paths.
+* Only the package `snakebite.frontend` may import dmd modules. Other
+  code takes dmd node types and enums from `snakebite.frontend.ast`, and
+  calls any other dmd function through `inFrontend`, which takes the
+  frontend lock. The build fails on a dmd import outside the package
+  (ADR 0015).
+* In the bytecode backend, only `snakebite.backends.bytecode.compiler` may
+  import frontend modules. The bytecode VM and all project modules that it
+  imports must compile without DMD frontend import paths.
 
 # Runtime semantics
 
@@ -129,9 +134,9 @@ review must-fix.
   internal implementation details.
 - Code comments are for *why*.
 - Dispatch on a closed set with `final switch` over the full enum,
-  after `toBasetype`. A missing case then fails the build instead of
-  hiding behind a `default`.
-- Call `toBasetype` before any `.ty` test, not only before a
+  after `baseType` (`toBasetype` in the frontend package). A missing
+  case then fails the build instead of hiding behind a `default`.
+- Call `baseType` before any `.ty` test, not only before a
   `switch`. A `.ty ==` check in an `if` on an un-normalised type
   misses enums and typedef-like base types.
 - Fix the full concept: cover every case the same reasoning applies

@@ -41,6 +41,27 @@ Guest values retain native D layout. Druntime owns guest collection and
 finalization. The GC roots, thread registration, and shared druntime
 requirements in ADR-0005, ADR-0006, and ADR-0008 still apply.
 
+### The build enforces the import boundary
+
+Only the package `snakebite.frontend` imports dmd modules. Other code takes
+dmd node types and enums from `snakebite.frontend.ast`. It calls each other
+dmd function through `inFrontend`, which takes the frontend lock, and names
+the function as a string: `inFrontend!"mutableOf"(type)`.
+
+The [boundary check][boundary] reads each own D file of a binary. A dmd
+import in a file outside `source/snakebite/frontend/` and the `dmd.iasm`
+shim fails the build. Each binary depends on the check, so `ninja bin/ut`
+fails, not only CI. Generated and vendored D code is not own code, and the
+check does not read it.
+
+The check does not catch:
+
+- a member that a node value or a listed type gives: a method, or a static
+  such as `Module.amodules`;
+- a read of a node field that dmd still writes;
+- wrong code inside the frontend package;
+- an import that a string mixin makes.
+
 ## Considered options
 
 **Allocate frontend state through the GC.** This remains supported through
@@ -104,3 +125,4 @@ The allocation boundary is implemented in [the compiler][compiler]. The
 [tests]: ../../validation/arena/memory.d
 [compiler]: ../../source/snakebite/frontend/compiler.d
 [gc]: ../../source/snakebite/memory/gc.d
+[boundary]: ../../build/frontend_boundary.py
