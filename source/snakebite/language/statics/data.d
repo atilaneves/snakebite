@@ -645,7 +645,7 @@ public struct NativeData {
     private Placed buildInitialBytes(VarDeclaration variable, in TypeFacts facts) {
         import core.stdc.string: memcpy;
         import dmd.expressionsem: getConstInitializer;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
 
         if (auto pending = variable in _pendingStatics)
             return *pending;
@@ -660,7 +660,7 @@ public struct NativeData {
         } else if (variable._init.isVoidInitializer is null) {
             auto initializer = variable._init.isExpInitializer;
             auto expression = initializer is null
-                ? newInFrontend!getConstInitializer(variable, true)
+                ? inFrontend!"getConstInitializer"(variable, true)
                 : initializerValueOf(initializer);
             write(variable.type, facts, expression, bytes.ptr);
         }
@@ -700,7 +700,7 @@ public struct NativeData {
         ubyte* place,
     ) {
         import dmd.expressionsem: getConstInitializer;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
 
         size_t writtenBitEnd;
         foreach (field; declaration.fields) {
@@ -713,7 +713,7 @@ public struct NativeData {
                 ? initialValue(field.type, field.loc)
                 : value(
                     field.type,
-                    newInFrontend!getConstInitializer(field, false),
+                    inFrontend!"getConstInitializer"(field, false),
                     field,
                 );
             if (field.isBitFieldDeclaration !is null) {
@@ -763,12 +763,12 @@ private bool mutableElementsEqual(
     imported!"dmd.mtype".Type second,
 ) {
     import dmd.typesem: mutableOf;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
     if (first.mod == 0 && second.mod == 0)
         return first.equals(second);
 
-    return newInFrontend!mutableOf(first).equals(newInFrontend!mutableOf(second));
+    return inFrontend!"mutableOf"(first).equals(inFrontend!"mutableOf"(second));
 }
 
 private imported!"dmd.expression".Expression initialExpression(
@@ -776,9 +776,9 @@ private imported!"dmd.expression".Expression initialExpression(
     in imported!"dmd.location".Loc loc,
 ) {
     import dmd.typesem: defaultInitLiteral;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
-    return newInFrontend!defaultInitLiteral(type, loc);
+    return inFrontend!"defaultInitLiteral"(type, loc);
 }
 
 // Whether `value`, through any casts, is the address of a symbol plus an
@@ -901,7 +901,7 @@ private void storeValue(
     import dmd.mtype: Type;
     import dmd.expressionsem: toImaginary;
     import dmd.typesem: mutableOf, nextOf;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
     import snakebite.frontend.typefacts:
         baseType, complexValue, integerValue, realValue;
     import std.conv: text;

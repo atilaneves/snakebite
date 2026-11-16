@@ -240,7 +240,7 @@ private extern(C++) class Collector
     private extern(D) bool opaqueInstance(FuncDeclaration function_) {
         import dmd.dtemplate: isType;
         import dmd.mtype: Parameter, ParameterList, TypeFunction;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
         import snakebite.frontend.dmd.mangle: completeFunctionType;
 
         if (!function_.hasInlineAsm)
@@ -271,7 +271,7 @@ private extern(C++) class Collector
         auto next = opaqueType(original.next, false);
         if (next is null)
             return false;
-        auto parameters = newInFrontend!(Parameter.arraySyntaxCopy)(original.parameterList.parameters);
+        auto parameters = inFrontend!(Parameter.arraySyntaxCopy)(original.parameterList.parameters);
         foreach (i; 0 .. original.parameterList.length) {
             auto parameter = (*parameters)[i]; // DMD declarations take mutable parameters.
             auto standIn = opaqueType(parameter.type, false);
@@ -280,7 +280,7 @@ private extern(C++) class Collector
             parameter.type = standIn;
         }
 
-        auto type = newInFrontend!TypeFunction(
+        auto type = inFrontend!TypeFunction(
             ParameterList(parameters, original.parameterList.varargs, original.parameterList.stc),
             next, original.linkage,
         );
@@ -293,7 +293,7 @@ private extern(C++) class Collector
     // or an enum.
     private extern(D) Type opaqueType(Type type, in bool pointee) {
         import dmd.typesem: addMod, pointerTo;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
 
         if (!mentionsRoot(type))
             return type;
@@ -308,11 +308,11 @@ private extern(C++) class Collector
                 classType.sym.isInterfaceDeclaration ? Aggregate.interface_ : Aggregate.class_);
         } else if (auto pointerType = type.isTypePointer) {
             if (auto next = opaqueType(pointerType.next, true))
-                standIn = newInFrontend!pointerTo(next);
+                standIn = inFrontend!"pointerTo"(next);
         }
         if (standIn is null)
             return null;
-        return newInFrontend!addMod(standIn, type.mod);
+        return inFrontend!"addMod"(standIn, type.mod);
     }
 
     // One aggregate without members per root symbol, named after the order in
@@ -322,25 +322,25 @@ private extern(C++) class Collector
         import dmd.dstruct: StructDeclaration;
         import dmd.identifier: Identifier;
         import dmd.location: Loc;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
 
         if (auto known = symbol in _opaqueTypes)
             return *known;
         const name = text("SnakebiteOpaque", _opaqueTypes.length);
-        auto identifier = newInFrontend!(Identifier.idPool)(name); // DMD takes a mutable identifier.
+        auto identifier = inFrontend!(Identifier.idPool)(name); // DMD takes a mutable identifier.
         Type type;
         string body_ = ";";
         final switch (kind) {
             case Aggregate.struct_:
-                type = newInFrontend!StructDeclaration(Loc.initial, identifier, false).type;
+                type = inFrontend!StructDeclaration(Loc.initial, identifier, false).type;
                 break;
             case Aggregate.interface_:
-                type = newInFrontend!InterfaceDeclaration(Loc.initial, identifier, null).type;
+                type = inFrontend!InterfaceDeclaration(Loc.initial, identifier, null).type;
                 break;
             case Aggregate.class_:
                 // A class without members still has a size, which
                 // `core.atomic` reads when it exchanges a class reference.
-                type = newInFrontend!ClassDeclaration(Loc.initial, identifier, null, null, false).type;
+                type = inFrontend!ClassDeclaration(Loc.initial, identifier, null, null, false).type;
                 body_ = " {}";
                 break;
         }
@@ -372,7 +372,7 @@ private extern(C++) class Collector
     // parse into a nested mixin makes it happen speculatively too.
     private extern(D) string addressGuard(Reference reference, in string key) {
         import dmd.typesem: pointerTo;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
 
         const untyped = text("mixin(q{&", key, "})");
         string guard = text("__traits(compiles, { auto pointer = ", untyped, "; })");
@@ -380,7 +380,7 @@ private extern(C++) class Collector
             auto type = signatureOf(function_);
             if (type is null)
                 continue;
-            auto pointerType = newInFrontend!pointerTo(type);
+            auto pointerType = inFrontend!"pointerTo"(type);
             const declaration = text(sourceSpelling(pointerType.toChars.fromStringz),
                 " matched = pointer;");
             guard ~= text(" && __traits(compiles, { auto pointer = ", untyped,
@@ -393,7 +393,7 @@ private extern(C++) class Collector
         FuncDeclaration function_, in string key,
     ) {
         import dmd.typesem: pointerTo;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
         import snakebite.frontend.dmd.mangle: mangledNameOf;
 
         auto type = signatureOf(function_);
@@ -404,7 +404,7 @@ private extern(C++) class Collector
         // an inferred return type or attribute set dmd has not resolved
         // yet would otherwise print incomplete.
         const mangled = mangledNameOf(function_);
-        auto pointerType = newInFrontend!pointerTo(type);
+        auto pointerType = inFrontend!"pointerTo"(type);
         const pointer = text(sourceSpelling(pointerType.toChars.fromStringz),
             " pointer = &", key, ";");
         const result = text("{\nstatic if (__traits(compiles, { mixin(q{", pointer,

@@ -79,23 +79,23 @@ public struct RuntimeTypes {
         import dmd.dsymbolsem;
         import dmd.mangle: mangleToBuffer;
         import dmd.typesem: hasPointers;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
 
         bool hasPointerData() {
             if (auto classDeclaration = declaration.isClassDeclaration) {
                 for (auto parent = classDeclaration; parent !is null;
                         parent = parent.baseClass)
                     foreach (field; parent.fields)
-                        if (newInFrontend!(dmd.dsymbolsem.hasPointers)(field))
+                        if (inFrontend!"hasPointers"(field))
                             return true;
                 return false;
             }
-            return newInFrontend!hasPointers(declaration.type);
+            return inFrontend!"hasPointers"(declaration.type);
         }
 
         immutable(void)* resolve(Declaration symbol, ptrdiff_t offset) {
             OutBuffer name;
-            newInFrontend!mangleToBuffer(symbol, name);
+            inFrontend!"mangleToBuffer"(symbol, name);
             auto address = _resolve(name[]);
             return address is null ? null
                 : cast(immutable(void)*)(cast(ubyte*) address + offset);
@@ -147,14 +147,14 @@ public struct RuntimeTypes {
         if (auto cached = type in _types)
             return *cached;
 
-        import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+        import snakebite.frontend.compiler: inFrontend, withCompilerLock;
         import dmd.typesem: merge2;
 
         TypeInfo info;
         withCompilerLock({
             // The frontend's argument classifier can return unmerged types.
             // TypeInfo identity follows genTypeInfo's canonical type.
-            type = newInFrontend!merge2(type);
+            type = inFrontend!"merge2"(type);
             if (auto cached = type in _types)
                 info = *cached;
             else
@@ -170,15 +170,15 @@ public struct RuntimeTypes {
     public TypeInfo_Class unqualifiedClassInfo(Type declared) {
         import dmd.astenums: Tclass;
         import dmd.typesem: mutableOf, unSharedOf;
-        import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+        import snakebite.frontend.compiler: inFrontend, withCompilerLock;
         import snakebite.frontend.typefacts: baseType;
 
         // One entry into the frontend for the three steps.
         Type type;
         TypeInfo found;
         withCompilerLock({
-            type = newInFrontend!unSharedOf(
-                newInFrontend!mutableOf(baseType(declared)));
+            type = inFrontend!"unSharedOf"(
+                inFrontend!"mutableOf"(baseType(declared)));
             if (type.ty == Tclass)
                 found = get(type);
         });
@@ -195,7 +195,7 @@ public struct RuntimeTypes {
     private TypeInfo build(Type type) {
         import dmd.astenums;
         import dmd.typesem: mutableOf, nextOf, unSharedOf;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
         import dmd.root.string: toDString;
         import object: TypeInfo_Array, TypeInfo_AssociativeArray,
             TypeInfo_Const, TypeInfo_Delegate, TypeInfo_Enum,
@@ -214,8 +214,8 @@ public struct RuntimeTypes {
         }
         if (type.mod != 0) {
             auto baseType = type.isShared
-                ? newInFrontend!unSharedOf(type)
-                : newInFrontend!mutableOf(type);
+                ? inFrontend!"unSharedOf"(type)
+                : inFrontend!"mutableOf"(type);
             return qualified(type, get(baseType));
         }
 
@@ -339,7 +339,7 @@ public struct RuntimeTypes {
         import dmd.common.outbuffer: OutBuffer;
         import dmd.mangle: mangleToBuffer;
         import snakebite.frontend.dmd.mangle: completeMangleTargets;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
         import std.conv: text;
 
         if (type.vtinfo is null)
@@ -357,7 +357,7 @@ public struct RuntimeTypes {
             // function's own mangled signature - see `completeMangleTargets`.
             completeMangleTargets(classType.sym);
             OutBuffer mangled;
-            newInFrontend!mangleToBuffer(classType.sym, mangled);
+            inFrontend!"mangleToBuffer"(classType.sym, mangled);
             name = text("_D", mangled[], "7__ClassZ");
         }
         return cast(TypeInfo) _resolve(name);
@@ -476,15 +476,15 @@ public struct RuntimeTypes {
         import dmd.astenums: STC;
         import dmd.semantic3: semanticTypeInfoMembers, search_toString;
         import dmd.typesem: hasPointers;
-        import snakebite.frontend.compiler: newInFrontend;
-        newInFrontend!semanticTypeInfoMembers(declaration);
+        import snakebite.frontend.compiler: inFrontend;
+        inFrontend!"semanticTypeInfoMembers"(declaration);
         if (declaration.xhash !is null)
             method(&info.xtoHash, declaration.xhash);
         if (declaration.xeq !is null)
             method(&info.xopEquals, declaration.xeq);
         if (declaration.xcmp !is null)
             method(&info.xopCmp, declaration.xcmp);
-        if (auto toString = newInFrontend!search_toString(declaration))
+        if (auto toString = inFrontend!"search_toString"(declaration))
             method(&info.xtoString, toString);
         if (declaration.tidtor !is null)
             method(&info.xdtor, declaration.tidtor);
@@ -493,7 +493,7 @@ public struct RuntimeTypes {
             method(&info.xpostblit, declaration.postblit);
         // The enum's default value is `hasPointers`, its first member, so a
         // pointer-free struct must have the flags cleared explicitly.
-        const hasPointerData = newInFrontend!hasPointers(declaration.type);
+        const hasPointerData = inFrontend!"hasPointers"(declaration.type);
         info.m_flags = hasPointerData
             ? TypeInfo_Struct.StructFlags.hasPointers
             : cast(TypeInfo_Struct.StructFlags) 0;

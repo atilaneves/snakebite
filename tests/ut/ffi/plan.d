@@ -3101,7 +3101,7 @@ private void readWhileGlobalScopeIsSetUp(
     import core.thread: Thread;
     import dmd.dsymbolsem: scopeCreateGlobal;
     import dmd.globals: global;
-    import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
+    import snakebite.frontend.compiler: inFrontend, withCompilerLock;
     import std.array: appender;
     import std.conv: text;
 
@@ -3122,7 +3122,7 @@ private void readWhileGlobalScopeIsSetUp(
     auto writer = new Thread({
         while (!atomicLoad(done))
             withCompilerLock({
-                newInFrontend!scopeCreateGlobal(guestModule, global.errorSink);
+                inFrontend!"scopeCreateGlobal"(guestModule, global.errorSink);
             });
     });
     writer.start;

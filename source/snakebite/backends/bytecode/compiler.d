@@ -8840,7 +8840,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.dtemplate: isType;
         import dmd.location: Loc;
         import dmd.typesem: isZeroInit;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
         import snakebite.language.call.druntimehook: DruntimeHook, planOf;
         import snakebite.frontend.dmd.functions: moduleOf;
 
@@ -8867,7 +8867,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const hook = name == "_d_newarrayU"
             ? DruntimeHook.newArrayUninitialized
-            : newInFrontend!isZeroInit(elementType, Loc.initial)
+            : inFrontend!"isZeroInit"(elementType, Loc.initial)
             ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
         auto plan = planOf(_bytecode._world.plans, hook);
 

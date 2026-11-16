@@ -63,10 +63,9 @@ public bool functionNeedsClosure(FuncDeclaration function_) {
 public void runSemantic3(FuncDeclaration function_) {
     import core.atomic: atomicLoad, MemoryOrder;
     import dmd.dsymbol: PASS;
-    import dmd.funcsem: functionSemantic3;
     import snakebite.frontend.compiler: forceIfNeeded;
 
-    forceIfNeeded!functionSemantic3(
+    forceIfNeeded!"functionSemantic3"(
         () => atomicLoad!(MemoryOrder.acq)(function_.semanticRun)
             >= PASS.semantic3done,
         function_,

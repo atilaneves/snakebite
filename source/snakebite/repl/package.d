@@ -49,7 +49,7 @@ public struct Repl {
         in JitSetting jit = JitSetting.init,
     ) {
         import dmd.frontend: addImport, addStringImport;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
 
         _backendName = backendName;
         _jit = jit;
@@ -57,9 +57,9 @@ public struct Repl {
         _flags = FrontendFlags(flags.compilerArguments.dup);
         _dependencyImage = dependencyImage;
         foreach (importPath; _importPaths)
-            newInFrontend!addImport(importPath);
+            inFrontend!"addImport"(importPath);
         foreach (stringImportPath; stringImportPaths)
-            newInFrontend!addStringImport(stringImportPath);
+            inFrontend!"addStringImport"(stringImportPath);
     }
 
     public bool shouldQuit(in string input) const @safe pure {

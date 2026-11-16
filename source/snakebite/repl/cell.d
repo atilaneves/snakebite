@@ -102,14 +102,14 @@ public bool isIncompleteDeclaration(
     import dmd.errors: diagnostics, ErrorKind;
     import dmd.frontend: parseModule;
     import snakebite.frontend.compiler:
-        newInFrontend, resetErrors, withCompilerLock;
+        inFrontend, resetErrors, withCompilerLock;
     import std.conv: text;
 
     bool result;
     withCompilerLock(() {
         resetErrors;
 
-        auto moduleResult = newInFrontend!parseModule(
+        auto moduleResult = inFrontend!"parseModule"(
             text("repl_probe_", probeCounter++, ".d"),
             input,
         );

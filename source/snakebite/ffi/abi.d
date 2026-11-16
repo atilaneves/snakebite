@@ -186,10 +186,10 @@ private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
 private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
     import dmd.dsymbolsem: isPOD;
     import dmd.typesem: baseElemOf;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
-    auto aggregate = newInFrontend!baseElemOf(type).isTypeStruct;
-    return aggregate !is null && !newInFrontend!isPOD(aggregate.sym);
+    auto aggregate = inFrontend!"baseElemOf"(type).isTypeStruct;
+    return aggregate !is null && !inFrontend!"isPOD"(aggregate.sym);
 }
 
 // Whether `type` is a static array of one `real`, with no struct around
@@ -201,11 +201,11 @@ private bool isDmdIntegerPairArray(imported!"dmd.mtype".Type unbasedType) {
     version (DigitalMars) {
         import dmd.astenums: Tfloat80, Timaginary80, Tsarray;
         import dmd.typesem: baseElemOf;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: inFrontend;
         import snakebite.frontend.typefacts: baseType, representationSize;
 
         auto type = unbasedType.baseType;
-        const element = newInFrontend!baseElemOf(type).ty;
+        const element = inFrontend!"baseElemOf"(type).ty;
         return type.ty == Tsarray && representationSize(type) == 16
             && (element == Tfloat80 || element == Timaginary80);
     } else

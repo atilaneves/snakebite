@@ -4,7 +4,7 @@ module ut.backends.run.main;
 import ut.backends;
 import snakebite.program: Program;
 import snakebite.run.program: run;
-import snakebite.frontend.compiler: parseSnippet, newInFrontend, withCompilerLock;
+import snakebite.frontend.compiler: parseSnippet, inFrontend, withCompilerLock;
 import std.meta: AliasSeq;
 import dmd.expression: ErrorExp;
 import dmd.location: Loc;
@@ -400,11 +400,11 @@ static foreach (backend; AliasSeq!(Bytecode, Interpreter)) {
                     const savedErrors = global.gaggedErrors;
                     scope(exit) global.gaggedErrors = savedErrors;
                     ++global.gaggedErrors;
-                    function_.fbody = newInFrontend!ErrorStatement;
+                    function_.fbody = inFrontend!ErrorStatement;
                 } else {
-                    auto expression = newInFrontend!ErrorExp;
+                    auto expression = inFrontend!ErrorExp;
                     expression.type = Type.tint32;
-                    function_.fbody = newInFrontend!ExpStatement(
+                    function_.fbody = inFrontend!ExpStatement(
                         Loc.initial, expression);
                 }
             });

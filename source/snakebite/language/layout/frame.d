@@ -204,14 +204,14 @@ package(snakebite) struct FrameLayout {
                 context = function_.vthis;
             } else {
                 import dmd.declaration: ThisDeclaration;
-                import snakebite.frontend.compiler: newInFrontend;
+                import snakebite.frontend.compiler: inFrontend;
 
                 auto aggregate = function_.isThis();
                 assert(aggregate !is null,
                     "FrameLayout.of: hasHiddenThis is true for a bodyless " ~
                         "function with no `this` to derive its facts from");
                 isRefThis = aggregate.isStructDeclaration !is null;
-                context = newInFrontend!ThisDeclaration(
+                context = inFrontend!ThisDeclaration(
                     function_.loc, aggregate.handleType());
             }
 
