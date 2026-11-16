@@ -873,8 +873,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
-        Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
-        branchTargetField, recordRelocs, rolesOf,
+        Instruction, Role, Roles, addressSlotOf,
+        branchTargetField, recordLocalReferences, recordRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1321,6 +1321,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
+        recordLocalReferences(result);
         return result;
     }
 

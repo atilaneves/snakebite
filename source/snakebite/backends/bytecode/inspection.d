@@ -10,8 +10,9 @@ private:
 
 import snakebite.backends.bytecode.relocation: Place, Reloc;
 import snakebite.native.address: Target;
-import snakebite.backends.bytecode.vm: Function, Instruction, Roles,
-    jitCompiled, rolesOf, wordAt;
+import snakebite.backends.bytecode.vm: bindInstructionReferences,
+    CountingSite, Function, Instruction, misplacedLocalRecords, Roles,
+    TargetWord, jitCompiled, rolesOf, wordAt;
 import std.conv: text;
 
 public const(Reloc)[] relocsOf(const(Function)* function_) {
@@ -74,3 +75,25 @@ public string[] misplacedRelocs(const(Function)* function_) {
     return found;
 }
 
+
+// Where the local records of a complete `Function` disagree with the role
+// table and the table of counting twins.
+public string[] misplacedLocalReferences(const(Function)* function_) {
+    return misplacedLocalRecords(function_);
+}
+
+// What `bindInstructionReferences` says about a function of `instructions`
+// whose records name each `targets` entry as (instruction, word) and each
+// `counting` entry as an instruction; null when it accepts them.
+public string bindWithRecords(Instruction[] instructions,
+    const uint[2][] targets, const uint[] counting)
+{
+    Function function_;
+    function_.instructions = instructions;
+    foreach (target; targets)
+        function_.targetWords ~= TargetWord(target[0], target[1]);
+    foreach (instruction; counting)
+        function_.countingSites ~= CountingSite(instruction,
+            instructions[0].handler);
+    return bindInstructionReferences(function_);
+}
