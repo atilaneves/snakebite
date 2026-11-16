@@ -71,42 +71,66 @@ static foreach (backend; Matrix!()) {
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOfWithJitCode!(backend, q{
-            interface Operation {
-                long evaluate(long value);
-            }
+            interface Addition { long add(long value); }
+            interface Subtraction { long subtract(long value); }
+            interface Tag { void tag(); }
 
-            class Add : Operation {
+            class Add : Addition {
                 long offset;
                 this(long offset) { this.offset = offset; }
-                override long evaluate(long value) { return value + offset; }
+                override long add(long value) { return value + offset; }
             }
 
-            class Subtract : Operation {
+            class Subtract : Tag, Subtraction {
                 long offset;
                 this(long offset) { this.offset = offset; }
-                override long evaluate(long value) { return value - offset; }
+                override long subtract(long value) { return value - offset; }
+                override void tag() {}
+            }
+
+            class Multiply {
+                long factor;
+                this(long factor) { this.factor = factor; }
+                long multiply(long value) { return value * factor; }
+            }
+
+            class Mask {
+                long mask(long value) {
+                    long[1024] storage = void;
+                    const index = cast(size_t) value % storage.length;
+                    storage[index] = value ^ 7;
+                    return storage[index];
+                }
+            }
+
+            class Negate {
+                long negate(long value) { return -value; }
+            }
+
+            long invoke(long delegate(long) operation, long value) {
+                return operation(value);
             }
 
             void main() {
-                Operation first = new Add(17);
-                Operation second = new Add(29);
-                Operation third = new Subtract(41);
-                auto addFirst = &first.evaluate;
-                auto addSecond = &second.evaluate;
-                auto subtract = &third.evaluate;
-                foreach (round; 0 .. 1024) {
-                    auto operation = addFirst;
-                    long offset = 17;
-                    if (round % 3 == 1) {
-                        operation = addSecond;
-                        offset = 29;
-                    } else if (round % 3 == 2) {
-                        operation = subtract;
-                        offset = -41;
-                    }
-                    assert(operation(round) == round + offset);
+                Addition first = new Add(17);
+                Addition second = new Add(29);
+                Subtraction third = new Subtract(41);
+                auto fourth = new Multiply(5);
+                auto fifth = new Mask;
+                auto sixth = new Negate;
+                auto operations = [
+                    &first.add, &second.add, &third.subtract,
+                    &fourth.multiply, &fifth.mask, &sixth.negate,
+                ];
+                foreach (round; 0 .. 3072L) {
+                    const index = round % operations.length;
+                    long[6] expected = [
+                        round + 17, round + 29, round - 41,
+                        round * 5, round ^ 7, -round,
+                    ];
+                    assert(invoke(operations[index], round) == expected[index]);
                 }
             }
-        }, ["main"]);
+        }, ["main", "invoke", "add", "subtract", "multiply", "mask"]);
     }
 }

@@ -109,13 +109,14 @@ tier-up threshold, the original counting handler takes over before the
 template changes the frame or the count.
 
 An indirect window call can use the same template. The counting handler
-records the first target whose frame fits the window. The callback bridge
-keeps that entry valid for the lifetime of the bytecode that uses it. If
-the caller compiles after the handler publishes the target, the template
-checks the current entry address before using the recorded callee and
-receiver adjustment. It reads the receiver from the current window on
-every call. A different target or a site with no recorded target uses the
-original handler.
+records up to four distinct entries whose frames fit the window. The
+callback bridge keeps each entry valid for the lifetime of the bytecode
+that uses it. The JIT reads the records when it compiles the caller. A
+release store of the entry publishes each callee and receiver adjustment.
+The JIT checks the live entry address before it uses either recorded value.
+It reads the receiver from the current window on every call. If the live
+entry matches none of the guards, the original handler takes over.
+Publication after compilation does not change the emitted guards.
 
 A return to a guest caller with no pending cleanup releases the frame and
 jumps through the caller's resume slot. A value return can copy up to 64
