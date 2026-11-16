@@ -269,8 +269,17 @@ def test_process_collector_choice(
     assert result.returncode == 0, output(result)
 
 
-@pytest.mark.parametrize("collector", ["", "array-cache"])
-def test_array_allocations_survive_fiber_suspension(
+@pytest.mark.parametrize("collector", [
+    "",
+    pytest.param(
+        "array-cache",
+        marks=pytest.mark.skipif(
+            not os.environ.get("SNAKEBITE_ARRAY_CACHE_COLLECTOR_SOURCE"),
+            reason="requires the opt-in LDC collector build",
+        ),
+    ),
+])
+def test_array_allocations_survive_fiber_migration(
     tmp_path: Path, collector: str,
 ) -> None:
     write(
@@ -317,11 +326,14 @@ def test_array_allocations_survive_fiber_suspension(
             assert(after - before == GC.query(first.ptr).size + GC.query(second.ptr).size);
             check(first, 4);
             check(second, 7);
+            second[6].child = second.ptr;
             first[0].child = second.ptr;
+            second = null;
             first ~= Element(null);
             GC.collect();
-            assert(first[0].child == second.ptr);
-            assert(GC.query(first[0].child).base == second.ptr);
+            auto child = first[0].child;
+            assert(GC.query(child).base == child);
+            assert(child[6].child == child);
         }
 
         void main() {
@@ -331,14 +343,14 @@ def test_array_allocations_survive_fiber_suspension(
                 checkAccounting();
             });
             fiber.call();
-            auto collector = new Thread(() {
+            auto worker = new Thread(() {
                 GC.collect();
                 warm();
                 checkAccounting();
+                fiber.call();
             });
-            collector.start();
-            collector.join();
-            fiber.call();
+            worker.start();
+            worker.join();
             assert(fiber.state == Fiber.State.TERM);
             puts("array cache fiber checks passed");
         }

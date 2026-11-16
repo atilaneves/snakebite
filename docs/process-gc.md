@@ -46,7 +46,8 @@ before generating the build:
 
 ```sh
 collector_source=/path/to/core/internal/gc/impl/conservative/gc.d
-SNAKEBITE_ARRAY_CACHE_COLLECTOR_SOURCE="$collector_source" build/reggae.sh
+export SNAKEBITE_ARRAY_CACHE_COLLECTOR_SOURCE="$collector_source"
+build/reggae.sh
 ninja bin/sb
 DGC=array-cache bin/sb --backend=bytecode path/to/project
 ```
@@ -56,8 +57,10 @@ contain pointers and have no destructor. It holds spares for one exact
 array type per dispatch. The collector uses its existing block
 allocation and array metadata code to fill the cache. Cache hits use
 the native array layout and charge each allocation to the calling
-thread. A dispatch can retain up to 298,592 bytes in spare blocks plus
-its cache record of about 16 KiB while it runs or stays suspended.
+thread. Generated code uses the executable-local TLS offsets of the
+collector, so a resumed fiber charges the thread that runs it. A
+dispatch can retain up to 298,592 bytes in spare blocks plus its cache
+record of about 16 KiB while it runs or stays suspended.
 
 Druntime continues to collect host and guest memory. Array allocations
 in a finalizer follow the usual runtime path. The experimental mode

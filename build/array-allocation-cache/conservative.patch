@@ -119,25 +119,35 @@
          // Return next item from free list
          bucket[bin] = undefinedRead((cast(List*)p).next);
          auto pool = undefinedRead((cast(List*)p).pool);
-@@ -5556,3 +5597,27 @@
+@@ -5556,3 +5597,37 @@
  
      return block.ptr[0 .. block.length - padding];
  }
 +
 +
 +import snakebite.memory.arrayallocation :
-+    ArrayAllocationRequest, ArrayAllocationSlots, ArrayAllocationThread, arrayAllocationMaxSpares;
++    ArrayAllocationRequest, ArrayAllocationSlots, ArrayAllocationTls, arrayAllocationMaxSpares;
 +
 +private ArrayAllocationRequest* _arrayAllocationRequest;
 +
-+extern(C) ArrayAllocationThread arrayAllocationThread() nothrow @nogc
++extern(C) ArrayAllocationTls arrayAllocationTls() nothrow @nogc
 +{
++    import ldc.llvmasm : __asm;
++
 +    if (!Gcx.instance || ConservativeGC.isPrecise || config.fork)
-+        return ArrayAllocationThread.init;
-+    debug(LOGGING) return ArrayAllocationThread.init;
-+    debug(SENTINEL) return ArrayAllocationThread.init;
-+    debug(VALGRIND) return ArrayAllocationThread.init;
-+    return ArrayAllocationThread(&ConservativeGC._inFinalizer, &bytesAllocated);
++        return ArrayAllocationTls.init;
++    debug(LOGGING) return ArrayAllocationTls.init;
++    debug(SENTINEL) return ArrayAllocationTls.init;
++    debug(VALGRIND) return ArrayAllocationTls.init;
++
++    // The overlay is linked into the executable. On x86-64 Linux its
++    // TLS variables have fixed offsets from the thread pointer in FS.
++    const base = __asm!ptrdiff_t("movq %fs:0, $0", "=r");
++    const finalizer = cast(ptrdiff_t) &ConservativeGC._inFinalizer - base;
++    const allocated = cast(ptrdiff_t) &bytesAllocated - base;
++    if (finalizer < int.min || finalizer >= 0 || allocated < int.min || allocated >= 0)
++        return ArrayAllocationTls.init;
++    return ArrayAllocationTls(cast(int) finalizer, cast(int) allocated);
 +}
 +
 +extern(C) ArrayAllocationRequest* exchangeArrayAllocationRequest(

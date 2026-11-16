@@ -1030,6 +1030,18 @@ private struct Asm {
             d32(m.disp);
     }
 
+    version (ArrayAllocationCache)
+    void fsDisp32(int w, int reg, ubyte opcode, int displacement) {
+        // FS plus a signed displacement. ModRM selects SIB with no base or index.
+        b(0x64);
+        if (w == 8)
+            b(cast(ubyte) (0x48 | (reg >= 8 ? 4 : 0)));
+        b(opcode);
+        b(cast(ubyte) ((reg & 7) << 3 | 4));
+        b(0x25);
+        d32(displacement);
+    }
+
     // reg, reg. `reg` is the ModRM reg field, `rm` the r/m field.
     void rrOp(int w, bool byteReg, int reg, int rm, uint opc,
         bool forceW = false)
@@ -2461,7 +2473,7 @@ private struct Gen {
     version (ArrayAllocationCache)
     bool emitArrayAllocation(size_t i, Instruction.Handler original) {
         import snakebite.memory.arrayallocation: ArrayAllocationCache,
-            ArrayAllocationSlots, ArrayAllocationThread, arrayAllocationMaxLength;
+            ArrayAllocationSlots, arrayAllocationMaxLength, arrayAllocationTls;
 
         const ins = snapshot[i];
         const site = &callSites[ins.source];
@@ -2470,10 +2482,9 @@ private struct Gen {
                 || !frameOperand(site.args[1].callerOffset, length)
                 || !frameOperand(ins.destination, destination))
             return false;
-        enum inFinalizer = ArrayAllocationCache.thread.offsetof
-            + ArrayAllocationThread.inFinalizer.offsetof;
-        enum bytesAllocated = ArrayAllocationCache.thread.offsetof
-            + ArrayAllocationThread.bytesAllocated.offsetof;
+        const tls = arrayAllocationTls();
+        if (!tls.available)
+            return false;
 
         a.ld(8, R9, Mem(STATE, DispatchState.arrayAllocation.offsetof));
         a.aluRI(Alu.cmp, 8, R9, 0);
@@ -2481,8 +2492,9 @@ private struct Gen {
         a.ld(8, RAX, type);
         a.alu(Alu.cmp, 8, RAX, Mem(R9, ArrayAllocationCache.type.offsetof));
         const differentType = jccLocal(CC_NE);
-        a.ld(8, R11, Mem(R9, inFinalizer));
-        a.aluMI(Alu.cmp, 1, Mem(R11, 0), 0);
+        // A suspended fiber can resume on a different thread.
+        a.fsDisp32(1, Alu.cmp, 0x80, tls.inFinalizer);
+        a.b(0);
         const finalizing = jccLocal(CC_NE);
         a.ld(8, R10, length);
         a.lea(R11, Mem(R10, -1));
@@ -2501,9 +2513,7 @@ private struct Gen {
         a.stI(8, root, 0);
         a.st(8, Mem(R11, ArrayAllocationSlots.count.offsetof), RAX);
         a.ld(8, R10, Mem(R11, ArrayAllocationSlots.charge.offsetof));
-        a.ld(8, R9, Mem(R9, bytesAllocated));
-        a.alu(Alu.add, 8, R10, Mem(R9, 0));
-        a.st(8, Mem(R9, 0), R10);
+        a.fsDisp32(8, R10, 0x01, tls.bytesAllocated);
         jmpTo(i + 1);
 
         patchHere(disabled);

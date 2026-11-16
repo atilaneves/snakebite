@@ -24,19 +24,22 @@ public struct ArrayAllocationRequest {
 }
 
 
-public struct ArrayAllocationThread {
-    const(bool)* inFinalizer;
-    ulong* bytesAllocated;
+public struct ArrayAllocationTls {
+    int inFinalizer;
+    int bytesAllocated;
+
+    public bool available() const pure nothrow @nogc {
+        return bytesAllocated != 0;
+    }
 }
 
 public struct ArrayAllocationCache {
-    ArrayAllocationThread thread;
     const(void)* type;
     ArrayAllocationSlots[arrayAllocationMaxLength] lengths;
 }
 
 
-extern(C) public ArrayAllocationThread arrayAllocationThread() nothrow @nogc;
+extern(C) public ArrayAllocationTls arrayAllocationTls() nothrow @nogc;
 extern(C) public ArrayAllocationRequest* exchangeArrayAllocationRequest(
     ArrayAllocationRequest* request,
 ) nothrow @nogc;

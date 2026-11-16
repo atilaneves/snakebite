@@ -1375,17 +1375,14 @@ private void dispatch(
     auto state = DispatchState(frames, null, null, 0, vm,
         cast(DispatchState*) frames.backendEntry);
     version (ArrayAllocationCache) {
-        import snakebite.memory.arrayallocation: ArrayAllocationCache, arrayAllocationThread;
+        import core.memory: GC;
+        import snakebite.memory.arrayallocation: ArrayAllocationCache, arrayAllocationTls;
         import snakebite.memory.gc: arrayAllocationCacheEnabled, insideFrontend;
 
         // The cache must be scanned, including while a guest fiber is suspended.
-        if (arrayAllocationCacheEnabled() && !insideFrontend()) {
-            auto thread = arrayAllocationThread();
-            if (thread.inFinalizer !is null && !*thread.inFinalizer) {
-                state.arrayAllocation = new ArrayAllocationCache;
-                state.arrayAllocation.thread = thread;
-            }
-        }
+        if (arrayAllocationCacheEnabled() && !insideFrontend()
+                && arrayAllocationTls().available && !GC.inFinalizer)
+            state.arrayAllocation = new ArrayAllocationCache;
     }
     // A halt must also discard a partially reserved activation.
     const frameMark = frames.mark;
@@ -2259,13 +2256,14 @@ private const(Instruction)* opArrayAllocationMiss(
     DispatchState* state,
     ubyte* frame,
 ) {
+    import core.memory: GC;
     import snakebite.memory.arrayallocation: ArrayAllocationRequest, arrayAllocationMaxLength,
         exchangeArrayAllocationRequest;
 
     const length = loadWord(frame + site.args[1].callerOffset, Load.word64);
     auto cache = state.arrayAllocation;
-    if (cache is null || *cache.thread.inFinalizer
-            || length == 0 || length > arrayAllocationMaxLength)
+    if (cache is null || length == 0 || length > arrayAllocationMaxLength
+            || GC.inFinalizer)
         return opCallDirectTwoWordsPairResult!false(site, pc, active, state, frame);
     const type = cast(const TypeInfo) cast(void*) loadWord(
         frame + site.args[0].callerOffset, Load.word64);
