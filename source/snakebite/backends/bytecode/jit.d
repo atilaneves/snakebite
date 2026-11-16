@@ -321,6 +321,7 @@ package struct JitState {
         g.bmi2 = bmi2;
         g.instructions = instructions;
         g.snapshot = snapshot;
+        g.frameSize = function_.frameSize;
         g.constants = function_.constants;
         g.callSites = function_.callSites;
         auto labelMemory = labels.reserve(instructions.length + 1);
@@ -336,7 +337,19 @@ package struct JitState {
             if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
             g.labels[i] = g.a.n;
-            if (!g.fpLoop.backedge && ops[i].kind == JitOp.Kind.branch)
+            if (g.checkedLoop.update && i == g.checkedLoop.update) {
+                g.jumpToHandler(i, originals[i]);
+                g.emitCheckedLoopUpdate;
+                continue;
+            }
+            if (g.checkedLoop.update && i == g.checkedLoop.update + 1) {
+                g.emitCheckedLoopBackedge;
+                g.labels[i] = needsHandlerEntry;
+                ++handlerEntryCount;
+                continue;
+            }
+            if (!g.checkedLoop.update && !g.fpLoop.backedge
+                    && ops[i].kind == JitOp.Kind.branch)
                 g.fpLoop = g.planFpLoop(i, ops, originals);
             if (g.fpLoop.backedge) {
                 if (i == g.fpLoop.head) {
@@ -396,8 +409,8 @@ package struct JitState {
                     continue;
                 if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                     return Emitted.full;
-                // Dispatch and branches can enter here without running the
-                // preceding constant store.
+                // Dispatch and branches can enter here without the values
+                // that the preceding machine code supplies.
                 label = g.a.n;
                 g.jumpToHandler(i, originals[i]);
                 if (--handlerEntryCount == 0)
@@ -1355,6 +1368,17 @@ private struct CheckedEntry {
     size_t afterLoad;
 }
 
+private struct CheckedLoop {
+    size_t update;
+    int indexSlot;
+    int stepSlot;
+    int limitSlot;
+    int protectedStart;
+    int protectedEnd;
+    size_t body;
+    size_t updateFixup;
+}
+
 private struct FpLoop {
     size_t head;
     size_t compare;
@@ -1383,11 +1407,13 @@ private struct Gen {
     FpLoop fpLoop;
     IntSlot intSlot;
     CheckedEntry checkedEntry;
+    CheckedLoop checkedLoop;
     bool readIntSlot;
     size_t reloadEntryCount;
     bool bmi2;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
+    size_t frameSize;
     const(long)[] constants;
     const(CallSite)[] callSites;
     size_t[] labels;
@@ -1811,6 +1837,67 @@ private struct Gen {
         a.jmpRax;
     }
 
+    CheckedLoop planCheckedLoop(size_t i, const(JitOp)[] ops) {
+        import std.algorithm.comparison: min, max;
+
+        const store = snapshot[i];
+        const check = ops[i].checked;
+        size_t update;
+        if (!i || check.access != CheckedAccess.store || !check.constantValue
+                || check.fixedLength || check.indexWidth != int.sizeof
+                || !check.signed || ops[i].width != ubyte.sizeof
+                || !targetIndex(store.sourceWidth, update)
+                || update <= i + 1 || ops.length - update < 3)
+            return CheckedLoop.init;
+
+        const header = snapshot[i - 1];
+        const test = ops[i - 1];
+        const index = cast(uint) store.width;
+        size_t exit;
+        if (test.kind != JitOp.Kind.fused || test.fused.kind != CompareKind.signed
+                || test.fused.constantRight || test.fused.leftInR0
+                || integerBranchCc(test.fused) != CC_G
+                || header.width != int.sizeof || header.destination != index
+                || !targetIndex(header.sourceWidth, exit) || exit != update + 2)
+            return CheckedLoop.init;
+
+        const ins = snapshot[update];
+        const add = ops[update];
+        const width = add.width ? add.width : ins.width;
+        size_t head;
+        if (add.kind != JitOp.Kind.int3
+                || add.int3.operation != JitOp.IntOperation.add
+                || add.int3.constantRight || add.int3.leftInR0
+                || add.int3.resultInR0 || width != int.sizeof
+                || ins.destination != index
+                || (!add.int3.twoAddress && ins.source != index)
+                || ops[update + 1].kind != JitOp.Kind.jump
+                || !targetIndex(snapshot[update + 1].destination, head)
+                || head != i - 1)
+            return CheckedLoop.init;
+
+        const step = add.int3.twoAddress ? ins.source : ins.sourceWidth;
+        const size_t[4] slots = [index, step, header.source, store.source];
+        const size_t[4] widths = [int.sizeof, int.sizeof, int.sizeof,
+            arrayPointerOffset + size_t.sizeof];
+        auto start = size_t.max;
+        size_t end;
+        foreach (n, offset; slots) {
+            Mem operand;
+            if (!frameOperand(offset, operand) || offset > frameSize
+                    || widths[n] > frameSize - offset)
+                return CheckedLoop.init;
+            const past = offset + widths[n];
+            foreach (other, earlier; slots[0 .. n])
+                if (offset < earlier + widths[other] && earlier < past)
+                    return CheckedLoop.init;
+            start = min(start, offset);
+            end = max(end, past);
+        }
+        return CheckedLoop(update, cast(int) index, cast(int) slots[1],
+            cast(int) header.source, cast(int) start, cast(int) end);
+    }
+
     FpLoop planFpLoop(size_t head, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals)
     {
@@ -2184,6 +2271,11 @@ private struct Gen {
         }
 
         case checked:
+            if (!checkedLoop.update && !fpLoop.backedge) {
+                checkedLoop = planCheckedLoop(i, ops);
+                if (checkedLoop.update)
+                    return emitCheckedLoop(i, ins, op, original);
+            }
             return emitChecked(i, ins, op);
 
         case castFixed: {
@@ -2699,6 +2791,12 @@ private struct Gen {
         intSlot = IntSlot.init;
     }
 
+    static int integerBranchCc(in JitOp.Fused op) {
+        const cc = op.kind == CompareKind.signed
+            ? signedCc(op.comparison) : unsignedCc(op.comparison);
+        return op.jumpWhen ? cc : cc ^ 1;
+    }
+
     bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
         size_t localTarget = 0)
     {
@@ -2716,11 +2814,7 @@ private struct Gen {
             if (!integerRight(ins.source, p.constantRight, w, R10, right))
                 return false;
             emitIntCompare(w, l, right, p.leftInR0);
-            int cc = p.kind == CompareKind.signed
-                ? signedCc(p.comparison) : unsignedCc(p.comparison);
-            if (!p.jumpWhen)
-                cc ^= 1;
-            jccTo(cc, t, localTarget);
+            jccTo(integerBranchCc(p), t, localTarget);
             return true;
         }
         if (w != 8 && w != 4)
@@ -2885,34 +2979,91 @@ private struct Gen {
         return true;
     }
 
-    bool emitChecked(size_t i, in Instruction ins, in JitOp op) {
+    enum checkedLength = R9;
+    enum checkedLimit = R10;
+    enum checkedStep = R11;
+
+    bool emitCheckedLoop(size_t i, in Instruction ins, in JitOp op,
+        Instruction.Handler original)
+    {
+        const slice = cast(int) ins.source;
+        a.ld(8, SC2, Mem(FRAME, slice + cast(int) arrayPointerOffset));
+        a.ld(8, checkedLength, Mem(FRAME, slice + cast(int) arrayLengthOffset));
+        a.movRR64(RAX, SC2);
+        a.aluRR(Alu.add, 8, RAX, checkedLength);
+        const wrap = jccLocal(CC_B);
+
+        a.lea(checkedLimit, Mem(FRAME, checkedLoop.protectedStart));
+        a.aluRR(Alu.cmp, 8, RAX, checkedLimit);
+        const before = jccLocal(CC_BE);
+        a.lea(checkedLimit, Mem(FRAME, checkedLoop.protectedEnd));
+        a.aluRR(Alu.cmp, 8, SC2, checkedLimit);
+        const after = jccLocal(CC_AE);
+
+        patchHere(wrap);
+        jumpToHandler(i, original);
+        patchHere(before);
+        patchHere(after);
+
+        a.ld(4, RAX, Mem(FRAME, checkedLoop.indexSlot));
+        a.ld(4, checkedLimit, Mem(FRAME, checkedLoop.limitSlot));
+        a.ld(4, checkedStep, Mem(FRAME, checkedLoop.stepSlot));
+        // The bounds check consumes k + offset. Bias the step so its
+        // next 32-bit add produces k + step, including on wraparound.
+        const offset = cast(int) (ins.width >> 32);
+        if (offset)
+            a.aluRI(Alu.sub, 4, checkedStep, offset);
+        checkedLoop.body = a.n;
+        return emitChecked!true(i, ins, op);
+    }
+
+    void emitCheckedLoopUpdate() {
+        patchHere(checkedLoop.updateFixup);
+        a.aluRR(Alu.add, 4, RAX, checkedStep);
+        a.st(4, Mem(FRAME, checkedLoop.indexSlot), RAX);
+    }
+
+    void emitCheckedLoopBackedge() {
+        a.aluRR(Alu.cmp, 4, RAX, checkedLimit);
+        jccTo(CC_LE, 0, checkedLoop.body);
+        checkedLoop = CheckedLoop.init;
+        known = KnownConstant.init;
+        intSlot = IntSlot.init;
+        fpSlots = FpSlots.init;
+    }
+
+    bool emitChecked(bool resident = false)(
+        size_t i, in Instruction ins, in JitOp op,
+    ) {
         const p = op.checked;
         const packed = ins.width;
         const idxOff = cast(uint) packed;
         const hi = packed >> 32;
         const es = op.width;
         const access = p.access;
-        if (idxOff > 0x7fff_0000)
-            return false;
         size_t target;
-        if (access != CheckedAccess.storeUnchecked
-                && !targetIndex(ins.sourceWidth, target))
-            return false;
         Mem d, s;
-        if (access != CheckedAccess.check && !p.constantValue
-                && !opnd(ins.destination, R9, d))
-            return false;
-        if (!opnd(ins.source, R10, s))
-            return false;
+        static if (!resident) {
+            if (idxOff > 0x7fff_0000
+                    || (access != CheckedAccess.storeUnchecked
+                        && !targetIndex(ins.sourceWidth, target)))
+                return false;
+            if (access != CheckedAccess.check && !p.constantValue
+                    && !opnd(ins.destination, R9, d))
+                return false;
+            if (!opnd(ins.source, R10, s))
+                return false;
+        }
         const idx = Mem(FRAME, cast(int) idxOff);
         const offset = p.fixedLength ? 0 : cast(int) hi;
-        if (p.indexWidth == 4) {
-            a.ld(4, RAX, idx);
-            // This entry needs only the low 32 bits of RAX. The slice
-            // operand needs no address setup and sign extension follows.
-            if (access == CheckedAccess.store && p.constantValue && p.signed
-                    && !p.fixedLength && s.base == FRAME)
-                checkedEntry = CheckedEntry(i, a.n);
+        if (resident || p.indexWidth == 4) {
+            static if (!resident) {
+                a.ld(4, RAX, idx);
+                // Sign extension follows, and the slice needs no address setup.
+                if (access == CheckedAccess.store && p.constantValue && p.signed
+                        && !p.fixedLength && s.base == FRAME)
+                    checkedEntry = CheckedEntry(i, a.n);
+            }
             if (offset != 0)
                 a.aluRI(Alu.add, 4, RAX, offset);
             if (p.signed)
@@ -2923,7 +3074,10 @@ private struct Gen {
                 a.aluRI(Alu.add, 8, RAX, offset);
         }
         size_t failJump = size_t.max;
-        if (access != CheckedAccess.storeUnchecked) {
+        static if (resident) {
+            a.aluRR(Alu.cmp, 8, RAX, checkedLength);
+            jccTo(CC_AE, i + 1);
+        } else if (access != CheckedAccess.storeUnchecked) {
             if (p.fixedLength) {
                 if (hi <= int.max)
                     a.aluRI(Alu.cmp, 8, RAX, cast(int) hi);
@@ -2936,10 +3090,13 @@ private struct Gen {
             failJump = jccLocal(CC_AE);
         }
         if (access != CheckedAccess.check) {
-            if (p.fixedLength)
-                a.lea(SC2, s);
-            else
-                a.ld(8, SC2, Mem(s.base, s.disp + cast(int) arrayPointerOffset));
+            static if (!resident) {
+                if (p.fixedLength)
+                    a.lea(SC2, s);
+                else
+                    a.ld(8, SC2, Mem(s.base,
+                        s.disp + cast(int) arrayPointerOffset));
+            }
             const element = Mem(SC2, 0, RAX, cast(ubyte) es);
             if (access == CheckedAccess.load) {
                 a.ld(es, R11, element);
@@ -2958,10 +3115,16 @@ private struct Gen {
                 a.st(es, element, R11);
             }
         }
-        if (access != CheckedAccess.storeUnchecked)
-            jmpTo(target);
-        if (failJump != size_t.max)
-            patchHere(failJump);
+        static if (resident) {
+            a.b(0xE9);
+            checkedLoop.updateFixup = a.n;
+            a.d32(0);
+        } else {
+            if (access != CheckedAccess.storeUnchecked)
+                jmpTo(target);
+            if (failJump != size_t.max)
+                patchHere(failJump);
+        }
         return true;
     }
 

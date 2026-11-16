@@ -350,6 +350,45 @@ static foreach (backend; Matrix!()) {
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert an int address to a ubyte pointer"),
+)) {
+    @("jit.checkedByteLoopReadsTheUpdatedIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int mark(ubyte[] flags, int first, int last, int step,
+                bool aliasIndex)
+            {
+                assert(step != 0);
+                int k = first;
+                if (aliasIndex)
+                    flags = (cast(ubyte*) &k)[0 .. 1];
+                while (k <= last) {
+                    flags[k - 1] = 0;
+                    k += step;
+                }
+                return k;
+            }
+
+            int main() {
+                auto flags = new ubyte[600];
+                flags[] = 1;
+                if (mark(flags, 1, 600, 2, false) != 601)
+                    return 1;
+                foreach (i, flag; flags)
+                    if (flag != i % 2)
+                        return 2;
+                if (mark(flags, 601, 600, 1, false) != 601)
+                    return 3;
+                // The write changes k from 1 to 0 before the add.
+                return mark(flags, 1, 1, 2, true) == 2 ? 0 : 4;
+            }
+        }, ["mark"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot reinterpret overlapped union fields"),
 )) {
     @("jit.floatingPointSlotsFollowPartialAndAdjacentWrites." ~ backend.stringof)
