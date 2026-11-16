@@ -5763,6 +5763,41 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
             return atomicLoad(color) == Color.green ? 1 : 0;
         }
         """, 1, NATIVE_AND_FILE_BACKENDS),
+    # On an LDC host the body of `loadUnaligned` calls LLVM inline IR, which
+    # no backend executes: the image holds the instance and the call is
+    # native.
+    "unaligned_vector_load": snippet_shape("""
+        import core.simd: float4, loadUnaligned;
+        int answer() {
+            float[5] values = [0, 1, 2, 3, 4];
+            const vector = loadUnaligned(cast(const(float4)*) &values[1]);
+            return cast(int) (vector[0] + vector[1] + vector[2] + vector[3]);
+        }
+        """, 10, NATIVE_AND_FILE_BACKENDS),
+    # `total!float` has a body that a backend executes, and it calls the
+    # instance of `loadUnaligned`, which only the image runs on an LDC host.
+    "guest_instance_calls_an_image_instance": ImageShape(
+        {
+            "deps/vectors.d": """
+                module vectors;
+                import core.simd: float4, loadUnaligned;
+                int total(T)(const(T)[] values) {
+                    const vector = loadUnaligned(cast(const(float4)*) values.ptr);
+                    return cast(int) (vector[0] + vector[1] + vector[2] + vector[3]);
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import vectors;
+                int main() {
+                    float[4] values = [1, 2, 3, 4];
+                    return total(values[]) == 10 ? 0 : 1;
+                }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
     # An instance without inline assembler keeps its guest body: the template
     # decides from the enum at compile time, which its base type would change.
     "root_enum_text": snippet_shape("""

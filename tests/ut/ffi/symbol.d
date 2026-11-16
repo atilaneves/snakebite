@@ -188,16 +188,18 @@ unittest {
 
 
 // The image source must import the module that names a template argument
-// (`Thread`), or the instantiation `_d_newclassT!Thread` cannot be
-// spelled in the image and falls back to the guest. Nothing here needs the
-// built image: only the text that is made for it.
+// (`Thread`), or the instantiation `atomicLoad!(MemoryOrder.seq,
+// shared(Thread))`, whose body has inline assembler, cannot be spelled in the
+// image. Nothing here needs the built image: only the text that is made for
+// it.
 @("image.templateArgumentImports")
 unittest {
     // Program requires a mutable AST.
     auto module_ = parseSnippet(q{
-        import core.lifetime: _d_newclassT;
+        import core.atomic: atomicLoad;
         import core.thread.osthread: Thread;
-        Thread allocate() { return _d_newclassT!Thread(); }
+        shared Thread thread;
+        Thread current() { return cast(Thread) atomicLoad(thread); }
     });
     const source = imageSource(Program([module_]));
     "import core.thread.osthread;".should.be in source;
@@ -242,7 +244,7 @@ unittest {
     sandbox.writeFile("deps/" ~ moduleName ~ ".d",
         "module " ~ moduleName ~ ";\n" ~ q{
             struct Bucket(K, V) { K key; V value; }
-            void store(T)(T value) {}
+            void store(T)(T value) { asm { nop; } }
         });
     sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
         "module root_" ~ moduleName ~ ";\nimport " ~ moduleName ~ ";\n" ~ q{
@@ -276,7 +278,7 @@ unittest {
     enum moduleName = "image_alias_argument";
     sandbox.writeFile("deps/" ~ moduleName ~ ".d",
         "module " ~ moduleName ~ ";\n" ~ q{
-            void apply(alias f)() { f(); }
+            void apply(alias f)() { asm { nop; } f(); }
             void plain() {}
         });
     sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
@@ -318,7 +320,7 @@ unittest {
     // discover that `Thing` is root-owned.
     sandbox.writeFile("deps/" ~ moduleName ~ ".d",
         "module " ~ moduleName ~ ";\n" ~ q{
-            void apply(alias f)() {}
+            void apply(alias f)() { asm { nop; } }
             void pick(T)() {}
         });
     sandbox.writeFile("app/root_" ~ moduleName ~ ".d",
@@ -353,7 +355,7 @@ unittest {
     enum moduleName = "image_alias_instance_root";
     sandbox.writeFile("deps/" ~ moduleName ~ ".d",
         "module " ~ moduleName ~ ";\n" ~ q{
-            void apply(alias f)() {}
+            void apply(alias f)() { asm { nop; } }
             template pick(T) {
                 void one() {}
                 void two() {}
@@ -453,6 +455,34 @@ unittest {
     "atomicExchange!(MemoryOrder.seq, false, shared(SnakebiteOpaque0)*)".should.be in source;
     "atomicLoad!(MemoryOrder.seq, shared(SnakebiteOpaque0)*)".should.be in source;
     "SnakebiteOpaque1".should.not.be in source;
+}
+
+
+// A backend executes an instance of a dependency template that root code
+// instantiates (docs/adr/0009), so the image does not hold one whose body a
+// backend can execute.
+@("image.executableInstanceIsNotInTheImage")
+unittest {
+    const source = snippetImageSource(q{
+        import std.algorithm.comparison: max;
+        int answer() { return max(3, 4); }
+    });
+    "max!".should.not.be in source;
+}
+
+
+// `atomicOp` has an ordinary body that calls `atomicFetchAdd`, whose body has
+// inline assembler: a backend executes the first, and only the image runs
+// the second.
+@("image.onlyTheInstanceWithInlineAsmIsInTheImage")
+unittest {
+    const source = snippetImageSource(q{
+        import core.atomic: atomicOp;
+        shared int counter;
+        int answer() { return atomicOp!"+="(counter, 5); }
+    });
+    "core.internal.atomic.atomicFetchAdd!(MemoryOrder.seq, true, int)".should.be in source;
+    "atomicOp!".should.not.be in source;
 }
 
 

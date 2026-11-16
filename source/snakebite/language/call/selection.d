@@ -334,10 +334,11 @@ public struct CallSelection {
             return Decision(Route.guest);
 
         // A root-owned body must run as guest even when its linker name
-        // is in the host (notably _Dmain). A template instance can reuse
-        // a native copy only when that copy is independent of the running
-        // executable - the dependency image or an already-loaded shared
-        // object (ADR-0008, ADR-0009). The executable's own copy is never
+        // is in the host (notably _Dmain). A template instance runs as guest
+        // (ADR-0009, decision 1) unless no backend can execute its body.
+        // Then it uses a native copy, but only one that is independent of
+        // the running executable - the dependency image or an already-loaded
+        // shared object (ADR-0008). The executable's own copy is never
         // preferred: snakebite instantiates plenty of the same templates a
         // guest program also instantiates (`dirEntries` in
         // `snakebite.project.loading` among them), and that copy's nested
@@ -346,9 +347,15 @@ public struct CallSelection {
         // wrong layout. A missing independent symbol leaves the guest body.
         // An ordinary dependency uses its own frontend body when its exact
         // native symbol is absent (ADR-0009, decision 3).
-        const prefers = context.instantiated
-            ? !hasIndependentNativeSymbol
-            : rootOwned || !hasNativeSymbol;
+        bool prefers;
+        if (context.instantiated) {
+            import snakebite.frontend.compiler: withCompilerQuery;
+
+            bool executes;
+            withCompilerQuery({ executes = backendExecutes(function_); });
+            prefers = executes || !hasIndependentNativeSymbol;
+        } else
+            prefers = rootOwned || !hasNativeSymbol;
         return Decision(prefers ? Route.guest : Route.native);
     }
 
@@ -1115,6 +1122,117 @@ public struct CallSelection {
                 return false;
         }
     }
+    }
+}
+
+// Whether a backend can compile and execute the body of `function_`. The call
+// selection and the dependency image ask this one question: an instance of a
+// dependency template that root code instantiates is guest code (ADR-0009),
+// and only an instance for which the answer is no needs a native copy. The
+// body is judged alone: a call of a function that no backend can execute is a
+// native call, which a backend makes. No backend runs inline assembler
+// (ADR-0012), and none runs an operation that only the code generator makes
+// (an LLVM intrinsic, LLVM inline IR, LDC's inline assembler, a dmd
+// intrinsic) when no wrapper takes it (`buildIntrinsicPlan`). The caller holds
+// the frontend lock.
+public bool backendExecutes(imported!"dmd.func".FuncDeclaration function_) {
+    if (function_.hasInlineAsm)
+        return false;
+    if (function_.fbody is null)
+        return true;
+    scope finder = new UnservedOperationFinder;
+    function_.fbody.accept(finder);
+    return !finder.found;
+}
+
+// Named distinctly from every other `extern(C++)` visitor: without a C++
+// namespace, two classes of one name mangle to one symbol.
+private extern(C++) final class UnservedOperationFinder
+        : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
+    import dmd.visitor: SemanticTimeTransitiveVisitor;
+    alias visit = SemanticTimeTransitiveVisitor.visit;
+
+    import dmd.expression: DeclarationExp, FuncExp, SymbolExp;
+    import dmd.statement: ExpStatement;
+    import snakebite.language.layout.lowered: LoweredExpressionTypes;
+
+    public bool found;
+
+    override void visit(SymbolExp expression) {
+        if (auto callee = expression.var.isFuncDeclaration)
+            if (isUnservedOperation(callee))
+                found = true;
+    }
+
+    // A function declared in the body has a body of its own, which is
+    // judged alone. Only what a local variable executes belongs here.
+    override void visit(DeclarationExp expression) {
+        auto variable = expression.declaration.isVarDeclaration;
+        if (variable is null)
+            return;
+        if (variable._init !is null)
+            if (auto initializer = variable._init.isExpInitializer)
+                initializer.exp.accept(this);
+        if (variable.edtor !is null)
+            variable.edtor.accept(this);
+    }
+
+    // The transitive visitor also walks the declaration that an
+    // `ExpStatement` holds, which can be a nested function.
+    override void visit(ExpStatement statement) {
+        if (statement.exp !is null)
+            statement.exp.accept(this);
+    }
+
+    override void visit(FuncExp) {}
+
+    // A backend executes the lowering in place of the expression.
+    static foreach (E; LoweredExpressionTypes) {
+        override void visit(E expression) {
+            if (expression.lowering !is null)
+                expression.lowering.accept(this);
+            else
+                super.visit(expression);
+        }
+    }
+}
+
+// A declaration whose call the code generator replaces with an operation of
+// its own, and for which no wrapper exists. Nothing but compiled code can
+// make the call: the operation has no symbol.
+private bool isUnservedOperation(imported!"dmd.func".FuncDeclaration callee) {
+    if (callee.fbody !is null)
+        return false;
+    auto module_ = callee.getModule; // DMD symbol queries are mutable.
+    version (LDC) {
+        if (!isMadeByCodeGenerator(callee))
+            return false;
+    } else {
+        if (!CallSelection.isInlinedByCodeGenerator(callee, module_))
+            return false;
+    }
+    return CallSelection.buildIntrinsicPlan(callee, module_).call.route
+        == CallSelection.Route.native;
+}
+
+// The pragmas of LDC that make the code generator emit the operation of a
+// declaration in place of a call. The others mark a declaration that has, or
+// links to, a symbol.
+version (LDC)
+private bool isMadeByCodeGenerator(imported!"dmd.func".FuncDeclaration callee) {
+    import gen.dpragma: LDCPragma;
+
+    final switch (cast(LDCPragma) callee.llvmInternal) with (LDCPragma) {
+        case LLVMnone, LLVMignore, LLVMglobal_crt_ctor, LLVMglobal_crt_dtor,
+                LLVMno_typeinfo, LLVMextern_weak, LLVMprofile_instr:
+            return false;
+        case LLVMintrinsic, LLVMalloca, LLVMva_start, LLVMva_copy, LLVMva_end,
+                LLVMva_arg, LLVMinline_asm, LLVMinline_ir, LLVMfence,
+                LLVMatomic_store, LLVMatomic_load, LLVMatomic_cmp_xchg,
+                LLVMatomic_rmw, LLVMbitop_bt, LLVMbitop_btc, LLVMbitop_btr,
+                LLVMbitop_bts, LLVMbitop_vld, LLVMbitop_vst,
+                LLVMconvertvector:
+            return true;
     }
 }
 
