@@ -3,8 +3,9 @@ module ut.backends.call.control_flow;
 
 import ut.backends;
 import snakebite.program: Program;
-import snakebite.frontend.compiler: parseSnippet;
+import snakebite.frontend.compiler: parseSnippet, withCompilerLock;
 import snakebite.frontend.dmd.functions: findFunction;
+import dmd.dmodule: Module;
 
 
 // Compiled D needs a callee to compile, not to run. A call that the program
@@ -574,6 +575,83 @@ static foreach (backend; Matrix!(
             int result() { return pick(5); }
         }, "result");
     }
+}
+
+
+// A `final switch` whose `case`s all return gives the native result when it
+// is compiled after the program has raised a `SwitchError`.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE interpreter fails an assertion (rootobject.d:43) on " ~
+        "the statement that raises the switch error"),
+)) {
+    @("finalSwitch.allCasesReturnAfterSwitchErrorRaised."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        enum code = q{
+            import core.exception: SwitchError;
+
+            import std.traits: EnumMembers;
+
+            enum Colour {
+                c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11,
+                c12, c13, c14, c15, c16, c17, c18, c19,
+            }
+
+            int height(Colour colour) {
+                final switch (colour) {
+                    static foreach (member; EnumMembers!Colour) {
+                        case member:
+                            return cast(int) member + 1;
+                    }
+                }
+            }
+
+            int weight(Colour colour) {
+                final switch (colour) {
+                    static foreach (member; EnumMembers!Colour) {
+                        case member:
+                            return 1;
+                    }
+                }
+            }
+
+            int result() {
+                try {
+                    weight(cast(Colour) 99);
+                } catch (SwitchError) {
+                }
+                return height(Colour.c19);
+            }
+        };
+        static if (is(backend == Native))
+            20.shouldBeRetOf!(backend, code, "result");
+        else {
+            auto module_ = parseSnippet(code);
+            Module switchModule, exceptionModule;
+            withCompilerLock({
+                switchModule = loadedModule("core.internal.switch_");
+                exceptionModule = loadedModule("core.exception");
+            });
+            auto backend_ = ownedBackend!backend(Program([
+                module_, switchModule, exceptionModule,
+            ]));
+            int result;
+            backend_.call(findFunction(module_, "result"), &result, []);
+            result.should == 20;
+        }
+    }
+}
+
+
+private auto loadedModule(string name) {
+    foreach (index; 0 .. Module.amodules.length) {
+        auto module_ = Module.amodules[index];
+        if (module_.md !is null && module_.md.toString == name)
+            return module_;
+    }
+    assert(false, "module `" ~ name ~ "` is not loaded");
 }
 
 

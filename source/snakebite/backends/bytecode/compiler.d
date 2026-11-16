@@ -1224,11 +1224,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _code.forwardCopies;
         _code.removeEmptyLifetimes;
         // Dispatch tests no end of stream: the last instruction ends the
-        // activation.
+        // activation, and no branch may target one past it. A copy of a
+        // function that ends in a throw jumps from its cold range to the
+        // end of the copy.
         if (_code.instructions.length == 0
                 || (_code.instructions[$ - 1].handler !is &opReturn
                     && _code.instructions[$ - 1].handler !is &opReturnVoid
-                    && _code.instructions[$ - 1].handler !is &opJump))
+                    && _code.instructions[$ - 1].handler !is &opJump)
+                || branchesPastEnd)
             emit(&opReturnVoid, 0, 0, 0);
         auto inlineBody = inlineBodyOfBuilt;
         const resultPlace = redirectReturns;
@@ -1544,6 +1547,19 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (slot == size_t.max)
             return place;
         return ReturnPlace(slot, _returnFacts.size, _returnFacts.alignment);
+    }
+
+    // Whether a branch instruction targets one past the last instruction.
+    // Handler and cleanup ranges may end there; they are not branches.
+    private bool branchesPastEnd() {
+        foreach (ref instruction; _code.instructions) {
+            if (instruction.handler is null)
+                continue;
+            if (auto field = branchTargetField(instruction))
+                if (*field >= _code.instructions.length)
+                    return true;
+        }
+        return false;
     }
 
     // Whether `instruction` copies a value of `width` bytes from a frame
