@@ -29,8 +29,8 @@ private enum ValueClass {
 }
 
 // The `Linkage` of dmd's `linkage`.
-public Linkage linkageOf(in imported!"dmd.astenums".LINK linkage) @safe @nogc nothrow pure {
-    import dmd.astenums: LINK;
+public Linkage linkageOf(in imported!"snakebite.frontend.ast".LINK linkage) @safe @nogc nothrow pure {
+    import snakebite.frontend.ast: LINK;
 
     final switch (linkage) with (LINK) {
         case default_:
@@ -57,12 +57,12 @@ public Linkage linkageOf(in imported!"dmd.astenums".LINK linkage) @safe @nogc no
 // Itanium rule holds for any host compiler, since it is a fact about the
 // calling convention, not about which compiler built the caller. A
 // return's shape comes from `returnPlanOf`.
-public ArgumentPlan argumentPlanOf(imported!"dmd.mtype".Type type) {
+public ArgumentPlan argumentPlanOf(imported!"snakebite.frontend.ast".Type type) {
     return aggregatePlan(type);
 }
 
-public ArgumentPlan returnPlanOf(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tcomplex80;
+public ArgumentPlan returnPlanOf(imported!"snakebite.frontend.ast".Type type) {
+    import snakebite.frontend.ast: Tcomplex80;
     import snakebite.frontend.typefacts: baseType, representationSize;
 
     auto base = type.baseType;
@@ -108,8 +108,8 @@ public ArgumentPlan returnPlanOf(imported!"dmd.mtype".Type type) {
 // explicit parameter, it never becomes an `ArgumentPlan` `buildMoves`
 // places on the stack, so `argumentPlanOf`'s alignment limit does not
 // apply to it.
-public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
-    import dmd.astenums: Tcomplex80;
+public bool needsHiddenReturnPointer(imported!"snakebite.frontend.ast".Type unbasedType) {
+    import snakebite.frontend.ast: Tcomplex80;
     import snakebite.frontend.typefacts: baseType;
 
     // An enum has its base type's native layout and classification -
@@ -149,8 +149,8 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
 // `aggregatePlan`'s own MEMORY route (verified against gcc -O0: `struct
 // { long double r; } take(struct S s)` reads `s` directly off the
 // stack, at `[rbp+0x10]`, never through a register).
-private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
-    import dmd.astenums: Tvoid;
+private bool isX87OnlyAggregate(imported!"snakebite.frontend.ast".Type unbasedType) {
+    import snakebite.frontend.ast: Tvoid;
     import snakebite.frontend.typefacts: baseType, representationSize;
 
     auto type = unbasedType.baseType;
@@ -183,9 +183,7 @@ private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
 // to *any* function, `extern(D)` included, which is why this is not
 // gated to one host compiler the way a parameter-only wrapper used to
 // gate it to LDC alone.
-private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
-    import dmd.dsymbolsem: isPOD;
-    import dmd.typesem: baseElemOf;
+private bool isNonTriviallyCopyable(imported!"snakebite.frontend.ast".Type type) {
     import snakebite.frontend.compiler: inFrontend;
 
     auto aggregate = inFrontend!"baseElemOf"(type).isTypeStruct;
@@ -197,10 +195,9 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
 // eightbytes, where its own `toArgTypes_sysv_x64` and ldc say X87 (verified
 // by disassembling `extern(C) real[1] f(real[1] x)` built by dmd and by ldc2;
 // a `struct { real[1] a; }` is X87 on both).
-private bool isDmdIntegerPairArray(imported!"dmd.mtype".Type unbasedType) {
+private bool isDmdIntegerPairArray(imported!"snakebite.frontend.ast".Type unbasedType) {
     version (DigitalMars) {
-        import dmd.astenums: Tfloat80, Timaginary80, Tsarray;
-        import dmd.typesem: baseElemOf;
+        import snakebite.frontend.ast: Tfloat80, Timaginary80, Tsarray;
         import snakebite.frontend.compiler: inFrontend;
         import snakebite.frontend.typefacts: baseType, representationSize;
 
@@ -212,11 +209,9 @@ private bool isDmdIntegerPairArray(imported!"dmd.mtype".Type unbasedType) {
         return false;
 }
 
-private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
-    import dmd.astenums:
-        Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
-        Tvector, Tvoid;
-    import dmd.typesem: isIntegral, isUnsigned;
+private ArgumentPlan aggregatePlan(imported!"snakebite.frontend.ast".Type unbasedType) {
+    import snakebite.frontend.ast: isIntegral, isUnsigned, Taarray, Tclass,
+        Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer, Tvector, Tvoid;
     import snakebite.frontend.typefacts:
         baseType, representationAlignment, representationSize;
     import std.algorithm: min;
@@ -390,13 +385,12 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
 }
 
 private void classify(
-    imported!"dmd.mtype".Type unbasedType,
+    imported!"snakebite.frontend.ast".Type unbasedType,
     in size_t offset,
     ref ValueClass[2] classes,
     ref bool memory,
 ) {
-    import dmd.astenums: TY;
-    import dmd.typesem: isIntegral, nextOf;
+    import snakebite.frontend.ast: nextOf, TY;
     import snakebite.frontend.typefacts:
         baseType, integerValue, representationAlignment,
         representationSize;

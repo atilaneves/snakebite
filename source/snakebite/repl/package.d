@@ -22,7 +22,7 @@ private alias DependencyImage =
 // not survive a cell boundary. Tracked in
 // https://github.com/atilaneves/snakebite/issues/154.
 public struct Repl {
-    import dmd.dmodule: Module;
+    import snakebite.frontend.ast: Module;
     import snakebite.backends: Backend, BackendName;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.frontend.compiler: checksOf, FrontendFlags;
@@ -48,7 +48,6 @@ public struct Repl {
         const(DependencyImage)* dependencyImage = null,
         in JitSetting jit = JitSetting.init,
     ) {
-        import dmd.frontend: addImport, addStringImport;
         import snakebite.frontend.compiler: inFrontend;
 
         _backendName = backendName;
@@ -335,11 +334,11 @@ private noreturn endCell() {
 // these count as guest code the interpreter runs directly - anything else
 // reached through `import` (Phobos, druntime) stays native, resolved
 // through FFI the way compiled D would call it.
-private imported!"dmd.dmodule".Module[] interpretedModules(
-    imported!"dmd.dmodule".Module module_,
+private imported!"snakebite.frontend.ast".Module[] interpretedModules(
+    imported!"snakebite.frontend.ast".Module module_,
     in string[] importPaths,
 ) {
-    import dmd.dmodule: Module;
+    import snakebite.frontend.ast: Module;
     import snakebite.frontend.compiler: isUnderAnyPath;
 
     bool[Module] visited;
@@ -384,7 +383,7 @@ private string withoutDuplicateLines(in string diagnostic) @safe pure {
 
 
 private string testFailureDiagnostic(
-    imported!"dmd.func".FuncDeclaration unittest_,
+    imported!"snakebite.frontend.ast".FuncDeclaration unittest_,
     in string message,
 ) {
     import std.conv: text;

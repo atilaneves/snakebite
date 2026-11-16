@@ -26,7 +26,7 @@ public string imageSource(imported!"snakebite.program".Program program) {
 // Cache inputs include imported source files: changing a dependency must
 // invalidate its compiled template bodies even when their names stay the same.
 public string[] imageInputs(imported!"snakebite.program".Program program) {
-    import dmd.dmodule: Module;
+    import snakebite.frontend.ast: Module;
     import snakebite.frontend.compiler: withCompilerLock;
     import std.algorithm: sort;
     import std.array: array;
@@ -64,12 +64,8 @@ private extern(C++) class Collector
     import snakebite.frontend.declarationcollector: DeclarationCollector;
     alias visit = DeclarationCollector.visit;
 
-    import dmd.func: FuncDeclaration;
-    import dmd.dmodule: Module;
-    import dmd.dsymbol: Dsymbol;
-    import dmd.dtemplate: TemplateInstance;
-    import dmd.expression: CallExp, VarExp, DelegateExp;
-    import dmd.mtype: Type;
+    import snakebite.frontend.ast: CallExp, DelegateExp, Dsymbol,
+        FuncDeclaration, Module, TemplateInstance, Type, VarExp;
     import snakebite.program: Program;
     import std.string: fromStringz;
     import std.conv: text;
@@ -93,7 +89,7 @@ private extern(C++) class Collector
     // opaque stand-ins: the template spelling and the stand-in signature.
     private struct Instance {
         string key;
-        imported!"dmd.mtype".TypeFunction type;
+        imported!"snakebite.frontend.ast".TypeFunction type;
     }
     private Instance[FuncDeclaration] _opaque;
 
@@ -207,7 +203,7 @@ private extern(C++) class Collector
 
     // The signature that the image source spells: the stand-in one for an
     // instance that the image compiles over opaque types.
-    private extern(D) imported!"dmd.mtype".TypeFunction signatureOf(
+    private extern(D) imported!"snakebite.frontend.ast".TypeFunction signatureOf(
         FuncDeclaration function_,
     ) {
         if (auto instance = function_ in _opaque)
@@ -238,8 +234,8 @@ private extern(C++) class Collector
     // decides at compile time from its type argument, and a stand-in answers
     // differently. Returns false when the instance needs the root type itself.
     private extern(D) bool opaqueInstance(FuncDeclaration function_) {
-        import dmd.dtemplate: isType;
-        import dmd.mtype: Parameter, ParameterList, TypeFunction;
+        import snakebite.frontend.ast: isType, Parameter, ParameterList,
+            TypeFunction;
         import snakebite.frontend.compiler: inFrontend;
         import snakebite.frontend.dmd.mangle: completeFunctionType;
 
@@ -292,7 +288,6 @@ private extern(C++) class Collector
     // `type` holds a root type in any way but as a pointee, a class reference
     // or an enum.
     private extern(D) Type opaqueType(Type type, in bool pointee) {
-        import dmd.typesem: addMod, pointerTo;
         import snakebite.frontend.compiler: inFrontend;
 
         if (!mentionsRoot(type))
@@ -318,10 +313,8 @@ private extern(C++) class Collector
     // One aggregate without members per root symbol, named after the order in
     // which the sorted references first use it.
     private extern(D) Type opaqueAggregate(Dsymbol symbol, in Aggregate kind) {
-        import dmd.dclass: ClassDeclaration, InterfaceDeclaration;
-        import dmd.dstruct: StructDeclaration;
-        import dmd.identifier: Identifier;
-        import dmd.location: Loc;
+        import snakebite.frontend.ast: ClassDeclaration, Identifier,
+            InterfaceDeclaration, Loc, StructDeclaration;
         import snakebite.frontend.compiler: inFrontend;
 
         if (auto known = symbol in _opaqueTypes)
@@ -371,7 +364,6 @@ private extern(C++) class Collector
     // error from source sitting directly in its block - deferring the
     // parse into a nested mixin makes it happen speculatively too.
     private extern(D) string addressGuard(Reference reference, in string key) {
-        import dmd.typesem: pointerTo;
         import snakebite.frontend.compiler: inFrontend;
 
         const untyped = text("mixin(q{&", key, "})");
@@ -392,7 +384,6 @@ private extern(C++) class Collector
     private extern(D) string overloadRegistry(
         FuncDeclaration function_, in string key,
     ) {
-        import dmd.typesem: pointerTo;
         import snakebite.frontend.compiler: inFrontend;
         import snakebite.frontend.dmd.mangle: mangledNameOf;
 
@@ -422,8 +413,7 @@ private extern(C++) class Collector
     private extern(D) string selectedOverload(
         FuncDeclaration function_, in string key, in const(char)[] pointerSpelling, in const(char)[] mangled,
     ) {
-        import dmd.dsymbol: Dsymbol;
-        import dmd.funcsem: overloadApply;
+        import snakebite.frontend.ast: Dsymbol, overloadApply;
         import std.algorithm: startsWith;
 
         auto instance = function_.parent.isTemplateInstance; // AST queries require mutable nodes.
@@ -473,7 +463,7 @@ private extern(C++) class Collector
     private extern(D) string overloadAnchor(
         FuncDeclaration function_, in string key, in string name,
     ) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
 
         // Speculative template instances can retain an error type.
         auto type = signatureOf(function_);
@@ -522,7 +512,7 @@ private extern(C++) class Collector
                     && isNamedByInstance(function_, instance)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
                 _imports[name] = true;
-                import dmd.mtype: Type;
+                import snakebite.frontend.ast: Type;
                 bool[Type] visited;
                 // Pointer, array, delegate parameter, associative array
                 // key, tuple element, and nested template instance
@@ -551,9 +541,7 @@ private extern(C++) class Collector
     // of the instance. Without an eponymous member the spelling names the
     // instance scope, and every function in it is kept.
     private extern(D) bool isNamedByInstance(FuncDeclaration function_, TemplateInstance instance) {
-        import dmd.dsymbol: Dsymbol;
-        import dmd.dsymbolsem: toAlias;
-        import dmd.funcsem: overloadApply;
+        import snakebite.frontend.ast: Dsymbol, overloadApply, toAlias;
 
         if (instance.aliasdecl is null)
             return true;
@@ -595,15 +583,15 @@ private extern(C++) class Collector
 // functions. Its file is `__importc_builtins.di`, not `__builtins.d`, so no
 // `import` of it from another module finds it; its functions run from their
 // bodies.
-private bool isImportCBuiltins(imported!"dmd.dmodule".Module module_) {
+private bool isImportCBuiltins(imported!"snakebite.frontend.ast".Module module_) {
     return module_.ident.toString == "__builtins";
 }
 
 
 // Function-local types cannot be named from an independent module. Their
 // enclosing dependency body can still instantiate them when it is compiled.
-private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance instance) {
-    import dmd.mtype: Type;
+private bool hasFunctionLocalType(imported!"snakebite.frontend.ast".TemplateInstance instance) {
+    import snakebite.frontend.ast: Type;
 
     bool[Type] visited;
     return eachTemplateArgument(instance, visited, (symbol) {
@@ -625,11 +613,11 @@ private bool hasFunctionLocalType(imported!"dmd.dtemplate".TemplateInstance inst
 // stops the walk early. A previously-seen type also stops the walk, guarding
 // against cycles through self-referential template instances.
 private bool eachTemplateArgumentSymbol(
-    imported!"dmd.mtype".Type type,
-    ref bool[imported!"dmd.mtype".Type] visited,
-    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+    imported!"snakebite.frontend.ast".Type type,
+    ref bool[imported!"snakebite.frontend.ast".Type] visited,
+    scope bool delegate(imported!"snakebite.frontend.ast".Dsymbol) each,
 ) {
-    import dmd.typesem: nextOf, toDsymbol;
+    import snakebite.frontend.ast: nextOf, toDsymbol;
 
     while (type !is null) {
         if (type in visited)
@@ -674,9 +662,9 @@ private bool eachTemplateArgumentSymbol(
 // `TemplateInstance` itself, so the climb must inspect its own tiargs too,
 // not just an enclosing instance's). One rule, shared by both callers below.
 private bool eachFoundSymbol(
-    imported!"dmd.dsymbol".Dsymbol symbol,
-    ref bool[imported!"dmd.mtype".Type] visited,
-    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+    imported!"snakebite.frontend.ast".Dsymbol symbol,
+    ref bool[imported!"snakebite.frontend.ast".Type] visited,
+    scope bool delegate(imported!"snakebite.frontend.ast".Dsymbol) each,
 ) {
     if (each(symbol))
         return true;
@@ -690,11 +678,11 @@ private bool eachFoundSymbol(
 
 // An alias argument names a symbol directly, with no type to recurse through.
 private bool eachTemplateArgument(
-    imported!"dmd.rootobject".RootObject argument,
-    ref bool[imported!"dmd.mtype".Type] visited,
-    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+    imported!"snakebite.frontend.ast".RootObject argument,
+    ref bool[imported!"snakebite.frontend.ast".Type] visited,
+    scope bool delegate(imported!"snakebite.frontend.ast".Dsymbol) each,
 ) {
-    import dmd.dtemplate: getType, isDsymbol;
+    import snakebite.frontend.ast: getType, isDsymbol;
 
     if (auto type = getType(argument))
         return eachTemplateArgumentSymbol(type, visited, each);
@@ -708,9 +696,9 @@ private bool eachTemplateArgument(
 // `each` (reached through `eachTemplateArgument` above) returns `true`. The
 // three sites that inspect a `TemplateInstance`'s tiargs share this loop.
 private bool eachTemplateArgument(
-    imported!"dmd.dtemplate".TemplateInstance instance,
-    ref bool[imported!"dmd.mtype".Type] visited,
-    scope bool delegate(imported!"dmd.dsymbol".Dsymbol) each,
+    imported!"snakebite.frontend.ast".TemplateInstance instance,
+    ref bool[imported!"snakebite.frontend.ast".Type] visited,
+    scope bool delegate(imported!"snakebite.frontend.ast".Dsymbol) each,
 ) {
     if (instance.tiargs is null)
         return false;
@@ -725,7 +713,7 @@ private bool eachTemplateArgument(
 // even when their type requires a cast. Such casts require parentheses in
 // source. Token boundaries keep nested instances and string arguments intact.
 private string sourceSpelling(in char[] spelling) {
-    import dmd.tokens: TOK;
+    import snakebite.frontend.ast: TOK;
     import snakebite.frontend.compiler: lex;
 
     const tokens = lex(spelling);

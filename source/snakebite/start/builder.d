@@ -11,11 +11,11 @@ import snakebite.start.data:
 
 // What the builder asks of a backend.
 alias CompiledFunction =
-    FunctionHandle delegate(imported!"dmd.func".FuncDeclaration);
+    FunctionHandle delegate(imported!"snakebite.frontend.ast".FuncDeclaration);
 alias StaticStorage =
-    imported!"snakebite.native.staticstore".Placed delegate(imported!"dmd.declaration".VarDeclaration);
+    imported!"snakebite.native.staticstore".Placed delegate(imported!"snakebite.frontend.ast".VarDeclaration);
 alias ModuleStorage =
-    ModuleStart* delegate(imported!"dmd.dmodule".Module);
+    ModuleStart* delegate(imported!"snakebite.frontend.ast".Module);
 
 
 // Reads the frontend one time and builds the start data of `program`. The
@@ -31,8 +31,7 @@ public StartData buildStartData(
     ModuleStorage moduleStorage,
 ) {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
-    import dmd.astenums: Tvoid;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf, Tvoid;
 
     StartData data;
     data.programName = program.name;
@@ -61,7 +60,7 @@ private void addModules(
     ModuleStorage moduleStorage,
     Program program,
 ) {
-    import dmd.dmodule: Module;
+    import snakebite.frontend.ast: Module;
     import snakebite.frontend.dmd.functions:
         findModuleFunctions, prettyNameOf;
     import std.string: fromStringz;
@@ -118,7 +117,7 @@ private void addModules(
 
 private FunctionHandle[] compiled(
     CompiledFunction compiledFunction,
-    imported!"dmd.func".FuncDeclaration[] functions,
+    imported!"snakebite.frontend.ast".FuncDeclaration[] functions,
 ) {
     FunctionHandle[] result;
     foreach (function_; functions)
@@ -129,7 +128,7 @@ private FunctionHandle[] compiled(
 
 private FunctionHandle compiled(
     CompiledFunction compiledFunction,
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
     return compiledFunction(function_);
 }
@@ -137,7 +136,7 @@ private FunctionHandle compiled(
 
 private GateStorage[] gatesOf(
     StaticStorage staticStorage,
-    imported!"dmd.func".FuncDeclaration[] destructors,
+    imported!"snakebite.frontend.ast".FuncDeclaration[] destructors,
 ) {
     GateStorage[] gates;
     foreach (destructor; destructors)

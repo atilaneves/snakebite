@@ -99,8 +99,7 @@ public bool isIncompleteDeclaration(
     in imported!"snakebite.frontend.compiler".FrontendFlags flags,
     ref uint probeCounter,
 ) {
-    import dmd.errors: diagnostics, ErrorKind;
-    import dmd.frontend: parseModule;
+    import snakebite.frontend.ast: diagnostics, ErrorKind;
     import snakebite.frontend.compiler:
         inFrontend, resetErrors, withCompilerLock;
     import std.conv: text;
@@ -141,7 +140,7 @@ public bool isStandalonePragmaMessageStatement(
     in imported!"snakebite.frontend.compiler".FrontendFlags flags
         = imported!"snakebite.frontend.compiler".FrontendFlags.init,
 ) {
-    import dmd.id: Id;
+    import snakebite.frontend.ast: Id;
     import snakebite.frontend.compiler: parseStatement, withCompilerLock;
 
     bool result;
