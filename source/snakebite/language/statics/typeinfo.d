@@ -458,7 +458,7 @@ public struct RuntimeTypes {
     // itself (through `get`) gets the same object. It goes into `_structs`
     // when it is complete.
     private TypeInfo_Struct buildStructInfo(StructDeclaration declaration) {
-        import snakebite.frontend.ast: hasPointers, STC, toDString;
+        import snakebite.frontend.ast: STC, toDString;
         auto info = _data.newObject!TypeInfo_Struct(declaration);
         _building[declaration] = info;
         scope(exit) _building.remove(declaration);
