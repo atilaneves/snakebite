@@ -47,8 +47,6 @@ public int run(string[] args) {
             .write(parsed.diagnostic);
     if (parsed.status != 0 || parsed.options.showHelp)
         return parsed.status;
-    selectFrontendMemory(parsed.options.lowmem);
-
     try {
         if (parsed.options.load.length) {
             // Nothing was prepared: the report shows those phases as taking
@@ -61,6 +59,7 @@ public int run(string[] args) {
             _statistics = Statistics(true, PreparationReport.init, report);
             return report.status;
         }
+        selectFrontendMemory(parsed.options.lowmem);
         // The project directory is where the compile runs: a relative path
         // of the caller must be absolute before that.
         const savePath = parsed.options.save.length
@@ -261,7 +260,8 @@ private string optionConflict(in Options options, in size_t argumentCount) {
     if (argumentCount != 1)
         return "--load takes no project directory";
     if (options.importPaths.length || options.stringImportPaths.length
-            || options.versions.length || options.noOptimiseImage)
+            || options.versions.length || options.noOptimiseImage
+            || options.lowmem)
         return "--load takes none of the options that describe a compile";
     return null;
 }
