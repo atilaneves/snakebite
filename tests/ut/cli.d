@@ -20,6 +20,19 @@ unittest {
 }
 
 
+@("loadRefusesLowmem")
+unittest {
+    const result = parseArgs([
+        "sb", "-b", "bytecode", "--load=program.sbc", "--lowmem",
+    ]);
+
+    result.status.should == 1;
+    result.diagnostic.startsWith(
+        "--load takes none of the options that describe a compile")
+        .should == true;
+}
+
+
 @("programArgumentsAfterSeparator")
 unittest {
     const result = parseArgs([

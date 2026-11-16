@@ -49,7 +49,7 @@ public enum lowmemHelp =
 private __gshared FrontendMemory _frontendMemory;
 
 
-// Every executable calls this once, from its argument parsing, before any
+// Every executable that runs the frontend calls this once, before any
 // thread enters the frontend: a change while a thread is inside would mix
 // arena and GC memory in one AST.
 public void selectFrontendMemory(in bool lowmem) nothrow @nogc {
