@@ -327,6 +327,81 @@ static foreach (backend; Matrix!()) {
         });
     }
 
+    @("jit.pointerCopyUsesBothValuesFromTheTakenPath." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Cell {
+                int value;
+            }
+            struct Pair {
+                Cell* dest;
+                Cell* source;
+            }
+            void copy(ref Pair first, ref Pair second, bool keepFirst) {
+                assert(first.dest !is null);
+                auto dest = first.dest;
+                auto source = first.source;
+                if (keepFirst)
+                    goto assign;
+                dest = second.dest;
+                source = second.source;
+            assign:
+                dest.value = source.value;
+            }
+            int main() {
+                Cell a, b;
+                Cell x = Cell(5), y = Cell(9);
+                Pair first = Pair(&a, &x), second = Pair(&b, &y);
+                foreach (_; 0 .. 300) {
+                    a.value = b.value = 0;
+                    copy(first, second, true);
+                    if (a.value != 5 || b.value != 0)
+                        return 1;
+                    copy(first, second, false);
+                    if (a.value != 5 || b.value != 9)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["copy"]);
+    }
+
+    @("jit.pointerCopyReadsTheFrameAfterAnIndirectStore." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Cell {
+                int value;
+            }
+            struct Pair {
+                Cell* dest;
+                Cell* source;
+            }
+            void copy(ref Pair pair, Cell* replacement) {
+                assert(replacement !is null);
+                Cell* dest;
+                auto aliasOfDest = &dest;
+                dest = pair.dest;
+                auto source = pair.source;
+                *aliasOfDest = replacement;
+                dest.value = source.value;
+            }
+            int main() {
+                Cell a, b;
+                Cell x = Cell(5);
+                Pair pair = Pair(&a, &x);
+                foreach (_; 0 .. 300) {
+                    a.value = b.value = 0;
+                    copy(pair, &b);
+                    if (a.value != 0 || b.value != 5)
+                        return 1;
+                }
+                return 0;
+            }
+        }, ["copy"]);
+    }
+
     @("jit.loopUpdateUsesTheNewStep." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
