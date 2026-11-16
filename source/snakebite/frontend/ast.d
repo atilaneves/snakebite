@@ -105,7 +105,7 @@ public import dmd.dsymbolsem: apply, fillVtbl, followInstantiationContext,
 public import dmd.dtemplate: getType, isDsymbol, isExpression, isTuple, isType;
 public import dmd.errors: diagnostics;
 public import dmd.expressionsem: isLvalue, toImaginary;
-public import dmd.funcsem: needsClosure, overloadApply;
+public import dmd.funcsem: overloadApply;
 public import dmd.globals: global;
 public import dmd.id: Id;
 public import dmd.root.string: toDString;
