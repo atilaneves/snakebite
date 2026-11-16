@@ -734,14 +734,12 @@ private bool fieldImageIncludes(
     imported!"dmd.declaration".VarDeclaration field,
     ref size_t writtenBitEnd,
 ) {
-    import dmd.typesem: size;
-
     const bitfield = field.isBitFieldDeclaration;
     const start = field.offset * 8 + (bitfield is null ? 0 : bitfield.bitOffset);
     if (start < writtenBitEnd)
         return false;
     writtenBitEnd = start + (bitfield is null
-        ? field.type.size * 8
+        ? representationSize(field.type) * 8
         : bitfield.fieldWidth);
     return true;
 }
@@ -902,10 +900,10 @@ private void storeValue(
     import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray, Tvector;
     import dmd.mtype: Type;
     import dmd.expressionsem: toImaginary;
-    import snakebite.frontend.typefacts: complexValue, integerValue, realValue;
-    import dmd.typesem: mutableOf, nextOf, size;
-    import snakebite.frontend.typefacts: baseType;
+    import dmd.typesem: mutableOf, nextOf;
     import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.typefacts:
+        baseType, complexValue, integerValue, realValue;
     import std.conv: text;
 
     if (value.isNullExp) {
@@ -959,7 +957,7 @@ private void storeValue(
         const wholeArray = sourceElement !is null
             && mutableElementsEqual(sourceElement, array.next);
         if (!wholeArray || value.isStringExp is null) {
-            const elementSize = array.next.size;
+            const elementSize = representationSize(array.next);
             auto literal = wholeArray ? value.isArrayLiteralExp : null;
             // dmd's default initializer of a `void[N]` is the `ubyte` one.
             auto storedElement = array.next.baseType.ty == TY.Tvoid
@@ -1021,7 +1019,7 @@ private void storeValue(
     }
 
     if (auto literal = value.isStringExp) {
-        const elementSize = type.nextOf.size;
+        const elementSize = representationSize(type.nextOf);
         assert(literal.sz == elementSize);
         if (type.ty == Tsarray) {
             assert(literal.len * elementSize == facts.size);
@@ -1041,7 +1039,7 @@ private void storeValue(
 
     if (auto literal = value.isArrayLiteralExp) {
         assert(type.ty == Tarray || type.ty == Tpointer);
-        const elementSize = type.nextOf.size;
+        const elementSize = representationSize(type.nextOf);
         // The data of the process store when there is one, so that a file can
         // hold them.
         Placed data;

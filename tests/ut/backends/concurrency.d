@@ -88,10 +88,11 @@ unittest {
         shared bool go = false;
         Throwable[threadCount] failures;
 
-        auto threads = new Thread[threadCount];
-        foreach (t; 0 .. threadCount) {
-            const threadIndex = t;
-            threads[t] = new Thread({
+        // One call for each thread: the delegate then has its own index.
+        // A variable of a loop body is shared by every delegate that
+        // the loop makes.
+        Thread threadFor(in size_t threadIndex) {
+            return new Thread({
                 atomicOp!"+="(ready, 1);
                 while (!atomicLoad(go)) {}
 
@@ -126,6 +127,11 @@ unittest {
                 } catch (Throwable throwable)
                     failures[threadIndex] = throwable;
             });
+        }
+
+        auto threads = new Thread[threadCount];
+        foreach (t; 0 .. threadCount) {
+            threads[t] = threadFor(t);
             threads[t].start;
         }
 
@@ -222,10 +228,11 @@ static foreach (backend; Matrix!(
             });
             frontend.start;
 
-            auto threads = new Thread[qualifiedCatchThreads];
-            foreach (t; 0 .. qualifiedCatchThreads) {
-                const threadIndex = t;
-                threads[t] = new Thread({
+            // One call for each thread: the delegate then has its own
+            // index. A variable of a loop body is shared by every
+            // delegate that the loop makes.
+            Thread threadFor(in size_t threadIndex) {
+                return new Thread({
                     atomicOp!"+="(ready, 1);
                     while (!atomicLoad(go)) {}
                     try {
@@ -244,6 +251,11 @@ static foreach (backend; Matrix!(
                     } catch (Throwable throwable)
                         failures[threadIndex] = throwable;
                 });
+            }
+
+            auto threads = new Thread[qualifiedCatchThreads];
+            foreach (t; 0 .. qualifiedCatchThreads) {
+                threads[t] = threadFor(t);
                 threads[t].start;
             }
 
@@ -260,6 +272,108 @@ static foreach (backend; Matrix!(
                     text("round ", round, ", frontend: ", frontendFailure.msg),
                     __FILE__, __LINE__);
             foreach (t; 0 .. qualifiedCatchThreads)
+                if (failures[t] !is null)
+                    throw new UnitTestException(
+                        text("round ", round, ", thread ", t, ": ",
+                            failures[t].msg),
+                        __FILE__, __LINE__);
+        }
+    }
+}
+
+
+// Several threads of one backend that ask for the initializer image of the
+// same new structs at once. The first thread to ask builds the
+// `TypeInfo_Struct` of each struct under the frontend lock, and each other
+// thread asks for the same one without the lock first: it must get the
+// finished one, with the image in it, never one that is still being
+// filled.
+private enum sharedStructCount = 24;
+private enum sharedStructThreads = 8;
+private enum sharedStructRounds = 16;
+
+private string sharedStructSource(in size_t round) {
+    string source = text("module ut.backends.shared_struct_", round, ";\n");
+    foreach (i; 0 .. sharedStructCount)
+        source ~= text(
+            "struct T", i, " { int a = 7; int[2] b = [", i, ", 5]; ",
+            "long c = 11; }\n");
+    foreach (t; 0 .. sharedStructThreads) {
+        source ~= text("long f", t, "() { long sum = 0;\n");
+        foreach (k; 0 .. sharedStructCount) {
+            const i = (t * 3 + k) % sharedStructCount;
+            source ~= text(
+                "    { auto image = cast(const(ubyte)[]) ",
+                "__traits(initSymbol, T", i, "); ",
+                "sum += image.length + image[0] + image[4]; }\n");
+        }
+        source ~= "    return sum; }\n";
+    }
+    return source;
+}
+
+private long sharedStructExpected() {
+    long sum = 0;
+    foreach (i; 0 .. sharedStructCount)
+        sum += 24 + 7 + i;
+    return sum;
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the race is between threads of one backend and the frontend"),
+    Omit!(Ctfe, Because.inexpressible,
+        "DMD CTFE has no `TypeInfo_Struct` of its own"),
+)) {
+    @("structInfoWhileOtherThreadsAsk." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        import core.atomic: atomicLoad, atomicOp, atomicStore;
+        import core.thread: Thread;
+
+        foreach (round; 0 .. sharedStructRounds) {
+            auto guestModule = parseSnippet(sharedStructSource(round));
+            auto program = Program([guestModule]);
+            auto guest = ownedBackend!backend(program);
+
+            shared size_t ready = 0;
+            shared bool go = false;
+            Throwable[sharedStructThreads] failures;
+
+            // One call for each thread: the delegate then has its own
+            // index. A variable of a loop body is shared by every
+            // delegate that the loop makes.
+            Thread threadFor(in size_t threadIndex) {
+                return new Thread({
+                    atomicOp!"+="(ready, 1);
+                    while (!atomicLoad(go)) {}
+                    try {
+                        auto function_ = findFunction(
+                            guestModule, text("f", threadIndex));
+                        long result;
+                        guest.call(function_, &result, []);
+                        if (result != sharedStructExpected)
+                            throw new Exception(text(
+                                "f", threadIndex, "() returned ", result,
+                                ", expected ", sharedStructExpected));
+                    } catch (Throwable throwable)
+                        failures[threadIndex] = throwable;
+                });
+            }
+
+            auto threads = new Thread[sharedStructThreads];
+            foreach (t; 0 .. sharedStructThreads) {
+                threads[t] = threadFor(t);
+                threads[t].start;
+            }
+
+            while (atomicLoad(ready) < sharedStructThreads) {}
+            atomicStore(go, true);
+
+            foreach (thread; threads)
+                thread.join;
+
+            foreach (t; 0 .. sharedStructThreads)
                 if (failures[t] !is null)
                     throw new UnitTestException(
                         text("round ", round, ", thread ", t, ": ",

@@ -40,6 +40,9 @@ public struct RuntimeTypes {
     // (ADR-0006); an entry is built once, under the compiler lock.
     private SharedTable!(Type, TypeInfo) _types;
     private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
+    // The structs that `buildStructInfo` is filling. Read and written under
+    // the compiler lock only.
+    private TypeInfo_Struct[StructDeclaration] _building;
 
     // `isRootOwned` is the owning `Program`'s own decision
     // (`Program.isRootOwned`), not a copy of its root module list: a
@@ -83,11 +86,11 @@ public struct RuntimeTypes {
                 for (auto parent = classDeclaration; parent !is null;
                         parent = parent.baseClass)
                     foreach (field; parent.fields)
-                        if (dmd.dsymbolsem.hasPointers(field))
+                        if (newInFrontend!(dmd.dsymbolsem.hasPointers)(field))
                             return true;
                 return false;
             }
-            return declaration.type.hasPointers;
+            return newInFrontend!hasPointers(declaration.type);
         }
 
         immutable(void)* resolve(Declaration symbol, ptrdiff_t offset) {
@@ -167,15 +170,22 @@ public struct RuntimeTypes {
     public TypeInfo_Class unqualifiedClassInfo(Type declared) {
         import dmd.astenums: Tclass;
         import dmd.typesem: mutableOf, unSharedOf;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.compiler: newInFrontend, withCompilerLock;
         import snakebite.frontend.typefacts: baseType;
 
-        auto type = newInFrontend!unSharedOf(
-            newInFrontend!mutableOf(baseType(declared)));
+        // One entry into the frontend for the three steps.
+        Type type;
+        TypeInfo found;
+        withCompilerLock({
+            type = newInFrontend!unSharedOf(
+                newInFrontend!mutableOf(baseType(declared)));
+            if (type.ty == Tclass)
+                found = get(type);
+        });
         if (type.ty != Tclass)
             internalFailure("a class type has a class type once its qualifiers go");
 
-        auto info = cast(TypeInfo_Class) get(type);
+        auto info = cast(TypeInfo_Class) found;
         if (info is null)
             internalFailure("the runtime type of a class is a `TypeInfo_Class`");
 
@@ -427,9 +437,12 @@ public struct RuntimeTypes {
         _data.storeFunction(place, _methodAddress(declaration, 0));
     }
 
-    // `initializer` reaches this without the frontend lock, and the build
-    // asks dmd about the struct (`hasPointers`, `argType`), which can
-    // change the frontend's state.
+    // `initializer` reaches this without the frontend lock. A thread that
+    // does not hold the lock reads only `_structs`, which holds the
+    // finished `TypeInfo_Struct`s: the table is safe to read while another
+    // thread inserts, and an entry is inserted only once it is complete. A
+    // build asks dmd about the struct (`hasPointers`, `argType`), so it
+    // runs under the lock.
     private TypeInfo_Struct structInfo(StructDeclaration declaration) {
         import snakebite.frontend.compiler: withCompilerLock;
 
@@ -440,16 +453,23 @@ public struct RuntimeTypes {
         withCompilerLock({
             if (auto cached = declaration in _structs)
                 info = *cached;
+            else if (auto building = declaration in _building)
+                info = *building;
             else
                 info = buildStructInfo(declaration);
         });
         return info;
     }
 
+    // Runs under the compiler lock. The object is in `_building` while it
+    // is filled, so that a request for the same struct from the build
+    // itself (through `get`) gets the same object. It goes into `_structs`
+    // when it is complete.
     private TypeInfo_Struct buildStructInfo(StructDeclaration declaration) {
         import dmd.root.string: toDString;
         auto info = _data.newObject!TypeInfo_Struct(declaration);
-        _structs.insert(declaration, info);
+        _building[declaration] = info;
+        scope(exit) _building.remove(declaration);
         _data.storeString(&info.mangledName, declaration.type.deco.toDString);
         storeStructInit(info, declaration);
         info.m_align = declaration.alignsize;
@@ -473,7 +493,7 @@ public struct RuntimeTypes {
             method(&info.xpostblit, declaration.postblit);
         // The enum's default value is `hasPointers`, its first member, so a
         // pointer-free struct must have the flags cleared explicitly.
-        const hasPointerData = declaration.type.hasPointers;
+        const hasPointerData = newInFrontend!hasPointers(declaration.type);
         info.m_flags = hasPointerData
             ? TypeInfo_Struct.StructFlags.hasPointers
             : cast(TypeInfo_Struct.StructFlags) 0;
@@ -487,6 +507,6 @@ public struct RuntimeTypes {
             if (auto arg = declaration.argType(1))
                 reference(&info.m_arg2, get(arg));
         }
-        return info;
+        return *_structs.insert(declaration, info);
     }
 }

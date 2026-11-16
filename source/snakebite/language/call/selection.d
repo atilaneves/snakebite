@@ -404,10 +404,10 @@ public struct CallSelection {
         in imported!"dmd.dmodule".Module module_,
     ) {
         import dmd.dtemplate: TemplateInstance;
-        import dmd.typesem: size;
         import core.stdc.string: strlen;
         import gen.dpragma: LDCPragma;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.frontend.typefacts: representationSize;
         import snakebite.builtin.call:
             copyVariadicEntry, endVariadicEntry;
         import snakebite.builtin.ldc;
@@ -429,7 +429,7 @@ public struct CallSelection {
             if (instance is null || instance.tdtypes.length != 1)
                 return 0;
             auto type = isType(instance.tdtypes[0]);
-            return type is null ? 0 : type.size;
+            return type is null ? 0 : representationSize(type);
         }
 
         static const(char)[] intrinsicNameOf(imported!"dmd.dtemplate".TemplateDeclaration declaration) {
@@ -460,10 +460,11 @@ public struct CallSelection {
             }
             case LLVMbitop_vld:
                 return builtin(volatileLoadEntryOf(
-                    typeFunctionOf(function_).next.size));
+                    representationSize(typeFunctionOf(function_).next)));
             case LLVMbitop_vst:
                 return builtin(volatileStoreEntryOf(
-                    typeFunctionOf(function_).parameterList[1].type.size));
+                    representationSize(
+                        typeFunctionOf(function_).parameterList[1].type)));
             default: return IntrinsicPlan.init;
         }
     }
@@ -634,10 +635,10 @@ public struct CallSelection {
         import dmd.constfold;
         import dmd.ctfeexpr: emplaceExp;
         import dmd.expression: IntegerExp, RealExp;
-        import snakebite.frontend.typefacts: truthValue, integerValue;
         import dmd.typesem: isIntegral, isReal, isUnsigned, size;
-        import snakebite.frontend.typefacts: baseType;
         import dmd.tokens: EXP;
+        import snakebite.frontend.typefacts:
+            baseType, integerValue, truthValue;
         import core.stdc.fenv;
 
         auto type = expression.type.baseType;
@@ -772,9 +773,8 @@ public struct CallSelection {
     ) {
         import core.volatile: volatileLoad;
         import dmd.backend.cdef: Vconst;
-        import snakebite.frontend.typefacts: integerValue, realValue;
         import dmd.astenums: TY;
-        import snakebite.frontend.typefacts: baseType;
+        import snakebite.frontend.typefacts: baseType, integerValue, realValue;
 
         // Inner producers must be stored at their own width before use.
         constant.value.exp.type = type;
@@ -1077,7 +1077,7 @@ public struct CallSelection {
         out ParameterType result,
     ) {
         import dmd.astenums: TY;
-        import dmd.typesem: size;
+        import snakebite.frontend.typefacts: representationSize;
 
         // The wrappers of `core.simd` move this many bytes.
         enum vectorSize = 16;
@@ -1102,7 +1102,7 @@ public struct CallSelection {
             case Tvoid: return false;
             case Tvector:
                 result = ParameterType.vector_;
-                return type.size == vectorSize;
+                return representationSize(type) == vectorSize;
             case Tpointer:
                 result = ParameterType.pointer_; return true;
             case Tarray, Tsarray, Taarray, Treference, Tfunction,

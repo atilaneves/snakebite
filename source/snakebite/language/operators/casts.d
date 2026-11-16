@@ -340,12 +340,13 @@ private CastPlan classifyStaticArray(
     in TypeFacts destFacts,
 ) {
     import snakebite.frontend.typefacts: integerValue;
-    import dmd.typesem: nextOf, size;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: representationSize;
 
     final switch (destKind) with (TypeKind) {
     case dynamicArray: {
-        const sourceElementSize = sourceType.nextOf.size;
-        const destElementSize = destType.nextOf.size;
+        const sourceElementSize = representationSize(sourceType.nextOf);
+        const destElementSize = representationSize(destType.nextOf);
         auto plan = CastPlan(CastKind.sarrayToSlice, sourceFacts, destFacts);
         if (sourceElementSize == destElementSize) {
             plan.staticLength = cast(size_t) sourceType.isTypeSArray.dim

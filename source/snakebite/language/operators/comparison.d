@@ -135,14 +135,14 @@ package(snakebite) IdentityPlan identityPlan(
 ) {
     import dmd.astenums: Tclass, Tfloat80, Tnull, Tpointer, Tsarray;
     import dmd.expressionsem: isLvalue;
-    import snakebite.frontend.typefacts: integerValue;
     import dmd.sideeffect: isTrivialExp;
     import dmd.target: target;
-    import dmd.typesem: isFloating, size;
-    import snakebite.frontend.typefacts: baseType;
+    import dmd.typesem: isFloating;
+    import snakebite.frontend.typefacts:
+        baseType, integerValue, representationSize;
 
     auto type = expression.e1.type.baseType;
-    auto width = type.size;
+    auto width = representationSize(type);
     if (type.isFloating && type.ty == Tfloat80)
         width -= target.realpad;
     if (type.ty == Tsarray) {

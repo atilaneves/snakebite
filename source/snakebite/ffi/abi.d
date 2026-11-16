@@ -63,8 +63,7 @@ public ArgumentPlan argumentPlanOf(imported!"dmd.mtype".Type type) {
 
 public ArgumentPlan returnPlanOf(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tcomplex80;
-    import dmd.typesem: size;
-    import snakebite.frontend.typefacts: baseType;
+    import snakebite.frontend.typefacts: baseType, representationSize;
 
     auto base = type.baseType;
     // SysV returns `creal` in ST0 and ST1. Its argument form is
@@ -90,7 +89,8 @@ public ArgumentPlan returnPlanOf(imported!"dmd.mtype".Type type) {
     // into `%st0`).
     if (isX87OnlyAggregate(type))
         return ArgumentPlan(
-            [Register(Register.Kind.x87, cast(ubyte) type.size),
+            [Register(
+                Register.Kind.x87, cast(ubyte) representationSize(type)),
                 Register.init],
             1,
             false,
@@ -151,14 +151,13 @@ public bool needsHiddenReturnPointer(imported!"dmd.mtype".Type unbasedType) {
 // stack, at `[rbp+0x10]`, never through a register).
 private bool isX87OnlyAggregate(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums: Tvoid;
-    import dmd.typesem: size;
-    import snakebite.frontend.typefacts: baseType;
+    import snakebite.frontend.typefacts: baseType, representationSize;
 
     auto type = unbasedType.baseType;
     if (type.ty == Tvoid)
         return false;
 
-    const bytes = type.size;
+    const bytes = representationSize(type);
     if (bytes == 0 || bytes > 16 || isDmdIntegerPairArray(type))
         return false;
 
@@ -201,13 +200,13 @@ private bool isNonTriviallyCopyable(imported!"dmd.mtype".Type type) {
 private bool isDmdIntegerPairArray(imported!"dmd.mtype".Type unbasedType) {
     version (DigitalMars) {
         import dmd.astenums: Tfloat80, Timaginary80, Tsarray;
-        import dmd.typesem: baseElemOf, size;
+        import dmd.typesem: baseElemOf;
         import snakebite.frontend.compiler: newInFrontend;
-        import snakebite.frontend.typefacts: baseType;
+        import snakebite.frontend.typefacts: baseType, representationSize;
 
         auto type = unbasedType.baseType;
         const element = newInFrontend!baseElemOf(type).ty;
-        return type.ty == Tsarray && type.size == 16
+        return type.ty == Tsarray && representationSize(type) == 16
             && (element == Tfloat80 || element == Timaginary80);
     } else
         return false;
@@ -217,8 +216,9 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     import dmd.astenums:
         Taarray, Tclass, Tfloat32, Tfloat64, Tfloat80, Tnull, Tpointer,
         Tvector, Tvoid;
-    import dmd.typesem: alignsize, isIntegral, isUnsigned, size;
-    import snakebite.frontend.typefacts: baseType;
+    import dmd.typesem: isIntegral, isUnsigned;
+    import snakebite.frontend.typefacts:
+        baseType, representationAlignment, representationSize;
     import std.algorithm: min;
 
     // An enum has its base type's native layout and classification - the
@@ -232,7 +232,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     if (type.ty == Tvoid)
         return plan;
 
-    plan.stackAlignment = type.alignsize;
+    plan.stackAlignment = representationAlignment(type);
 
     if (isDmdIntegerPairArray(type)) {
         plan.registers[0] = Register(Register.Kind.integer, 8);
@@ -250,9 +250,9 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     }
 
     if (type.ty == Tvector) {
-        if (type.size <= 16) {
+        if (representationSize(type) <= 16) {
             plan.registers[0] = Register(
-                Register.Kind.sse, cast(ubyte) type.size);
+                Register.Kind.sse, cast(ubyte) representationSize(type));
             plan.count = 1;
         } else {
             plan.registers[0] = Register(Register.Kind.sse, 16);
@@ -272,7 +272,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     if (type.ty == Tfloat32 || type.ty == Tfloat64) {
         plan.registers[0] = Register(
             Register.Kind.sse,
-            cast(ubyte) type.size,
+            cast(ubyte) representationSize(type),
         );
         plan.count = 1;
         return plan;
@@ -280,15 +280,15 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
 
     if (type.ty == Tfloat80) {
         plan.memory = true;
-        plan.memoryBytes = type.size;
-        plan.stackAlignment = type.alignsize;
+        plan.memoryBytes = representationSize(type);
+        plan.stackAlignment = representationAlignment(type);
         return plan;
     }
 
     if (type.isIntegral) {
         import snakebite.native.value: isIntegralSize;
 
-        const bytes = type.size;
+        const bytes = representationSize(type);
         if (bytes.isIntegralSize) {
             plan.registers[0] = Register(
                 type.isUnsigned
@@ -301,14 +301,14 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
         }
     }
 
-    const bytes = type.size;
+    const bytes = representationSize(type);
     if (bytes == 0)
         return plan;
     const count = (bytes + 7) / 8;
     if (count > 2) {
         plan.memory = true;
         plan.memoryBytes = bytes;
-        plan.stackAlignment = type.alignsize;
+        plan.stackAlignment = representationAlignment(type);
         return plan;
     }
 
@@ -348,7 +348,7 @@ private ArgumentPlan aggregatePlan(imported!"dmd.mtype".Type unbasedType) {
     if (memory) {
         plan.memory = true;
         plan.memoryBytes = bytes;
-        plan.stackAlignment = type.alignsize;
+        plan.stackAlignment = representationAlignment(type);
         return plan;
     }
 
@@ -396,9 +396,10 @@ private void classify(
     ref bool memory,
 ) {
     import dmd.astenums: TY;
-    import snakebite.frontend.typefacts: integerValue;
-    import dmd.typesem: alignsize, isIntegral, nextOf, size;
-    import snakebite.frontend.typefacts: baseType;
+    import dmd.typesem: isIntegral, nextOf;
+    import snakebite.frontend.typefacts:
+        baseType, integerValue, representationAlignment,
+        representationSize;
 
     if (memory)
         return;
@@ -413,7 +414,7 @@ private void classify(
     // `aggregatePlan` below) passes through.
     auto type = unbasedType.baseType;
 
-    const bytes = type.size;
+    const bytes = representationSize(type);
     if (offset + bytes > 16) {
         memory = true;
         return;
@@ -472,7 +473,8 @@ private void classify(
             return;
         }
         foreach (i; 0 .. count)
-            classify(type.nextOf, offset + i * type.nextOf.size,
+            classify(
+                type.nextOf, offset + i * representationSize(type.nextOf),
                 classes, memory);
         return;
     }
@@ -505,7 +507,7 @@ private void classify(
             if (field.type is null)
                 continue;
 
-            const alignment = field.type.alignsize;
+            const alignment = representationAlignment(field.type);
             const fieldOffset = offset + field.offset;
             if (alignment != 0 && fieldOffset % alignment != 0) {
                 memory = true;

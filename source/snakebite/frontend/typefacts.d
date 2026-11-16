@@ -20,8 +20,7 @@ import snakebite.native.value:
 // needs no lock.
 public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tarray, Tvector;
-    import dmd.typesem:
-        alignsize, hasPointers, isIntegral, isUnsigned, nextOf;
+    import dmd.typesem: hasPointers, isIntegral, isUnsigned, nextOf;
     import snakebite.frontend.compiler: forceIfNeeded;
 
     forceIfNeeded(() => resolved(type), () { forceResolved(type); });
@@ -48,7 +47,7 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     const scalar = type.ty != Tvector;
     TypeFacts facts;
     facts.size = representationSize(type);
-    facts.alignment = type.alignsize;
+    facts.alignment = representationAlignment(type);
     facts.isIntegral = scalar && type.isIntegral;
     facts.isUnsigned = scalar && type.isUnsigned;
     facts.canHoldAddress = type.hasPointers;
@@ -132,18 +131,40 @@ private auto normalized(imported!"dmd.expression".IntegerExp integer) {
     return IntegerExp.normalize(integer.type.baseType.ty, integer.value);
 }
 
-private auto representationSize(imported!"dmd.mtype".Type type) {
+// dmd's `size`, for code that runs after the frontend. The size of a
+// static array normalizes its length (`numberOfElems` writes the `dim`
+// literal) and its base element (`baseElemOf`), a vector is sized as its
+// static array, and an enum can still allocate a qualified base after its
+// declaration is resolved. Every other type is sized by a read.
+public auto representationSize(imported!"dmd.mtype".Type type) {
     import dmd.typesem: size;
     import snakebite.frontend.compiler: newInFrontend;
 
-    // Static-array size normalizes each nested element. An enum can
-    // still allocate a qualified base after its declaration is resolved.
+    if (sizeNeedsFrontend(type))
+        return newInFrontend!size(type);
+    return type.size;
+}
+
+// dmd's `alignsize`, for code that runs after the frontend. It follows
+// the element of a static array, the memory type of an enum and the
+// static array of a vector, so the cases that `representationSize` locks
+// are the cases that lock here.
+public uint representationAlignment(imported!"dmd.mtype".Type type) {
+    import dmd.typesem: alignsize;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    if (sizeNeedsFrontend(type))
+        return newInFrontend!alignsize(type);
+    return type.alignsize;
+}
+
+private bool sizeNeedsFrontend(imported!"dmd.mtype".Type type) {
     auto element = type;
     while (auto arrayType = element.isTypeSArray)
         element = arrayType.next;
-    if (element.isTypeEnum !is null)
-        return newInFrontend!size(type);
-    return type.size;
+    return element !is type
+        || element.isTypeEnum !is null
+        || element.isTypeVector !is null;
 }
 
 // `typeFacts`, for a caller that only prepares what execution may ask for
