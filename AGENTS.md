@@ -50,7 +50,7 @@ checks to that runner.
 Prefer to run focussed tests instead of the whole test suite by passing
 the relevant test names to `bin/ut`.
 
-To build `/bin/ut`, run `build/reggae.sh` if `build.ninja` does not
+To build `bin/ut`, run `build/reggae.sh` if `build.ninja` does not
 exist, then `ninja bin/ut`. Do not assume you can run `bin/ut`. It
 might be stale, and running ninja is either 1) required anyway or 2)
 so fast it doesn't matter.
