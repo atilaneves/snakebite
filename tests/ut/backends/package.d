@@ -8,8 +8,7 @@ public import snakebite.backends.api: Owned;
 public import std.meta: AliasSeq;
 
 import core.sync.mutex: Mutex;
-import dmd.dmodule: Module;
-import dmd.func: FuncDeclaration;
+import snakebite.frontend.ast: FuncDeclaration, Module;
 import snakebite.program: Program;
 import snakebite.run.program: run;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
@@ -296,7 +295,7 @@ public template shouldBeRetOf(
         in string file = __FILE__,
         in size_t line = __LINE__,
     ) {
-        import dmd.typesem: nextOf, size;
+        import snakebite.frontend.ast: nextOf, size;
 
         enum call = callExpression!(functionName, Args);
 

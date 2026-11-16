@@ -6,7 +6,7 @@ module ut.frontend.checks;
 // of two flags for the same check wins.
 
 
-import dmd.astenums: CHECKACTION, CHECKENABLE;
+import snakebite.frontend.ast: CHECKACTION, CHECKENABLE;
 import snakebite.frontend.checks: Checks, ldcArguments;
 import snakebite.frontend.compiler: checksOf, FrontendFlags, parseSnippet;
 import ut;

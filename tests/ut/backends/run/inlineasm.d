@@ -296,7 +296,6 @@ static foreach (backend; Matrix!()) {
 // This is still `parseSnippet` alone, so one test is enough.
 @("inlineasm.loadDiagnostic.projectImportFailsLoad")
 unittest {
-    import dmd.frontend: addImport;
 
     const moduleName = "inlineasm_project_package.imported";
     const directory = buildPath(

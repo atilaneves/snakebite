@@ -6,11 +6,8 @@ import snakebite.program: Program;
 import snakebite.run.program: run;
 import snakebite.frontend.compiler: parseSnippet, inFrontend, withCompilerLock;
 import std.meta: AliasSeq;
-import dmd.expression: ErrorExp;
-import dmd.location: Loc;
-import dmd.mtype: Type;
-import dmd.statement: ErrorStatement, ExpStatement;
-import dmd.globals: global;
+import snakebite.frontend.ast: ErrorExp, ErrorStatement, ExpStatement, global,
+    Loc, Type;
 import snakebite.frontend.dmd.functions: findFunction;
 
 

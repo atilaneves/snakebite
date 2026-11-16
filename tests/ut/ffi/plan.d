@@ -2,10 +2,8 @@ module ut.ffi.plan;
 
 
 import ut;
-import dmd.func: FuncDeclaration;
-import dmd.mtype: Type;
-import dmd.statement: ReturnStatement, Statement;
-import dmd.typesem: nextOf;
+import snakebite.frontend.ast: FuncDeclaration, nextOf, ReturnStatement,
+    Statement, Type;
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi: CallAdapter, PlanCache;
 import snakebite.ffi.abi:
@@ -170,7 +168,7 @@ unittest {
 
     static struct Ownership {
         typeof(guestModule) root;
-        bool owns(imported!"dmd.dsymbol".Dsymbol symbol) const {
+        bool owns(imported!"snakebite.frontend.ast".Dsymbol symbol) const {
             return moduleOf(symbol) is root;
         }
     }
@@ -3099,8 +3097,7 @@ private void readWhileGlobalScopeIsSetUp(
 ) {
     import core.atomic: atomicLoad, atomicStore;
     import core.thread: Thread;
-    import dmd.dsymbolsem: scopeCreateGlobal;
-    import dmd.globals: global;
+    import snakebite.frontend.ast: global;
     import snakebite.frontend.compiler: inFrontend, withCompilerLock;
     import std.array: appender;
     import std.conv: text;
@@ -3168,7 +3165,7 @@ unittest {
 
 @("cAssertCallOf.excludesConcurrentGlobalScopeSetup")
 unittest {
-    import dmd.location: Loc;
+    import snakebite.frontend.ast: Loc;
     import snakebite.language.checks: cAssertCallOf;
 
     readWhileGlobalScopeIsSetUp((function_) {

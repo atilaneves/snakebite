@@ -102,7 +102,7 @@ unittest {
 // pointers that the arena holds.
 @("arenaHoldsNoGCPointers.reportsAPointerIntoTheGCHeap")
 unittest {
-    import dmd.identifier: Identifier;
+    import snakebite.frontend.ast: Identifier;
     import snakebite.frontend.compiler: inFrontend;
     import snakebite.memory.gc: lowmem;
 
