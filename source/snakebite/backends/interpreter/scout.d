@@ -13,7 +13,8 @@ import dmd.expression:
     VarExp;
 import dmd.func: FuncDeclaration;
 import dmd.mtype: Type;
-import dmd.typesem: nextOf, toBasetype;
+import dmd.typesem: nextOf;
+import snakebite.frontend.typefacts: baseType;
 import dmd.statement:
     ExpStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
     Statement, TryCatchStatement, TryFinallyStatement, WithStatement;
@@ -221,7 +222,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         if (plan.destination == NewPlan.Destination.stack
                 && plan.objectKind == NewPlan.ObjectKind.class_)
             _preparation.stackClass(
-                expression.newtype.toBasetype.isTypeClass.sym);
+                expression.newtype.baseType.isTypeClass.sym);
     }
 
     private extern(D) void handle(DeleteExp expression) {
@@ -284,7 +285,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
         if (operand.type is null)
             return;
 
-        auto base = operand.type.toBasetype;
+        auto base = operand.type.baseType;
         if (base.ty == Tpointer || base.ty == Tarray || base.ty == Tsarray)
             _facts.prepareType(base.nextOf);
     }

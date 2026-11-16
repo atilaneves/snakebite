@@ -29,15 +29,16 @@ public ArrayLiteralPlan planArrayLiteral(
 ) {
     import dmd.astenums: FileType, Tarray, Tpointer, Tsarray, Tvoid;
     import dmd.mtype: Type;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.functions: moduleOf;
 
-    auto type = expression.type.toBasetype; // DMD element types remain mutable.
+    auto type = expression.type.baseType; // DMD element types remain mutable.
     const kind = type.ty;
     assert(kind == Tarray || kind == Tpointer || kind == Tsarray);
     auto elementType = type.nextOf;
     // DMD's glue executes void[n] initializers as ubyte[n].
-    if (kind == Tsarray && elementType.toBasetype.ty == Tvoid)
+    if (kind == Tsarray && elementType.baseType.ty == Tvoid)
         elementType = Type.tuns8;
 
     ArrayLiteralPlan plan;

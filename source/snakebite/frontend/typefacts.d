@@ -20,8 +20,7 @@ import snakebite.native.value:
 // needs no lock.
 public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tarray, Tvector;
-    import dmd.typesem:
-        alignsize, hasPointers, isIntegral, isUnsigned, nextOf;
+    import dmd.typesem: hasPointers, isIntegral, isUnsigned, nextOf;
     import snakebite.frontend.compiler: forceIfNeeded;
 
     forceIfNeeded(() => resolved(type), () { forceResolved(type); });
@@ -29,7 +28,7 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     // An enum value has the representation of its base type. Keeping
     // that representation here lets every byte-storage caller use the
     // same facts for enum values with floating or string bases.
-    type = representationType(type);
+    type = baseType(type);
 
     if (type.ty == Tarray) {
         forceIfNeeded(
@@ -48,37 +47,124 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     const scalar = type.ty != Tvector;
     TypeFacts facts;
     facts.size = representationSize(type);
-    facts.alignment = type.alignsize;
+    facts.alignment = representationAlignment(type);
     facts.isIntegral = scalar && type.isIntegral;
     facts.isUnsigned = scalar && type.isUnsigned;
     facts.canHoldAddress = type.hasPointers;
     return facts;
 }
 
-private imported!"dmd.mtype".Type representationType(
-    imported!"dmd.mtype".Type type,
-) {
+// dmd's `toBasetype`, for code that runs after the frontend. Only an enum
+// has a base type other than itself, and to find it is frontend work: dmd
+// can resolve the enum's base, and can make, merge and mangle a qualified
+// base even when the enum is resolved. Every other type is its own base,
+// and that answer needs no frontend.
+public imported!"dmd.mtype".Type baseType(imported!"dmd.mtype".Type type) {
     import dmd.typesem: toBasetype;
     import snakebite.frontend.compiler: newInFrontend;
 
-    // DMD can cache a new qualified base even when the enum is resolved.
     if (type.isTypeEnum !is null)
         return newInFrontend!toBasetype(type);
     return type;
 }
 
-private auto representationSize(imported!"dmd.mtype".Type type) {
+// dmd's `toInteger`, `toReal`, `toComplex` and `toBool`, for code that
+// runs after the frontend. For an `IntegerExp` dmd writes the value back
+// (`iexp.value = normalize(type.toBasetype.ty, value)`) at every call, and
+// `toBasetype` of an enum type can make a type. These read the value,
+// normalize it for the base type of the literal (`baseType`: only an enum
+// type takes the frontend lock) and write nothing, so a literal that other
+// threads read stays unchanged. Any other expression goes to dmd, which
+// only reads it.
+public auto realValue(
+    imported!"dmd.expression".Expression expression,
+) {
+    import dmd.astenums: Tuns64;
+    import dmd.expressionsem: toReal;
+    import dmd.root.ctfloat: real_t;
+
+    if (auto integer = expression.isIntegerExp) {
+        const ty = integer.type.baseType.ty;
+        const value = normalized(integer);
+        return ty == Tuns64
+            ? real_t(cast(ulong) value)
+            : real_t(cast(long) value);
+    }
+    return expression.toReal;
+}
+
+/// Ditto
+public auto complexValue(
+    imported!"dmd.expression".Expression expression,
+) {
+    import dmd.expressionsem: toComplex;
+    import dmd.root.complex: complex_t;
+
+    if (expression.isIntegerExp !is null)
+        return complex_t(expression.realValue);
+    return expression.toComplex;
+}
+
+/// Ditto
+public auto integerValue(
+    imported!"dmd.expression".Expression expression,
+) {
+    import dmd.expressionsem: toInteger;
+
+    if (auto integer = expression.isIntegerExp)
+        return normalized(integer);
+    return expression.toInteger;
+}
+
+/// Ditto
+public bool truthValue(imported!"dmd.expression".Expression expression) {
+    import dmd.expressionsem: toBool;
+
+    if (expression.isIntegerExp !is null)
+        return expression.integerValue != 0;
+    return expression.toBool.get;
+}
+
+private auto normalized(imported!"dmd.expression".IntegerExp integer) {
+    import dmd.expression: IntegerExp;
+
+    return IntegerExp.normalize(integer.type.baseType.ty, integer.value);
+}
+
+// dmd's `size`, for code that runs after the frontend. The size of a
+// static array normalizes its length (`numberOfElems` writes the `dim`
+// literal) and its base element (`baseElemOf`), a vector is sized as its
+// static array, and an enum can still allocate a qualified base after its
+// declaration is resolved. Every other type is sized by a read.
+public auto representationSize(imported!"dmd.mtype".Type type) {
     import dmd.typesem: size;
     import snakebite.frontend.compiler: newInFrontend;
 
-    // Static-array size normalizes each nested element. An enum can
-    // still allocate a qualified base after its declaration is resolved.
+    if (sizeNeedsFrontend(type))
+        return newInFrontend!size(type);
+    return type.size;
+}
+
+// dmd's `alignsize`, for code that runs after the frontend. It follows
+// the element of a static array, the memory type of an enum and the
+// static array of a vector, so the cases that `representationSize` locks
+// are the cases that lock here.
+public uint representationAlignment(imported!"dmd.mtype".Type type) {
+    import dmd.typesem: alignsize;
+    import snakebite.frontend.compiler: newInFrontend;
+
+    if (sizeNeedsFrontend(type))
+        return newInFrontend!alignsize(type);
+    return type.alignsize;
+}
+
+private bool sizeNeedsFrontend(imported!"dmd.mtype".Type type) {
     auto element = type;
     while (auto arrayType = element.isTypeSArray)
         element = arrayType.next;
-    if (element.isTypeEnum !is null)
-        return newInFrontend!size(type);
-    return type.size;
+    return element !is type
+        || element.isTypeEnum !is null
+        || element.isTypeVector !is null;
 }
 
 // `typeFacts`, for a caller that only prepares what execution may ask for
@@ -241,7 +327,7 @@ public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
     import dmd.typesem: size;
     import std.conv: text;
 
-    type = representationType(type);
+    type = baseType(type);
     final switch (type.ty) with (TY) {
         // An imaginary value is one `float`/`double`/`real`-shaped
         // component on its own - the same nonzero test a real one
@@ -290,7 +376,7 @@ public TypeFacts.Truth truthFacts(imported!"dmd.mtype".Type type) {
             Tinstance, Ttypeof, Ttuple, Tslice, Treturn, Ttraits,
             Tmixin, Ttag:
             internalFailure(text("`", type.toString, "` cannot be a ",
-                "condition: semantic rejects it, and `toBasetype` ",
+                "condition: semantic rejects it, and `baseType` ",
                 "leaves no enum"));
     }
 }
@@ -374,9 +460,7 @@ public bool isStoredLiteral(imported!"dmd.expression".Expression value) {
         return true;
     }
     if (auto literal = value.isArrayLiteralExp) {
-        import dmd.typesem: toBasetype;
-
-        if (literal.type.toBasetype.isTypeSArray is null)
+        if (literal.type.baseType.isTypeSArray is null)
             return false;
         foreach (i; 0 .. literal.elements.length)
             if (!isStoredLiteral(literal[i]))

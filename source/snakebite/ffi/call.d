@@ -271,13 +271,13 @@ public struct CallAdapter {
         private static Expression memoryOperand(Expression expression) {
             import dmd.expression: CastExp;
             import dmd.astenums: TY;
-            import dmd.typesem: toBasetype;
+            import snakebite.frontend.typefacts: baseType;
 
             while (true) {
                 auto cast_ = expression.isCastExp;
                 if (cast_ is null
-                        || cast_.type.toBasetype.ty != TY.Tvector
-                        || cast_.e1.type.toBasetype.ty != TY.Tvector)
+                        || cast_.type.baseType.ty != TY.Tvector
+                        || cast_.e1.type.baseType.ty != TY.Tvector)
                     return expression;
                 expression = cast_.e1;
             }

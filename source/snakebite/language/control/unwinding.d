@@ -38,9 +38,9 @@ public CatchPlan catchPlanOf(
 // `Throwable` is a D class, so it never matches such a clause, and the
 // clause has no `TypeInfo_Class` to match by.
 private bool catchesCppClass(imported!"dmd.statement".Catch catch_) {
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    return catch_.type.toBasetype.isClassHandle.isCPPclass;
+    return catch_.type.baseType.isClassHandle.isCPPclass;
 }
 
 public struct UnwindPlan {

@@ -522,7 +522,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.func: FuncDeclaration;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
@@ -538,7 +538,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         TryCatchStatement, ScopeGuardStatement, TryFinallyStatement,
         UnrolledLoopStatement, WithStatement;
     import dmd.tokens: EXP;
-    import dmd.typesem: isIntegral, nextOf, toBasetype;
+    import dmd.typesem: isIntegral, nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.language.statics.data: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
     import snakebite.language.statics.typeinfo: RuntimeTypes;
@@ -3504,7 +3505,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             arrayLengthOffset, arrayPointerOffset, arrayValueSize,
             checkedLoadIntegral;
 
-        auto type = expression.type.toBasetype;
+        auto type = expression.type.baseType;
         assert(type.ty == Tarray);
 
         assert(facts.size == arrayValueSize
@@ -3550,7 +3551,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // path - though the bytes are read the same way either type is stored.
     private void* asPointer(Expression expression) {
         auto type = expression.type;
-        const kind = type.toBasetype.ty;
+        const kind = type.baseType.ty;
         assert(kind == Tpointer || kind == Tclass);
 
         const facts = factsOf(type);
@@ -3641,9 +3642,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto literal = expression.fd;
 
-        if (_type.toBasetype.ty != Tdelegate) {
+        if (_type.baseType.ty != Tdelegate) {
             assert(literal !is null && literal.isThis() is null
-                    && expression.type.toBasetype.ty == Tpointer,
+                    && expression.type.baseType.ty == Tpointer,
                 "a literal that is not a delegate has a function pointer "
                 ~ "type and no `this`");
 
@@ -3819,7 +3820,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto owner = outerFunctionOf(variable);
         const hops = owner is null ? null : ClosurePlan.receiverHops(owner);
         if (hops.length == 0)
-            return variable.type.toBasetype.ty == Tclass
+            return variable.type.baseType.ty == Tclass
                 ? cast(size_t) checkedLoadIntegral(slot, size_t.sizeof, false)
                 : cast(size_t) slot;
 
@@ -4470,8 +4471,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         }
 
         public size_t storageStaticIndexLength(IndexExp expression) {
-            return cast(size_t) expression.e1.type.toBasetype.isTypeSArray
-                .dim.toInteger;
+            return cast(size_t) expression.e1.type.baseType.isTypeSArray
+                .dim.integerValue;
         }
 
         public void* storageIndexValue(
@@ -4521,7 +4522,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 arrayPointerOffset, checkedLoadIntegral;
 
             const stride =
-                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
+                evaluator.factsOf(expression.e1.type.baseType.nextOf).size;
             const value = checkedLoadIntegral(index, size_t.sizeof, false);
             auto elements = cast(ubyte*) checkedLoadIntegral(
                 cast(ubyte*) base + arrayPointerOffset,
@@ -4537,7 +4538,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             import snakebite.native.value: checkedLoadIntegral;
 
             const stride =
-                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
+                evaluator.factsOf(expression.e1.type.baseType.nextOf).size;
             const value = checkedLoadIntegral(index, size_t.sizeof, false);
             return cast(ubyte*) base + value * stride;
         }
@@ -4548,7 +4549,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             import snakebite.native.value: checkedLoadIntegral;
 
             const stride =
-                evaluator.factsOf(expression.e1.type.toBasetype.nextOf).size;
+                evaluator.factsOf(expression.e1.type.baseType.nextOf).size;
             const value = checkedLoadIntegral(index, size_t.sizeof, false);
             return cast(ubyte*) pointer + value * stride;
         }
@@ -4970,7 +4971,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // enum of a pointer, so the step comes from the pointee size, not
         // from `e2`.
         const elementSize =
-            factsOf(expression.e1.type.toBasetype.nextOf).size;
+            factsOf(expression.e1.type.baseType.nextOf).size;
         const changed = expression.op == EXP.plusPlus
             ? cast(ubyte*) current + elementSize
             : cast(ubyte*) current - elementSize;
@@ -5250,7 +5251,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             // Either operand may be static: each one's own length decides,
             // so two static arrays of different lengths are unequal.
             case dynamicArray, staticArray: {
-                auto leftType = expression.e1.type.toBasetype;
+                auto leftType = expression.e1.type.baseType;
                 const leftFacts = factsOf(leftType);
                 const rightFacts = factsOf(expression.e2.type);
                 auto left = _frames.push(leftFacts.size, leftFacts.alignment);
@@ -5287,15 +5288,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `storage`, with its length in its type; a dynamic one is its
     // `{length, ptr}` value.
     private ArrayValue arrayOperand(Expression expression, ubyte* storage) {
-        import dmd.expressionsem: toInteger;
+        import snakebite.frontend.typefacts: integerValue;
 
-        auto type = expression.type.toBasetype;
+        auto type = expression.type.baseType;
         if (type.ty == Tarray)
             return evaluateArray(expression, factsOf(type));
 
         evaluate(expression, type, factsOf(type), storage);
         return ArrayValue(
-            cast(size_t) type.isTypeSArray.dim.toInteger, storage);
+            cast(size_t) type.isTypeSArray.dim.integerValue, storage);
     }
 
     private bool equalComplex(EqualExp expression, in TypeFacts facts) {
@@ -5535,7 +5536,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             case pointerOffset:
                 static if (op == "+" || op == "-") {
                     const pointerLeft =
-                        expression.e1.type.toBasetype.ty == Tpointer;
+                        expression.e1.type.baseType.ty == Tpointer;
                     auto pointer = cast(ubyte*) asPointer(pointerLeft
                         ? expression.e1 : expression.e2);
                     const offset = asIntegral(pointerLeft
@@ -5568,7 +5569,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private real asFloating(Expression expression) {
         import snakebite.native.value: loadFloating;
 
-        auto type = expression.type.toBasetype;
+        auto type = expression.type.baseType;
         final switch (type.ty) with (TY) {
             case Tfloat32, Tfloat64, Tfloat80,
                 Timaginary32, Timaginary64, Timaginary80:
@@ -5984,7 +5985,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // in the `DotVarExp` that selects the context field of a dual-context
     // function.
     private void* fieldBaseAddress(Expression aggregate) {
-        const type = aggregate.type.toBasetype.ty;
+        const type = aggregate.type.baseType.ty;
         if (type != Tclass && type != Tpointer)
             return addressOf(aggregate);
 
@@ -6295,7 +6296,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (_controlFlow.seeking)
             return 0;
 
-        assert(operand.type.toBasetype.ty == Tclass,
+        assert(operand.type.baseType.ty == Tclass,
             "dmd rejects `throw` of anything but a class object");
 
         if (readsAfterEnd)
@@ -6415,7 +6416,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import std.conv: text;
 
         auto array = expression.e1;
-        auto sourceType = array.type.toBasetype;
+        auto sourceType = array.type.baseType;
 
         ubyte* base;
         size_t sourceLength;
@@ -6618,8 +6619,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import core.stdc.string: memcpy;
         import snakebite.native.value: checkedLoadIntegral;
 
-        auto structType = expression.newtype.toBasetype.isTypeStruct;
-        const resultKind = expression.type.toBasetype.ty;
+        auto structType = expression.newtype.baseType.isTypeStruct;
+        const resultKind = expression.type.baseType.ty;
         if (resultKind == Tclass || structType !is null) {
             auto object = cast(ubyte*) checkedLoadIntegral(
                 _place, size_t.sizeof, false);
@@ -6654,7 +6655,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         if (plan.destination == NewPlan.Destination.stack) {
             assert(plan.objectKind == NewPlan.ObjectKind.class_);
-            auto classType = expression.newtype.toBasetype.isTypeClass;
+            auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
             auto runtime = classRuntimeInfo(declaration);
@@ -6674,7 +6675,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         checkedStoreIntegral(_place, cast(size_t) object, _facts.size);
 
         if (plan.objectKind == NewPlan.ObjectKind.class_) {
-            auto classType = expression.newtype.toBasetype.isTypeClass;
+            auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto runtime = classRuntimeInfo(classType.sym);
             memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
@@ -6692,7 +6693,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.language.storage.lifetime:
             driveInit, planClassContext, planPositionalFields;
 
-        auto structType = expression.newtype.toBasetype.isTypeStruct;
+        auto structType = expression.newtype.baseType.isTypeStruct;
         auto plan = structType is null
             ? planClassContext(expression)
             : planPositionalFields(structType.sym,
@@ -7055,7 +7056,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return;
         }
 
-        auto structType = _type.toBasetype.isTypeStruct;
+        auto structType = _type.baseType.isTypeStruct;
         assert(structType !is null && structType.sym == expression.sd,
             "a struct literal destination has the same struct type");
 
@@ -7109,7 +7110,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
-        const elementBase = elementType.toBasetype;
+        const elementBase = elementType.baseType;
         assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
         const hook = elementBase.ty == Tchar
             ? DruntimeHook.arrayAppendChar : DruntimeHook.arrayAppendWchar;
@@ -7209,14 +7210,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         CallExp expression, void* returnPlace,
         void* address, void* context, in bool fromDelegate,
     ) {
-        import dmd.typesem: nextOf, toBasetype;
+        import dmd.typesem: nextOf;
+        import snakebite.frontend.typefacts: baseType;
 
         static if (nullChecks)
             if (address is null)
                 failNullDeref(expression.loc);
         auto callee = Callee(null, context, fromDelegate, address,
             fromDelegate
-                ? expression.e1.type.toBasetype.nextOf.isTypeFunction
+                ? expression.e1.type.baseType.nextOf.isTypeFunction
                 : expression.e1.isPtrExp.type.isTypeFunction);
         return executeThroughValue(expression, callee, returnPlace);
     }
@@ -7592,7 +7594,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.native.value: checkedLoadIntegral;
         import std.conv: text;
 
-        assert(expression.type.toBasetype.ty == Tclass,
+        assert(expression.type.baseType.ty == Tclass,
             "dmd gives a member call a receiver expression of class type");
 
         const facts = factsOf(expression.type);

@@ -404,10 +404,10 @@ public struct CallSelection {
         in imported!"dmd.dmodule".Module module_,
     ) {
         import dmd.dtemplate: TemplateInstance;
-        import dmd.typesem: size;
         import core.stdc.string: strlen;
         import gen.dpragma: LDCPragma;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
+        import snakebite.frontend.typefacts: representationSize;
         import snakebite.builtin.call:
             copyVariadicEntry, endVariadicEntry;
         import snakebite.builtin.ldc;
@@ -429,7 +429,7 @@ public struct CallSelection {
             if (instance is null || instance.tdtypes.length != 1)
                 return 0;
             auto type = isType(instance.tdtypes[0]);
-            return type is null ? 0 : type.size;
+            return type is null ? 0 : representationSize(type);
         }
 
         static const(char)[] intrinsicNameOf(imported!"dmd.dtemplate".TemplateDeclaration declaration) {
@@ -460,10 +460,11 @@ public struct CallSelection {
             }
             case LLVMbitop_vld:
                 return builtin(volatileLoadEntryOf(
-                    typeFunctionOf(function_).next.size));
+                    representationSize(typeFunctionOf(function_).next)));
             case LLVMbitop_vst:
                 return builtin(volatileStoreEntryOf(
-                    typeFunctionOf(function_).parameterList[1].type.size));
+                    representationSize(
+                        typeFunctionOf(function_).parameterList[1].type)));
             default: return IntrinsicPlan.init;
         }
     }
@@ -614,12 +615,12 @@ public struct CallSelection {
     private bool integerConstantOf(
         imported!"dmd.expression".Expression expression, out ulong value,
     ) {
-        import dmd.expressionsem: toInteger;
+        import snakebite.frontend.typefacts: integerValue;
         ScalarConstant constant;
         if (!scalarConstantOf(expression, constant)
                 || constant.exp.isIntegerExp is null)
             return false;
-        value = constant.exp.toInteger;
+        value = constant.exp.integerValue;
         return true;
     }
 
@@ -634,12 +635,13 @@ public struct CallSelection {
         import dmd.constfold;
         import dmd.ctfeexpr: emplaceExp;
         import dmd.expression: IntegerExp, RealExp;
-        import dmd.expressionsem: toBool, toInteger;
-        import dmd.typesem: toBasetype, isIntegral, isReal, isUnsigned, size;
+        import dmd.typesem: isIntegral, isReal, isUnsigned, size;
         import dmd.tokens: EXP;
+        import snakebite.frontend.typefacts:
+            baseType, integerValue, truthValue;
         import core.stdc.fenv;
 
-        auto type = expression.type.toBasetype;
+        auto type = expression.type.baseType;
         if (!type.isIntegral && !type.isReal)
             return false;
         if (expression.isIntegerExp !is null || expression.isRealExp !is null) {
@@ -658,7 +660,7 @@ public struct CallSelection {
             ScalarConstant condition;
             if (!scalarConstantOf(conditional.econd, condition))
                 return false;
-            const truth = condition.exp.toBool.get;
+            const truth = condition.exp.truthValue;
             if (fetestexcept(FE_ALL_EXCEPT)
                     || !scalarConstantOf(truth
                         ? conditional.e1 : conditional.e2, constant))
@@ -668,7 +670,7 @@ public struct CallSelection {
             if (!scalarConstantOf(binary.e1, left))
                 return false;
             if (binary.isLogicalExp !is null) {
-                const truth = left.exp.toBool.get;
+                const truth = left.exp.truthValue;
                 if (fetestexcept(FE_ALL_EXCEPT))
                     return false;
                 if (truth == (binary.op == EXP.orOr)) {
@@ -680,8 +682,8 @@ public struct CallSelection {
                 return false;
             if ((binary.op == EXP.div || binary.op == EXP.mod)
                     && type.isIntegral) {
-                const numerator = left.exp.toInteger;
-                const denominator = right.exp.toInteger;
+                const numerator = left.exp.integerValue;
+                const denominator = right.exp.integerValue;
                 const minimum = type.size == 8 ? long.min : int.min;
                 // Do not diagnose a fault while selecting an unexecuted call.
                 if (denominator == 0 || (!type.isUnsigned && numerator == minimum
@@ -712,7 +714,7 @@ public struct CallSelection {
                 case lessThan, lessOrEqual, greaterThan, greaterOrEqual:
                     constant.value = Cmp(expression.op, loc, resultType, e1, e2); break;
                 case andAnd, orOr:
-                    emplaceExp!IntegerExp(&constant.value, loc, e2.toBool.get, resultType);
+                    emplaceExp!IntegerExp(&constant.value, loc, e2.truthValue, resultType);
                     break;
                 case comma: constant = right; break;
                 // Assignments, memory access, and library calls (PowExp)
@@ -771,25 +773,24 @@ public struct CallSelection {
     ) {
         import core.volatile: volatileLoad;
         import dmd.backend.cdef: Vconst;
-        import dmd.expressionsem: toInteger, toReal;
         import dmd.astenums: TY;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType, integerValue, realValue;
 
         // Inner producers must be stored at their own width before use.
         constant.value.exp.type = type;
         if (constant.hasStorage)
             return;
         if (auto integer = constant.exp.isIntegerExp) {
-            integer.value = integer.toInteger;
+            integer.value = integer.integerValue;
             return;
         }
-        const base = type.toBasetype;
+        const base = type.baseType;
         auto floating = constant.exp.isRealExp;
         if (base.ty == TY.Tfloat32 || base.ty == TY.Tfloat64) {
             // An immediate cast followed by widening can keep excess x87
             // precision. Force the same memory stores as DMD's backend.
             Vconst stored;
-            stored.Vdouble = cast(double) floating.toReal;
+            stored.Vdouble = cast(double) floating.realValue;
             stored.Vullong = volatileLoad(&stored.Vullong);
             if (base.ty == TY.Tfloat32) {
                 stored.Vfloat = cast(float) stored.Vdouble;
@@ -806,7 +807,7 @@ public struct CallSelection {
     ) {
         import dmd.expression: RealExp;
         import dmd.ctfeexpr: emplaceExp;
-        import dmd.expressionsem: toReal;
+        import snakebite.frontend.typefacts: realValue;
         import dmd.backend.cdef: Vconst;
         import core.stdc.fenv;
         import core.stdc.string: memcpy;
@@ -840,7 +841,7 @@ public struct CallSelection {
             const width = typeFacts((*expression.arguments)[0].type).size;
             memcpy(&stored, operand.bytes(width).ptr, width);
         } else {
-            const value = operand.exp.toReal;
+            const value = operand.exp.realValue;
             final switch (parameters[0]) with (ParameterType) {
                 case float_: stored.Vfloat = cast(float) value; break;
                 case double_: stored.Vdouble = cast(double) value; break;
@@ -1042,14 +1043,14 @@ public struct CallSelection {
         out ParameterType result,
     ) {
         import dmd.astenums: STC, TY, VarArg;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         auto type = typeFunctionOf(function_);
         if (type.isRef || type.parameterList.varargs != VarArg.none
                 || parameters.length != type.parameterList.length)
             return false;
-        auto resultType = type.next.toBasetype;
+        auto resultType = type.next.baseType;
         if (resultType.ty == TY.Tvoid)
             result = ParameterType.void_;
         else if (!parameterTypeOf(resultType, result))
@@ -1064,7 +1065,7 @@ public struct CallSelection {
                 return false;
             ParameterType parameterType;
             if (!parameterTypeOf(
-                    parameter.type.toBasetype, parameterType))
+                    parameter.type.baseType, parameterType))
                 return false;
             parameters[i] = parameterType;
         }
@@ -1076,7 +1077,7 @@ public struct CallSelection {
         out ParameterType result,
     ) {
         import dmd.astenums: TY;
-        import dmd.typesem: size;
+        import snakebite.frontend.typefacts: representationSize;
 
         // The wrappers of `core.simd` move this many bytes.
         enum vectorSize = 16;
@@ -1101,7 +1102,7 @@ public struct CallSelection {
             case Tvoid: return false;
             case Tvector:
                 result = ParameterType.vector_;
-                return type.size == vectorSize;
+                return representationSize(type) == vectorSize;
             case Tpointer:
                 result = ParameterType.pointer_; return true;
             case Tarray, Tsarray, Taarray, Treference, Tfunction,
@@ -1248,7 +1249,7 @@ public bool isIndirectDelegateCall(
     imported!"dmd.mtype".Type calleeType,
 ) {
     import dmd.astenums: Tdelegate;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    return calleeType !is null && calleeType.toBasetype.ty == Tdelegate;
+    return calleeType !is null && calleeType.baseType.ty == Tdelegate;
 }

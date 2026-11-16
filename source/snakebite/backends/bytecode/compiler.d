@@ -920,8 +920,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero, opColdThrow,
         opTlsAddress, opTlsLoad, opTlsStore;
-    import dmd.expressionsem: toInteger;
-    import dmd.typesem: nextOf, toBasetype;
+    import snakebite.frontend.typefacts: integerValue;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, outerFunctionOf;
     import snakebite.language.storage.lifetime: InitStep, NewPlan;
@@ -2497,7 +2498,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tclass;
 
         if (!(expression !is null
-                && expression.type.toBasetype.ty == Tclass))
+                && expression.type.baseType.ty == Tclass))
             internalFailure("`throwSemantic` only accepts a `Throwable` class reference");
 
         if (readsAfterEnd)
@@ -2888,7 +2889,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     //
     private void compileAssert(AssertExp expression) {
         import dmd.astenums: Tnoreturn;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
         import snakebite.language.checks:
             assertFailureOf, assertPlanOf, FailurePlan, isUnanalysed;
 
@@ -2899,7 +2900,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const conditionOffset = compileCondition(expression.e1);
         const width = conditionWidth(expression.e1);
         const never = isUnanalysed(expression)
-            || expression.type.toBasetype.ty == Tnoreturn;
+            || expression.type.baseType.ty == Tnoreturn;
 
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
@@ -3178,7 +3179,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return true;
 
         auto integer = condition.isIntegerExp;
-        return integer !is null && integer.toInteger != 0;
+        return integer !is null && integer.integerValue != 0;
     }
 
     // Claims the pending label only when `statement` is what dmd resolved
@@ -4096,7 +4097,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(field !is null, "a field address names a variable");
 
         size_t addressOffset;
-        auto aggregateType = expression.e1.type.toBasetype;
+        auto aggregateType = expression.e1.type.baseType;
         if (aggregateType.ty == Tclass || aggregateType.ty == Tpointer) {
             addressOffset = reserveTemp(pointerFacts);
             evalInto(expression.e1, addressOffset, size_t.sizeof);
@@ -4163,7 +4164,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // array's own sub-range, through `visit(SliceExp)`'s own
         // `compileBoundedSlice`, the same machinery a bare read of that
         // sub-range already goes through, bounds checks included.
-        auto targetType = target.e1.type.toBasetype;
+        auto targetType = target.e1.type.baseType;
         if (targetType.ty != Tsarray
                 || target.lwr !is null || target.upr !is null)
             return compileDynamicSliceAssign(
@@ -4175,7 +4176,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto sarrayType = targetType.isTypeSArray;
         const elementFacts = typeFacts(sarrayType.next);
 
-        const dim = cast(size_t) sarrayType.dim.toInteger;
+        const dim = cast(size_t) sarrayType.dim.integerValue;
 
         // A local's own default-init blit reaches here with `destOffset`
         // set to that same local's own frame slot - not a distinct place
@@ -4200,7 +4201,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? compileAddress(target.e1)
             : loadSlicePointer(resolvedTarget, typeFacts(target.type));
 
-        const rightTy = expression.e2.type.toBasetype.ty;
+        const rightTy = expression.e2.type.baseType.ty;
         import snakebite.frontend.typefacts: isStoredLiteral;
 
         if (isStoredLiteral(expression.e2)) {
@@ -4281,13 +4282,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
-        const targetKind = target.e1.type.toBasetype.ty;
+        const targetKind = target.e1.type.baseType.ty;
         assert(targetKind == Tarray || targetKind == Tpointer
                 || targetKind == Tsarray);
 
         auto elementType = target.type.nextOf;
         assert(elementType !is null);
-        const elementBase = elementType.toBasetype;
+        const elementBase = elementType.baseType;
         const elementSize =
             elementBase.ty == Tvoid ? 1 : typeFacts(elementType).size;
 
@@ -4300,7 +4301,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto sourceElementType = expression.e2.type.nextOf;
         assert(sourceElementType !is null);
-        const sourceElementBase = sourceElementType.toBasetype;
+        const sourceElementBase = sourceElementType.baseType;
 
         const sourceElementSize = sourceElementBase.ty == Tvoid
             ? 1 : typeFacts(sourceElementType).size;
@@ -5071,7 +5072,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (expression.fd is null)
             internalFailure("`FuncExp`'s constructor always resolves its declaration");
 
-        if (expression.type.toBasetype.ty != Tdelegate) {
+        if (expression.type.baseType.ty != Tdelegate) {
             const address = _bytecode.operandAddress(expression.fd, 0);
             emit(&opConstant, _destination,
                 addConstant(address),
@@ -5285,7 +5286,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return;
         }
 
-        auto aggregateType = expression.e1.type.toBasetype;
+        auto aggregateType = expression.e1.type.baseType;
         assert(aggregateType.isTypeStruct !is null,
             "a struct field has a struct or class receiver");
 
@@ -5519,7 +5520,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const sliceFacts = TypeFacts(
             arrayValueSize, size_t.alignof, false, false, true,
-            typeFacts(expression.e1.type.toBasetype.nextOf).size,
+            typeFacts(expression.e1.type.baseType.nextOf).size,
         );
         const header = reserveTemp(sliceFacts);
 
@@ -5539,7 +5540,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import dmd.astenums: TY;
         import std.conv: text;
 
-        auto sourceType = expression.e1.type.toBasetype;
+        auto sourceType = expression.e1.type.baseType;
         final switch (sourceType.ty) with (TY) {
             case Tpointer:
                 return compilePointerSlice(expression, sourceType);
@@ -5614,7 +5615,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
-        const dim = cast(size_t) sourceType.isTypeSArray.dim.toInteger;
+        const dim = cast(size_t) sourceType.isTypeSArray.dim.integerValue;
 
         // A bounded static-array slice has no length word to read back,
         // but its result still has the native dynamic-array shape. Use the
@@ -5866,7 +5867,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         } else {
             assert(plan.destination == NewPlan.Destination.stack
                 && plan.objectKind == NewPlan.ObjectKind.class_);
-            auto classType = expression.newtype.toBasetype.isTypeClass;
+            auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
             auto runtime = _bytecode.classRuntimeInfo(declaration);
@@ -5882,7 +5883,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         if (plan.objectKind == NewPlan.ObjectKind.class_
                 && plan.destination == NewPlan.Destination.placement) {
-            auto classType = expression.newtype.toBasetype.isTypeClass;
+            auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
             auto runtime = _bytecode.classRuntimeInfo(declaration);
@@ -5901,10 +5902,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     protected override void visitLoweredNew(NewExp expression) {
         import dmd.astenums: Tpointer;
-        auto newType = expression.newtype.toBasetype;
+        auto newType = expression.newtype.baseType;
         if (newType.isTypeClass !is null || newType.isTypeStruct !is null)
             compileNew(expression);
-        else if (expression.type.toBasetype.ty == Tpointer
+        else if (expression.type.baseType.ty == Tpointer
                 && expression.arguments !is null
                 && expression.arguments.length != 0) {
             if (expression.arguments.length != 1)
@@ -5935,7 +5936,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             driveInit, planClassContext, planNew, planPositionalFields;
 
         auto newPlan = planNew(expression);
-        auto structType = expression.newtype.toBasetype.isTypeStruct;
+        auto structType = expression.newtype.baseType.isTypeStruct;
         const objectOffset = _destination;
         const storage = indirectStorage(objectOffset);
 
@@ -6116,7 +6117,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto elementType = expression.e1.type.nextOf;
         assert(elementType !is null);
-        const elementBase = elementType.toBasetype;
+        const elementBase = elementType.baseType;
         assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
         const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
@@ -6212,10 +6213,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // compiled hook.
     protected override bool visitLoweredClassCast(CastExp expression) {
         import dmd.astenums: STC;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
 
-        auto from = expression.e1.type.toBasetype.isTypeClass;
-        auto to = expression.to.toBasetype.isTypeClass;
+        auto from = expression.e1.type.baseType.isTypeClass;
+        auto to = expression.to.baseType.isTypeClass;
         if (from is null || to is null
                 || from.sym.isInterfaceDeclaration !is null
                 || to.sym.isInterfaceDeclaration !is null
@@ -6669,9 +6670,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // compared as an integer.
     private static bool isReference(Type type) {
         import dmd.astenums: Tclass, Tnull, Tpointer;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
 
-        const ty = type.toBasetype.ty;
+        const ty = type.baseType.ty;
         return ty == Tpointer || ty == Tclass || ty == Tnull;
     }
 
@@ -6713,7 +6714,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return indirectStorage(slot);
         }
         if (auto this_ = expression.isThisExp) {
-            if (this_.type.toBasetype.ty == Tclass)
+            if (this_.type.baseType.ty == Tclass)
                 return size_t.max;
             return indirectStorage(hiddenThisOffset(this_.var));
         }
@@ -6722,7 +6723,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (auto length = expression.isArrayLengthExp) {
             import snakebite.native.value: arrayLengthOffset;
 
-            if (length.e1.type.toBasetype.ty != Tarray)
+            if (length.e1.type.baseType.ty != Tarray)
                 return size_t.max;
             const array = placeOf(length.e1, inPlace);
             return array == size_t.max
@@ -6759,7 +6760,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || field.isDataseg)
             return size_t.max;
 
-        const aggregate = expression.e1.type.toBasetype.ty;
+        const aggregate = expression.e1.type.baseType.ty;
         if (aggregate == Tclass || aggregate == Tpointer) {
             const slot = baseSlot(expression.e1, inPlace);
             compileNullCheck(slot, expression.e1.loc);
@@ -6776,7 +6777,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t placeOfIndex(IndexExp expression, in bool inPlace) {
         import dmd.astenums: Tarray, Tpointer, Tsarray;
 
-        auto arrayType = expression.e1.type.toBasetype;
+        auto arrayType = expression.e1.type.baseType;
         switch (arrayType.ty) {
             case Tsarray:
                 return placeOfStaticIndex(expression, arrayType, inPlace);
@@ -6814,10 +6815,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.language.checks: boundsPlanOf, FailurePlan;
         import snakebite.language.storage.resolver: needsIndexBoundsCheck;
 
-        auto arrayType = expression.e1.type.toBasetype;
+        auto arrayType = expression.e1.type.baseType;
         shape.fixedLength = arrayType.ty == Tsarray;
         if (shape.fixedLength) {
-            shape.dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+            shape.dimension = cast(size_t) arrayType.isTypeSArray.dim.integerValue;
             if (shape.dimension > uint.max)
                 return false;
         }
@@ -6863,8 +6864,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && typeFacts(sum.e1.type).isUnsigned == index.isUnsigned) {
                 const local = operandOf(sum.e1, index.size, false);
                 const value = sum.op == EXP.add
-                    ? cast(long) literal.toInteger
-                    : -cast(long) literal.toInteger;
+                    ? cast(long) literal.integerValue
+                    : -cast(long) literal.integerValue;
                 if (local != size_t.max && value >= int.min
                         && value <= int.max) {
                     shape.slot = local;
@@ -7028,7 +7029,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto literal = expression.e2.isIntegerExp;
         if (literal is null || expression.lengthVar !is null)
             return size_t.max;
-        return cast(size_t) literal.toInteger;
+        return cast(size_t) literal.integerValue;
     }
 
     private size_t placeOfStaticIndex(
@@ -7039,7 +7040,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.native.value: arrayLengthOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
-        const dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+        const dimension = cast(size_t) arrayType.isTypeSArray.dim.integerValue;
         const literal = literalIndex(expression);
         if (literal < dimension)
             return placeAt(staticArrayPlace(expression.e1, inPlace),
@@ -7219,7 +7220,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (local != size_t.max)
                 return local;
             if (auto this_ = pointer.isThisExp)
-                if (this_.type.toBasetype.ty == Tclass)
+                if (this_.type.baseType.ty == Tclass)
                     return hiddenThisOffset(this_.var);
         }
         const slot = reserveTemp(pointerFacts);
@@ -8144,12 +8145,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // elements, as dmd's `e2ir.d` reads it for a mixed array comparison.
     private void evalArrayValueInto(Expression operand, in size_t destOffset) {
         import dmd.astenums: Tarray;
-        import dmd.expressionsem: toInteger;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: integerValue;
+        import snakebite.frontend.typefacts: baseType;
         import snakebite.native.value:
             arrayLengthOffset, arrayPointerOffset, arrayValueSize;
 
-        auto type = operand.type.toBasetype;
+        auto type = operand.type.baseType;
         if (type.ty == Tarray) {
             evalInto(operand, destOffset, arrayValueSize);
             return;
@@ -8158,7 +8159,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const address = compileIdentityArrayStorage(
             operand, typeFacts(type));
         emit(&opConstant, destOffset + arrayLengthOffset,
-            addConstant(cast(long) type.isTypeSArray.dim.toInteger),
+            addConstant(cast(long) type.isTypeSArray.dim.integerValue),
             size_t.sizeof);
         emit(&opCopy, destOffset + arrayPointerOffset, address,
             size_t.sizeof);
@@ -8325,13 +8326,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destOffset, in size_t width,
     ) {
         import dmd.astenums: Tbool;
-        import dmd.typesem: toBasetype;
+        import snakebite.frontend.typefacts: baseType;
 
-        const leftIsBool = expression.e1.type.toBasetype.ty == Tbool;
+        const leftIsBool = expression.e1.type.baseType.ty == Tbool;
         // Two `bool` operands evaluate into the destination: the left value
         // stays when it decides, the right one overwrites it otherwise, so
         // there is neither a cast to `bool` nor a join jump.
-        if (leftIsBool && expression.e2.type.toBasetype.ty == Tbool
+        if (leftIsBool && expression.e2.type.baseType.ty == Tbool
                 && plan.right == LogicalPlan.Right.value
                 && destOffset != discardResult && plan.hasValue) {
             const value = destOffset;
@@ -8964,7 +8965,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const inlinable = _bytecode.inlineBodyOf(callee);
                 if (inlinable !is null && bodyWritesOnlyItsFrame(*inlinable)) {
                     auto this_ = receiver.expression.isThisExp;
-                    if (this_ !is null && this_.type.toBasetype.ty == Tclass)
+                    if (this_ !is null && this_.type.baseType.ty == Tclass)
                         return hiddenThisOffset(this_.var);
                     if (argumentsAreSideEffectFree(expression.arguments)) {
                         const local = operandOf(
@@ -10239,12 +10240,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
 
         public size_t storageStaticIndexLength(IndexExp expression) {
-            import dmd.typesem: toBasetype;
+            import snakebite.frontend.typefacts: baseType;
 
             const length = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, length,
                 compiler.addConstant(cast(long) expression.e1.type
-                    .toBasetype.isTypeSArray.dim.toInteger),
+                    .baseType.isTypeSArray.dim.integerValue),
                 size_t.sizeof);
             return length;
         }
@@ -10292,11 +10293,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageDynamicIndex(
             IndexExp expression, size_t base, size_t index,
         ) {
-            import dmd.typesem: toBasetype;
+            import snakebite.frontend.typefacts: baseType;
             import snakebite.native.value: arrayPointerOffset;
 
             const stride =
-                typeFacts(expression.e1.type.toBasetype.nextOf).size;
+                typeFacts(expression.e1.type.baseType.nextOf).size;
             compiler.emitMultiplyConstant(index, index, stride);
 
             const facts = typeFacts(expression.e1.type);
@@ -10312,10 +10313,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storageStaticIndex(
             IndexExp expression, size_t base, size_t index,
         ) {
-            import dmd.typesem: toBasetype;
+            import snakebite.frontend.typefacts: baseType;
 
             const stride =
-                typeFacts(expression.e1.type.toBasetype.nextOf).size;
+                typeFacts(expression.e1.type.baseType.nextOf).size;
             compiler.emitMultiplyConstant(index, index, stride);
 
             const address = compiler.reserveTemp(compiler.pointerFacts);
@@ -10327,10 +10328,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         public size_t storagePointerIndex(
             IndexExp expression, size_t pointer, size_t index,
         ) {
-            import dmd.typesem: toBasetype;
+            import snakebite.frontend.typefacts: baseType;
 
             const stride =
-                typeFacts(expression.e1.type.toBasetype.nextOf).size;
+                typeFacts(expression.e1.type.baseType.nextOf).size;
             compiler.emitMultiplyConstant(index, index, stride);
 
             const address = compiler.reserveTemp(compiler.pointerFacts);

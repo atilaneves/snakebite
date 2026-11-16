@@ -37,14 +37,14 @@ public CallReceiver receiverOf(
     imported!"dmd.func".FuncDeclaration callee,
 ) {
     import dmd.astenums: Tclass;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     if (callee.isThis is null)
         return CallReceiver.init;
 
     auto dot = call.e1.isDotVarExp;
     auto receiver = dot is null ? call.e1 : dot.e1;
-    if (receiver.type.toBasetype.ty == Tclass)
+    if (receiver.type.baseType.ty == Tclass)
         return CallReceiver(CallReceiver.Kind.classValue, receiver);
     if (dot !is null || receiver.isThisExp !is null
             || receiver.isSuperExp !is null)

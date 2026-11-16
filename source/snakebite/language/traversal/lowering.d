@@ -587,7 +587,6 @@ extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
     // frame address or the frontend lowering's allocation result.
     final override void visit(ArrayLiteralExp expression) {
         import dmd.mtype: Type;
-        import dmd.typesem: pointerTo;
         import snakebite.language.layout.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
         import snakebite.frontend.typefacts: isStoredLiteral;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
@@ -598,7 +597,9 @@ extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
         if (isStoredLiteral(expression))
             return visitStoredArrayLiteral(expression);
 
-        auto pointerType = Type.tvoid.pointerTo;
+        // dmd makes `void*` when it starts (`Type._init`): a read, no
+        // frontend work.
+        auto pointerType = Type.tvoidptr;
         withTemporaryDestination(pointerType, typeFacts(pointerType), {
             final switch (plan.storage) {
             case ArrayLiteralPlan.Storage.empty:

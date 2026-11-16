@@ -767,7 +767,8 @@ private NativeSignature signatureOf(
         argumentPlanOf, linkageOf, needsHiddenReturnPointer, returnPlanOf;
     import snakebite.ffi.argumentplan: ArgumentPlan, Register, supported;
     import dmd.astenums: LINK, STC, Tdelegate, VarArg;
-    import dmd.typesem: nextOf, toBasetype;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: baseType;
     import std.conv: text;
 
     static if (!supported)
@@ -879,7 +880,7 @@ private NativeSignature signatureOf(
             // classify as.
             const storageClass = type.parameterList[i].storageClass;
             const isRef = (storageClass & (STC.ref_ | STC.out_)) != 0;
-            auto parameterType = type.parameterList[i].type.toBasetype;
+            auto parameterType = type.parameterList[i].type.baseType;
             auto pointer = parameterType.isTypePointer;
             const isFunctionPointer =
                 pointer !is null && pointer.nextOf.isTypeFunction !is null;
@@ -911,7 +912,7 @@ private NativeSignature signatureOf(
         // that shape gets: its type is known at this call site, which is
         // all the swap needs.
         foreach (extraType; extraArgumentTypes) {
-            auto base = extraType.toBasetype;
+            auto base = extraType.baseType;
             auto pointer = base.isTypePointer;
             const isFunctionPointer =
                 pointer !is null && pointer.nextOf.isTypeFunction !is null;

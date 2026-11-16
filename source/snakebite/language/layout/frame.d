@@ -829,9 +829,9 @@ package(snakebite) Shape.Class classOf(imported!"dmd.mtype".Type type) {
         Tbool, Tchar, Tclass, Tdchar, Tfloat32, Tfloat64, Timaginary32,
         Timaginary64, Tint16, Tint32, Tint64, Tint8, Tnull, Tpointer, Taarray,
         Twchar, Tuns16, Tuns32, Tuns64, Tuns8;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    switch (type.toBasetype.ty) {
+    switch (type.baseType.ty) {
         case Tint8, Tuns8, Tint16, Tuns16, Tint32, Tuns32, Tint64, Tuns64,
                 Tbool, Tchar, Twchar, Tdchar, Tpointer, Tclass, Taarray,
                 Tnull:

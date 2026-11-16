@@ -33,10 +33,10 @@ public struct Hooks {
 // the information. The vtable of an object of an interface type has the
 // interface's own information in between.
 public size_t typeidLoadCount(Expression object) {
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
     return 2
-        + (object.type.toBasetype.isTypeClass.sym
+        + (object.type.baseType.isTypeClass.sym
             .isInterfaceDeclaration !is null);
 }
 

@@ -59,10 +59,10 @@ private enum TypeKind {
 public CastPlan classify(
     imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
 ) {
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    sourceType = sourceType.toBasetype;
-    destType = destType.toBasetype;
+    sourceType = sourceType.baseType;
+    destType = destType.baseType;
 
     return classifyByKind(
         kindOf(sourceType), kindOf(destType), sourceType, destType,
@@ -339,23 +339,24 @@ private CastPlan classifyStaticArray(
     in TypeFacts sourceFacts,
     in TypeFacts destFacts,
 ) {
-    import dmd.expressionsem: toInteger;
-    import dmd.typesem: nextOf, size;
+    import snakebite.frontend.typefacts: integerValue;
+    import dmd.typesem: nextOf;
+    import snakebite.frontend.typefacts: representationSize;
 
     final switch (destKind) with (TypeKind) {
     case dynamicArray: {
-        const sourceElementSize = sourceType.nextOf.size;
-        const destElementSize = destType.nextOf.size;
+        const sourceElementSize = representationSize(sourceType.nextOf);
+        const destElementSize = representationSize(destType.nextOf);
         auto plan = CastPlan(CastKind.sarrayToSlice, sourceFacts, destFacts);
         if (sourceElementSize == destElementSize) {
             plan.staticLength = cast(size_t) sourceType.isTypeSArray.dim
-                .toInteger;
+                .integerValue;
         } else {
             assert(destElementSize != 0
-                && (sourceType.isTypeSArray.dim.toInteger
+                && (sourceType.isTypeSArray.dim.integerValue
                     * sourceElementSize) % destElementSize == 0);
             plan.staticLength = cast(size_t)(
-                sourceType.isTypeSArray.dim.toInteger * sourceElementSize
+                sourceType.isTypeSArray.dim.integerValue * sourceElementSize
                     / destElementSize);
         }
         return plan;

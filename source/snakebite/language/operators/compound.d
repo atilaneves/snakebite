@@ -2,7 +2,7 @@ module snakebite.language.operators.compound;
 
 private:
 
-import dmd.typesem: toBasetype;
+import snakebite.frontend.typefacts: baseType;
 
 import snakebite.language.operators.arithmetic: ArithmeticPlan;
 import snakebite.language.operators.casts: CastPlan;
@@ -14,15 +14,15 @@ import snakebite.frontend.typefacts: typeFacts;
 public imported!"dmd.expression".Expression compoundTarget(
     imported!"dmd.expression".BinAssignExp expression,
 ) {
-    const type = expression.type.toBasetype;
-    if (sameScalar(expression.e1.type.toBasetype, type))
+    const type = expression.type.baseType;
+    if (sameScalar(expression.e1.type.baseType, type))
         return expression.e1;
 
     // A shift by a wider count promotes the target twice, e.g.
     // `cast(long)cast(int)b` for a `byte`.
     for (auto promotion = expression.e1.isCastExp; promotion !is null;
             promotion = promotion.e1.isCastExp)
-        if (sameScalar(promotion.e1.type.toBasetype, type))
+        if (sameScalar(promotion.e1.type.baseType, type))
             return promotion.e1;
     return expression.e1;
 }
@@ -115,11 +115,11 @@ private imported!"dmd.mtype".Type operationPrecision(
 ) {
     import dmd.astenums: TY;
     import dmd.mtype: Type;
-    import dmd.typesem: toBasetype;
+    import snakebite.frontend.typefacts: baseType;
 
-    if (targetType.toBasetype.ty == TY.Tuns64)
+    if (targetType.baseType.ty == TY.Tuns64)
         return Type.tfloat80;
-    if (operationType.toBasetype.ty == TY.Tfloat32)
+    if (operationType.baseType.ty == TY.Tfloat32)
         return Type.tfloat64;
     return operationType;
 }
