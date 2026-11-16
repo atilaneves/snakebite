@@ -8,7 +8,7 @@ benchmarks=(
     dub@1.42.0
     fearless@0.0.4
     mirror@0.3.4
-    reggae@0.17.0
+    reggae@0.18.0
     tardy@0.0.3
     test_allocator@0.3.4
     unit-threaded@2.2.6
@@ -69,12 +69,16 @@ benchmarks=(
     # vibe-core@2.14.0  # Bytecode: SIGSEGV; Interpreter: AssertError "had GC allocations!"
 )
 
-failed=()
-for benchmark in "${benchmarks[@]}"; do
-    bin/bench "$benchmark" "$@" || failed+=("$benchmark")
-done
+# Sourced by build/saved-corpus.sh for the list: the loop runs only when
+# this file is executed.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    failed=()
+    for benchmark in "${benchmarks[@]}"; do
+        bin/bench "$benchmark" "$@" || failed+=("$benchmark")
+    done
 
-if ((${#failed[@]})); then
-    echo "failed: ${failed[*]}" >&2
-    exit 1
+    if ((${#failed[@]})); then
+        echo "failed: ${failed[*]}" >&2
+        exit 1
+    fi
 fi

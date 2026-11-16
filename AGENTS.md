@@ -115,8 +115,8 @@ This is a judgment check, not an automated guarantee.
 
 - `bin/bench <project directory or dub package> -w 0 -r 1` times the
   backends and the native `dub test` edit cycle (`bench/source/bench/oracle.d`).
-- `build/bench-corpus.sh` lists the corpus projects. They are already in
-  `~/.dub/packages`.
+- `build/bench-corpus.sh` lists the corpus projects. `bin/bench`, `bin/sb`
+  and `dub` fetch a project that is not yet in `~/.dub/packages`.
 - The native baseline is: edit a project source file, then plain
   `dub test`. Use dub's default compiler and no `--force`.
 - Before any profiling or optimisation, load the `linux-perf` and
