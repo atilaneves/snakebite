@@ -55,7 +55,7 @@ package struct JitOp {
         fpcmp3, index, checked, castFixed, sliceToPointer, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
         callWindow, returnValue, returnVoid, arrayEqual, signedDivide,
-        temporaryTransition, sliceFill,
+        temporaryTransition, sliceFill, arrayAllocation,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
@@ -2093,6 +2093,12 @@ private struct Gen {
         case returnVoid:
             return emitReturn(i, op.kind == returnValue, original);
 
+        case arrayAllocation:
+            version (ArrayAllocationCache)
+                return emitArrayAllocation(i, original);
+            else
+                return false;
+
         case temporaryTransition:
             // Only a direct frame slot can skip receiver resolution.
             if (ins.source & indirectBit)
@@ -2450,6 +2456,63 @@ private struct Gen {
             return false;
         return integerRight(twoAddress ? ins.source : ins.sourceWidth,
             literalRight, width, R11, right);
+    }
+
+    version (ArrayAllocationCache)
+    bool emitArrayAllocation(size_t i, Instruction.Handler original) {
+        import snakebite.memory.arrayallocation: ArrayAllocationCache,
+            ArrayAllocationSlots, ArrayAllocationThread, arrayAllocationMaxLength;
+
+        const ins = snapshot[i];
+        const site = &callSites[ins.source];
+        Mem type, length, destination;
+        if (!frameOperand(site.args[0].callerOffset, type)
+                || !frameOperand(site.args[1].callerOffset, length)
+                || !frameOperand(ins.destination, destination))
+            return false;
+        enum inFinalizer = ArrayAllocationCache.thread.offsetof
+            + ArrayAllocationThread.inFinalizer.offsetof;
+        enum bytesAllocated = ArrayAllocationCache.thread.offsetof
+            + ArrayAllocationThread.bytesAllocated.offsetof;
+
+        a.ld(8, R9, Mem(STATE, DispatchState.arrayAllocation.offsetof));
+        a.aluRI(Alu.cmp, 8, R9, 0);
+        const disabled = jccLocal(CC_E);
+        a.ld(8, RAX, type);
+        a.alu(Alu.cmp, 8, RAX, Mem(R9, ArrayAllocationCache.type.offsetof));
+        const differentType = jccLocal(CC_NE);
+        a.ld(8, R11, Mem(R9, inFinalizer));
+        a.aluMI(Alu.cmp, 1, Mem(R11, 0), 0);
+        const finalizing = jccLocal(CC_NE);
+        a.ld(8, R10, length);
+        a.lea(R11, Mem(R10, -1));
+        a.aluRI(Alu.cmp, 8, R11, arrayAllocationMaxLength - 1);
+        const invalidLength = jccLocal(CC_A);
+        a.imulRI(R11, R11, cast(int) ArrayAllocationSlots.sizeof);
+        a.lea(R11, Mem(R9, ArrayAllocationCache.lengths.offsetof, R11));
+        a.ld(8, RAX, Mem(R11, ArrayAllocationSlots.count.offsetof));
+        a.aluRI(Alu.cmp, 8, RAX, 0);
+        const empty = jccLocal(CC_E);
+        a.aluRI(Alu.sub, 8, RAX, 1);
+        const root = Mem(R11, ArrayAllocationSlots.roots.offsetof, RAX, 8);
+        a.ld(8, SC2, root);
+        a.st(8, Mem(destination.base, destination.disp + cast(int) arrayLengthOffset), R10);
+        a.st(8, Mem(destination.base, destination.disp + cast(int) arrayPointerOffset), SC2);
+        a.stI(8, root, 0);
+        a.st(8, Mem(R11, ArrayAllocationSlots.count.offsetof), RAX);
+        a.ld(8, R10, Mem(R11, ArrayAllocationSlots.charge.offsetof));
+        a.ld(8, R9, Mem(R9, bytesAllocated));
+        a.alu(Alu.add, 8, R10, Mem(R9, 0));
+        a.st(8, Mem(R9, 0), R10);
+        jmpTo(i + 1);
+
+        patchHere(disabled);
+        patchHere(differentType);
+        patchHere(finalizing);
+        patchHere(invalidLength);
+        patchHere(empty);
+        jumpToHandler(i, original);
+        return true;
     }
 
     bool emitArrayEqual(size_t i, in Instruction ins,

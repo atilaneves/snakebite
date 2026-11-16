@@ -444,6 +444,8 @@ public struct CallSite {
     @plain package bool directSwapped;
     @plain package ubyte[3] directOrder;
     @plain package Load[3] directLoads;
+    version (ArrayAllocationCache)
+        @plain package bool arrayAllocation;
     @hostCode package BuiltinCall builtinEntry;
     @plain package size_t calleeSlotOffset;
     @plain package bool hasContext;
@@ -1332,6 +1334,10 @@ package struct DispatchState {
     const(void)* decodedAddress;
     const(void)* decodedWord;
     ptrdiff_t decodedAdjustment;
+    version (ArrayAllocationCache) {
+        import snakebite.memory.arrayallocation: ArrayAllocationCache;
+        ArrayAllocationCache* arrayAllocation;
+    }
 }
 
 // Thrown after guest code has resumed from a handler that took an exception
@@ -1368,6 +1374,19 @@ private void dispatch(
     root.base.parent = null;
     auto state = DispatchState(frames, null, null, 0, vm,
         cast(DispatchState*) frames.backendEntry);
+    version (ArrayAllocationCache) {
+        import snakebite.memory.arrayallocation: ArrayAllocationCache, arrayAllocationThread;
+        import snakebite.memory.gc: arrayAllocationCacheEnabled, insideFrontend;
+
+        // The cache must be scanned, including while a guest fiber is suspended.
+        if (arrayAllocationCacheEnabled() && !insideFrontend()) {
+            auto thread = arrayAllocationThread();
+            if (thread.inFinalizer !is null && !*thread.inFinalizer) {
+                state.arrayAllocation = new ArrayAllocationCache;
+                state.arrayAllocation.thread = thread;
+            }
+        }
+    }
     // A halt must also discard a partially reserved activation.
     const frameMark = frames.mark;
     scope(exit) frames.backendEntry = state.parent;
@@ -2230,6 +2249,49 @@ private const(Instruction)* opCallDirectTwoWordsPairResult(bool indirect)(
     callDirectWords(site.directTarget, first, second,
         /* third */ 0, /* resultWidth */ 16, place);
     return pc + 1;
+}
+
+version (ArrayAllocationCache)
+private const(Instruction)* opArrayAllocationMiss(
+    const(CallSite)* site,
+    const(Instruction)* pc,
+    Activation* active,
+    DispatchState* state,
+    ubyte* frame,
+) {
+    import snakebite.memory.arrayallocation: ArrayAllocationRequest, arrayAllocationMaxLength,
+        exchangeArrayAllocationRequest;
+
+    const length = loadWord(frame + site.args[1].callerOffset, Load.word64);
+    auto cache = state.arrayAllocation;
+    if (cache is null || *cache.thread.inFinalizer
+            || length == 0 || length > arrayAllocationMaxLength)
+        return opCallDirectTwoWordsPairResult!false(site, pc, active, state, frame);
+    const type = cast(const TypeInfo) cast(void*) loadWord(
+        frame + site.args[0].callerOffset, Load.word64);
+    const address = cast(const(void)*) type;
+    if (cache.type is null && eligibleArrayElement(type) !is null)
+        cache.type = address;
+    if (cache.type !is address || type is null)
+        return opCallDirectTwoWordsPairResult!false(site, pc, active, state, frame);
+
+    auto request = ArrayAllocationRequest(
+        &cache.lengths[length - 1], type.next, length * (void*).sizeof,
+    );
+    auto parent = exchangeArrayAllocationRequest(&request);
+    scope(exit) exchangeArrayAllocationRequest(parent);
+    return opCallDirectTwoWordsPairResult!false(site, pc, active, state, frame);
+}
+
+version (ArrayAllocationCache)
+private const(TypeInfo_Struct) eligibleArrayElement(const TypeInfo type) nothrow {
+    const array = cast(const TypeInfo_Array) type;
+    const element = array is null ? null : cast(const TypeInfo_Struct) array.next;
+    if (element is null || element.initializer.ptr !is null
+            || element.tsize != (void*).sizeof || element.xdtor !is null
+            || element.flags != TypeInfo_Struct.StructFlags.hasPointers)
+        return null;
+    return element;
 }
 
 // A direct call whose arguments are extended or reordered, or that has no
@@ -5724,9 +5786,13 @@ static if (jitSupported) {
             if (!tables.unspecialise(snapshot[index]))
                 return false;
             ops[index] = tables.jitGet(snapshot[index].handler);
-            if (handler is &callGeneral!true || handler is &callGeneral!false)
+            if (handler is &callGeneral!true || handler is &callGeneral!false) {
                 originals[index] = nativeCallJitEntry(
                     &function_.callSites[snapshot[index].source], handler);
+                version (ArrayAllocationCache)
+                if (originals[index] is &callPreparedNative!(opArrayAllocationMiss))
+                    ops[index] = JitOp.plain(JitOp.Kind.arrayAllocation);
+            }
         }
         return lock.jitFunction(function_, snapshot, ops, originals);
     }
@@ -5747,6 +5813,12 @@ static if (jitSupported) {
             case threeWordsZero32:
                 return &callPreparedNative!(opCallDirectThreeWords!(Load.zero32));
             case twoWordsPairResult:
+                version (ArrayAllocationCache) {
+                    import snakebite.memory.gc: arrayAllocationCacheEnabled;
+
+                    if (site.arrayAllocation && arrayAllocationCacheEnabled())
+                        return &callPreparedNative!(opArrayAllocationMiss);
+                }
                 return &callPreparedNative!(opCallDirectTwoWordsPairResult!false);
             case twoWordsIndirectPairResult:
                 return &callPreparedNative!(opCallDirectTwoWordsPairResult!true);

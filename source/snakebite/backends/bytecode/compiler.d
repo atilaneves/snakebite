@@ -8837,10 +8837,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const info = reserveTemp(pointerFacts);
         emitRuntimeTypeInfoConstant(
             expression.type, info, size_t.sizeof);
-        _code.callSites ~= CallSite.native(
+        auto site = CallSite.native(
             plan,
             [Arg(info, 0, size_t.sizeof), Arg(length, 0, size_t.sizeof)],
             2 * size_t.sizeof);
+        version (ArrayAllocationCache)
+            site.arrayAllocation = hook == DruntimeHook.newArrayZeroed;
+        _code.callSites ~= site;
         emit(&opCall, destOffset, _code.callSites.length - 1, 0);
         return true;
     }

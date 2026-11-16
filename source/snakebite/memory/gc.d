@@ -623,11 +623,21 @@ private __gshared GC _collector;
 // Selected by the C constructor, before druntime initializes its threads.
 private __gshared bool _useSymgc;
 
+version (ArrayAllocationCache) {
+    private __gshared bool _arrayAllocationCacheEnabled;
+
+    public bool arrayAllocationCacheEnabled() nothrow @nogc {
+        return _arrayAllocationCacheEnabled;
+    }
+}
+
 
 private GC createSnakebiteGC() {
     import core.gc.registry: createGCInstance;
 
-    const name = _useSymgc ? "sdcq" : "conservative";
+    auto name = _useSymgc ? "sdcq" : "conservative";
+    version (ArrayAllocationCache) if (_arrayAllocationCacheEnabled)
+        name = "array-cache";
     _collector = createGCInstance(name);
     if (_collector is null)
         internalFailure("the selected process GC is not registered");
@@ -646,6 +656,9 @@ private extern(C) void registerSnakebiteGC() {
 
     const selected = getenv("DGC");
     _useSymgc = selected !is null && strcmp(selected, "symgc") == 0;
+    version (ArrayAllocationCache)
+        _arrayAllocationCacheEnabled = selected !is null
+            && strcmp(selected, "array-cache") == 0;
     registerGCFactory(gcName, &createSnakebiteGC,
         _useSymgc ? &initSDCThread : null);
 }

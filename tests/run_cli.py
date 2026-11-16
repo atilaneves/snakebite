@@ -269,6 +269,89 @@ def test_process_collector_choice(
     assert result.returncode == 0, output(result)
 
 
+@pytest.mark.parametrize("collector", ["", "array-cache"])
+def test_array_allocations_survive_fiber_suspension(
+    tmp_path: Path, collector: str,
+) -> None:
+    write(
+        tmp_path / "main.d",
+        """
+        module array_cache_fiber;
+
+        import core.memory : GC;
+        import core.stdc.stdio : puts;
+        import core.thread : Fiber, Thread;
+
+        struct Element {
+            Element* child;
+        }
+
+        Element[] fixed() {
+            return new Element[4];
+        }
+
+        Element[] variable(size_t length) {
+            return new Element[length];
+        }
+
+        void check(Element[] array, size_t length) {
+            assert(array.length == length && array.capacity >= length);
+            assert(GC.query(array.ptr).base == array.ptr);
+            foreach (const ref element; array)
+                assert(element.child is null);
+        }
+
+        void warm() {
+            foreach (i; 0 .. 300) {
+                check(fixed(), 4);
+                check(variable(7), 7);
+            }
+        }
+
+        void checkAccounting() {
+            const before = GC.stats.allocatedInCurrentThread;
+            auto first = fixed();
+            auto second = variable(7);
+            const after = GC.stats.allocatedInCurrentThread;
+            assert(first.ptr != second.ptr);
+            assert(after - before == GC.query(first.ptr).size + GC.query(second.ptr).size);
+            check(first, 4);
+            check(second, 7);
+            first[0].child = second.ptr;
+            first ~= Element(null);
+            GC.collect();
+            assert(first[0].child == second.ptr);
+            assert(GC.query(first[0].child).base == second.ptr);
+        }
+
+        void main() {
+            auto fiber = new Fiber({
+                warm();
+                Fiber.yield();
+                checkAccounting();
+            });
+            fiber.call();
+            auto collector = new Thread(() {
+                GC.collect();
+                warm();
+                checkAccounting();
+            });
+            collector.start();
+            collector.join();
+            fiber.call();
+            assert(fiber.state == Fiber.State.TERM);
+            puts("array cache fiber checks passed");
+        }
+        """,
+    )
+    result = run_sb(
+        "--backend=bytecode", "-I", ".", ".", "--", "--DRT-testmode=run-main",
+        cwd=tmp_path, env={"DGC": collector},
+    )
+    assert result.returncode == 0, output(result)
+    assert "array cache fiber checks passed" in result.stdout
+
+
 # The DMD source declarations are @trusted; LDC exports @safe symbols.
 # ADR-0009 requires the original bodies, not renamed host declarations,
 # when these exact native symbols are absent from the release process.

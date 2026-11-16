@@ -1,0 +1,149 @@
+--- conservative/gc.d
++++ array_allocation_collector.d
+@@ -5,7 +5,7 @@
+  * License:   $(HTTP www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
+  * Authors:   Walter Bright, David Friedman, Sean Kelly
+  */
+-module core.internal.gc.impl.conservative.gc;
++module core.internal.gc.impl.conservative.array_allocation_collector;
+ 
+ // D Programming Language Garbage Collector implementation
+ 
+@@ -118,24 +118,24 @@
+ // register GC in C constructor (_STI_)
+ private pragma(crt_constructor) void gc_conservative_ctor()
+ {
+-    _d_register_conservative_gc();
++    _sb_array_cache_register_conservative_gc();
+ }
+ 
+-extern(C) void _d_register_conservative_gc()
++extern(C) void _sb_array_cache_register_conservative_gc()
+ {
+     import core.gc.registry;
+-    registerGCFactory("conservative", &initialize);
++    registerGCFactory("array-cache", &initialize);
+ }
+ 
+ private pragma(crt_constructor) void gc_precise_ctor()
+ {
+-    _d_register_precise_gc();
++    _sb_array_cache_register_precise_gc();
+ }
+ 
+-extern(C) void _d_register_precise_gc()
++extern(C) void _sb_array_cache_register_precise_gc()
+ {
+     import core.gc.registry;
+-    registerGCFactory("precise", &initialize_precise);
++    registerGCFactory("array-cache-precise", &initialize_precise);
+ }
+ 
+ private GC initialize()
+@@ -498,8 +498,21 @@
+ 
+         size_t localAllocSize = void;
+ 
+-        auto p = runLocked!(mallocNoSync, mallocTime, numMallocs)(needed, bits, localAllocSize, ti);
++        auto request = _arrayAllocationRequest;
++        if (request && request.element is ti && request.payload == size
++                && bits == BlkAttr.APPENDABLE)
++            _arrayAllocationRequest = null;
++        else
++            request = null;
++        auto p = runLocked!(mallocNoSync, mallocTime, numMallocs)(
++            needed, bits, localAllocSize, ti, request, size, padding);
++
++        return finishMalloc(p, localAllocSize, bits, padding, size, ti);
++    }
+ 
++    private static void* finishMalloc(void* p, size_t localAllocSize,
++        uint bits, size_t padding, size_t size, const TypeInfo ti) nothrow
++    {
+         invalidate(p[0 .. localAllocSize], 0xF0, true);
+ 
+         auto ret = setupMetadata(p[0 .. localAllocSize], bits, padding, size, ti);
+@@ -516,7 +529,9 @@
+     //
+     // Implementation for malloc and calloc.
+     //
+-    private void *mallocNoSync(size_t size, uint bits, ref size_t alloc_size, const TypeInfo ti = null) nothrow
++    private void *mallocNoSync(size_t size, uint bits, ref size_t alloc_size,
++        const TypeInfo ti = null, ArrayAllocationRequest* request = null,
++        size_t payload = 0, size_t padding = 0) nothrow
+     {
+         assert(size != 0);
+ 
+@@ -538,11 +553,31 @@
+         }
+         gcx.leakDetector.log_malloc(p, size);
+         bytesAllocated += alloc_size;
++        if (request)
++            refillArraySlots(*request.slots, size, bits, ti, payload, padding);
+ 
+         debug(PRINTF) printf("  => p = %p\n", p);
+         return p;
+     }
+ 
++    private void refillArraySlots(ref ArrayAllocationSlots slots,
++        size_t size, uint bits, const TypeInfo ti, size_t payload, size_t padding) nothrow
++    {
++        const bin = Gcx.binTable[size];
++        const charge = binsize[bin];
++        slots.charge = charge;
++        while (slots.count < arrayAllocationMaxSpares)
++        {
++            auto next = gcx.bucket[bin];
++            if (!next)
++                return;
++            auto block = gcx.claimReadySmall(next, bin, charge, size, bits, ti);
++            auto data = finishMalloc(block, charge, bits, padding, payload, ti);
++            memset(data, 0, payload);
++            slots.roots[slots.count++] = data;
++        }
++    }
++
+     BlkInfo qalloc( size_t size, uint bits, const scope TypeInfo ti) nothrow
+     {
+         // qalloc should not be used for building metadata-containing blocks,
+@@ -2235,6 +2270,12 @@
+         }
+         assert(p !is null);
+     L_hasBin:
++        return claimReadySmall(p, bin, alloc_size, size, bits, ti);
++    }
++
++    void* claimReadySmall(void* p, Bins bin, size_t alloc_size, size_t size,
++        uint bits, const TypeInfo ti) nothrow
++    {
+         // Return next item from free list
+         bucket[bin] = undefinedRead((cast(List*)p).next);
+         auto pool = undefinedRead((cast(List*)p).pool);
+@@ -5556,3 +5597,27 @@
+ 
+     return block.ptr[0 .. block.length - padding];
+ }
++
++
++import snakebite.memory.arrayallocation :
++    ArrayAllocationRequest, ArrayAllocationSlots, ArrayAllocationThread, arrayAllocationMaxSpares;
++
++private ArrayAllocationRequest* _arrayAllocationRequest;
++
++extern(C) ArrayAllocationThread arrayAllocationThread() nothrow @nogc
++{
++    if (!Gcx.instance || ConservativeGC.isPrecise || config.fork)
++        return ArrayAllocationThread.init;
++    debug(LOGGING) return ArrayAllocationThread.init;
++    debug(SENTINEL) return ArrayAllocationThread.init;
++    debug(VALGRIND) return ArrayAllocationThread.init;
++    return ArrayAllocationThread(&ConservativeGC._inFinalizer, &bytesAllocated);
++}
++
++extern(C) ArrayAllocationRequest* exchangeArrayAllocationRequest(
++    ArrayAllocationRequest* request) nothrow @nogc
++{
++    auto previous = _arrayAllocationRequest;
++    _arrayAllocationRequest = request;
++    return previous;
++}

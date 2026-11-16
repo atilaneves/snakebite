@@ -78,6 +78,22 @@ Target registryImageObject() {
     );
 }
 
+private enum collectorSourceOption = "SNAKEBITE_ARRAY_CACHE_COLLECTOR_SOURCE";
+private enum collectorObject = "$project/array_allocation_collector.o";
+
+Target arrayCacheCollectorObject(string source) {
+    auto compiler = environment.get("LDC", ldcPath());
+    return Target(
+        collectorObject,
+        "bash $project/build/array-allocation-cache/build-overlay.sh "
+            ~ escapeShellCommand(compiler, source) ~ " $out",
+        Target[].init,
+        [Target(source), Target("build/array-allocation-cache/build-overlay.sh"),
+         Target("build/array-allocation-cache/conservative.patch"),
+         Target("source/snakebite/memory/arrayallocation.d")],
+    );
+}
+
 // The native libraries that `bin/ut` loads, built here so that no test
 // starts a compiler for them. They lie in `bin/fixtures`, next to the test
 // executable. They are implicit inputs of an empty object linked by
@@ -417,6 +433,10 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     // into the same link line as the D-compiled ones.
     info.packages[0].files ~= assembledSources.map!assembledObjectPath.array
         ~ assembledObjectPath(registryImageSource);
+    if (compiler != "dmd" && environment.get(collectorSourceOption, "").length) {
+        info.packages[0].dflags ~= "-d-version=ArrayAllocationCache";
+        info.packages[0].files ~= collectorObject;
+    }
     const unitHost = config == "unittest" || config == "arena-validation";
     const testHost = unitHost || config == "acceptance-test";
     if (testHost)
@@ -466,6 +486,7 @@ Build reggaeBuild() {
     // Not -g: ThinLTO in LDC 1.43 drops the full debug info of member functions.
     auto profFlags = CompilerFlags(releaseFlags.value ~ "--frame-pointer=all"
         ~ "-gline-tables-only");
+    const collectorSource = environment.get(collectorSourceOption, "");
     Target[] targets = assembledSources.map!assembledObject.array ~ [
         registryImageObject,
     ]
@@ -475,6 +496,8 @@ Build reggaeBuild() {
         ~ dubTarget("ldc2", "sb", "release", "sb", releaseFlags)
         ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", releaseFlags)
         ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);
+    if (collectorSource.length)
+        targets ~= arrayCacheCollectorObject(collectorSource);
     // Optional: `ninja bin/sb-prof` builds it, a plain `ninja` does not.
     auto profTargets = dubTarget("ldc2", "sb", "sb-prof", "sb-prof", profFlags);
     return Build(targets.map!(a => createTopLevelTarget(a)).array
