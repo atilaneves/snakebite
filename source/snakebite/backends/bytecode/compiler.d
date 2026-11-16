@@ -138,6 +138,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // copy them, nested inside each other. Greater than zero while such a
     // compile runs; it never exceeds `maxSpeculationDepth`.
     private size_t _speculating;
+    private bool _recursiveInlining;
+    private bool _traceRecursiveInlining;
     private bool[FuncDeclaration] _rejectedForInlining;
     // The body a caller copies in place of a call, for each compiled
     // function that has one. Read and written under the compiler lock.
@@ -161,6 +163,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         // In place: the program's tables of thread-local variables keep the
         // address of its resolver.
         import core.lifetime: emplace;
+        import std.process: environment;
+
+        const recursiveInlining = environment.get("SNAKEBITE_RECURSIVE_INLINE");
+        _recursiveInlining = !recordsAddresses
+            && (recursiveInlining == "1" || recursiveInlining == "trace");
+        _traceRecursiveInlining = _recursiveInlining
+            && recursiveInlining == "trace";
 
         emplace(&compiledProgram, program.dependencyImage, recordsAddresses);
         _compilation.hasCompiler = true;
@@ -762,9 +771,20 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
             scope compiler = new FunctionCompiler(
                 this, function_, layout, returnFacts, isVoidReturn,
-                isRefReturn);
+                isRefReturn, _recursiveInlining ? placeholder : null);
             const(InlineBody)* builtInlineBody;
-            *placeholder = compiler.build(body_, builtInlineBody);
+            auto built = compiler.build(body_, builtInlineBody);
+            if (builtInlineBody !is null && builtInlineBody.hasWindows) {
+                // Build the recursive entry against the same published word.
+                // Callers copy the canonical one-level body. Only its
+                // surviving recursive edge enters the two-level body.
+                scope recursive = new FunctionCompiler(
+                    this, function_, layout, returnFacts, isVoidReturn,
+                    isRefReturn, null, builtInlineBody);
+                const(InlineBody)* unused;
+                built = recursive.build(body_, unused);
+            }
+            *placeholder = built;
             if (builtInlineBody !is null)
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
@@ -835,6 +855,12 @@ package struct InlineBody {
     package FrameRange[] allocations;
     package bool exposesFrame;
     package FrameRange[] exposedFrames;
+    package size_t windowSlot = size_t.max;
+    package size_t windowReach;
+
+    package bool hasWindows() const {
+        return windowSlot != size_t.max;
+    }
 }
 
 
@@ -1002,6 +1028,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // use, and the farthest any window reaches.
     private size_t _windowDepth;
     private size_t _windowReach;
+    private const(Function)* _recursiveTarget;
+    private const(InlineBody)* _recursiveBody;
+    private size_t _selfCalls;
     // Where the receiver of the call being compiled is to be written, in the
     // window of the call, or `size_t.max`. The first code that computes the
     // receiver takes it.
@@ -1176,7 +1205,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in TypeFacts returnFacts,
         in bool isVoidReturn,
         in bool isRefReturn,
+        const(Function)* recursiveTarget = null,
+        const(InlineBody)* recursiveBody = null,
     ) {
+        _recursiveTarget = recursiveTarget;
+        _recursiveBody = recursiveBody;
         _bytecode = bytecode;
         _function = function_;
         _layout = layout;
@@ -1234,7 +1267,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && _code.instructions[$ - 1].handler !is &opJump)
                 || branchesPastEnd)
             emit(&opReturnVoid, 0, 0, 0);
-        auto inlineBody = inlineBodyOfBuilt;
+        auto inlineBody = _recursiveBody is null ? inlineBodyOfBuilt : null;
         const resultPlace = redirectReturns;
         // A cold entry uses the complete original frame, including its
         // return-place slot. Nested copies already reserve that frame.
@@ -1349,19 +1382,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             coldSites += range.siteEnd - range.siteFirst;
             coldHooks += range.hooks;
         }
-        if (_code.callSites.length - coldSites != _hookSites - coldHooks
+        const recursive = _selfCalls != 0;
+        if ((recursive ? _code.cold.length != 0
+                : _code.callSites.length - coldSites != _hookSites - coldHooks)
                 || _code.assertSites.length != 0
                 || _code.exceptionHandlers.length != 0
                 || _closureOffset != size_t.max
                 || _layout.returnPlace.offset != size_t.max
                 || _layout.variadicTypes != size_t.max
                 || _layout.variadicCursor != size_t.max
-                || _code.instructions.length > Bytecode.maxInlineInstructions)
+                || _code.instructions.length > Bytecode.maxInlineInstructions) {
+            if (recursive)
+                traceRecursive("shape", _code.instructions.length);
             return null;
+        }
         foreach (i, instruction; _code.instructions) {
             Operands roles;
-            if (!_code.inCold(i) && !copyOperandsOf(instruction.handler, roles))
+            if (!_code.inCold(i)
+                    && !inlineCopyOperands(instruction, recursive, roles)) {
+                if (recursive)
+                    traceRecursive("operand", cast(size_t) instruction.handler);
                 return null;
+            }
         }
         auto instructions = _code.instructions.dup;
         CallSite[] sites;
@@ -1372,16 +1414,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 cold |= index >= range.siteFirst && index < range.siteEnd;
             if (cold)
                 continue;
-            if (site.cleanupStartIndex != size_t.max)
+            if (site.cleanupStartIndex != size_t.max
+                    || (recursive
+                        && !(site.kind == CallSite.Kind.native
+                                && site.nativePlan !is null)
+                        && !(site.kind == CallSite.Kind.guest
+                                && site.callee is _recursiveTarget
+                                && site.windowSlot == _windowSlot))) {
+                if (recursive)
+                    traceRecursive("site", cast(size_t) site.kind);
                 return null;
+            }
             siteMap[index] = sites.length;
             site.args = site.args.dup;
             sites ~= site;
         }
-        foreach (i, ref instruction; instructions)
-            if (!_code.inCold(i) && (instruction.handler is &opCall
-                    || instruction.handler is &opColdThrow))
+        foreach (i, ref instruction; instructions) {
+            Operands roles;
+            if (!_code.inCold(i)
+                    && inlineCopyOperands(instruction, recursive, roles)
+                    && roles.source == Operand.callSite)
                 instruction.source = siteMap[instruction.source];
+        }
         if (_code.cold.length != 0) {
             auto bytecode = _bytecode;
             auto function_ = _function;
@@ -1400,10 +1454,52 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if (reloc.place.section != Place.Section.instruction
                     || !_code.inCold(reloc.place.index))
                 relocs ~= reloc;
+        if (recursive)
+            traceRecursive("admitted", instructions.length);
         return new InlineBody(
             instructions, _code.constants.dup, _tempSize, _tempAlignment,
             relocs, sites, _allocations.dup, _exposesFrame,
-            _exposedFrames.dup);
+            _exposedFrames.dup, recursive ? _windowSlot : size_t.max,
+            recursive ? _windowReach : 0);
+    }
+
+    private void traceRecursive(in string reason, in size_t value) {
+        if (!_bytecode._traceRecursiveInlining)
+            return;
+        import std.stdio: stderr;
+
+        stderr.writefln("recursive inline %s: %s %x",
+            _function.toString, reason, value);
+    }
+
+    private static bool inlineCopyOperands(
+        in Instruction instruction, in bool recursive, out Operands roles,
+    ) {
+        import std.meta: AliasSeq;
+
+        const handler = instruction.handler;
+        if (copyOperandsOf(handler, roles))
+            return true;
+        if (!recursive)
+            return false;
+
+        static foreach (operation; AliasSeq!(
+            opCallWindowFrame, opCallWindowIndirect, opCallWindowDiscard,
+        ))
+            if (handler is &operation) {
+                roles = Operands(Operand.ignored, Operand.callSite);
+                return true;
+            }
+        static foreach (operation; AliasSeq!(
+            opDivideSigned, opDivideSigned32, opDivideUnsigned,
+            opModuloSigned, opModuloSigned32, opModuloUnsigned,
+            opCastAs!(CastKind.sliceToPointer),
+        ))
+            if (handler is &operation) {
+                roles = Operands(Operand.storage, Operand.storage);
+                return true;
+            }
+        return false;
     }
 
     // Whether an instruction of a copied body leaves its `destination`
@@ -1438,6 +1534,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool bodyWritesOnlyItsFrame(in InlineBody body_) {
         import std.meta: AliasSeq;
 
+        if (body_.hasWindows)
+            return false;
         foreach (instruction; body_.instructions) {
             static foreach (operation; AliasSeq!(
                 opStoreIndirect, opFrameAddress,
@@ -1650,6 +1748,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void emitInlined(
         in InlineBody body_, Arg[] args, in size_t destOffset,
     ) {
+        if (body_.hasWindows) {
+            assert(_windowDepth == 0);
+            claimWindowSlot;
+            if (body_.windowReach > _windowReach)
+                _windowReach = body_.windowReach;
+        }
         const base = alignUp(_tempSize, body_.frameAlignment);
         _tempSize = base + body_.frameSize;
         if (body_.frameAlignment > _tempAlignment)
@@ -1665,7 +1769,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 base + range.offset, range.size);
 
         const deferredStart = _deferredBindings.length;
-        bool canDefer = !body_.exposesFrame;
+        bool canDefer = !body_.exposesFrame && !body_.hasWindows;
         foreach (instruction; body_.instructions)
             if (instruction.handler is &opFrameAddress
                     || instruction.handler is &opIndexStatic
@@ -1702,7 +1806,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             if ((operand & (1UL << 63)) == 0)
                 return rebase(operand);
             const slot = (operand >> 32) & 0x7fff_ffffUL;
-            return indirectStorage(rebase(slot)) | (operand & 0xffff_ffffUL);
+            const rebased = slot == body_.windowSlot ? _windowSlot : rebase(slot);
+            return indirectStorage(rebased) | (operand & 0xffff_ffffUL);
         }
 
         const instructions = body_.instructions;
@@ -1761,7 +1866,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         foreach (i, instruction; instructions) {
             Operands roles;
-            copyOperandsOf(instruction.handler, roles);
+            inlineCopyOperands(instruction, body_.hasWindows, roles);
             const isReturn = instruction.handler is &opReturn;
             if (isReturn || instruction.handler is &opReturnVoid) {
                 if (isReturn && destOffset != discardResult && !direct[i])
@@ -1794,8 +1899,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 site.args = site.args.dup;
                 foreach (ref arg; site.args)
                     arg.callerOffset = place(arg.callerOffset);
+                if (body_.hasWindows && !isCold) {
+                    if (copied.destination != discardResult)
+                        copied.destination = place(copied.destination);
+                    if (site.windowSlot != size_t.max) {
+                        site.windowSlot = _windowSlot;
+                        copied.handler = windowCallHandler(copied.destination);
+                    }
+                } else
+                    ++_hookSites;
                 _code.callSites ~= site;
-                ++_hookSites;
                 copied.source = _code.callSites.length - 1;
             }
             if (roles.right == Operand.storage)
@@ -8965,7 +9078,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             // A receiver that is `this` or a plain local is read in place
             // by an inlined callee that only writes its own frame.
             if (dest == size_t.max) {
-                const inlinable = _bytecode.inlineBodyOf(callee);
+                const inlinable = inlineBodyAtCall(callee);
                 if (inlinable !is null && bodyWritesOnlyItsFrame(*inlinable)) {
                     auto this_ = receiver.expression.isThisExp;
                     if (this_ !is null && this_.type.baseType.ty == Tclass)
@@ -9168,7 +9281,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             internalFailure("a `void` call is only ever evaluated for effect");
 
         const inlinable = calleeType.parameterList.varargs == VarArg.none
-            ? _bytecode.inlineBodyOf(callee) : null;
+            ? inlineBodyAtCall(callee) : null;
         if (inlinable is null && calleeType.parameterList.varargs == VarArg.none
                 && windowFits(callee, calleeLayout))
             return compileWindowCall(
@@ -9244,15 +9357,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
     }
 
+    private const(InlineBody)* inlineBodyAtCall(FuncDeclaration callee) {
+        const body_ = callee is _function && _recursiveBody !is null
+            ? _recursiveBody : _bytecode.inlineBodyOf(callee);
+        if (body_ !is null && body_.hasWindows && _windowDepth != 0)
+            return null;
+        return body_;
+    }
+
+    private void claimWindowSlot() {
+        if (_windowSlot == size_t.max)
+            // The VM writes it when the function starts, with no
+            // instruction naming it, so copy forwarding must not see it.
+            _windowSlot = reserveStorage(pointerFacts);
+    }
+
     // The window of a call to a callee with `layout`, from the windows that are
     // open now. It takes the frame slot that holds where the windows start.
     private CallSite.Window windowOf(
         in FrameLayout layout, in CallAdapter returnShape,
     ) {
-        if (_windowSlot == size_t.max)
-            // The VM writes it when the function starts, with no
-            // instruction naming it, so copy forwarding must not see it.
-            _windowSlot = reserveStorage(pointerFacts);
+        claimWindowSlot;
 
         const scratchBytes = returnShape.isVoid ? 0 :
             (returnShape.returnFacts.size > layout.returnPlace.size
@@ -9300,7 +9425,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (type.parameterList.varargs != VarArg.none
                 || layout.hiddenThis.variable is null
                 || !windowFits(callee, layout)
-                || _bytecode.inlineBodyOf(callee) !is null)
+                || inlineBodyAtCall(callee) !is null)
             return size_t.max;
         const window = windowOf(layout, CallAdapter.ofType(type));
         windowEnd = window.end;
@@ -9409,10 +9534,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // The delegate outlives this compiler, so it captures the backend
         // and not `this`.
         auto bytecode = _bytecode;
-        _code.callSites ~= CallSite.guest(
-            deferred(() => bytecode.compileFunction(callee)), args,
-            returnShape.returnFacts.size, window,
-        );
+        if (_recursiveTarget !is null && callee is _function) {
+            auto site = CallSite.guest(
+                _recursiveTarget, args, returnShape.returnFacts.size);
+            site.useWindow(window);
+            _code.callSites ~= site;
+            ++_selfCalls;
+        } else
+            _code.callSites ~= CallSite.guest(
+                deferred(() => bytecode.compileFunction(callee)), args,
+                returnShape.returnFacts.size, window,
+            );
         emit(windowCallHandler(destOffset), destOffset, siteIndex, 0);
         emitReceiverResult(returnShape, destOffset, receiverOffset);
     }
