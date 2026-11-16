@@ -1350,6 +1350,11 @@ private struct ReloadEntry {
     IntSlot intSlot;
 }
 
+private struct CheckedEntry {
+    size_t index;
+    size_t afterLoad;
+}
+
 private struct FpLoop {
     size_t head;
     size_t compare;
@@ -1377,6 +1382,7 @@ private struct Gen {
     FpSlots fpSlots;
     FpLoop fpLoop;
     IntSlot intSlot;
+    CheckedEntry checkedEntry;
     bool readIntSlot;
     size_t reloadEntryCount;
     bool bmi2;
@@ -1489,10 +1495,13 @@ private struct Gen {
         fix(target);
     }
 
-    void jccTo(int cc, size_t target) {
+    void jccTo(int cc, size_t target, size_t localTarget = 0) {
         a.b(0x0F);
         a.b(cast(ubyte) (0x80 + cc));
-        fix(target);
+        if (localTarget)
+            a.d32(cast(int) (localTarget - (a.n + int.sizeof)));
+        else
+            fix(target);
     }
 
     // A forward jump inside the code of one instruction; returns the position
@@ -2100,8 +2109,14 @@ private struct Gen {
                     // `auto` would keep the copy const.
                     JitOp.Fused test = ops[t].fused;
                     test.jumpWhen = !test.jumpWhen;
+                    const carriesIndex = checkedEntry.index == t + 1
+                        && !test.leftInR0 && header.width == int.sizeof
+                        && header.destination == cast(uint) snapshot[t + 1].width
+                        && intSlot == IntSlot(cast(int) header.destination,
+                            int.sizeof, RAX);
                     const saved = a.n;
-                    if (emitFused(header, test, t + 1))
+                    if (emitFused(header, test, t + 1,
+                            carriesIndex ? checkedEntry.afterLoad : 0))
                         return true;
                     a.n = saved;
                     readIntSlot = false;
@@ -2169,7 +2184,7 @@ private struct Gen {
         }
 
         case checked:
-            return emitChecked(ins, op);
+            return emitChecked(i, ins, op);
 
         case castFixed: {
             Mem d, s;
@@ -2684,7 +2699,9 @@ private struct Gen {
         intSlot = IntSlot.init;
     }
 
-    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t) {
+    bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
+        size_t localTarget = 0)
+    {
         const w = cast(int) ins.width;
         Mem l;
         if (p.kind != CompareKind.floating) {
@@ -2703,7 +2720,7 @@ private struct Gen {
                 ? signedCc(p.comparison) : unsignedCc(p.comparison);
             if (!p.jumpWhen)
                 cc ^= 1;
-            jccTo(cc, t);
+            jccTo(cc, t, localTarget);
             return true;
         }
         if (w != 8 && w != 4)
@@ -2868,7 +2885,7 @@ private struct Gen {
         return true;
     }
 
-    bool emitChecked(in Instruction ins, in JitOp op) {
+    bool emitChecked(size_t i, in Instruction ins, in JitOp op) {
         const p = op.checked;
         const packed = ins.width;
         const idxOff = cast(uint) packed;
@@ -2891,6 +2908,11 @@ private struct Gen {
         const offset = p.fixedLength ? 0 : cast(int) hi;
         if (p.indexWidth == 4) {
             a.ld(4, RAX, idx);
+            // This entry needs only the low 32 bits of RAX. The slice
+            // operand needs no address setup and sign extension follows.
+            if (access == CheckedAccess.store && p.constantValue && p.signed
+                    && !p.fixedLength && s.base == FRAME)
+                checkedEntry = CheckedEntry(i, a.n);
             if (offset != 0)
                 a.aluRI(Alu.add, 4, RAX, offset);
             if (p.signed)
