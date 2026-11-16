@@ -339,7 +339,7 @@ private CastPlan classifyStaticArray(
     in TypeFacts sourceFacts,
     in TypeFacts destFacts,
 ) {
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.typesem: nextOf, size;
 
     final switch (destKind) with (TypeKind) {
@@ -349,13 +349,13 @@ private CastPlan classifyStaticArray(
         auto plan = CastPlan(CastKind.sarrayToSlice, sourceFacts, destFacts);
         if (sourceElementSize == destElementSize) {
             plan.staticLength = cast(size_t) sourceType.isTypeSArray.dim
-                .toInteger;
+                .integerValue;
         } else {
             assert(destElementSize != 0
-                && (sourceType.isTypeSArray.dim.toInteger
+                && (sourceType.isTypeSArray.dim.integerValue
                     * sourceElementSize) % destElementSize == 0);
             plan.staticLength = cast(size_t)(
-                sourceType.isTypeSArray.dim.toInteger * sourceElementSize
+                sourceType.isTypeSArray.dim.integerValue * sourceElementSize
                     / destElementSize);
         }
         return plan;

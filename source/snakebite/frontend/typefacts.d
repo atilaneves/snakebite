@@ -69,6 +69,69 @@ public imported!"dmd.mtype".Type baseType(imported!"dmd.mtype".Type type) {
     return type;
 }
 
+// dmd's `toInteger`, `toReal`, `toComplex` and `toBool`, for code that
+// runs after the frontend. For an `IntegerExp` dmd writes the value back
+// (`iexp.value = normalize(type.toBasetype.ty, value)`) at every call, and
+// `toBasetype` of an enum type can make a type. These read the value,
+// normalize it for the base type of the literal (`baseType`: only an enum
+// type takes the frontend lock) and write nothing, so a literal that other
+// threads read stays unchanged. Any other expression goes to dmd, which
+// only reads it.
+public auto realValue(
+    imported!"dmd.expression".Expression expression,
+) {
+    import dmd.astenums: Tuns64;
+    import dmd.expressionsem: toReal;
+    import dmd.root.ctfloat: real_t;
+
+    if (auto integer = expression.isIntegerExp) {
+        const ty = integer.type.baseType.ty;
+        const value = normalized(integer);
+        return ty == Tuns64
+            ? real_t(cast(ulong) value)
+            : real_t(cast(long) value);
+    }
+    return expression.toReal;
+}
+
+/// Ditto
+public auto complexValue(
+    imported!"dmd.expression".Expression expression,
+) {
+    import dmd.expressionsem: toComplex;
+    import dmd.root.complex: complex_t;
+
+    if (expression.isIntegerExp !is null)
+        return complex_t(expression.realValue);
+    return expression.toComplex;
+}
+
+/// Ditto
+public auto integerValue(
+    imported!"dmd.expression".Expression expression,
+) {
+    import dmd.expressionsem: toInteger;
+
+    if (auto integer = expression.isIntegerExp)
+        return normalized(integer);
+    return expression.toInteger;
+}
+
+/// Ditto
+public bool truthValue(imported!"dmd.expression".Expression expression) {
+    import dmd.expressionsem: toBool;
+
+    if (expression.isIntegerExp !is null)
+        return expression.integerValue != 0;
+    return expression.toBool.get;
+}
+
+private auto normalized(imported!"dmd.expression".IntegerExp integer) {
+    import dmd.expression: IntegerExp;
+
+    return IntegerExp.normalize(integer.type.baseType.ty, integer.value);
+}
+
 private auto representationSize(imported!"dmd.mtype".Type type) {
     import dmd.typesem: size;
     import snakebite.frontend.compiler: newInFrontend;

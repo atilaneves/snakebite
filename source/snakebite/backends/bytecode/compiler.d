@@ -920,7 +920,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero, opColdThrow,
         opTlsAddress, opTlsLoad, opTlsStore;
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.typesem: nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.delegates:
@@ -3179,7 +3179,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return true;
 
         auto integer = condition.isIntegerExp;
-        return integer !is null && integer.toInteger != 0;
+        return integer !is null && integer.integerValue != 0;
     }
 
     // Claims the pending label only when `statement` is what dmd resolved
@@ -4176,7 +4176,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto sarrayType = targetType.isTypeSArray;
         const elementFacts = typeFacts(sarrayType.next);
 
-        const dim = cast(size_t) sarrayType.dim.toInteger;
+        const dim = cast(size_t) sarrayType.dim.integerValue;
 
         // A local's own default-init blit reaches here with `destOffset`
         // set to that same local's own frame slot - not a distinct place
@@ -5615,7 +5615,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
-        const dim = cast(size_t) sourceType.isTypeSArray.dim.toInteger;
+        const dim = cast(size_t) sourceType.isTypeSArray.dim.integerValue;
 
         // A bounded static-array slice has no length word to read back,
         // but its result still has the native dynamic-array shape. Use the
@@ -6818,7 +6818,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto arrayType = expression.e1.type.baseType;
         shape.fixedLength = arrayType.ty == Tsarray;
         if (shape.fixedLength) {
-            shape.dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+            shape.dimension = cast(size_t) arrayType.isTypeSArray.dim.integerValue;
             if (shape.dimension > uint.max)
                 return false;
         }
@@ -6864,8 +6864,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && typeFacts(sum.e1.type).isUnsigned == index.isUnsigned) {
                 const local = operandOf(sum.e1, index.size, false);
                 const value = sum.op == EXP.add
-                    ? cast(long) literal.toInteger
-                    : -cast(long) literal.toInteger;
+                    ? cast(long) literal.integerValue
+                    : -cast(long) literal.integerValue;
                 if (local != size_t.max && value >= int.min
                         && value <= int.max) {
                     shape.slot = local;
@@ -7029,7 +7029,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto literal = expression.e2.isIntegerExp;
         if (literal is null || expression.lengthVar !is null)
             return size_t.max;
-        return cast(size_t) literal.toInteger;
+        return cast(size_t) literal.integerValue;
     }
 
     private size_t placeOfStaticIndex(
@@ -7040,7 +7040,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         import snakebite.native.value: arrayLengthOffset;
 
         const stride = typeFacts(arrayType.nextOf).size;
-        const dimension = cast(size_t) arrayType.isTypeSArray.dim.toInteger;
+        const dimension = cast(size_t) arrayType.isTypeSArray.dim.integerValue;
         const literal = literalIndex(expression);
         if (literal < dimension)
             return placeAt(staticArrayPlace(expression.e1, inPlace),
@@ -8145,7 +8145,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // elements, as dmd's `e2ir.d` reads it for a mixed array comparison.
     private void evalArrayValueInto(Expression operand, in size_t destOffset) {
         import dmd.astenums: Tarray;
-        import dmd.expressionsem: toInteger;
+        import snakebite.frontend.typefacts: integerValue;
         import snakebite.frontend.typefacts: baseType;
         import snakebite.native.value:
             arrayLengthOffset, arrayPointerOffset, arrayValueSize;
@@ -8159,7 +8159,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const address = compileIdentityArrayStorage(
             operand, typeFacts(type));
         emit(&opConstant, destOffset + arrayLengthOffset,
-            addConstant(cast(long) type.isTypeSArray.dim.toInteger),
+            addConstant(cast(long) type.isTypeSArray.dim.integerValue),
             size_t.sizeof);
         emit(&opCopy, destOffset + arrayPointerOffset, address,
             size_t.sizeof);
@@ -10245,7 +10245,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const length = compiler.reserveTemp(compiler.pointerFacts);
             compiler.emit(&opConstant, length,
                 compiler.addConstant(cast(long) expression.e1.type
-                    .baseType.isTypeSArray.dim.toInteger),
+                    .baseType.isTypeSArray.dim.integerValue),
                 size_t.sizeof);
             return length;
         }

@@ -396,7 +396,7 @@ private void classify(
     ref bool memory,
 ) {
     import dmd.astenums: TY;
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.typesem: alignsize, isIntegral, nextOf, size;
     import snakebite.frontend.typefacts: baseType;
 
@@ -463,7 +463,7 @@ private void classify(
     case Tsarray: {
         auto array = type.isTypeSArray;
         assert(array !is null);
-        const count = array.dim.toInteger;
+        const count = array.dim.integerValue;
         // dmd's `toArgTypes_sysv_x64` and ldc both make an aggregate that
         // holds a zero-length array MEMORY: it is an aggregate with no
         // fields.

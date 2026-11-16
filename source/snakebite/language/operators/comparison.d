@@ -134,7 +134,8 @@ package(snakebite) IdentityPlan identityPlan(
     imported!"dmd.expression".IdentityExp expression,
 ) {
     import dmd.astenums: Tclass, Tfloat80, Tnull, Tpointer, Tsarray;
-    import dmd.expressionsem: isLvalue, toInteger;
+    import dmd.expressionsem: isLvalue;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.sideeffect: isTrivialExp;
     import dmd.target: target;
     import dmd.typesem: isFloating, size;
@@ -147,7 +148,7 @@ package(snakebite) IdentityPlan identityPlan(
     if (type.ty == Tsarray) {
         auto array = type.isTypeSArray;
         return IdentityPlan(2 * size_t.sizeof, true,
-            cast(size_t) array.dim.toInteger, false,
+            cast(size_t) array.dim.integerValue, false,
             !isLvalue(expression.e1), !isLvalue(expression.e2));
     }
 

@@ -149,7 +149,7 @@ private InterpretResult interpret(
 // built up at compile time (as `std.conv.text` does) is an `ArrayLiteralExp`
 // of character elements.
 private string stringValue(imported!"dmd.expression".Expression expression) {
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import std.conv: text;
 
     if (auto literal = expression.isStringExp)
@@ -161,7 +161,7 @@ private string stringValue(imported!"dmd.expression".Expression expression) {
     if (auto array = expression.isArrayLiteralExp) {
         string result;
         foreach (element; *array.elements)
-            result ~= cast(char) element.toInteger;
+            result ~= cast(char) element.integerValue;
         return result;
     }
 

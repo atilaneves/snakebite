@@ -522,7 +522,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import dmd.arraytypes: Expressions;
     import dmd.declaration: Declaration, VarDeclaration;
     import dmd.expression;
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.func: FuncDeclaration;
     import dmd.identifier: Identifier;
     import dmd.init: ExpInitializer;
@@ -4472,7 +4472,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         public size_t storageStaticIndexLength(IndexExp expression) {
             return cast(size_t) expression.e1.type.baseType.isTypeSArray
-                .dim.toInteger;
+                .dim.integerValue;
         }
 
         public void* storageIndexValue(
@@ -5288,7 +5288,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // `storage`, with its length in its type; a dynamic one is its
     // `{length, ptr}` value.
     private ArrayValue arrayOperand(Expression expression, ubyte* storage) {
-        import dmd.expressionsem: toInteger;
+        import snakebite.frontend.typefacts: integerValue;
 
         auto type = expression.type.baseType;
         if (type.ty == Tarray)
@@ -5296,7 +5296,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         evaluate(expression, type, factsOf(type), storage);
         return ArrayValue(
-            cast(size_t) type.isTypeSArray.dim.toInteger, storage);
+            cast(size_t) type.isTypeSArray.dim.integerValue, storage);
     }
 
     private bool equalComplex(EqualExp expression, in TypeFacts facts) {

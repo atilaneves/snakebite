@@ -118,7 +118,7 @@ public struct NativeData {
 
     // The object is a datum of the blocks of the D module of its class.
     private Placed classValue(ClassReferenceExp value) {
-        import dmd.expressionsem: toInteger;
+        import snakebite.frontend.typefacts: integerValue;
         import snakebite.frontend.compiler: withCompilerLock;
         version(unittest) import snakebite.host.sharedtable: assertCacheFillAllowed;
 
@@ -154,7 +154,7 @@ public struct NativeData {
                     if (field.isBitFieldDeclaration !is null) {
                         const access = bitfieldAccess(field);
                         access.store(cast(ubyte*) address + access.offset,
-                            element.toInteger);
+                            element.integerValue);
                     } else
                         write(field.type, typeFacts(field.type), element,
                             cast(ubyte*) address + field.offset);
@@ -901,7 +901,8 @@ private void storeValue(
     import core.stdc.string: memcpy, memset;
     import dmd.astenums: TY, Tarray, Tdelegate, Tpointer, Tsarray, Tvector;
     import dmd.mtype: Type;
-    import dmd.expressionsem: toComplex, toImaginary, toInteger, toReal;
+    import dmd.expressionsem: toImaginary;
+    import snakebite.frontend.typefacts: complexValue, integerValue, realValue;
     import dmd.typesem: mutableOf, nextOf, size;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.compiler: newInFrontend;
@@ -922,7 +923,7 @@ private void storeValue(
             return;
         }
 
-        checkedStoreIntegral(place, value.toInteger, facts.size);
+        checkedStoreIntegral(place, value.integerValue, facts.size);
         return;
     }
 
@@ -931,7 +932,7 @@ private void storeValue(
     // DMD represents an integer-to-pointer cast as an integer literal. Its
     // low pointer-width bits are the pointer value in the native layout.
     if (type.ty == Tpointer && value.isIntegerExp) {
-        checkedStoreIntegral(place, cast(ulong) value.toInteger, facts.size);
+        checkedStoreIntegral(place, cast(ulong) value.integerValue, facts.size);
         return;
     }
 
@@ -963,7 +964,7 @@ private void storeValue(
             // dmd's default initializer of a `void[N]` is the `ubyte` one.
             auto storedElement = array.next.baseType.ty == TY.Tvoid
                 ? Type.tuns8 : array.next;
-            foreach (i; 0 .. cast(size_t) array.dim.toInteger)
+            foreach (i; 0 .. cast(size_t) array.dim.integerValue)
                 storeValue(storedElement, literal is null ? value : literal[i],
                     bytes + i * elementSize, symbolAddress, nativeData);
             return;
@@ -1070,7 +1071,7 @@ private void storeValue(
     if (type.isTypeStruct !is null && value.isIntegerExp) {
         // DMD encodes a zero-initialized struct as an IntegerExp. Resolve
         // that encoding here, not from the destination's byte count.
-        assert(value.toInteger == 0);
+        assert(value.integerValue == 0);
         memset(place, 0, facts.size);
         return;
     }
@@ -1086,7 +1087,7 @@ private void storeValue(
                 continue;
             if (field.isBitFieldDeclaration !is null) {
                 const access = bitfieldAccess(field);
-                access.store(bytes + access.offset, element.toInteger);
+                access.store(bytes + access.offset, element.integerValue);
             } else
                 storeValue(field.type, element, bytes + field.offset,
                     symbolAddress, nativeData);
@@ -1096,25 +1097,25 @@ private void storeValue(
 
     final switch (type.ty) with (TY) {
         case Tfloat32:
-            *cast(float*) place = cast(float) value.toReal;
+            *cast(float*) place = cast(float) value.realValue;
             return;
 
         case Tfloat64:
-            *cast(double*) place = cast(double) value.toReal;
+            *cast(double*) place = cast(double) value.realValue;
             return;
 
         case Tfloat80:
-            *cast(real*) place = value.toReal;
+            *cast(real*) place = value.realValue;
             return;
 
         // A complex value's native layout is its `{re, im}` pair, each
-        // exactly half of `facts.size` - `dmd.expressionsem.toComplex`
+        // exactly half of `facts.size` - `complexValue`
         // already answers `re`/`im` for an `IntegerExp`/`RealExp` (an
         // implicit real-to-complex promotion, `im` zero) as well as a
         // `ComplexExp` literal, so this one case covers every constant
         // source a `complex`-typed constant declaration can have.
         case Tcomplex32, Tcomplex64, Tcomplex80: {
-            const parts = value.toComplex;
+            const parts = value.complexValue;
             const half = facts.size / 2;
             if (half == float.sizeof) {
                 *cast(float*) bytes = cast(float) parts.re;

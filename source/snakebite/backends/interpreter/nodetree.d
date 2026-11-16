@@ -5857,7 +5857,7 @@ private bool returnsReference(CallExp call) {
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
     import dmd.astenums: TY;
     import snakebite.language.storage.resolver: readsIndexAfterBase;
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.typesem: nextOf;
     import snakebite.frontend.typefacts: baseType;
 
@@ -5890,7 +5890,7 @@ private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
             if (array is null)
                 return null;
             const length = cast(size_t) indexed.e1.type.baseType
-                .isTypeSArray.dim.toInteger;
+                .isTypeSArray.dim.integerValue;
             // An array that is read first has calls or effects, so its
             // address is a node.
             if (readsIndexAfterBase(indexed))
@@ -6869,7 +6869,7 @@ private Node buildComma(E)(
 
 private Node buildSliceOf(E)(E ev, SliceExp expression) {
     import dmd.astenums: TY;
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import dmd.typesem: nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.resolver: planSlice;
@@ -6930,7 +6930,7 @@ private Node buildSliceOf(E)(E ev, SliceExp expression) {
             auto base = buildAddress(ev, expression.e1);
             return base is null ? null : make!(SliceSource.staticArray)(
                 &ev.failTreeBounds, ev._treeRoot, expression, base, lower, upper, stride,
-                cast(size_t) sourceType.isTypeSArray.dim.toInteger, plan);
+                cast(size_t) sourceType.isTypeSArray.dim.integerValue, plan);
         }
         default:
             return null;
@@ -7856,7 +7856,7 @@ private Node buildEquality(bool negate, E)(E ev, EqualExp e) {
 // array is its address and its length.
 private Node buildArrayOperand(E)(E ev, Expression operand) {
     import dmd.astenums: TY;
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import snakebite.frontend.typefacts: baseType;
 
     auto type = operand.type.baseType;
@@ -7864,7 +7864,7 @@ private Node buildArrayOperand(E)(E ev, Expression operand) {
         return buildSlice(ev, operand);
     auto address = buildAddress(ev, operand);
     return address is null ? null : new StaticArrayToSlice(
-        address, cast(size_t) type.isTypeSArray.dim.toInteger);
+        address, cast(size_t) type.isTypeSArray.dim.integerValue);
 }
 
 private enum flippedOp(string op) = op == "<" ? ">" : op == ">" ? "<"
@@ -8394,11 +8394,11 @@ private Node buildAggregate(E)(E ev, Expression expression) {
 // `dsymbolsem.d` for a declaration with no initializer), as in
 // `s = 0, s.this(args)`.
 private Node buildAggregateFor(E)(E ev, Type target, Expression value) {
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
 
     const size = ev.factsOf(target).size;
     if (value.isIntegerExp !is null && !isAggregate(value.type)) {
-        assert(value.toInteger == 0, "dmd writes only an all-zero aggregate as an integer");
+        assert(value.integerValue == 0, "dmd writes only an all-zero aggregate as an integer");
         return new ZeroInto(size);
     }
     if (!isAggregate(value.type) || ev.factsOf(value.type).size != size)

@@ -49,7 +49,7 @@ package(snakebite) struct CaseTable {
 }
 
 package(snakebite) CaseTable caseTableOf(SwitchPlan plan) {
-    import dmd.expressionsem: toInteger;
+    import snakebite.frontend.typefacts: integerValue;
     import std.algorithm: sort;
     import std.range: zip;
 
@@ -59,7 +59,7 @@ package(snakebite) CaseTable caseTableOf(SwitchPlan plan) {
     foreach (i, case_; plan.cases) {
         assert(case_.exp.isIntegerExp !is null,
             "dmd makes the value of a case with no variable a constant");
-        table.values[i] = cast(long) case_.exp.toInteger;
+        table.values[i] = cast(long) case_.exp.integerValue;
         table.cases[i] = i;
     }
     zip(table.values, table.cases).sort!((a, b) => a[0] < b[0]);
