@@ -110,7 +110,7 @@ jobs:
         run: |
           ldc=$(realpath "$DC")
           sdk=$(dirname "$(dirname "$ldc")")
-          collector="$sdk/include/d/core/internal/gc/impl/conservative/gc.d"
+          collector="$sdk/import/core/internal/gc/impl/conservative/gc.d"
           test -f "$collector"
           echo "SNAKEBITE_ARRAY_CACHE_COLLECTOR_SOURCE=$collector" >> "$GITHUB_ENV"
           echo "LDC=$ldc" >> "$GITHUB_ENV"
