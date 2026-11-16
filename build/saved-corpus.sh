@@ -71,8 +71,8 @@ firstdiff() {
 # firsterror NAME: first line that looks like an error, else first stderr line.
 firsterror() {
     local l
-    l=$(grep -aiE -m1 'error|fail|cannot' "$1.err" "$1.out" | head -1 \
-        | sed 's/^[^:]*://' | cut -c1-200)
+    l=$(cat "$1.err" "$1.out" | grep -av '^Warning' \
+        | grep -aiE -m1 'error|failed|cannot be found' | cut -c1-200)
     [[ -n $l ]] || l=$(head -n1 "$1.err" | cut -c1-200)
     printf '%s' "$l"
 }
@@ -101,7 +101,11 @@ for project in "${projects[@]}"; do
     elif [[ $(<"$p/save.status") == 124 ]]; then
         result="timeout (save)"
     elif [[ $(<"$p/save.status") != "$(<"$p/ram.status")" || ! -s $p/file.sbc ]]; then
-        result="save failed (see $p/save.err)"
+        if [[ $(<"$p/ram.status") != 0 ]]; then
+            result="fails from RAM: exit $(<"$p/ram.status"), $(firsterror "$p/ram")"
+        else
+            result="save failed (see $p/save.err)"
+        fi
     else
         parts=()
         for mode in jit no-jit; do
