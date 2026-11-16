@@ -44,23 +44,30 @@ requirements in ADR-0005, ADR-0006, and ADR-0008 still apply.
 ### The build enforces the import boundary
 
 Only the package `snakebite.frontend` imports dmd modules. Other code takes
-dmd node types and enums from `snakebite.frontend.ast`. It calls each other
-dmd function through `inFrontend`, which takes the frontend lock, and names
-the function as a string: `inFrontend!"mutableOf"(type)`.
+dmd node types and enums from `snakebite.frontend.ast`. A dmd function that
+is not on the list of that module is called through `inFrontend`, which takes
+the frontend lock, and is named as a string: `inFrontend!"mutableOf"(type)`.
 
-The [boundary check][boundary] reads each own D file of a binary. A dmd
-import in a file outside `source/snakebite/frontend/` and the `dmd.iasm`
-shim fails the build. Each binary depends on the check, so `ninja bin/ut`
-fails, not only CI. Generated and vendored D code is not own code, and the
-check does not read it.
+The [boundary check][boundary] reads every own D file of the tree once for all
+binaries. A dmd import in a file outside `source/snakebite/frontend/` and the
+`dmd.iasm` shim fails the build. Each binary links the object of the check,
+so `ninja bin/ut` fails, not only CI. The check sees `import` and `imported!`
+with any string literal form, and ignores comments and strings. Code under
+`vendor/` is the only code that it skips by name. A file that it is given and
+does not know is an error, and so is a run that checks no file.
 
 The check does not catch:
 
+- the "not reviewed" block of `snakebite.frontend.ast`: about 50 dmd
+  functions and the globals `global`, `target`, `diagnostics` and `Id`, which
+  outside code can call or read directly, with no lock. Later steps of #972
+  review each name and remove it from the block;
 - a member that a node value or a listed type gives: a method, or a static
   such as `Module.amodules`;
 - a read of a node field that dmd still writes;
 - wrong code inside the frontend package;
-- an import that a string mixin makes.
+- an import that a string mixin builds, and one through an alias of
+  `imported` (`alias I = imported; I!"dmd.x"`).
 
 ## Considered options
 

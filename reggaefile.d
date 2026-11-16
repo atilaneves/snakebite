@@ -108,26 +108,29 @@ Target[] testFixtureLibraries() {
 }
 
 // The import boundary of the frontend (ADR 0015): an own D file outside
-// `source/snakebite/frontend/` that imports dmd fails the build. The check
-// makes an empty object that the binary links, so `ninja bin/ut` and
-// `ninja bin/sb` fail, not only CI. It first runs on a fixture project, in
-// which it must report the one file outside the frontend package that
-// imports dmd.
+// `source/snakebite/frontend/` that imports dmd fails the build. One check
+// covers the whole tree and makes an empty object that every binary links,
+// so `ninja bin/ut` and `ninja bin/sb` fail, not only CI, and the scan runs
+// once per edit instead of once per binary. It first runs on a fixture
+// project, in which it must report each `reported_*.d` file and no other.
 enum frontendBoundaryFixture = "build/frontend-boundary-fixture";
 
-Target frontendBoundaryObject(in string output, in string[] files) {
-    const fixtureFiles = [
-        frontendBoundaryFixture ~ "/source/snakebite/outside.d",
-        frontendBoundaryFixture ~ "/source/snakebite/frontend/inside.d",
-    ];
+Target frontendBoundaryObject() {
+    import std.file: dirEntries, SpanMode;
+    string[] ownFiles(in string directory) {
+        return dirEntries(directory, "*.d", SpanMode.depth)
+            .map!(entry => entry.name).array.sort.array;
+    }
+    const fixtureFiles = ownFiles(frontendBoundaryFixture);
+    string[] files;
+    foreach (directory; ["source", "tests", "bench", "validation", "acceptance"])
+        files ~= ownFiles(directory);
     const check = "python3 $project/build/frontend_boundary.py";
     return Target(
-        "$project/" ~ output ~ "_frontend_boundary.o",
-        check ~ " --root $project/" ~ frontendBoundaryFixture
-            ~ " --expect $project/" ~ fixtureFiles[0]
-            ~ " " ~ fixtureFiles.map!(path => "$project/" ~ path).join(" ")
+        "$project/build/frontend_boundary.o",
+        check ~ " --selftest $project/" ~ frontendBoundaryFixture
             ~ " && " ~ check ~ " $in && cc -x c -c /dev/null -o $out",
-        files.filter!(path => path.endsWith(".d")).map!(path => Target(path)).array,
+        files.map!(path => Target(path)).array,
         [Target("build/frontend_boundary.py")]
             ~ fixtureFiles.map!(path => Target(path)).array,
     );
@@ -438,8 +441,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
             .array ~ ["tests", "acceptance"];
     info.packages[0].targetPath = "bin";
     info.packages[0].targetFileName = objectSet;
-    auto boundary = frontendBoundaryObject(output, info.packages[0].files);
-    info.packages[0].files ~= "$project/" ~ output ~ "_frontend_boundary.o";
+    auto boundary = frontendBoundaryObject();
+    info.packages[0].files ~= "$project/build/frontend_boundary.o";
     // Links each hand-written `.S` object into this target - see
     // `assembledSources`. Reggae sweeps a dub package's own `.o` files
     // into the same link line as the D-compiled ones.

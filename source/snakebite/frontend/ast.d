@@ -12,9 +12,15 @@ The rule for a function on this list: the function, read to its leaves in the
 dmd source of the version that snakebite links (2.113.0), writes only its own
 stack, reads no global table, and reads only fields that dmd does not write
 after the parse that made the node returns. A function that is safe only for
-some arguments (`toBasetype`, `size`) is not on the list: the frontend package
-gives a function that is always safe (`snakebite.frontend.typefacts.baseType`,
-`representationSize`).
+some arguments (`toBasetype`) is not on the list: the frontend package gives a
+function that is always safe (`snakebite.frontend.typefacts.baseType`).
+
+The block marked "not reviewed" below does not follow this rule yet. It holds
+50 names (functions and the globals `global`, `target`, `diagnostics` and
+`Id`) that outside code called, or read, directly when the boundary was made,
+among them `size`. Each is to be shown safe or replaced by a function of the
+frontend package, and then removed from the block. Until then the build does
+not check a call of them with the lock.
 
 Not on the list, and not caught by the build: a member that a node value or a
 type on the list gives (a method, a static), and a read of a node field that

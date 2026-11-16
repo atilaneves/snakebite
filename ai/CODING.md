@@ -56,10 +56,14 @@
   backend package, modules can and should import each other, including
   package-private code.
 * Only the package `snakebite.frontend` may import dmd modules. Other
-  code takes dmd node types and enums from `snakebite.frontend.ast`, and
-  calls any other dmd function through `inFrontend`, which takes the
-  frontend lock. The build fails on a dmd import outside the package
-  (ADR 0015).
+  code takes dmd node types, enums and the functions that are on the list of
+  `snakebite.frontend.ast`. Call a dmd function that is not on the list
+  through `inFrontend`, which takes the frontend lock. The "not reviewed"
+  block of that module still lets outside code call about 50 dmd functions
+  and read the globals `global`, `target`, `diagnostics` and `Id` with no
+  lock: do not add to it, and do not rely on it being safe. The build fails
+  on a dmd import outside the package. It does not see a string-mixin import
+  or an alias of `imported` (ADR 0015).
 * In the bytecode backend, only `snakebite.backends.bytecode.compiler` may
   import frontend modules. The bytecode VM and all project modules that it
   imports must compile without DMD frontend import paths.
