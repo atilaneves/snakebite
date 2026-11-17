@@ -15,10 +15,9 @@ translate each address one by one.
 
 1. The header of the file holds a key of the executable that wrote it. The
    load refuses a file with another key.
-2. The refusal must not occur in normal use. The dependency file that `sb`
-   writes for each compile (the dmd option `-makedeps`) lists the path of
-   the `sb` executable. A new `sb` then makes the build tool compile again.
-   reggae also lists the compiler as an implicit dependency of each compile.
+2. The refusal must not occur in normal use. The `sb` executable is an
+   input of each compile statement in the `build.ninja` file that `sb`
+   writes (ADR-0021). A new `sb` then makes ninja compile again.
 
 ## Considered options
 
@@ -37,4 +36,4 @@ translate each address one by one.
 
 - A file from another build of `sb` is refused, and is never run wrongly.
 - The load needs no translation of addresses.
-- The build tool, not `sb`, renews a file after a new `sb`.
+- ninja renews a file after a new `sb`.

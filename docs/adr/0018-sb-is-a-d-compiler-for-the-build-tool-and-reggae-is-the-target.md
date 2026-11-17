@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0021
 ---
 
 # `sb` is a D compiler for the build tool; reggae is the target
