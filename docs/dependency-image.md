@@ -8,28 +8,31 @@ druntime. It supports the Linux DMD and LDC builds used by Snakebite.
 
 `prepareProject` prepares an image before `bin/sb` or `bin/bench` constructs a
 backend that calls native code. Runs with only CTFE or the native compiler skip
-this step. The frontend walks function bodies and collects dependency function
-template instances. Generated source takes their addresses, which retains the
-original D symbols in the image. There are no forwarding wrappers or changes to
-the calling convention. Overloaded templates are instantiated separately with
-`__traits(getOverloads)`.
+this step. The frontend walks function bodies and collects the dependency
+function template instances whose body no backend can compile or execute
+(ADR-0009, decision 1): a body with inline assembler, or one that calls an
+operation that only the code generator makes and that no wrapper of the
+backends takes. A backend executes every other instance, so the image does not
+hold it. Generated source takes the addresses of the collected instances,
+which retains the original D symbols in the image. There are no forwarding
+wrappers or changes to the calling convention. Overloaded templates are
+instantiated separately with `__traits(getOverloads)`.
 
 Root-defined templates stay in the guest. Instances that require private names,
 guest-local types, or a captured context cannot be compiled in the image and
 keep the normal backend fallback.
 
-An instance of a dependency template can have root types as arguments, because
-the image source cannot import a root module. Such an instance keeps its guest
-body, except when its own body has inline assembler: no backend runs that body
-(ADR-0012), so only the native instance can. The image then compiles it over
-stand-ins when it holds the root type only as a pointee, a class reference, or
-an enum value. A root struct, union, or class that is a pointee or a class
-reference becomes an aggregate with no fields, declared in the image source (a
-class has an empty body). A root enum becomes its base type. The registry
-returns the compiled instance under the mangled name of the guest's instance,
-so a call reaches native code that moves the same bits. The instance keeps its
-guest body when it uses a root struct or union by value. Nothing in the image
-describes the layout of a root type.
+An instance of a dependency template can have root types as arguments, which
+the image source cannot name, because it cannot import a root module. The image
+compiles such an instance over stand-ins when it holds the root type only as a
+pointee, a class reference, or an enum value, and when no other template
+argument names a root symbol. A root struct, union, or class that is a pointee
+or a class reference becomes an aggregate with no fields, declared in the image
+source (a class has an empty body). A root enum becomes its base type. The
+registry returns the compiled instance under the mangled name of the guest's
+instance, so a call reaches native code that moves the same bits. The instance
+keeps its guest body when it uses a root struct or union by value. Nothing in
+the image describes the layout of a root type.
 
 For dub projects, the same `dub describe` call supplies root sources and the
 full dependency description. Snakebite uses the host compiler with `dub build

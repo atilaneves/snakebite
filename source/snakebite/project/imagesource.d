@@ -224,10 +224,10 @@ private extern(C++) class Collector
         return eachTemplateArgumentSymbol(type, visited, &isRootSymbol);
     }
 
-    // A backend cannot run an instance whose own body has inline assembler
-    // (docs/adr/0012), so it needs the native one even when a template
-    // argument is a root type, which the image source cannot name. For such
-    // an instance the image compiles the template over stand-ins whenever it
+    // The image holds only instances that no backend can execute, so such an
+    // instance needs the native one even when a template argument is a root
+    // type, which the image source cannot name. For such an instance the
+    // image compiles the template over stand-ins whenever it
     // handles a root type only as a pointer, a class reference or an enum
     // value: an opaque aggregate for a pointee or a class, and the base type
     // for an enum. Any other instance keeps its guest body: a template
@@ -239,8 +239,6 @@ private extern(C++) class Collector
         import snakebite.frontend.compiler: inFrontend;
         import snakebite.frontend.dmd.mangle: completeFunctionType;
 
-        if (!function_.hasInlineAsm)
-            return false;
         completeFunctionType(function_);
         auto instance = function_.parent.isTemplateInstance;
         auto original = function_.type.isTypeFunction;
@@ -259,6 +257,11 @@ private extern(C++) class Collector
                     if (standIn is null)
                         return false;
                     (*instance.tiargs)[i] = standIn;
+                } else {
+                    // A symbol argument has no stand-in.
+                    bool[Type] visited;
+                    if (eachTemplateArgument(argument, visited, &isRootSymbol))
+                        return false;
                 }
             }
             spelling = sourceSpelling(instance.toPrettyChars(true).fromStringz);
@@ -504,12 +507,17 @@ private extern(C++) class Collector
         _current = function_;
         scope(exit) _current = previous;
         if (auto instance = function_.parent.isTemplateInstance) {
+            import snakebite.frontend.dmd.functions: backendExecutes;
+
+            // A backend executes every other instance (docs/adr/0009); the
+            // walk of the body comes after the cheap tests.
             if (instance.tempdecl !is null
                     && !_program.isRootOwned(instance.tempdecl)
                     && !isImportCBuiltins(instance.tempdecl.getModule)
                     && !function_.needThis && !function_.isNested
                     && !hasFunctionLocalType(instance)
-                    && isNamedByInstance(function_, instance)) {
+                    && isNamedByInstance(function_, instance)
+                    && !backendExecutes(function_)) {
                 const name = instance.tempdecl.getModule.toPrettyChars.fromStringz.idup;
                 _imports[name] = true;
                 import snakebite.frontend.ast: Type;

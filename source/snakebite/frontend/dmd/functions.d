@@ -160,6 +160,33 @@ public FunctionContext contextOf(
     return result;
 }
 
+// Whether a backend can compile and execute the body of `function_`, nested
+// functions and function literals in it included (ADR-0009, decision 1). The
+// call selection, the call plans and the dependency image source all ask this
+// one question, here, and the walk of the body runs once for a function and
+// thread. A walk inside the frontend answers without keeping the result, as
+// `moduleOf` does.
+public bool backendExecutes(
+    imported!"dmd.func".FuncDeclaration function_,
+) {
+    import snakebite.frontend.lock: withCompilerQuery;
+    import snakebite.language.call.selection: bodyIsExecutedByBackend;
+    import snakebite.memory.gc: insideFrontend;
+
+    if (insideFrontend)
+        return bodyIsExecutedByBackend(function_);
+
+    if (auto found = function_ in metadata.executed)
+        return *found;
+
+    bool result;
+    withCompilerQuery({
+        result = bodyIsExecutedByBackend(function_);
+        metadata.executed[function_] = result;
+    });
+    return result;
+}
+
 // DMD temporarily reparents packages during semantic work. A snapshot taken
 // under the query lock sees the settled owner. Each thread keeps that value
 // for the declaration's lifetime, as call decisions already do, so unrelated
@@ -169,6 +196,7 @@ private struct ThreadMetadata {
     imported!"dmd.dmodule".Module[imported!"dmd.dsymbol".Dsymbol] modules;
     FunctionContext[imported!"dmd.func".FuncDeclaration] contexts;
     const(char)*[imported!"dmd.dsymbol".Dsymbol] prettyNames;
+    bool[imported!"dmd.func".FuncDeclaration] executed;
 }
 
 // Ordinary module storage is TLS in D; the maps need no shared lock.

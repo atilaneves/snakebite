@@ -5763,6 +5763,125 @@ IMAGE_SHAPES: dict[str, ImageShape] = {
             return atomicLoad(color) == Color.green ? 1 : 0;
         }
         """, 1, NATIVE_AND_FILE_BACKENDS),
+    # A result check. On an LDC host the body of `loadUnaligned` calls LLVM
+    # inline IR; the result is the same whichever copy of it runs. That the
+    # image holds it is checked by
+    # `test_an_instance_with_inline_ir_needs_an_image`.
+    "unaligned_vector_load": snippet_shape("""
+        import core.simd: float4, loadUnaligned;
+        int answer() {
+            float[5] values = [0, 1, 2, 3, 4];
+            const vector = loadUnaligned(cast(const(float4)*) &values[1]);
+            return cast(int) (vector[0] + vector[1] + vector[2] + vector[3]);
+        }
+        """, 10, NATIVE_AND_FILE_BACKENDS),
+    # A result check: `total!float` calls `loadUnaligned`, and the result is
+    # the same whichever copy of `total!float` runs.
+    "guest_instance_calls_an_image_instance": ImageShape(
+        {
+            "deps/vectors.d": """
+                module vectors;
+                import core.simd: float4, loadUnaligned;
+                int total(T)(const(T)[] values) {
+                    const vector = loadUnaligned(cast(const(float4)*) values.ptr);
+                    return cast(int) (vector[0] + vector[1] + vector[2] + vector[3]);
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import vectors;
+                int main() {
+                    float[4] values = [1, 2, 3, 4];
+                    return total(values[]) == 10 ? 0 : 1;
+                }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
+    # `first!(const(Pair)*)` has inline assembler and a root type as a
+    # pointee: the image compiles it over a stand-in for `Pair`, and the call
+    # is native.
+    "inline_asm_instance_with_a_root_pointee": ImageShape(
+        {
+            "deps/peek.d": """
+                module peek;
+                int first(T)(T value) {
+                    asm { nop; }
+                    return *cast(const(int)*) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import peek;
+                struct Pair { int first, second; }
+                int main() {
+                    const pair = Pair(42, 7);
+                    return first(&pair) == 42 ? 0 : 1;
+                }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
+    # A nested function has no native copy of its own, so the instance that holds it
+    # is native when the nested function has inline assembler.
+    "inline_asm_in_a_nested_function": ImageShape(
+        {
+            "deps/nested.d": """
+                module nested;
+                int first(T)(T value) {
+                    int inner() { asm { nop; } return 42; }
+                    return inner() + cast(int) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import nested;
+                int main() { return first(0) == 42 ? 0 : 1; }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
+    # The same for a nested function that is `static`.
+    "inline_asm_in_a_static_nested_function": ImageShape(
+        {
+            "deps/nested.d": """
+                module nested;
+                int first(T)(T value) {
+                    static int inner() { asm { nop; } return 42; }
+                    return inner() + cast(int) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import nested;
+                int main() { return first(0) == 42 ? 0 : 1; }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
+    # The same for a function literal.
+    "inline_asm_in_a_function_literal": ImageShape(
+        {
+            "deps/nested.d": """
+                module nested;
+                int first(T)(T value) {
+                    auto inner = () { asm { nop; } return 42; };
+                    return inner() + cast(int) value;
+                }
+                """,
+            "app/root.d": """
+                module root;
+                import nested;
+                int main() { return first(0) == 42 ? 0 : 1; }
+                """,
+        },
+        backends=NATIVE_AND_FILE_BACKENDS,
+        imports=True,
+    ),
     # An instance without inline assembler keeps its guest body: the template
     # decides from the enum at compile time, which its base type would change.
     "root_enum_text": snippet_shape("""
@@ -5880,12 +5999,14 @@ def run_with_stubs(
     )
 
 
+# A backend executes an instance of a dependency template unless its body
+# has inline assembler, so only such an instance is in the image.
 def write_answer_project(directory: Path, value: int = 7) -> None:
     write(
         directory / "deps" / "answers.d",
         f"""
         module answers;
-        int answer(T)() {{ return {value}; }}
+        int answer(T)() {{ asm {{ nop; }} return {value}; }}
         """,
     )
     write(
@@ -5939,6 +6060,67 @@ def test_unchanged_project_builds_its_image_once(
         repeated = run_with_stubs(tmp_path, backend, *arguments)
         assert repeated.returncode == 7, output(repeated)
     assert image_builds(log) == 2
+
+
+# A backend executes an instance of a dependency template whose body it can
+# execute, so the image holds none of them: a project with only such
+# instances needs no image and starts no image compiler, and an instance that
+# only the image can run makes one.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_only_an_instance_that_no_backend_executes_needs_an_image(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "deps" / "ordinary.d",
+        """
+        module ordinary;
+        int answer(T)() { return 7; }
+        """,
+    )
+    write(
+        tmp_path / "app" / "root.d",
+        """
+        module root;
+        import ordinary;
+        int main() { return answer!int(); }
+        """,
+    )
+    log = recording_compiler(tmp_path)
+
+    ordinary = run_with_stubs(tmp_path, backend)
+    assert ordinary.returncode == 7, output(ordinary)
+    assert image_builds(log) == 0
+
+    write_answer_project(tmp_path)
+    assembler = run_with_stubs(tmp_path, backend)
+    assert assembler.returncode == 7, output(assembler)
+    assert image_builds(log) == 1
+
+
+# `bin/sb` is built with LDC, so the body of `loadUnaligned` calls LLVM inline
+# IR, which no backend executes: the instance that a project calls is in an
+# image, which a project with no such instance does not need.
+@pytest.mark.parametrize("backend", FILE_BACKENDS)
+def test_an_instance_with_inline_ir_needs_an_image(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "root.d",
+        """
+        module root;
+        import core.simd: float4, loadUnaligned;
+        int main() {
+            float[5] values = [0, 1, 2, 3, 4];
+            const vector = loadUnaligned(cast(const(float4)*) &values[1]);
+            return cast(int) (vector[0] + vector[1] + vector[2] + vector[3]);
+        }
+        """,
+    )
+    log = recording_compiler(tmp_path)
+
+    result = run_with_stubs(tmp_path, backend)
+    assert result.returncode == 10, output(result)
+    assert image_builds(log) == 1
 
 
 # An edit to a dependency is in the next start's result, and builds the
@@ -6011,7 +6193,7 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
         "deps/missing.d": """
             module missing;
             extern(C) int image_missing_dependency();
-            int answer(T)() { return image_missing_dependency(); }
+            int answer(T)() { asm { nop; } return image_missing_dependency(); }
             """,
         "app/root.d": """
             module root;
@@ -6032,7 +6214,7 @@ def test_unresolved_dependency_symbol_fails_the_image_link(
         tmp_path / "deps" / "missing.d",
         """
         module missing;
-        int answer(T)() { return 5; }
+        int answer(T)() { asm { nop; } return 5; }
         """,
     )
     builds = image_builds(log)

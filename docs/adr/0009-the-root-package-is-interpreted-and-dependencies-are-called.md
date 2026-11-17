@@ -17,7 +17,19 @@ modules.
 1. Every module of the root package is interpreted. This includes
    every template instantiation that would land in the root object
    file in a real build. Phobos and druntime templates count too,
-   when the root package instantiates them.
+   when the root package instantiates them. The exception is an
+   instance of a dependency template whose body no backend can
+   compile or execute. Today that is a body with inline assembler
+   (ADR-0012), or a body that calls an operation that only the code
+   generator makes and that no wrapper of the backends takes: an LLVM
+   intrinsic outside the table of the bytecode VM, LLVM inline IR,
+   LDC's inline assembler, or a dmd intrinsic with no wrapper. Such an
+   instance is compiled natively into the dependency image (ADR-0007)
+   and called across the barrier. Each function is judged on its own
+   body, and its body includes the nested functions and function
+   literals in it: they exist only as part of it, and no native copy
+   of one exists. An instance that calls such an instance is
+   interpreted, and its call is a native call.
 2. Every function from a dependency module is called across the
    barrier. The call resolves through the dependency image
    (ADR-0007) or through the host.
@@ -41,3 +53,9 @@ step is the reason this project exists.
 The root-owned predicate is the one question both call dispatch and
 type metadata construction ask. A backend must not keep its own
 copy of this predicate.
+
+The exception of decision 1 is also one predicate,
+`backendExecutes` in `source/snakebite/frontend/dmd/functions.d`,
+which keeps its answer for each function. The call selection, the
+call plans and the dependency image source ask it. A backend must
+not keep its own copy of it either.

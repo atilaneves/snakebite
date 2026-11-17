@@ -63,7 +63,7 @@ public import dmd.expression: AddAssignExp, AddExp, AddrExp, AndAssignExp,
     ThrownExceptionExp, TraitsExp, TupleExp, TypeExp, TypeidExp, UAddExp,
     UnaExp, UshrAssignExp, UshrExp, VarExp, VectorArrayExp, VectorExp,
     VoidInitExp, XorAssignExp, XorExp;
-public import dmd.func: FuncDeclaration;
+public import dmd.func: FuncDeclaration, FuncLiteralDeclaration;
 public import dmd.identifier: Identifier;
 public import dmd.init: ExpInitializer;
 public import dmd.location: Loc;
