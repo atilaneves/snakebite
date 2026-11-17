@@ -6,7 +6,7 @@ import reggae.rules.dub: CompilationMode;
 import reggae.rules.dub.runtime: dubBuild;
 import reggae.types: CompilerFlags;
 import std.algorithm: canFind, endsWith, filter, map, sort, startsWith;
-import std.array: array;
+import std.array: array, join;
 import std.process: environment, executeShell, escapeShellCommand;
 import std.exception: enforce;
 import std.path: baseName, buildPath, dirName, stripExtension;
@@ -105,6 +105,35 @@ Target[] testFixtureLibraries() {
             Target("tests/fixtures/native/cpp_image.cpp"),
         ),
     ];
+}
+
+// The import boundary of the frontend (ADR 0015): an own D file outside
+// `source/snakebite/frontend/` that imports dmd fails the build. One check
+// covers the whole tree and makes an empty object that every binary links,
+// so `ninja bin/ut` and `ninja bin/sb` fail, not only CI, and the scan runs
+// once per edit instead of once per binary. It first runs on a fixture
+// project, in which it must report each `reported_*.d` file and no other.
+enum frontendBoundaryFixture = "build/frontend-boundary-fixture";
+
+Target frontendBoundaryObject() {
+    import std.file: dirEntries, SpanMode;
+    string[] ownFiles(in string directory) {
+        return dirEntries(directory, "*.d", SpanMode.depth)
+            .map!(entry => entry.name).array.sort.array;
+    }
+    const fixtureFiles = ownFiles(frontendBoundaryFixture);
+    string[] files;
+    foreach (directory; ["source", "tests", "bench", "validation", "acceptance"])
+        files ~= ownFiles(directory);
+    const check = "python3 $project/build/frontend_boundary.py";
+    return Target(
+        "$project/build/frontend_boundary.o",
+        check ~ " --selftest $project/" ~ frontendBoundaryFixture
+            ~ " && " ~ check ~ " $in && cc -x c -c /dev/null -o $out",
+        files.map!(path => Target(path)).array,
+        [Target("build/frontend_boundary.py")]
+            ~ fixtureFiles.map!(path => Target(path)).array,
+    );
 }
 
 // What the compiler of this target says about itself (`-v`): its import
@@ -412,6 +441,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
             .array ~ ["tests", "acceptance"];
     info.packages[0].targetPath = "bin";
     info.packages[0].targetFileName = objectSet;
+    auto boundary = frontendBoundaryObject();
+    info.packages[0].files ~= "$project/build/frontend_boundary.o";
     // Links each hand-written `.S` object into this target - see
     // `assembledSources`. Reggae sweeps a dub package's own `.o` files
     // into the same link line as the D-compiled ones.
@@ -453,8 +484,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     auto target = dubBuild(buildOptions, info, CompilationMode.options, flags);
     target.rawOutputs[0] = "bin/" ~ output;
     return testHost
-        ? [target, testFixtureObject(objectSet, exportMap,
-            unitHost ? testFixtureLibraries : [])] : [target];
+        ? [target, boundary, testFixtureObject(objectSet, exportMap,
+            unitHost ? testFixtureLibraries : [])] : [target, boundary];
 }
 
 Build reggaeBuild() {

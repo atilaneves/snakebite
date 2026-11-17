@@ -6,7 +6,7 @@ private:
 
 // Runs guest code with dmd's own compile-time function evaluator.
 public final class Ctfe: imported!"snakebite.backends.api".Backend {
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
     import snakebite.backends.api: DeclarationHandle;
     import snakebite.start.data: StartData;
     import snakebite.program: Program;
@@ -42,7 +42,7 @@ public final class Ctfe: imported!"snakebite.backends.api".Backend {
     }
 
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
-        imported!"dmd.declaration".VarDeclaration,
+        imported!"snakebite.frontend.ast".VarDeclaration,
     ) {
         return imported!"snakebite.native.staticstore".Placed.init;
     }
@@ -66,12 +66,11 @@ public final class Ctfe: imported!"snakebite.backends.api".Backend {
 // nothing. Integrals and floating point are laid out exactly as compiled D
 // would; anything else is not supported yet.
 private void writeResult(
-    imported!"dmd.func".FuncDeclaration function_,
-    imported!"dmd.expression".Expression value,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".Expression value,
     void* returnPlace,
 ) {
-    import dmd.astenums: Tvoid;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf, Tvoid;
     import snakebite.language.statics.data: storeValue;
 
     auto type = function_.type.nextOf;
@@ -86,7 +85,7 @@ private void writeResult(
 // failure. A guest failure is data, not a host exception, because `run` maps
 // it to an exit status while `eval` maps it to a thrown `Exception`.
 private struct InterpretResult {
-    import dmd.expression: Expression;
+    import snakebite.frontend.ast: Expression;
 
     Expression value;
     string error;
@@ -96,16 +95,12 @@ private struct InterpretResult {
 // expression, so the call is synthesised and typed by hand: a zero-argument
 // call's type is the function's return type.
 private InterpretResult interpret(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
-    import dmd.dinterpret: ctfeInterpret;
-    import dmd.expression: CallExp, VarExp;
-    import dmd.globals: global;
-    import dmd.location: Loc;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: CallExp, global, Loc, nextOf, VarExp;
     import snakebite.frontend.compiler:
         diagnosticMessage,
-        newInFrontend,
+        inFrontend,
         resetErrors,
         withCompilerLock;
 
@@ -131,12 +126,12 @@ private InterpretResult interpret(
     withCompilerLock({
         resetErrors;
 
-        auto callee = newInFrontend!VarExp(Loc.initial, function_);
+        auto callee = inFrontend!VarExp(Loc.initial, function_);
         callee.type = function_.type;
-        auto call = newInFrontend!(CallExp.create)(Loc.initial, callee);
+        auto call = inFrontend!(CallExp.create)(Loc.initial, callee);
         call.type = function_.type.nextOf;
 
-        result.value = newInFrontend!ctfeInterpret(call);
+        result.value = inFrontend!"ctfeInterpret"(call);
 
         if (result.value.isErrorExp !is null || global.errors != 0)
             result.error = diagnosticMessage;
@@ -148,7 +143,7 @@ private InterpretResult interpret(
 // A CTFE string is a `StringExp` when it came from a literal, but a string
 // built up at compile time (as `std.conv.text` does) is an `ArrayLiteralExp`
 // of character elements.
-private string stringValue(imported!"dmd.expression".Expression expression) {
+private string stringValue(imported!"snakebite.frontend.ast".Expression expression) {
     import snakebite.frontend.typefacts: integerValue;
     import std.conv: text;
 

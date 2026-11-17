@@ -4,8 +4,7 @@ module snakebite.language.control.condition;
 private:
 
 
-import dmd.expression: Expression;
-import dmd.tokens: EXP;
+import snakebite.frontend.ast: EXP, Expression;
 import snakebite.language.operators.comparison: identityPlan;
 import snakebite.frontend.typefacts: typeFacts;
 import snakebite.native.value: isIntegralSize;
@@ -26,7 +25,7 @@ package(snakebite) struct IfPlan {
     bool bodyHasLabels;
 }
 
-package(snakebite) IfPlan ifPlan(imported!"dmd.statement".IfStatement statement) {
+package(snakebite) IfPlan ifPlan(imported!"snakebite.frontend.ast".IfStatement statement) {
     if (!statement.isIfCtfeBlock)
         return IfPlan(IfPlan.Kind.condition, false);
 
@@ -53,9 +52,9 @@ package(snakebite) struct LogicalPlan {
 }
 
 package(snakebite) LogicalPlan logicalPlan(
-    imported!"dmd.expression".LogicalExp expression,
+    imported!"snakebite.frontend.ast".LogicalExp expression,
 ) {
-    import dmd.astenums: Tnoreturn, Tvoid;
+    import snakebite.frontend.ast: Tnoreturn, Tvoid;
     import snakebite.frontend.typefacts: baseType;
 
     const rightType = expression.e2.type.baseType.ty;
@@ -75,7 +74,7 @@ package(snakebite) LogicalPlan logicalPlan(
 package(snakebite) bool isPlainCondition(
     Expression expression, in Flag!"calls" calls = Yes.calls,
 ) {
-    import dmd.astenums: STC, Tpointer, VarArg;
+    import snakebite.frontend.ast: STC, Tpointer, VarArg;
     import snakebite.frontend.typefacts: baseType;
 
     const facts = typeFacts(expression.type);
@@ -131,7 +130,7 @@ package(snakebite) bool isPlainCondition(
 // A chain of fields, dereferences and `this` over variables: reading
 // it creates no temporary with a lifetime of its own.
 package(snakebite) bool isPlainPlace(Expression expression) {
-    import dmd.astenums: STC;
+    import snakebite.frontend.ast: STC;
 
     with (EXP) switch (expression.op) {
         case variable:
@@ -155,8 +154,8 @@ package(snakebite) bool isPlainPlace(Expression expression) {
     }
 }
 
-package(snakebite) bool isRealFloatType(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+package(snakebite) bool isRealFloatType(imported!"snakebite.frontend.ast".Type type) {
+    import snakebite.frontend.ast: Tfloat32, Tfloat64, Tfloat80;
     import snakebite.frontend.typefacts: baseType;
 
     const ty = type.baseType.ty;

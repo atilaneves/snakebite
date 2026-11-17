@@ -3,9 +3,22 @@ module snakebite.language.traversal.coverage;
 
 private:
 
-import dmd.expression;
-import dmd.statement;
-import std.meta: AliasSeq;
+import snakebite.frontend.ast: ArrayExp, AsmStatement, BinAssignExp,
+    CaseRangeStatement, CompoundLiteralExp, ConditionalStatement, CTFEExp,
+    DebugStatement, DefaultInitExp, DollarExp, DotExp, DotIdExp, DotTemplateExp,
+    DotTemplateInstanceExp, DsymbolExp, ErrorExp, ErrorStatement, Expression,
+    FileInitExp, ForeachRangeStatement, ForeachStatement, ForwardingStatement,
+    FuncInitExp, GccAsmStatement, GenericExp, IdentifierExp, ImportExp, InExp,
+    InlineAsmStatement, InterpExp, IntervalExp, IsExp, LineInitExp, MixinExp,
+    MixinStatement, ModuleInitExp, NewAnonClassExp, ObjcClassReferenceExp,
+    OverExp, PeelStatement, PowAssignExp, PowExp, PragmaStatement, PreExp,
+    PrettyFuncInitExp, RemoveExp, ScopeExp, Statement, StaticAssertStatement,
+    StaticForeachStatement, SymbolExp, SynchronizedStatement, TemplateExp,
+    ThrownExceptionExp, TraitsExp, TypeExp, UAddExp, VoidInitExp,
+    WhileStatement;
+import snakebite.frontend.nodeclasses: ExpressionClasses, StatementClasses;
+import std.meta: AliasSeq, Filter;
+import std.traits: isAbstractClass;
 
 
 // A frontend node class that no backend ever receives, and why. A class on
@@ -173,8 +186,7 @@ package(snakebite) template AssertEveryNodeHandled(Visitor) {
 }
 
 private string unnecessaryEntries(Visitor)() {
-    import dmd.expression: Expression;
-    import dmd.statement: Statement;
+    import snakebite.frontend.ast: Expression, Statement;
 
     string result;
     static foreach (Entry; UnreachableNodes) {
@@ -186,8 +198,7 @@ private string unnecessaryEntries(Visitor)() {
 }
 
 private string missingNodes(Visitor)() {
-    import dmd.expression: Expression;
-    import dmd.statement: Statement;
+    import snakebite.frontend.ast: Expression, Statement;
 
     string result;
     static foreach (Node; ConcreteNodes) {
@@ -198,24 +209,10 @@ private string missingNodes(Visitor)() {
     return result;
 }
 
-private alias ConcreteNodes = AliasSeq!(
-    concreteClasses!(imported!"dmd.expression", Expression),
-    concreteClasses!(imported!"dmd.statement", Statement),
-);
+private alias ConcreteNodes = Filter!(isConcreteClass, ExpressionClasses,
+    StatementClasses);
 
-private template concreteClasses(alias mod, Base) {
-    import std.traits: isAbstractClass;
-
-    alias concreteClasses = AliasSeq!();
-    static foreach (name; __traits(allMembers, mod)) {
-        static if (__traits(compiles, __traits(getMember, mod, name))
-                && is(__traits(getMember, mod, name) == class)
-                && is(__traits(getMember, mod, name) : Base)
-                && !isAbstractClass!(__traits(getMember, mod, name)))
-            concreteClasses = AliasSeq!(
-                concreteClasses, __traits(getMember, mod, name));
-    }
-}
+private enum isConcreteClass(Node) = !isAbstractClass!Node;
 
 private enum isUnreachable(Node) = isUnreachableIn!(Node, UnreachableNodes);
 
@@ -254,7 +251,7 @@ private template isHandled(Visitor, Node, Expression, Statement) {
 
 private template overriddenParameterNames(Visitor) {
     import std.traits: Parameters;
-    import dmd.visitor: FrontendVisitor = Visitor;
+    import snakebite.frontend.ast: FrontendVisitor = Visitor;
 
     enum overriddenParameterNames = () {
         string[] names;

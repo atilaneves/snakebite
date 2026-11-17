@@ -10,9 +10,7 @@ private:
 // these.
 public struct Program {
     import snakebite.image.dependency: DependencyImage, TestHooks;
-    import dmd.dmodule: Module;
-    import dmd.func: FuncDeclaration;
-    import dmd.dsymbol: Dsymbol;
+    import snakebite.frontend.ast: Dsymbol, FuncDeclaration, Module;
     import snakebite.failure.halt: HaltAction, HostActions;
     import snakebite.frontend.checks: Checks;
     import snakebite.frontend.dmd.linking: LinkMap;
@@ -114,8 +112,8 @@ public struct Program {
     }
 
     // As `linkedFunctionOf`, for an `extern` variable.
-    public imported!"dmd.declaration".VarDeclaration linkedVariableOf(
-        imported!"dmd.declaration".VarDeclaration variable,
+    public imported!"snakebite.frontend.ast".VarDeclaration linkedVariableOf(
+        imported!"snakebite.frontend.ast".VarDeclaration variable,
     ) const {
         return _links.definitionOf(variable);
     }
@@ -125,7 +123,7 @@ public struct Program {
     // none of them and no module constructor, and the program is only
     // that function.
     public bool hasCEntryPoint() const {
-        import dmd.astenums: LINK;
+        import snakebite.frontend.ast: LINK;
 
         return main.func !is null
             && (cast() main.func).resolvedLinkage == LINK.c;

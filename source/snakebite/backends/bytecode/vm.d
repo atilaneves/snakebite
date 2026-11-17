@@ -936,9 +936,9 @@ public struct Instruction {
     //    sees it - then rewrites each index to the address it names, once
     //    the function's instructions have stopped growing and so can no
     //    longer move.
-    // The file holds each of the three as the instruction index or the
-    // relocation that `rolesOf` says it is, or as it is. The split forms are
-    // the same bytes.
+    // The file holds each of the three as the instruction index that
+    // `Function.targetWords` names, as the relocation that `rolesOf` says it
+    // is, or as it is. The split forms are the same bytes.
     union {
         @plain package size_t destination;
         @plain package SplitOperand splitDestination;
@@ -999,6 +999,24 @@ package struct ExceptionHandler {
 }
 
 
+// A word of `Function.instructions` that holds the index of an instruction of
+// the same function (a branch target) until `bindInstructionReferences` makes
+// it the address of that instruction.
+package struct TargetWord {
+    @plain package uint instruction;
+    // The word of the instruction, with the handler as word 0.
+    @plain package uint word;
+}
+
+// An instruction that counts an event of its function for the JIT: a call, or
+// a branch whose target is at or before it. `prepareForExecution` puts the
+// counting handler in when the functions count their events.
+package struct CountingSite {
+    @plain package uint instruction;
+    @hostCode package Instruction.Handler counted;
+}
+
+
 public struct Function {
     @plain package Instruction[] instructions;
     @plain package long[] constants;
@@ -1035,6 +1053,11 @@ public struct Function {
     // the program records addresses (`Program.recordsAddresses`). A file holds the list; a load applies
     // it and drops it.
     @plain package Reloc[] relocs;
+    // The local records of the instructions: `recordLocalReferences` writes
+    // them when the instructions are final, and `Program.complete` reads
+    // them after a compile and after a load.
+    @plain package TargetWord[] targetWords;
+    @plain package CountingSite[] countingSites;
     // `size_t.max` unless this function lays out call windows. Otherwise
     // this frame slot holds the address where they start, and `windowBytes`
     // is how far they reach from it.
@@ -4812,12 +4835,12 @@ package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
 
 // Turns every index that a complete `Function` holds for one of its own
 // instructions into the instruction's address: the target of each branch
-// (`branchTargetField`) and the cleanup range of each call site, and checks
-// the four places of each exception handler. Returns null, or why an index is out of
-// range. A cleanup may branch to its exclusive end, which can be one past the
-// last instruction: the VM stops at that address before it reads an
-// instruction. The function must not move or grow its instructions after
-// this call.
+// (`Function.targetWords`) and the cleanup range of each call site, and
+// checks the four places of each exception handler and the place of each
+// counting site. Returns null, or why an index is out of range. A cleanup may
+// branch to its exclusive end, which can be one past the last instruction:
+// the VM stops at that address before it reads an instruction. The function
+// must not move or grow its instructions after this call.
 package string bindInstructionReferences(ref Function function_) {
     import std.conv: text;
 
@@ -4834,18 +4857,22 @@ package string bindInstructionReferences(ref Function function_) {
         return false;
     }
 
-    foreach (index, ref instruction; instructions) {
-        auto target = branchTargetField(instruction);
+    foreach (record; function_.targetWords) {
+        auto target = targetWordAt(instructions, record);
         if (target is null)
-            continue;
+            return "a branch target record names no instruction operand";
 
         if (!(*target < instructions.length
                 || (*target == instructions.length
-                    && isCleanupEndBranch(index, *target))))
+                    && isCleanupEndBranch(record.instruction, *target))))
             return text("branch target ", *target, " is out of range");
 
         *target = cast(size_t) addressOf(*target);
     }
+
+    foreach (site; function_.countingSites)
+        if (site.instruction >= instructions.length)
+            return "a counting record names no instruction";
 
     foreach (handler; function_.exceptionHandlers) {
         if (!(handler.handlerIndex < instructions.length
@@ -4873,6 +4900,112 @@ package ptrdiff_t hostCodeOffset(in size_t address) {
 
 package size_t hostCodeAt(in ptrdiff_t offset) {
     return cast(size_t) (cast(ptrdiff_t) &opReturnVoid + offset);
+}
+
+// The word of `instructions` that `record` names, or null when it names no
+// operand of an instruction.
+package size_t* targetWordAt(Instruction[] instructions, in TargetWord record) {
+    enum words = Instruction.sizeof / size_t.sizeof;
+    if (record.instruction >= instructions.length
+            || record.word == 0 || record.word >= words)
+        return null;
+    return cast(size_t*) &instructions[record.instruction] + record.word;
+}
+
+// Writes the local records of `function_` from its final instructions: a
+// `TargetWord` for each branch target (`branchTargetField`), and a
+// `CountingSite` for each instruction that counts for the JIT, with its
+// counting handler. The records do not depend on the JIT setting.
+package void recordLocalReferences(ref Function function_) {
+    auto instructions = function_.instructions;
+    if (instructions.length > uint.max)
+        internalFailure("a function has more instructions than a record can name");
+    TargetWord[] targets;
+    CountingSite[] counting;
+    foreach (index, ref instruction; instructions) {
+        auto target = branchTargetField(instruction);
+        if (target !is null)
+            targets ~= TargetWord(cast(uint) index,
+                cast(uint) (target - cast(size_t*) &instruction));
+        static if (jitSupported) {
+            const counts = target is null
+                ? isCountedCall(instruction.handler)
+                : *target <= index;
+            // A handler with no twin stays: that instruction does not count.
+            if (counts) {
+                if (const twin = instruction.handler in _countingTwins.countedOf)
+                    counting ~= CountingSite(cast(uint) index,
+                        cast(Instruction.Handler) *twin);
+            }
+        }
+    }
+    function_.targetWords = targets;
+    function_.countingSites = counting;
+}
+
+// The ways in which the local records of a complete `function_` disagree with
+// the role table and the table of counting twins: `targetWords` has to name
+// exactly the words that the role table says are branch targets, and
+// `countingSites` exactly the calls and backward branches that have a twin,
+// each with that twin. A function that runs as JIT code has no handlers to
+// compare, and passes.
+version (unittest)
+public string[] misplacedLocalRecords(const(Function)* function_) {
+    import std.conv: text;
+
+    // JIT code has replaced the handlers: the role table and the twin table
+    // no longer know them.
+    if (jitCompiled(function_))
+        return null;
+
+    string[] found;
+    auto instructions = cast(Instruction[]) function_.instructions;
+    TargetWord[] expectedTargets;
+    foreach (index, instruction; instructions) {
+        instruction.handler = withoutCount(instruction.handler);
+        auto target = branchTargetField(instruction);
+        if (target !is null)
+            expectedTargets ~= TargetWord(cast(uint) index,
+                cast(uint) (target - cast(size_t*) &instruction));
+    }
+    if (expectedTargets != function_.targetWords)
+        found ~= text("the target words are ", function_.targetWords,
+            ", the role table says ", expectedTargets);
+
+    static if (jitSupported) {
+        uint[] expectedSites;
+        foreach (index, instruction; instructions) {
+            const original = withoutCount(instruction.handler);
+            auto copy = instruction;
+            copy.handler = original;
+            auto target = branchTargetField(copy);
+            const counts = target is null
+                ? isCountedCall(original)
+                : *target <= cast(size_t) (instructions.ptr + index);
+            if (counts && original in _countingTwins.countedOf)
+                expectedSites ~= cast(uint) index;
+        }
+        uint[] sites;
+        foreach (site; function_.countingSites) {
+            sites ~= site.instruction;
+            if (site.instruction >= instructions.length) {
+                found ~= text("counting site ", site.instruction,
+                    " is outside the function");
+                continue;
+            }
+            const original = withoutCount(
+                instructions[site.instruction].handler);
+            const twin = original in _countingTwins.countedOf;
+            if (twin is null || *twin !is site.counted)
+                found ~= text("counting site ", site.instruction,
+                    " does not hold the twin of its handler");
+        }
+        if (sites != expectedSites)
+            found ~= text("the counting sites are ", sites,
+                ", the instructions that count are ", expectedSites);
+    } else if (function_.countingSites.length != 0)
+        found ~= "a build with no JIT has counting sites";
+    return found;
 }
 
 // The field of `instruction` that holds the instruction of the same function
@@ -5483,11 +5616,10 @@ static if (jitSupported) {
     // of the `Bytecode` backend that compiled it; backends in one process can
     // differ. The function compiler does not know it: a compiled function is
     // the same for each setting. When the functions count their
-    // events, this replaces the handler of each counted event by its counting
-    // twin: a call, or a branch whose target is at or before it. It always
-    // sets the heat, state, counts and `jit` fields of the function, and
-    // sets `jitName` only when the JIT and the perf map are on. It reads the
-    // finished instructions, so their branch targets must be addresses.
+    // events, this puts the counting handler of each `CountingSite` in. It
+    // always sets the heat, state, counts and `jit` fields of the function,
+    // and sets `jitName` only when the JIT and the perf map are on.
+    // `bindInstructionReferences` checks the counting sites first.
     // `name` is only evaluated when the perf map is on.
     package void prepareForExecution(Function* function_,
         in JitSetting setting,
@@ -5500,17 +5632,8 @@ static if (jitSupported) {
         function_.jit = jit;
         if (!setting.enabled)
             return;
-        foreach (ref instruction; function_.instructions) {
-            const target = branchTargetField(instruction);
-            const counts = target is null
-                ? isCountedCall(instruction.handler)
-                : *target <= cast(size_t) &instruction;
-            if (!counts)
-                continue;
-            // A handler with no twin stays: that instruction does not count.
-            if (const twin = instruction.handler in _countingTwins.countedOf)
-                instruction.handler = cast(Instruction.Handler) *twin;
-        }
+        foreach (site; function_.countingSites)
+            function_.instructions[site.instruction].handler = site.counted;
         if (setting.perfMap)
             function_.jitName = name;
     }

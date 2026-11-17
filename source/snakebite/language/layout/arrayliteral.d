@@ -10,7 +10,7 @@ import snakebite.native.value: TypeFacts;
 
 
 public struct ArrayLiteralPlan {
-    import dmd.mtype: Type;
+    import snakebite.frontend.ast: Type;
 
     public enum Storage { empty, temporary, lowering }
     public enum Result { slice, pointer, value }
@@ -24,12 +24,11 @@ public struct ArrayLiteralPlan {
 }
 
 public ArrayLiteralPlan planArrayLiteral(
-    imported!"dmd.expression".ArrayLiteralExp expression,
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".ArrayLiteralExp expression,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
-    import dmd.astenums: FileType, Tarray, Tpointer, Tsarray, Tvoid;
-    import dmd.mtype: Type;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: FileType, nextOf, Tarray, Tpointer, Tsarray,
+        Tvoid, Type;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.functions: moduleOf;
 

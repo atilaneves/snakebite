@@ -36,9 +36,8 @@ public void completeFunctionType(
 ) {
     import core.atomic: atomicLoad, MemoryOrder;
     import dmd.dsymbol: PASS;
-    import dmd.funcsem: functionSemantic;
     import snakebite.frontend.compiler:
-        diagnosticMessage, forceIfNeeded, newInFrontend;
+        diagnosticMessage, forceIfNeeded, inFrontend;
 
     // Acquire load - see `snakebite.frontend.compiler.forceIfNeeded`'s
     // own doc for why the unlocked check needs that much, not a plain
@@ -69,7 +68,7 @@ public void completeFunctionType(
             // `withCompilerLock`
             // resets it on exit, so the message carries dmd's real error
             // rather than a made-up one.
-            if (!newInFrontend!functionSemantic(function_)) {
+            if (!inFrontend!"functionSemantic"(function_)) {
                 import std.string: fromStringz;
 
                 internalFailure("dmd failed to complete " ~
@@ -111,8 +110,7 @@ public void completeMangleTargets(imported!"dmd.dsymbol".Dsymbol symbol) {
 public const(char)[] mangledNameOf(
     imported!"dmd.func".FuncDeclaration function_,
 ) {
-    import dmd.mangle: mangleExact;
-    import snakebite.frontend.compiler: newInFrontend, withCompilerQuery;
+    import snakebite.frontend.compiler: inFrontend, withCompilerQuery;
     import std.string: fromStringz;
 
     if (auto found = function_ in names.mangled)
@@ -121,7 +119,7 @@ public const(char)[] mangledNameOf(
     const(char)[] result;
     withCompilerQuery({
         completeMangleTargets(function_);
-        result = newInFrontend!mangleExact(function_).fromStringz;
+        result = inFrontend!"mangleExact"(function_).fromStringz;
         names.mangled[function_] = result;
     });
     return result;
@@ -150,8 +148,7 @@ private ref ThreadNames names() {
 
 public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
     import dmd.common.outbuffer: OutBuffer;
-    import dmd.mangle: mangleToBuffer;
-    import snakebite.frontend.compiler: newInFrontend;
+    import snakebite.frontend.compiler: inFrontend;
 
     // `symbol` is never itself a function (every caller branches to
     // `snakebite.ffi.plan.PlanCache.addressOf`/`mangledNameOf` for that -
@@ -161,6 +158,6 @@ public string nativeSymbolName(imported!"dmd.declaration".Declaration symbol) {
     // signature - see `completeMangleTargets`.
     completeMangleTargets(symbol);
     OutBuffer name;
-    newInFrontend!mangleToBuffer(symbol, name);
+    inFrontend!"mangleToBuffer"(symbol, name);
     return name[].idup;
 }

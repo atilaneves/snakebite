@@ -9,14 +9,10 @@ module snakebite.backends.interpreter.nodetree;
 
 private:
 
-import dmd.declaration: VarDeclaration;
-import dmd.expression: AssertExp, AssignExp, BinAssignExp, BinExp, CallExp,
-    CastExp, CatAssignExp, DeclarationExp, EqualExp, Expression, IdentityExp,
-    IndexExp, NewExp, PostExp, SliceExp, ThisExp;
-import dmd.func: FuncDeclaration;
-import dmd.location: Loc;
-import dmd.mtype: Type;
-import dmd.statement: Statement;
+import snakebite.frontend.ast: AssertExp, AssignExp, BinAssignExp, BinExp,
+    CallExp, CastExp, CatAssignExp, DeclarationExp, EqualExp, Expression,
+    FuncDeclaration, IdentityExp, IndexExp, Loc, NewExp, PostExp, SliceExp,
+    Statement, ThisExp, Type, VarDeclaration;
 import snakebite.language.storage.lifetime: InitStep;
 import snakebite.language.checks: BoundsCheck;
 import snakebite.language.control.transfer: ControlFlowState, labelTargetOf;
@@ -62,9 +58,9 @@ package struct TreeRoot {
     private Region* _region;
     // The label of each labelled loop, by the loop statement: the loop takes
     // a `continue` to its label.
-    private imported!"dmd.identifier".Identifier[const(void)*] _loopLabels;
+    private imported!"snakebite.frontend.ast".Identifier[const(void)*] _loopLabels;
 
-    package imported!"dmd.identifier".Identifier loopLabelOf(
+    package imported!"snakebite.frontend.ast".Identifier loopLabelOf(
         Statement loop,
     ) {
         auto found = cast(const(void)*) loop in _loopLabels;
@@ -111,8 +107,7 @@ package struct TreeRoot {
 
 // What the result word of a call of `function_` holds.
 package ResultWord resultWordFor(E)(E ev, FuncDeclaration function_) {
-    import dmd.astenums: TY;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
@@ -139,7 +134,7 @@ package TreeRoot* rootOf(E)(
     E ev, FuncDeclaration function_, Statement body_,
     const(imported!"snakebite.language.layout.frame".FrameLayout)* layout,
 ) {
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf;
 
     auto root = new TreeRoot;
     root._layout = layout;
@@ -378,7 +373,7 @@ private struct Position {
 }
 
 package bool isSlice(Type type) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
 
     return type !is null && type.baseType.ty == TY.Tarray;
@@ -387,7 +382,7 @@ package bool isSlice(Type type) {
 // A call of a `void` function gives no value, and a call of a `noreturn`
 // function never returns to give one: neither result has bytes.
 package bool hasNoResult(Type type) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
 
     if (type is null)
@@ -3044,7 +3039,7 @@ private final class ShortSequence(size_t length) : Node {
 private abstract class Branches : Node {
     protected Node _then;
     protected Node _else;
-    protected imported!"dmd.statement".IfStatement _source;
+    protected imported!"snakebite.frontend.ast".IfStatement _source;
     private Holders _holders;
 
     public override TreeFlow enterAt(ubyte* frame, const(void)* label) {
@@ -3088,7 +3083,7 @@ private struct NodeCondition {
 // A loop holds the statements of its body, not a node that runs them.
 private abstract class Loop : Node {
     protected Statements _body;
-    protected imported!"dmd.identifier".Identifier _label;
+    protected imported!"snakebite.frontend.ast".Identifier _label;
     protected Entrances _entrances;
 }
 
@@ -3141,7 +3136,7 @@ private final class ForLoop(C) : Loop {
 // loop ends, and the result is the flow that leaves it.
 private TreeFlow afterBody(
     in TreeFlow flow, ControlFlowState* controlFlow,
-    imported!"dmd.identifier".Identifier label, out bool exit,
+    imported!"snakebite.frontend.ast".Identifier label, out bool exit,
 ) {
     exit = false;
     if (flow == TreeFlow.break_) {
@@ -3164,7 +3159,7 @@ private TreeFlow afterBody(
 // loop.
 private final class Unrolled : Node {
     private ControlFlowState* _controlFlow;
-    private imported!"dmd.identifier".Identifier _label;
+    private imported!"snakebite.frontend.ast".Identifier _label;
     private Node[] _bodies;
     private Statement[] _sources;
     private Holders _holders;
@@ -3271,7 +3266,7 @@ private final class ReturnSlice : Node {
 // tree statements.
 private final class Catching(E) : Node {
     private E _ev;
-    private imported!"dmd.statement".TryCatchStatement _statement;
+    private imported!"snakebite.frontend.ast".TryCatchStatement _statement;
     private Node _body;
     private Node[] _handlers;
     // The address of each clause's variable, or null for a clause without
@@ -3279,7 +3274,7 @@ private final class Catching(E) : Node {
     private Node[] _variables;
     private Holders _holders;
 
-    public this(E ev, imported!"dmd.statement".TryCatchStatement statement) {
+    public this(E ev, imported!"snakebite.frontend.ast".TryCatchStatement statement) {
         _ev = ev; _statement = statement;
     }
     public override TreeFlow executeStmt(ubyte* frame) {
@@ -3287,7 +3282,7 @@ private final class Catching(E) : Node {
             (catch_, guest) => handle(frame, catch_, guest));
     }
     private TreeFlow handle(
-        ubyte* frame, imported!"dmd.statement".Catch catch_, Throwable guest,
+        ubyte* frame, imported!"snakebite.frontend.ast".Catch catch_, Throwable guest,
     ) {
         foreach (i, clause; *_statement.catches)
             if (clause is catch_) {
@@ -3315,13 +3310,13 @@ private final class Catching(E) : Node {
 
 private final class Finally(E) : Node {
     private E _ev;
-    private imported!"dmd.statement".TryFinallyStatement _statement;
+    private imported!"snakebite.frontend.ast".TryFinallyStatement _statement;
     private typeof(E.init.finallyPlanOf(null)) _plan;
     private TreeRoot* _root;
     private Node _body;
     private Node _finally;
 
-    public this(E ev, imported!"dmd.statement".TryFinallyStatement statement) {
+    public this(E ev, imported!"snakebite.frontend.ast".TryFinallyStatement statement) {
         _ev = ev; _statement = statement; _root = ev._treeRoot;
         _plan = ev.finallyPlanOf(statement);
     }
@@ -3490,10 +3485,10 @@ private final class GotoEntry : Node {
 // takes the transfer.
 private final class LabelledJump(bool continues) : Node {
     private ControlFlowState* _controlFlow;
-    private imported!"dmd.identifier".Identifier _label;
+    private imported!"snakebite.frontend.ast".Identifier _label;
     public this(
         ControlFlowState* controlFlow,
-        imported!"dmd.identifier".Identifier label,
+        imported!"snakebite.frontend.ast".Identifier label,
     ) {
         _controlFlow = controlFlow; _label = label;
     }
@@ -3510,11 +3505,11 @@ private final class LabelledJump(bool continues) : Node {
 // that the label names takes a `continue` to it (`TreeRoot.loopLabelOf`).
 private final class Labelled : Node {
     private ControlFlowState* _controlFlow;
-    private imported!"dmd.identifier".Identifier _label;
+    private imported!"snakebite.frontend.ast".Identifier _label;
     private Node _inner;
     public this(
         ControlFlowState* controlFlow,
-        imported!"dmd.identifier".Identifier label,
+        imported!"snakebite.frontend.ast".Identifier label,
     ) {
         _controlFlow = controlFlow; _label = label;
     }
@@ -3537,7 +3532,7 @@ private final class GenericStatement(E) : Node {
     private Statement _statement;
     private TreeRoot* _root;
     // The label of the statement when it is a labelled loop.
-    private imported!"dmd.identifier".Identifier _label;
+    private imported!"snakebite.frontend.ast".Identifier _label;
     public this(E ev, Statement statement) {
         _ev = ev; _statement = statement; _root = ev._treeRoot;
         _label = _root.loopLabelOf(statement);
@@ -3559,7 +3554,7 @@ private final class GenericStatement(E) : Node {
 private final class CtfeBlock(E) : Node {
     private Node _else;
     private GenericStatement!E _entered;
-    public this(E ev, imported!"dmd.statement".IfStatement statement) {
+    public this(E ev, imported!"snakebite.frontend.ast".IfStatement statement) {
         _entered = new GenericStatement!E(ev, statement);
     }
     public override TreeFlow executeStmt(ubyte* frame) {
@@ -3628,7 +3623,7 @@ private enum Argument : ubyte {
 // The arguments of a call site: the node of each one, how it is passed, and
 // the bytes that it fills in its parameter slot.
 private struct SiteArguments {
-    import dmd.astenums: StorageClass;
+    import snakebite.frontend.ast: StorageClass;
 
     public Node[] nodes;
     public Argument[] modes;
@@ -5055,10 +5050,7 @@ private final class Setter(E, T, bool receiverIsAddress) : Node {
 // it. A getter or a setter is only recognised when the accessor reads or
 // writes its field as the tree would, with no check of the receiver.
 private void examine(E)(E ev, TreeCallee* callee) {
-    import dmd.astenums: STC, TY;
-    import dmd.expression: ThisExp;
-    import dmd.tokens: EXP;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: EXP, nextOf, STC, TY;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.delegates: isDualContext;
 
@@ -5529,7 +5521,7 @@ private final class BuiltinOp : Node {
 // code generator inlines through its builtin wrapper. Null for any other
 // call.
 private Node buildIntrinsicCall(E)(E ev, CallExp call, FuncDeclaration function_) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -5596,7 +5588,7 @@ private struct Scalar {
 }
 
 private Scalar scalarOf(E)(E ev, Type type) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
 
     if (type is null)
@@ -5677,7 +5669,7 @@ private struct Slot {
 }
 
 private Slot slotOf(E)(E ev, VarDeclaration variable) {
-    import dmd.astenums: STC;
+    import snakebite.frontend.ast: STC;
     import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
     if (variable is null || isCtfeVariable(variable) || variable.isDataseg
@@ -5714,7 +5706,7 @@ private Node ownContext(E)(E ev) {
 
 // The address of a variable of an enclosing function, or null.
 private Node buildOuterAddress(E)(E ev, VarDeclaration variable) {
-    import dmd.astenums: STC;
+    import snakebite.frontend.ast: STC;
     import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
     if (variable is null || isCtfeVariable(variable)
@@ -5753,8 +5745,7 @@ private Node buildVariableAddress(E)(E ev, VarDeclaration variable) {
 }
 
 private Node buildAddress(E)(E ev, Expression expression) {
-    import dmd.astenums: TY;
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP, TY;
     import snakebite.frontend.typefacts: baseType;
 
     switch (expression.op) with (EXP) {
@@ -5855,10 +5846,9 @@ private bool returnsReference(CallExp call) {
 }
 
 private Node buildIndexAddress(E)(E ev, IndexExp indexed) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: nextOf, TY;
     import snakebite.language.storage.resolver: readsIndexAfterBase;
     import snakebite.frontend.typefacts: integerValue;
-    import dmd.typesem: nextOf;
     import snakebite.frontend.typefacts: baseType;
 
     auto element = ev.factsOf(indexed.e1.type.baseType.nextOf);
@@ -6056,7 +6046,6 @@ private bool bindsReference(E)(E ev, AssignExp e) {
 // A call node: its argument nodes by parameter kind. Null when the call is
 // outside what `Call` runs.
 private Node buildCall(E)(E ev, CallExp call) {
-    import dmd.astenums: TY;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.context.source: pairPlanOf;
@@ -6200,7 +6189,7 @@ private Node bound(N)(TreeCallee* callee, N node) {
 // reference, which the node yields as an address. A function with two
 // contexts reaches it through its pair.
 private Node buildThisValue(E)(E ev, VarDeclaration variable) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.context.chain: ClosurePlan;
     import snakebite.frontend.dmd.delegates: outerFunctionOf;
@@ -6283,15 +6272,14 @@ private Node buildContext(E)(
 // A call through a function pointer or a delegate: null when the value of
 // the callee is outside what the tree reads.
 private Node buildIndirectCall(E)(E ev, CallExp call) {
-    import dmd.astenums: TY;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.call.selection: isIndirectDelegateCall;
 
     auto callee = call.e1;
     const viaDelegate = isIndirectDelegateCall(callee.type);
     Node target;
-    imported!"dmd.mtype".TypeFunction type;
+    imported!"snakebite.frontend.ast".TypeFunction type;
     if (viaDelegate) {
         type = callee.type.baseType.nextOf.isTypeFunction;
         target = buildDelegate(ev, callee);
@@ -6353,11 +6341,11 @@ private Extras extrasFor(in TreeCallee* callee) {
 // that the callee takes them in (`TreeCallee.slots`), and how each one is
 // passed. False when one is outside the supported kinds.
 private bool buildArguments(E)(
-    E ev, imported!"dmd.mtype".TypeFunction type,
-    imported!"dmd.arraytypes".Expressions* arguments, out SiteArguments site,
+    E ev, imported!"snakebite.frontend.ast".TypeFunction type,
+    imported!"snakebite.frontend.ast".Expressions* arguments, out SiteArguments site,
     in Extras extras = Extras.packed,
 ) {
-    import dmd.astenums: VarArg;
+    import snakebite.frontend.ast: VarArg;
     import snakebite.ffi: CallAdapter;
     import snakebite.failure.report: internalFailure;
 
@@ -6427,10 +6415,10 @@ private bool buildArguments(E)(
 // `storageClass`, and how it is passed. False when it is outside the
 // supported kinds.
 private bool buildArgument(E)(
-    E ev, Type parameterType, imported!"dmd.astenums".StorageClass storageClass,
+    E ev, Type parameterType, imported!"snakebite.frontend.ast".StorageClass storageClass,
     Expression argument, out Node node, out Argument mode, out size_t size,
 ) {
-    import dmd.astenums: STC;
+    import snakebite.frontend.ast: STC;
 
     if ((storageClass & STC.lazy_) != 0)
         return false;
@@ -6479,7 +6467,7 @@ private bool buildArgument(E)(
 }
 
 package bool isDelegate(Type type) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
 
     return type !is null && type.baseType.ty == TY.Tdelegate;
@@ -6493,7 +6481,7 @@ package bool isPair(Type type) {
 // The node that yields the delegate `expression` as two words, or null when
 // the tree does not cover the expression.
 private Node buildDelegate(E)(E ev, Expression expression) {
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
 
     if (!isDelegate(expression.type))
         return null;
@@ -6671,7 +6659,7 @@ private Node buildAppend(E)(E ev, CatAssignExp append) {
 // The node that yields the dynamic array `expression`, or null when the
 // tree does not cover the expression.
 private Node buildSlice(E)(E ev, Expression expression) {
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
 
     if (!isSlice(expression.type))
         return null;
@@ -6765,8 +6753,7 @@ private bool isStoreTarget(Expression target) {
 private Node buildSliceAssignment(E)(
     E ev, AssignExp assignment, SliceExp target,
 ) {
-    import dmd.expression: MemorySet;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: MemorySet, nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.resolver: planSlice;
 
@@ -6859,7 +6846,7 @@ private Node buildPair(E)(E ev, Type target, Expression value) {
 
 // `first, second`: `second` is built by `buildSecond`.
 private Node buildComma(E)(
-    E ev, imported!"dmd.expression".CommaExp comma,
+    E ev, imported!"snakebite.frontend.ast".CommaExp comma,
     Node function(E, Expression) buildSecond,
 ) {
     auto first = buildEffect(ev, comma.e1);
@@ -6868,9 +6855,8 @@ private Node buildComma(E)(
 }
 
 private Node buildSliceOf(E)(E ev, SliceExp expression) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: nextOf, TY;
     import snakebite.frontend.typefacts: integerValue;
-    import dmd.typesem: nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.resolver: planSlice;
 
@@ -6981,7 +6967,7 @@ private Node buildZeroPair(E)(E ev, Expression operand) {
 // contexts, then its constructor call or the fields given in order. The
 // value of `new int(1)` fills the new storage as a field at offset 0 does.
 private Node buildNew(E)(E ev, NewExp expression) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.storage.lifetime: AggregateInitPlan, driveInit,
         NewPlan, planClassContext, planNew, planPositionalFields;
@@ -7196,8 +7182,7 @@ private Node buildThrow(E)(E ev, Expression operand) {
 
 // The effect of `expression`, whatever its type, or null.
 private Node buildEffect(E)(E ev, Expression expression) {
-    import dmd.astenums: TY;
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
     import snakebite.frontend.typefacts: baseType;
 
     if (auto declaration = expression.isDeclarationExp)
@@ -7258,7 +7243,7 @@ private Node buildAssertion(E)(E ev, AssertExp expression) {
 
 // The node that tests the truth of `expression`, as a condition does.
 private Node buildTruth(E)(E ev, Expression expression) {
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
     import snakebite.language.control.condition: isPlainCondition;
 
     if (expression.op == EXP.comma)
@@ -7281,7 +7266,7 @@ private Node buildTruth(E)(E ev, Expression expression) {
 private Node buildBranches(E)(
     E ev, Expression expression, in FullExpressionScope.Position position,
 ) {
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
 
     Node operand(Expression one, in FullExpressionScope.Position where) {
         Node build() {
@@ -7340,7 +7325,7 @@ private Node buildTruthAfterEnd(E)(
 
 // `&&` or `||` as its plan says (`logicalPlan`): a right operand with a
 // value is a test, and one without runs for its effect.
-private Node buildLogical(E)(E ev, imported!"dmd.expression".LogicalExp logical) {
+private Node buildLogical(E)(E ev, imported!"snakebite.frontend.ast".LogicalExp logical) {
     import snakebite.language.control.condition: LogicalPlan, logicalPlan;
 
     const plan = logicalPlan(logical);
@@ -7388,7 +7373,7 @@ private Node notOf(Node operand) {
 
 // The node that yields `expression`'s scalar value.
 private Node buildValue(E)(E ev, Expression expression) {
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
     import snakebite.language.storage.resolver: typeInfoAddressedBy;
     import snakebite.frontend.typefacts: isStaticStructAddress;
     import snakebite.native.value: checkedLoadIntegral;
@@ -7592,7 +7577,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             return location is null ? null : new AddressValue(location);
         }
         case typeid_: {
-            import dmd.dtemplate: isExpression, isType;
+            import snakebite.frontend.ast: isExpression, isType;
 
             if (auto object = isExpression(expression.isTypeidExp.obj))
                 return buildTypeidOf(ev, object, scalar);
@@ -7627,7 +7612,7 @@ private Node buildValue(E)(E ev, Expression expression) {
 
 // `test ? first : second`, with `buildBranch` building each branch and `Result` the node.
 private Node buildConditional(alias buildBranch, Result, E)(
-    E ev, imported!"dmd.expression".CondExp e,
+    E ev, imported!"snakebite.frontend.ast".CondExp e,
 ) {
     auto test = buildTruth(ev, e.econd);
     auto first = buildBranch(ev, e.e1);
@@ -7855,7 +7840,7 @@ private Node buildEquality(bool negate, E)(E ev, EqualExp e) {
 // An operand of an array comparison as a dynamic array value: a static
 // array is its address and its length.
 private Node buildArrayOperand(E)(E ev, Expression operand) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: integerValue;
     import snakebite.frontend.typefacts: baseType;
 
@@ -8258,7 +8243,7 @@ private Node initializationOf(E)(
 
 private Node buildInitializer(E)(
     E ev, VarDeclaration variable, DeclarationExp declaration,
-    imported!"dmd.init".ExpInitializer initializer,
+    imported!"snakebite.frontend.ast".ExpInitializer initializer,
 ) {
     import snakebite.frontend.typefacts:
         initializerRunsForEffect, initializerValueOf;
@@ -8289,7 +8274,7 @@ private Node buildInitializer(E)(
     if (!slot.ok && closed is null)
         return null;
     if (variableIsAggregate) {
-        import dmd.astenums: TY;
+        import snakebite.frontend.ast: TY;
         import snakebite.frontend.typefacts: baseType;
 
         // A copy with a postblit is `(variable = value).__postblit()`, which
@@ -8335,7 +8320,7 @@ private Node buildInitializer(E)(
 // A struct or a static array: a value of its own bytes, which is not a
 // register scalar or a slice.
 package bool isAggregate(Type type) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
 
     if (type is null)
@@ -8348,7 +8333,7 @@ package bool isAggregate(Type type) {
 // where `executeInto` says. Null when the tree does not cover the
 // expression.
 private Node buildAggregate(E)(E ev, Expression expression) {
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
 
     if (!isAggregate(expression.type))
         return null;
@@ -8423,7 +8408,7 @@ private Node buildAggregateStore(E)(E ev, AssignExp e) {
 
 // The effect of the struct or static array `expression`.
 private Node buildAggregateEffect(E)(E ev, Expression expression) {
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: EXP;
 
     switch (expression.op) with (EXP) {
         case call:
@@ -8443,7 +8428,7 @@ private Node buildAggregateEffect(E)(E ev, Expression expression) {
     }
 }
 
-private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteralExp literal) {
+private Node buildStructLiteral(E)(E ev, imported!"snakebite.frontend.ast".StructLiteralExp literal) {
     import snakebite.frontend.typefacts: isStoredLiteral;
 
     const facts = ev.factsOf(literal.type);
@@ -8471,7 +8456,7 @@ private Node buildStructLiteral(E)(E ev, imported!"dmd.expression".StructLiteral
 // literal is written where the caller wants the result, with no staging
 // area, because only a return operand or a field of one reaches here.
 private Node buildArrayLiteral(E)(
-    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+    E ev, imported!"snakebite.frontend.ast".ArrayLiteralExp literal,
 ) {
     import snakebite.language.layout.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
     import snakebite.frontend.typefacts: isStoredLiteral;
@@ -8501,7 +8486,7 @@ private Node buildArrayLiteral(E)(
 // there before the result names it, as an element can read the old value
 // of the destination.
 private Node buildArrayLiteralStorage(E)(
-    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+    E ev, imported!"snakebite.frontend.ast".ArrayLiteralExp literal,
     imported!"snakebite.language.layout.arrayliteral".ArrayLiteralPlan plan,
 ) {
     import snakebite.language.layout.arrayliteral: ArrayLiteralPlan;
@@ -8535,7 +8520,7 @@ private Node buildArrayLiteralStorage(E)(
 }
 
 private Node buildArrayLiteralSlice(E)(
-    E ev, imported!"dmd.expression".ArrayLiteralExp literal,
+    E ev, imported!"snakebite.frontend.ast".ArrayLiteralExp literal,
 ) {
     import snakebite.language.layout.arrayliteral: planArrayLiteral;
 
@@ -8626,8 +8611,7 @@ private Node buildReferenceBinding(E)(
 }
 
 private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
-    import dmd.astenums: STMT;
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: STMT;
     import snakebite.language.control.condition: IfPlan, ifPlan;
     import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
 
@@ -8710,7 +8694,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
         // dmd makes a destructor call that a scope ends a `DtorExp`
         // statement, which runs as the expression statement it is.
         case Exp, DtorExp: {
-            import dmd.statement: ExpStatement;
+            import snakebite.frontend.ast: ExpStatement;
 
             auto expression = (cast(ExpStatement) statement).exp;
             enum where = FullExpressionScope.Position.expressionStatement;
@@ -8888,7 +8872,7 @@ private Node buildStatement(E)(E ev, Statement statement, Node* slot) {
 // operand or a case value that the tree does not build, or a `case` inside
 // a statement of the body that the list cannot start at.
 private Node buildSwitch(E)(
-    E ev, imported!"dmd.statement".SwitchStatement statement,
+    E ev, imported!"snakebite.frontend.ast".SwitchStatement statement,
 ) {
     import snakebite.language.control.cases: SwitchPlan, caseTableOf, switchPlan;
 
@@ -9008,8 +8992,7 @@ private Statement[] statementsOf(Statement statement, out Labels labels) {
 private void appendStatements(
     Statement statement, ref Statement[] statements, ref Labels labels,
 ) {
-    import dmd.astenums: STMT;
-    import dmd.statement: CompoundStatement;
+    import snakebite.frontend.ast: CompoundStatement, STMT;
 
     if (statement is null)
         return;
@@ -9065,8 +9048,7 @@ private ListEntry entryOf(
 
 // Whether `label` is in `statement`.
 private bool holdsLabel(in Statement statement, const(void)* label) {
-    import dmd.visitor: StoppableVisitor;
-    import dmd.visitor.postorder: walkPostorder;
+    import snakebite.frontend.ast: StoppableVisitor, walkPostorder;
 
     extern(C++) static final class Finder : StoppableVisitor {
         alias visit = StoppableVisitor.visit;
@@ -9092,8 +9074,7 @@ private bool holdsLabel(in Statement statement, const(void)* label) {
 // into a `try` statement; one that is a whole `catch` handler stays, and
 // runs nothing.
 private bool runsNothing(Statement statement) {
-    import dmd.astenums: STMT;
-    import dmd.statement: ExpStatement;
+    import snakebite.frontend.ast: ExpStatement, STMT;
     import snakebite.language.layout.variables: forEachRuntimeVariable;
 
     switch (statement.stmt) with (STMT) {
@@ -9115,7 +9096,7 @@ private bool runsNothing(Statement statement) {
     }
 }
 
-private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement returned) {
+private Node buildReturn(E)(E ev, imported!"snakebite.frontend.ast".ReturnStatement returned) {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 
     Node generic() {
@@ -9142,9 +9123,8 @@ private Node buildReturn(E)(E ev, imported!"dmd.statement".ReturnStatement retur
 // The return statement of `returned.exp`, or null when the tree does not
 // cover it.
 private Node buildReturnOperand(E)(
-    E ev, imported!"dmd.statement".ReturnStatement returned,
+    E ev, imported!"snakebite.frontend.ast".ReturnStatement returned,
 ) {
-    import dmd.astenums: TY;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.functions: typeFunctionOf;
 

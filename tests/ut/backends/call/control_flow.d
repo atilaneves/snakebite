@@ -5,7 +5,7 @@ import ut.backends;
 import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet, withCompilerLock;
 import snakebite.frontend.dmd.functions: findFunction;
-import dmd.dmodule: Module;
+import snakebite.frontend.ast: Module;
 
 
 // Compiled D needs a callee to compile, not to run. A call that the program

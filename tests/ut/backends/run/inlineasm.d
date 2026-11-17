@@ -3,7 +3,7 @@ module ut.backends.run.inlineasm;
 
 import ut.backends;
 import snakebite.frontend.compiler:
-    FrontendFlags, newInFrontend, parseRootModules, parseSnippet;
+    FrontendFlags, inFrontend, parseRootModules, parseSnippet;
 import std.conv: text;
 import std.file: mkdirRecurse, rmdirRecurse, tempDir, write;
 import std.path: buildPath;
@@ -296,7 +296,6 @@ static foreach (backend; Matrix!()) {
 // This is still `parseSnippet` alone, so one test is enough.
 @("inlineasm.loadDiagnostic.projectImportFailsLoad")
 unittest {
-    import dmd.frontend: addImport;
 
     const moduleName = "inlineasm_project_package.imported";
     const directory = buildPath(
@@ -317,7 +316,7 @@ unittest {
     // list `rootImportPaths` below does not itself populate; add it
     // the same way `snakebite.repl.Repl.this()` does for a real
     // session.
-    newInFrontend!addImport(directory);
+    inFrontend!"addImport"(directory);
 
     parseSnippet(
         "import " ~ moduleName ~ ";",

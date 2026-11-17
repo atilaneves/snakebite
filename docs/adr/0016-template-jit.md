@@ -227,14 +227,14 @@ parent and child from writing code at the same offset in the inherited file.
 
 ### Independent of stored bytecode
 
-The JIT replaces handler words in the live instruction array, and the
-compiler does not know about it. The JIT changes no operand and no table
-entry of a function, so its relocation records stay true with the JIT on:
-`inspection.misplacedRelocs` reads only those words, and the relocation
-tests run with the JIT setting of the test run. No test scans the live
-instructions of a function for addresses that no record names. The compiler
-itself makes the same bytecode whether the JIT is on or off, except that the
-JIT adds counting twins when it is on.
+The JIT replaces handler words in the live instruction array. The JIT changes
+no operand and no table entry of a function, so its relocation records stay
+true with the JIT on: `inspection.misplacedRelocs` reads only those words, and
+the relocation tests run with the JIT setting of the test run. No test scans
+the live instructions of a function for addresses that no record names. The
+compiler makes the same bytecode whether the JIT is on or off: it writes the
+counting handlers into the `countingSites` records of each function with the
+JIT on or off, and the JIT puts them in when it is on.
 
 ## Platform limits
 

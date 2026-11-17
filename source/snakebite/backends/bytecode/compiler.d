@@ -10,7 +10,7 @@ import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 import snakebite.failure.report: internalFailure;
 
-import dmd.mtype: Type;
+import snakebite.frontend.ast: Type;
 import object: TypeInfo_Class;
 import snakebite.native.signature: Shape;
 import snakebite.native.staticstore: Placed;
@@ -54,7 +54,7 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 // distinctly from the other collectors: see `Collector` in `imagesource.d`.
 private extern(C++) final class EagerCompileCollector
         : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
     import snakebite.frontend.declarationcollector: DeclarationCollector;
     alias visit = DeclarationCollector.visit;
 
@@ -77,11 +77,8 @@ private extern(C++) final class EagerCompileCollector
 }
 
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
-    import dmd.dclass: ClassDeclaration;
-    import dmd.declaration: Declaration;
-    import dmd.dmodule: SourceModule = Module;
-    import dmd.func: FuncDeclaration;
-    import dmd.root.string: toDString;
+    import snakebite.frontend.ast: ClassDeclaration, Declaration,
+        FuncDeclaration, SourceModule = Module;
     import snakebite.program: SourceProgram = Program;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
@@ -276,7 +273,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
-        imported!"dmd.declaration".VarDeclaration variable,
+        imported!"snakebite.frontend.ast".VarDeclaration variable,
     ) {
         return _world.data.storageOf(variable);
     }
@@ -607,7 +604,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     private static bool hasTinyBody(FuncDeclaration function_) {
-        import dmd.statement: Statement;
+        import snakebite.frontend.ast: Statement;
 
         int budget = maxSpeculativeStatements;
         bool tiny(Statement statement) {
@@ -679,9 +676,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // lock. Completed bodies are published in `_complete`; every caller
     // can reuse them without waiting for unrelated frontend work.
     package const(Function)* compileFunction(FuncDeclaration function_) {
-        import dmd.astenums: STC, Tvoid;
-        import dmd.funcsem: needsClosure;
-        import dmd.typesem: nextOf;
+        import snakebite.frontend.ast: nextOf, Tvoid;
         import snakebite.language.layout.frame: FrameLayout;
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -852,29 +847,31 @@ package struct InlineBody {
 // ever handed back through `FrameLayout` itself.
 extern(C++) private final class FunctionCompiler: LoweringVisitor {
     import snakebite.ffi.call: CallAdapter;
-    import dmd.arraytypes: Expressions;
-    import dmd.declaration: VarDeclaration;
-    import dmd.identifier: Identifier;
-    import dmd.init: ExpInitializer;
-    import dmd.location: Loc;
-    import dmd.expression;
-    import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type, TypeFunction;
-    import dmd.statement:
-        BreakStatement, CaseStatement, CompoundStatement, ContinueStatement,
-        DefaultStatement, DoStatement, ExpStatement, ForStatement,
-        GotoCaseStatement, GotoDefaultStatement, GotoStatement, IfStatement,
-        ImportStatement, LabelStatement, ReturnStatement, ScopeStatement, Statement,
-        SwitchErrorStatement, SwitchStatement, ThrowStatement,
-        TryCatchStatement, ScopeGuardStatement, TryFinallyStatement,
-        UnrolledLoopStatement, WithStatement;
-    import dmd.tokens: EXP;
+    import snakebite.frontend.ast: AddExp, AddrExp, AndExp, ArrayLengthExp,
+        ArrayLiteralExp, AssertExp, AssignExp, AssocArrayLiteralExp,
+        BinAssignExp, BinExp, BlitExp, BreakStatement, CallExp, CaseStatement,
+        CastExp, CatAssignExp, CatDcharAssignExp, CatExp, ClassReferenceExp,
+        CmpExp, ComExp, CommaExp, ComplexExp, CompoundStatement, CondExp,
+        ConstructExp, ContinueStatement, DeclarationExp, DefaultStatement,
+        DelegateExp, DelegateFuncptrExp, DelegatePtrExp, DeleteExp, DivExp,
+        DoStatement, DotTypeExp, DotVarExp, EqualExp, EXP, Expression,
+        Expressions, ExpStatement, ForStatement, FuncDeclaration, FuncExp,
+        GotoCaseStatement, GotoDefaultStatement, GotoStatement, Identifier,
+        IdentityExp, IfStatement, ImportStatement, IndexExp, IntegerExp,
+        LabelStatement, Loc, LogicalExp, MemorySet, MinExp, ModExp, MulExp,
+        NegExp, NewExp, nextOf, NotExp, NullExp, OrExp, PostExp, PtrExp,
+        RealExp, ReturnStatement, ScopeGuardStatement, ScopeStatement, ShlExp,
+        ShrExp, SliceExp, Statement, StringExp, StructLiteralExp, SuperExp,
+        SwitchErrorStatement, SwitchStatement, SymOffExp, ThisExp,
+        TryCatchStatement, TryFinallyStatement, Type, TypeFunction, TypeidExp,
+        UnaExp, UnrolledLoopStatement, UshrExp, VarDeclaration, VarExp,
+        VectorArrayExp, VectorExp, WithStatement, XorExp;
     import snakebite.backends.bytecode.vm:
         Arg, AssertSite, CallSite, ClosureSlot, castSizeWithSignedness,
         discardResult, Field, indirectStorage,
         ExceptionHandler, Function,
-        Instruction, Role, Roles, addressSlotOf, bindInstructionReferences,
-        branchTargetField, recordRelocs, rolesOf,
+        Instruction, Role, Roles, addressSlotOf,
+        branchTargetField, recordLocalReferences, recordRelocs, rolesOf,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -926,7 +923,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero, opColdThrow,
         opTlsAddress, opTlsLoad, opTlsStore;
     import snakebite.frontend.typefacts: integerValue;
-    import dmd.typesem: nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.delegates:
         DelegateTarget, delegateTargetOf, outerFunctionOf;
@@ -1321,6 +1317,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowSlot = _windowSlot;
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
+        recordLocalReferences(result);
         return result;
     }
 
@@ -2534,7 +2531,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     protected override size_t visitThrowOperand(
         Expression expression, bool readsAfterEnd,
     ) {
-        import dmd.astenums: Tclass;
+        import snakebite.frontend.ast: Tclass;
 
         if (!(expression !is null
                 && expression.type.baseType.ty == Tclass))
@@ -2927,7 +2924,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // things D's own assertion semantics call for.
     //
     private void compileAssert(AssertExp expression) {
-        import dmd.astenums: Tnoreturn;
+        import snakebite.frontend.ast: Tnoreturn;
         import snakebite.frontend.typefacts: baseType;
         import snakebite.language.checks:
             assertFailureOf, assertPlanOf, FailurePlan, isUnanalysed;
@@ -4130,7 +4127,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t compileFieldAddress(DotVarExp expression) {
-        import dmd.astenums: Tclass, Tpointer;
+        import snakebite.frontend.ast: Tclass, Tpointer;
 
         auto field = expression.var.isVarDeclaration;
         assert(field !is null, "a field address names a variable");
@@ -4193,7 +4190,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
     ) {
-        import dmd.astenums: Tsarray;
+        import snakebite.frontend.ast: Tsarray;
 
         // A bounded slice - whether of a dynamic array, a pointer, or a
         // static array's own sub-range - has no compile-time-fixed
@@ -4209,7 +4206,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return compileDynamicSliceAssign(
                 expression, target, destOffset, resolvedTarget);
 
-        import dmd.astenums: Tarray;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         auto sarrayType = targetType.isTypeSArray;
@@ -4318,7 +4314,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         AssignExp expression, SliceExp target, in size_t destOffset,
         in size_t resolvedTarget = size_t.max,
     ) {
-        import dmd.astenums: Tarray, Tpointer, Tsarray, Tvoid;
+        import snakebite.frontend.ast: Tarray, Tpointer, Tsarray, Tvoid;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
         const targetKind = target.e1.type.baseType.ty;
@@ -5106,7 +5102,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     override void visit(FuncExp expression) {
         requireDestination(expression);
 
-        import dmd.astenums: Tdelegate;
+        import snakebite.frontend.ast: Tdelegate;
 
         if (expression.fd is null)
             internalFailure("`FuncExp`'s constructor always resolves its declaration");
@@ -5471,7 +5467,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // whose length dmd knows at compile time has no slot: dmd folds it into
     // every use.
     private void bindDollar(VarDeclaration dollar, in size_t length) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
 
         if (dollar is null)
             return;
@@ -5576,7 +5572,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileSliceHeader(SliceExp expression) {
-        import dmd.astenums: TY;
+        import snakebite.frontend.ast: TY;
         import std.conv: text;
 
         auto sourceType = expression.e1.type.baseType;
@@ -5940,7 +5936,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitLoweredNew(NewExp expression) {
-        import dmd.astenums: Tpointer;
+        import snakebite.frontend.ast: Tpointer;
         auto newType = expression.newtype.baseType;
         if (newType.isTypeClass !is null || newType.isTypeStruct !is null)
             compileNew(expression);
@@ -6031,7 +6027,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(TypeidExp expression) {
-        import dmd.dtemplate: isExpression, isType;
+        import snakebite.frontend.ast: isExpression, isType;
         import snakebite.language.statics.classinfo: typeidLoadCount;
         import std.conv: text;
 
@@ -6151,7 +6147,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // itself runs with its result discarded, and `opLoadIndirect` reads
     // the updated pair straight out of `x`'s own storage instead.
     override void visitUnloweredCatDcharAssign(CatDcharAssignExp expression) {
-        import dmd.astenums: Tchar, Twchar;
+        import snakebite.frontend.ast: Tchar, Twchar;
         import snakebite.native.value: arrayValueSize;
 
         auto elementType = expression.e1.type.nextOf;
@@ -6199,7 +6195,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     override void visit(CommaExp expression) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
 
         compileEffect(expression.e1);
         if (_destination != discardResult) {
@@ -6218,7 +6214,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     protected override void visitUnloweredCast(CastExp expression) {
-        import dmd.astenums: Tvoid;
+        import snakebite.frontend.ast: Tvoid;
 
         // `cast(void) call();`: dmd's own `foreach`-over-associative-array
         // lowering casts `_d_aaApply2`'s `int` result to `void` when the
@@ -6251,7 +6247,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // instructions of Richards. Revisit this if druntime exports a
     // compiled hook.
     protected override bool visitLoweredClassCast(CastExp expression) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
         import snakebite.frontend.typefacts: baseType;
 
         auto from = expression.e1.type.baseType.isTypeClass;
@@ -6663,7 +6659,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // `size_t.max`. Plain: has a frame slot, not `ref`, not a closure
     // variable, not `$`, not a return place, not lazy.
     private size_t localSlot(Expression expression) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
         import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
         auto read = expression.isVarExp;
@@ -6708,7 +6704,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A pointer, a class reference or `typeof(null)`: one word that is
     // compared as an integer.
     private static bool isReference(Type type) {
-        import dmd.astenums: Tclass, Tnull, Tpointer;
+        import snakebite.frontend.ast: Tclass, Tnull, Tpointer;
         import snakebite.frontend.typefacts: baseType;
 
         const ty = type.baseType.ty;
@@ -6741,7 +6737,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // plain local is used in place only when `inPlace` says that nothing
     // evaluated later can change it.
     private size_t placeOf(Expression expression, in bool inPlace) {
-        import dmd.astenums: Tarray, Tclass;
+        import snakebite.frontend.ast: Tarray, Tclass;
 
         if (auto read = expression.isVarExp)
             return placeOfVariable(read);
@@ -6772,7 +6768,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t placeOfVariable(VarExp read) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
         import snakebite.frontend.dmd.delegates: isCtfeVariable;
 
         auto variable = read.var.isVarDeclaration;
@@ -6792,7 +6788,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private size_t placeOfField(DotVarExp expression, in bool inPlace) {
-        import dmd.astenums: Tclass, Tpointer;
+        import snakebite.frontend.ast: Tclass, Tpointer;
 
         auto field = expression.var.isVarDeclaration;
         if (field is null || field.isBitFieldDeclaration !is null
@@ -6814,7 +6810,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // the bounds check, so the place stays valid when the base changes
     // while a later operand is evaluated.
     private size_t placeOfIndex(IndexExp expression, in bool inPlace) {
-        import dmd.astenums: Tarray, Tpointer, Tsarray;
+        import snakebite.frontend.ast: Tarray, Tpointer, Tsarray;
 
         auto arrayType = expression.e1.type.baseType;
         switch (arrayType.ty) {
@@ -6849,8 +6845,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool checkedIndexShape(
         IndexExp expression, in size_t elementSize, out CheckedIndex shape,
     ) {
-        import dmd.astenums: Tarray, Tsarray;
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect, Tarray, Tsarray;
         import snakebite.language.checks: boundsPlanOf, FailurePlan;
         import snakebite.language.storage.resolver: needsIndexBoundsCheck;
 
@@ -6943,7 +6938,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         IndexExp expression, Expression value, in size_t width,
         in bool floating,
     ) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
 
         CheckedIndex shape;
         if (!checkedIndexShape(expression, width, shape))
@@ -7119,7 +7114,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t placeOfSliceIndex(
         IndexExp expression, Type arrayType, in bool inPlace,
     ) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
         import snakebite.language.storage.resolver:
             needsIndexBoundsCheck, readsIndexAfterBase;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
@@ -7196,7 +7191,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t placeOfPointerIndex(
         IndexExp expression, Type pointerType, in bool inPlace,
     ) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
 
         const stride = typeFacts(pointerType.nextOf).size;
         const readInPlace = !hasSideEffect(expression.e2);
@@ -7223,7 +7218,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t indexOperand(
         IndexExp expression, in size_t length, Expression later,
     ) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
 
         bindDollar(expression.lengthVar, length);
 
@@ -7252,7 +7247,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A frame slot that holds the value of `pointer`. A plain local is that
     // slot when nothing evaluated later can change it.
     private size_t baseSlot(Expression pointer, in bool inPlace) {
-        import dmd.astenums: Tclass;
+        import snakebite.frontend.ast: Tclass;
 
         if (inPlace) {
             const local = localSlot(pointer);
@@ -7305,7 +7300,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in imported!"snakebite.native.value".TypeFacts facts,
         in size_t width, in bool floating, in bool destructorsFollow = false,
     ) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
 
         const offset = operandPlace(operand, width, floating,
             !destructorsFollow && (later is null || !hasSideEffect(later)));
@@ -7606,8 +7601,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool compileDirectAssign(
         AssignExp expression, in size_t destOffset,
     ) {
-        import dmd.expression: MemorySet;
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect, MemorySet;
 
         // Binding a `ref` variable writes the pointer in its slot, not the
         // `int` it will refer to.
@@ -7704,7 +7698,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool compileDirectCompound(
         BinAssignExp expression, in size_t destOffset,
     ) {
-        import dmd.sideeffect: hasSideEffect;
         import snakebite.language.operators.arithmetic:
             ArithmeticPlan, arithmeticPlan;
         import snakebite.language.operators.compound: compoundTarget;
@@ -7754,7 +7747,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Expression target, in size_t width, in bool floating,
         Expression later,
     ) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
 
         const local = operandOf(target, width, floating);
         if (local != size_t.max)
@@ -8093,7 +8086,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileIdentity(
         IdentityExp expression, in IdentityPlan plan, in size_t destOffset,
     ) {
-        import dmd.tokens: EXP;
+        import snakebite.frontend.ast: EXP;
         import snakebite.native.value: arrayValueSize;
 
         if (plan.skipCompare) {
@@ -8160,7 +8153,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileMemcmpDynamicArrayEquality(
         EqualExp expression, in ComparisonPlan plan, in size_t destOffset,
     ) {
-        import dmd.tokens: EXP;
+        import snakebite.frontend.ast: EXP;
         import snakebite.native.value: arrayValueSize;
 
         assert(expression.lowering is null);
@@ -8183,7 +8176,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // A static array operand becomes the `{length, ptr}` value of its own
     // elements, as dmd's `e2ir.d` reads it for a mixed array comparison.
     private void evalArrayValueInto(Expression operand, in size_t destOffset) {
-        import dmd.astenums: Tarray;
+        import snakebite.frontend.ast: Tarray;
         import snakebite.frontend.typefacts: integerValue;
         import snakebite.frontend.typefacts: baseType;
         import snakebite.native.value:
@@ -8221,7 +8214,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileStaticArrayEquality(
         EqualExp expression, in size_t destOffset,
     ) {
-        import dmd.tokens: EXP;
+        import snakebite.frontend.ast: EXP;
 
         assert(expression.lowering is null);
 
@@ -8364,7 +8357,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         LogicalExp expression, in LogicalPlan plan,
         in size_t destOffset, in size_t width,
     ) {
-        import dmd.astenums: Tbool;
+        import snakebite.frontend.ast: Tbool;
         import snakebite.frontend.typefacts: baseType;
 
         const leftIsBool = expression.e1.type.baseType.ty == Tbool;
@@ -8707,7 +8700,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileVirtualCall(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
-        import dmd.astenums: STC, Tvoid, VarArg;
+        import snakebite.frontend.ast: Tvoid, VarArg;
         import snakebite.language.call.selection: arityMismatches, ValueCall;
         import snakebite.frontend.dmd.dispatch: classReceiverOf;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -8837,10 +8830,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool compileNativeArrayNew(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
-        import dmd.dtemplate: isType;
-        import dmd.location: Loc;
-        import dmd.typesem: isZeroInit;
-        import snakebite.frontend.compiler: newInFrontend;
+        import snakebite.frontend.ast: isType, Loc;
+        import snakebite.frontend.compiler: inFrontend;
         import snakebite.language.call.druntimehook: DruntimeHook, planOf;
         import snakebite.frontend.dmd.functions: moduleOf;
 
@@ -8867,7 +8858,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const hook = name == "_d_newarrayU"
             ? DruntimeHook.newArrayUninitialized
-            : newInFrontend!isZeroInit(elementType, Loc.initial)
+            : inFrontend!"isZeroInit"(elementType, Loc.initial)
             ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
         auto plan = planOf(_bytecode._world.plans, hook);
 
@@ -8890,7 +8881,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private bool compileFloatIntrinsic(
         CallExp expression, FuncDeclaration callee, in size_t destOffset,
     ) {
-        import dmd.astenums: Tfloat32, Tfloat64, Tfloat80;
+        import snakebite.frontend.ast: Tfloat32, Tfloat64, Tfloat80;
 
         if (destOffset == discardResult)
             return false;
@@ -8986,7 +8977,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t firstContextOffsetOf(
         CallExp expression, FuncDeclaration callee,
     ) {
-        import dmd.astenums: Tclass;
+        import snakebite.frontend.ast: Tclass;
         import snakebite.frontend.dmd.dispatch: CallReceiver, receiverOf;
 
         // DMD expressions must stay mutable for backend evaluation.
@@ -9046,7 +9037,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private static bool argumentsAreSideEffectFree(Expressions* arguments) {
-        import dmd.sideeffect: hasSideEffect;
+        import snakebite.frontend.ast: hasSideEffect;
 
         if (arguments !is null)
             foreach (argument; *arguments)
@@ -9075,7 +9066,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t destOffset,
         Expression site = null,
     ) {
-        import dmd.astenums: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         import snakebite.language.call.selection: arityMismatches;
@@ -9119,7 +9109,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         size_t destOffset,
         Expression site = null,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.language.call.selection: arityMismatches;
 
@@ -9329,7 +9319,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private size_t receiverSlotOf(
         FuncDeclaration callee, Expression site, out size_t windowEnd,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
         import snakebite.ffi.call: CallAdapter;
 
@@ -9747,7 +9737,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // so does the context word. A callee with another signature reads each
     // parameter from the argument in the same register (`ValueCall`).
     private void compileIndirectCall(CallExp expression, in size_t destOffset) {
-        import dmd.astenums: STC, VarArg;
         import snakebite.language.call.selection: isIndirectDelegateCall, ValueCall;
         import snakebite.native.value:
             delegateContextOffset, delegateFunctionOffset, delegateValueSize;
@@ -9850,7 +9839,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in bool mayUseWindow,
     ) {
         import core.memory: pageSize;
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
         // A frame that asks for a page of alignment is called the generic
@@ -10535,7 +10524,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 }
 
 // Renders `expression` back to source text for a diagnostic message.
-private string expressionText(imported!"dmd.expression".Expression expression) {
+private string expressionText(imported!"snakebite.frontend.ast".Expression expression) {
     import std.conv: text;
 
     return text("`", expression.toString, "`");

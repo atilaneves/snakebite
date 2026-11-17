@@ -17,7 +17,7 @@ public struct CallSelection {
     // storage with the original until one side grows.
     @disable this(this);
 
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
 
     import snakebite.builtin.call:
         BuiltinCall, ParameterType, startVariadicEntry;
@@ -61,7 +61,7 @@ public struct CallSelection {
     // e2ir substitutes an intrinsic only for an OPvar callee, not an
     // expression that computes that callee (notably a comma prefix).
     public static bool hasIntrinsicCallee(
-        imported!"dmd.expression".CallExp expression,
+        imported!"snakebite.frontend.ast".CallExp expression,
     ) {
         auto callee = expression.e1;
         if (auto variable = callee.isVarExp)
@@ -77,7 +77,7 @@ public struct CallSelection {
     // declares both without a body and inlines them; LDC aliases `fabs` to
     // `llvm_fabs` and gives `sqrt` a body that calls `llvm_sqrt`.
     public FloatIntrinsic floatIntrinsicOf(
-        imported!"dmd.expression".CallExp expression, FuncDeclaration function_,
+        imported!"snakebite.frontend.ast".CallExp expression, FuncDeclaration function_,
     ) {
         import snakebite.frontend.dmd.functions: moduleOf;
 
@@ -116,7 +116,7 @@ public struct CallSelection {
     }
 
     public static Decision atCallSite(
-        in Decision decision, imported!"dmd.expression".Expression site,
+        in Decision decision, imported!"snakebite.frontend.ast".Expression site,
     ) {
         auto call = site is null ? null : site.isCallExp;
         return call !is null && !hasIntrinsicCallee(call)
@@ -126,8 +126,8 @@ public struct CallSelection {
     }
 
     public static void eachResolvedCalleePrefix(
-        imported!"dmd.expression".CallExp expression,
-        scope void delegate(imported!"dmd.expression".Expression) execute,
+        imported!"snakebite.frontend.ast".CallExp expression,
+        scope void delegate(imported!"snakebite.frontend.ast".Expression) execute,
     ) {
         // Indirect calls evaluate their complete callee value themselves.
         if (expression.f is null)
@@ -255,7 +255,7 @@ public struct CallSelection {
     public bool usesNativeVariadicAddress(
         FuncDeclaration function_, bool hasNativeSymbol,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         return hasNativeSymbol
@@ -277,7 +277,7 @@ public struct CallSelection {
     public bool isVariadicGuest(
         FuncDeclaration function_, bool hasNativeSymbol,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         return typeFunctionOf(function_).parameterList.varargs
@@ -292,7 +292,7 @@ public struct CallSelection {
         lazy bool hasIndependentNativeSymbol,
         scope bool delegate(FuncDeclaration) isGuest,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions:
             backendExecutes, bodyIsSelected, contextOf, typeFunctionOf;
 
@@ -409,9 +409,8 @@ public struct CallSelection {
     // (`__simd_ib`) that has no wrapper.
     version (LDC)
     private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
-        in imported!"dmd.dmodule".Module module_,
+        in imported!"snakebite.frontend.ast".Module module_,
     ) {
-        import dmd.dtemplate: TemplateInstance;
         import core.stdc.string: strlen;
         import gen.dpragma: LDCPragma;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
@@ -431,7 +430,7 @@ public struct CallSelection {
         // (a value parameter, no template): it has no wrapper, and the call
         // says so.
         size_t argumentSize() {
-            import dmd.dtemplate: isType;
+            import snakebite.frontend.ast: isType;
 
             auto instance = function_.parent.isTemplateInstance;
             if (instance is null || instance.tdtypes.length != 1)
@@ -440,7 +439,7 @@ public struct CallSelection {
             return type is null ? 0 : representationSize(type);
         }
 
-        static const(char)[] intrinsicNameOf(imported!"dmd.dtemplate".TemplateDeclaration declaration) {
+        static const(char)[] intrinsicNameOf(imported!"snakebite.frontend.ast".TemplateDeclaration declaration) {
             return declaration.intrinsicName is null
                 ? "" : declaration.intrinsicName[0 .. strlen(declaration.intrinsicName)];
         }
@@ -499,7 +498,7 @@ public struct CallSelection {
     }
     else
     private static IntrinsicPlan buildIntrinsicPlan(FuncDeclaration function_,
-        in imported!"dmd.dmodule".Module module_,
+        in imported!"snakebite.frontend.ast".Module module_,
     ) {
         import snakebite.builtin.call:
             destinationParameterOf, entryOf;
@@ -526,18 +525,17 @@ public struct CallSelection {
 
     version (LDC) {
         public bool foldedScalarIntrinsic(
-            imported!"dmd.expression".CallExp, out ScalarConstant,
+            imported!"snakebite.frontend.ast".CallExp, out ScalarConstant,
         ) {
             return false;
         }
     } else
     public bool foldedScalarIntrinsic(
-        imported!"dmd.expression".CallExp expression,
+        imported!"snakebite.frontend.ast".CallExp expression,
         out ScalarConstant constant,
     ) {
         import core.stdc.fenv;
-        import dmd.ctfeexpr: emplaceExp;
-        import dmd.expression: IntegerExp;
+        import snakebite.frontend.ast: emplaceExp, IntegerExp;
 
         ulong value;
         if (foldedIntegerIntrinsic(expression, value)) {
@@ -556,8 +554,8 @@ public struct CallSelection {
     // Backend constants can have a nonnumeric result view. RealExp alone
     // cannot carry a signaling NaN through a narrower native store.
     public struct ScalarConstant {
-        private imported!"dmd.ctfeexpr".UnionExp value;
-        private imported!"dmd.backend.cdef".Vconst storage;
+        private imported!"snakebite.frontend.ast".UnionExp value;
+        private imported!"snakebite.frontend.ast".Vconst storage;
         private ParameterType representation;
         public bool hasStorage;
 
@@ -566,12 +564,12 @@ public struct CallSelection {
             return (cast(const(void)*) &storage)[0 .. width];
         }
 
-        public imported!"dmd.expression".Expression expression() {
+        public imported!"snakebite.frontend.ast".Expression expression() {
             assert(!hasStorage);
             return value.exp;
         }
 
-        private imported!"dmd.expression".Expression exp() {
+        private imported!"snakebite.frontend.ast".Expression exp() {
             if (hasStorage) {
                 auto floating = value.exp.isRealExp;
                 final switch (representation) with (ParameterType) {
@@ -593,7 +591,7 @@ public struct CallSelection {
         // width; `cdbswap` uses the result width for a nonconstant operand.
         // The call site must keep that distinction before argument evaluation.
         private bool foldedIntegerIntrinsic(
-            imported!"dmd.expression".CallExp expression, out ulong value,
+            imported!"snakebite.frontend.ast".CallExp expression, out ulong value,
         ) {
             import core.bitop: popcnt;
             import core.stdc.fenv;
@@ -642,7 +640,7 @@ public struct CallSelection {
     }
 
     private bool integerConstantOf(
-        imported!"dmd.expression".Expression expression, out ulong value,
+        imported!"snakebite.frontend.ast".Expression expression, out ulong value,
     ) {
         import snakebite.frontend.typefacts: integerValue;
         ScalarConstant constant;
@@ -658,14 +656,12 @@ public struct CallSelection {
     // Use DMD's allocation-free constant operations on private UnionExps;
     // optimize() also expands declarations and allocates frontend objects.
     private bool scalarConstantOf(
-        imported!"dmd.expression".Expression expression,
+        imported!"snakebite.frontend.ast".Expression expression,
         out ScalarConstant constant,
     ) {
-        import dmd.constfold;
-        import dmd.ctfeexpr: emplaceExp;
-        import dmd.expression: IntegerExp, RealExp;
-        import dmd.typesem: isIntegral, isReal, isUnsigned, size;
-        import dmd.tokens: EXP;
+        import snakebite.frontend.ast: Add, And, Cast, Cmp, Com, Div,
+            emplaceExp, Equal, EXP, Identity, IntegerExp, isIntegral, isReal,
+            isUnsigned, Min, Mod, Mul, Neg, Not, Or, Shl, Shr, size, Ushr, Xor;
         import snakebite.frontend.typefacts:
             baseType, integerValue, truthValue;
         import core.stdc.fenv;
@@ -798,11 +794,10 @@ public struct CallSelection {
 
     private static void normalizeScalar(
         ref ScalarConstant constant,
-        imported!"dmd.mtype".Type type,
+        imported!"snakebite.frontend.ast".Type type,
     ) {
         import core.volatile: volatileLoad;
-        import dmd.backend.cdef: Vconst;
-        import dmd.astenums: TY;
+        import snakebite.frontend.ast: TY, Vconst;
         import snakebite.frontend.typefacts: baseType, integerValue, realValue;
 
         // Inner producers must be stored at their own width before use.
@@ -831,13 +826,11 @@ public struct CallSelection {
     }
 
     private bool foldedFloatingIntrinsic(
-        imported!"dmd.expression".CallExp expression,
+        imported!"snakebite.frontend.ast".CallExp expression,
         out ScalarConstant constant,
     ) {
-        import dmd.expression: RealExp;
-        import dmd.ctfeexpr: emplaceExp;
+        import snakebite.frontend.ast: emplaceExp, RealExp, Vconst;
         import snakebite.frontend.typefacts: realValue;
-        import dmd.backend.cdef: Vconst;
         import core.stdc.fenv;
         import core.stdc.string: memcpy;
         import snakebite.builtin.dmd: magnitudeTo;
@@ -901,7 +894,7 @@ public struct CallSelection {
     private enum FloatingSign { magnitude, negate }
 
     private static void applyFloatingSign(
-        ref imported!"dmd.backend.cdef".Vconst storage,
+        ref imported!"snakebite.frontend.ast".Vconst storage,
         in ParameterType representation, in FloatingSign operation,
     ) {
         size_t signByte;
@@ -923,7 +916,7 @@ public struct CallSelection {
     // Widening a signaling NaN to a temporary real first would quiet it
     // before evalu8 checks the actual conversion's exception flags.
     private static void convertFloatingStorage(
-        ref imported!"dmd.backend.cdef".Vconst storage,
+        ref imported!"snakebite.frontend.ast".Vconst storage,
         in ParameterType source, in ParameterType result,
     ) {
         import core.volatile: volatileLoad;
@@ -972,9 +965,9 @@ public struct CallSelection {
     // (`toAliasFunc`). The call plan only sees the resolved function,
     // because the frontend resolves the alias when it picks the overload.
     private static bool isInlinedByCodeGenerator(
-        FuncDeclaration function_, in imported!"dmd.dmodule".Module module_,
+        FuncDeclaration function_, in imported!"snakebite.frontend.ast".Module module_,
     ) {
-        import dmd.astenums: TY;
+        import snakebite.frontend.ast: TY;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         if (function_.isDeprecated)
@@ -1071,7 +1064,7 @@ public struct CallSelection {
         scope ParameterType[] parameters,
         out ParameterType result,
     ) {
-        import dmd.astenums: STC, TY, VarArg;
+        import snakebite.frontend.ast: STC, TY, VarArg;
         import snakebite.frontend.typefacts: baseType;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
@@ -1102,10 +1095,10 @@ public struct CallSelection {
     }
 
     private static bool parameterTypeOf(
-        imported!"dmd.mtype".Type type,
+        imported!"snakebite.frontend.ast".Type type,
         out ParameterType result,
     ) {
-        import dmd.astenums: TY;
+        import snakebite.frontend.ast: TY;
         import snakebite.frontend.typefacts: representationSize;
 
         // The wrappers of `core.simd` move this many bytes.
@@ -1159,7 +1152,7 @@ public struct CallSelection {
 // only the code generator makes when no wrapper takes it
 // (`buildIntrinsicPlan`).
 public bool bodyIsExecutedByBackend(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
     if (function_.hasInlineAsm)
         return false;
@@ -1173,13 +1166,12 @@ public bool bodyIsExecutedByBackend(
 // Named distinctly from every other `extern(C++)` visitor: without a C++
 // namespace, two classes of one name mangle to one symbol.
 private extern(C++) final class UnservedOperationFinder
-        : imported!"dmd.visitor".SemanticTimeTransitiveVisitor {
-    import dmd.func: FuncDeclaration, FuncLiteralDeclaration;
-    import dmd.visitor: SemanticTimeTransitiveVisitor;
+        : imported!"snakebite.frontend.ast".SemanticTimeTransitiveVisitor {
+    import snakebite.frontend.ast: FuncDeclaration, FuncLiteralDeclaration,
+        SemanticTimeTransitiveVisitor;
     alias visit = SemanticTimeTransitiveVisitor.visit;
 
-    import dmd.expression: DeclarationExp, SymbolExp;
-    import dmd.statement: ExpStatement;
+    import snakebite.frontend.ast: DeclarationExp, ExpStatement, SymbolExp;
     import snakebite.language.layout.lowered: LoweredExpressionTypes;
 
     public bool found;
@@ -1242,7 +1234,7 @@ private extern(C++) final class UnservedOperationFinder
 // A declaration whose call the code generator replaces with an operation of
 // its own, and for which no wrapper exists. Nothing but compiled code can
 // make the call: the operation has no symbol.
-private bool isUnservedOperation(imported!"dmd.func".FuncDeclaration callee) {
+private bool isUnservedOperation(imported!"snakebite.frontend.ast".FuncDeclaration callee) {
     if (callee.fbody !is null)
         return false;
     const plan = CallSelection.buildIntrinsicPlan(
@@ -1276,8 +1268,8 @@ private bool isUnservedOperation(imported!"dmd.func".FuncDeclaration callee) {
 // the time this ever runs, so `>=` never actually admits more arguments
 // than `parameterList.length` for that kind.
 public bool arityMismatches(
-    imported!"dmd.mtype".ParameterList parameterList,
-    imported!"dmd.arraytypes".Expressions* arguments,
+    imported!"snakebite.frontend.ast".ParameterList parameterList,
+    imported!"snakebite.frontend.ast".Expressions* arguments,
     in bool allowExtra = false,
 ) {
     const count = arguments is null ? 0 : arguments.length;
@@ -1303,7 +1295,7 @@ public bool arityMismatches(
 // that has no context, such as a function literal that a delegate type holds,
 // has the parameters of `withoutContext`.
 public struct ValueCall {
-    import dmd.mtype: TypeFunction;
+    import snakebite.frontend.ast: TypeFunction;
     import snakebite.native.signature:
         ArgumentFlow, Shape, Signature, SignatureTable;
     import snakebite.language.layout.frame: FrameLayout;
@@ -1325,13 +1317,13 @@ public struct ValueCall {
     }
 
     public bool isVariadic() const {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         return type.parameterList.varargs == VarArg.variadic;
     }
 
     public bool mismatches(
-        imported!"dmd.arraytypes".Expressions* arguments,
+        imported!"snakebite.frontend.ast".Expressions* arguments,
     ) {
         // dmd's `ParameterList` has no `const` methods.
         return arityMismatches(type.parameterList, arguments, isVariadic);
@@ -1378,9 +1370,9 @@ public struct ValueCall {
 // lowering leaves `e1.type` the pointed-to `Tfunction`, that `PtrExp`'s
 // own `e1` for the function pointer's single word.
 public bool isIndirectDelegateCall(
-    imported!"dmd.mtype".Type calleeType,
+    imported!"snakebite.frontend.ast".Type calleeType,
 ) {
-    import dmd.astenums: Tdelegate;
+    import snakebite.frontend.ast: Tdelegate;
     import snakebite.frontend.typefacts: baseType;
 
     return calleeType !is null && calleeType.baseType.ty == Tdelegate;

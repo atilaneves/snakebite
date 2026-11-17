@@ -8,7 +8,7 @@ public import snakebite.druntime.atomicwrapper;
 
 
 public struct NativeTarget {
-    import dmd.astenums: LINK;
+    import snakebite.frontend.ast: LINK;
 
     public void* address;
     public LINK linkage;
@@ -24,7 +24,7 @@ public struct NativeTarget {
 // scope (`scopeCreateGlobal`), so the walk runs under the frontend query
 // lock, which excludes every such writer.
 public NativeTarget nativeTarget(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
     import snakebite.frontend.compiler: withCompilerQuery;
 
@@ -43,7 +43,7 @@ public NativeTarget nativeTarget(
 // a repeated query takes no lock.
 private struct Targets {
     size_t generation;
-    NativeTarget[imported!"dmd.func".FuncDeclaration] byFunction;
+    NativeTarget[imported!"snakebite.frontend.ast".FuncDeclaration] byFunction;
 }
 
 private Targets _targets;
@@ -59,12 +59,10 @@ private ref Targets targets() {
 
 
 private NativeTarget nativeTargetLocked(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
-    import dmd.astenums: LINK, STC, Tint32, VarArg;
-    import dmd.dtemplate: isExpression, isType;
-    import dmd.root.string: toDString;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: isExpression, isType, LINK, nextOf, STC,
+        Tint32, toDString, VarArg;
 
     auto instance = function_.isInstantiated;
     if (instance is null || instance.tempdecl is null)

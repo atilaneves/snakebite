@@ -13,10 +13,8 @@ private:
 public struct StaticWorld {
     @disable this(this);
 
-    import dmd.dclass: ClassDeclaration;
-    import dmd.declaration: Declaration;
-    import dmd.dmodule: Module;
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: ClassDeclaration, Declaration,
+        FuncDeclaration, Module;
     import snakebite.ffi: PlanCache;
     import snakebite.ffi.callplanstore: CallPlanStore;
     import snakebite.language.call.selection: CallSelection;
@@ -136,7 +134,7 @@ public struct StaticWorld {
     // aggregates or through pointers to guest data, where the barrier cannot
     // replace them. Null for an abstract function.
     public void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import dmd.dsymbolsem: isAbstract;
+        import snakebite.frontend.ast: isAbstract;
 
         // getOverloads can leave an alias in a function-pointer constant.
         method = definitionOf(method.toAliasFunc);

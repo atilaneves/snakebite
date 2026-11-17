@@ -41,9 +41,9 @@ package(snakebite) struct ArithmeticPlan {
 }
 
 package(snakebite) ArithmeticPlan arithmeticPlan(
-    imported!"dmd.expression".BinExp expression,
+    imported!"snakebite.frontend.ast".BinExp expression,
 ) {
-    import dmd.astenums: Tpointer;
+    import snakebite.frontend.ast: Tpointer;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.native.value: ComplexOperand;
 
@@ -70,7 +70,7 @@ package(snakebite) ArithmeticPlan arithmeticPlan(
 }
 
 package(snakebite) ArithmeticPlan arithmeticPlan(
-    imported!"dmd.expression".UnaExp expression,
+    imported!"snakebite.frontend.ast".UnaExp expression,
 ) {
     import snakebite.frontend.typefacts: baseType;
     import std.conv: text;
@@ -85,15 +85,15 @@ package(snakebite) ArithmeticPlan arithmeticPlan(
 // The bytes that a postfix `++` or `--` moves a pointer by: the size of the
 // pointee. dmd scales the step `e2` only when the type of `e1` is itself a
 // pointer, and leaves it 1 for an enum of a pointer.
-package(snakebite) size_t pointerPostStep(imported!"dmd.expression".PostExp expression) {
-    import dmd.typesem: nextOf;
+package(snakebite) size_t pointerPostStep(imported!"snakebite.frontend.ast".PostExp expression) {
+    import snakebite.frontend.ast: nextOf;
     import snakebite.frontend.typefacts: baseType;
 
     return typeFacts(expression.e1.type.baseType.nextOf).size;
 }
 
 private ArithmeticPlan planOf(
-    imported!"dmd.mtype".Type type, in ArithmeticPlan.Kind kind,
+    imported!"snakebite.frontend.ast".Type type, in ArithmeticPlan.Kind kind,
 ) {
     auto plan = ArithmeticPlan(kind, typeFacts(type));
     if (kind == ArithmeticPlan.Kind.vector) {
@@ -105,8 +105,8 @@ private ArithmeticPlan planOf(
 }
 
 // How arithmetic in `type` combines its operands.
-package(snakebite) ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: TY;
+package(snakebite) ArithmeticPlan.Kind arithmeticKind(imported!"snakebite.frontend.ast".Type type) {
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
     import std.conv: text;
 
@@ -146,9 +146,9 @@ package(snakebite) ArithmeticPlan.Kind arithmeticKind(imported!"dmd.mtype".Type 
 }
 
 private imported!"snakebite.native.value".ComplexOperand complexOperand(
-    imported!"dmd.mtype".Type type,
+    imported!"snakebite.frontend.ast".Type type,
 ) {
-    import dmd.astenums: TY;
+    import snakebite.frontend.ast: TY;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.native.value: ComplexOperand;
     import std.conv: text;

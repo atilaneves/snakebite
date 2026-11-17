@@ -3,22 +3,15 @@ module snakebite.backends.interpreter.scout;
 
 private:
 
-import dmd.dclass: ClassDeclaration;
-import dmd.declaration: Declaration, VarDeclaration;
-import dmd.expression:
-    AddAssignExp, AddExp, AssignExp, CallExp, CastExp, ClassReferenceExp, CmpExp,
+import snakebite.frontend.ast: AddAssignExp, AddExp, AssignExp, CallExp,
+    CastExp, ClassDeclaration, ClassReferenceExp, CmpExp, Declaration,
     DeclarationExp, DelegateExp, DeleteExp, DotVarExp, EqualExp, Expression,
-    FuncExp, IndexExp, MinAssignExp, MinExp, NewExp, PostExp,
-    SliceExp, StringExp, StructLiteralExp, SymOffExp, ThisExp, TypeidExp,
-    VarExp;
-import dmd.func: FuncDeclaration;
-import dmd.mtype: Type;
-import dmd.typesem: nextOf;
+    ExpStatement, FuncDeclaration, FuncExp, GotoCaseStatement,
+    GotoDefaultStatement, GotoStatement, IndexExp, MinAssignExp, MinExp, NewExp,
+    nextOf, PostExp, SemanticTimeTransitiveVisitor, SliceExp, Statement,
+    StringExp, StructLiteralExp, SymOffExp, ThisExp, TryCatchStatement,
+    TryFinallyStatement, TypeidExp, VarDeclaration, VarExp, WithStatement;
 import snakebite.frontend.typefacts: baseType;
-import dmd.statement:
-    ExpStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
-    Statement, TryCatchStatement, TryFinallyStatement, WithStatement;
-import dmd.visitor: SemanticTimeTransitiveVisitor;
 import snakebite.language.control.transfer: ScopePaths;
 import snakebite.language.layout.lowered: LoweredExpressionTypes;
 import snakebite.language.control.cases: gotoCaseTarget, gotoDefaultTarget;
@@ -230,7 +223,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     }
 
     private extern(D) void handle(TypeidExp expression) {
-        import dmd.dtemplate: isType;
+        import snakebite.frontend.ast: isType;
 
         if (auto type = isType(expression.obj))
             _facts.prepareTypeInfo(type);
@@ -280,7 +273,7 @@ package extern(C++) final class BodyScout: SemanticTimeTransitiveVisitor {
     }
 
     private extern(D) void element(Expression operand) {
-        import dmd.astenums: Tarray, Tpointer, Tsarray;
+        import snakebite.frontend.ast: Tarray, Tpointer, Tsarray;
 
         if (operand.type is null)
             return;

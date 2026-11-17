@@ -111,7 +111,7 @@ public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
 // Runs host code under the frontend lock, so it sees dmd's state
 // settled and excludes every other thread's dmd work. It is still host
 // code: it allocates from the GC, and it reaches dmd only through
-// `newInFrontend`. `flags` are in effect for `action` only, as for a
+// `inFrontend`. `flags` are in effect for `action` only, as for a
 // parse: a REPL session hands its project's flags to every frontend
 // call it makes.
 public void withCompilerLock(
@@ -182,38 +182,81 @@ private string pathUnder(in string path, in string directory) {
     return relative.startsWith("..") ? null : relative;
 }
 
-// Calls `dmdSymbol` - a function dmd declares, or a dmd class, which is
-// then constructed - with `arguments`, inside the frontend: under the
+// Calls `dmdSymbol` with `arguments`, inside the frontend: under the
 // frontend lock, with every allocation from the frontend arena, the way
-// dmd allocates (`snakebite.memory.gc`). This is how host code reaches dmd for
-// anything that can make or change AST: semantic, forcing a forward
-// reference, CTFE, a type's derived types (`pointerTo`...), a mangled
-// name, a new node. Only dmd code runs inside, so host data never lands
-// in the arena; each array argument is copied in, so the AST never keeps
-// a pointer to host GC memory. What dmd returns is arena memory, which
-// is never freed, so host code may keep it; host code that writes into
-// the AST writes only other AST (frontend memory) into it.
+// dmd allocates (`snakebite.memory.gc`). `dmdSymbol` is a dmd class, which
+// is then constructed, a static member function of a dmd class, or the name
+// of a dmd function as a string (`inFrontend!"mutableOf"(type)`). The name
+// resolves here, in the frontend package (`doorFunction`): code outside
+// the package imports no dmd module (`snakebite.frontend.ast`), so it has
+// no symbol of such a function that it could call with no lock.
+//
+// This is how host code reaches dmd for anything that can make or change
+// AST: semantic, forcing a forward reference, CTFE, a type's derived types
+// (`pointerTo`...), a mangled name, a new node. Only dmd code runs inside,
+// so host data never lands in the arena; each array argument is copied in,
+// so the AST never keeps a pointer to host GC memory. What dmd returns is
+// arena memory, which is never freed, so host code may keep it; host code
+// that writes into the AST writes only other AST (frontend memory) into it.
 //
 // A debug build stops at the first dmd object made outside the frontend
 // (`snakebite.memory.gc.requireInsideFrontend`).
-public auto newInFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
-    static assert(
-        declaredByDmd!dmdSymbol,
-        __traits(identifier, dmdSymbol)
-            ~ " is not dmd code: only dmd runs inside the frontend",
-    );
+public auto inFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
     static foreach (Argument; Args)
         static assert(
             crossesIntoFrontend!Argument,
             Argument.stringof ~ " is host data dmd could keep",
         );
 
+    static if (is(typeof(dmdSymbol) : string)) {
+        alias target = doorFunction!(dmdSymbol, Args);
+    } else {
+        static assert(
+            declaredByDmd!dmdSymbol,
+            __traits(identifier, dmdSymbol)
+                ~ " is not dmd code: only dmd runs inside the frontend",
+        );
+        static assert(
+            is(dmdSymbol == class) || is(__traits(parent, dmdSymbol) == class),
+            __traits(identifier, dmdSymbol) ~ " is a dmd function: name it, "
+                ~ "`inFrontend!\"" ~ __traits(identifier, dmdSymbol) ~ "\"`",
+        );
+        alias target = dmdSymbol;
+    }
+
     return compiler.inside(() {
-        static if (is(dmdSymbol == class))
-            return mixin("new dmdSymbol(", frontendArguments(Args.length), ")");
+        static if (is(target == class))
+            return mixin("new target(", frontendArguments(Args.length), ")");
         else
-            return mixin("dmdSymbol(", frontendArguments(Args.length), ")");
+            return mixin("target(", frontendArguments(Args.length), ")");
     });
+}
+
+// The dmd function called `name` that takes `Args`, from the dmd modules
+// that hold the functions that host code calls inside the frontend. A name
+// that two of the modules declare (`hasPointers` of a type and of a symbol)
+// resolves by its arguments.
+private template doorFunction(string name, Args...) {
+    import dmd.dinterpret, dmd.dsymbolsem, dmd.enumsem, dmd.expressionsem,
+        dmd.frontend, dmd.funcsem, dmd.mangle, dmd.semantic3, dmd.typesem;
+    import std.meta: AliasSeq, NoDuplicates;
+
+    alias doorModules = AliasSeq!(dmd.dinterpret, dmd.dsymbolsem,
+        dmd.enumsem, dmd.expressionsem, dmd.frontend, dmd.funcsem, dmd.mangle,
+        dmd.semantic3, dmd.typesem);
+    alias found = AliasSeq!();
+    static foreach (module_; doorModules)
+        static if (__traits(hasMember, module_, name)
+                && is(typeof((Args arguments) =>
+                    __traits(getMember, module_, name)(arguments))))
+            found = AliasSeq!(found, __traits(getMember, module_, name));
+    // A module that imports a function has it as a member too.
+    alias functions = NoDuplicates!found;
+    static assert(functions.length == 1,
+        "`inFrontend!\"" ~ name ~ "\"`: " ~ (functions.length
+            ? "more than one dmd function of that name takes these arguments"
+            : "no dmd function of that name takes these arguments"));
+    alias doorFunction = functions[0];
 }
 
 // The target query can create TypeTuple nodes while it classifies a return.
@@ -366,7 +409,7 @@ private string frontendArguments(in size_t count) {
     return list;
 }
 
-// Runs `force`, host code that reaches dmd through `newInFrontend`, under
+// Runs `force`, host code that reaches dmd through `inFrontend`, under
 // the frontend lock, but only when `ready` - a cheap,
 // lock-free read of the one dmd field a forward-reference forcing call
 // itself gates on (`FuncDeclaration.semanticRun`, `AggregateDeclaration.
@@ -450,13 +493,13 @@ public void forceIfNeeded(
 }
 
 // `forceIfNeeded` for a force that is one dmd call, made inside the
-// frontend (`newInFrontend`).
+// frontend (`inFrontend`).
 public void forceIfNeeded(alias dmdFunction, Args...)(
     scope bool delegate() ready,
     auto ref Args arguments,
 ) {
     if (!ready())
-        newInFrontend!dmdFunction(arguments);
+        inFrontend!dmdFunction(arguments);
 }
 
 final class Compiler {

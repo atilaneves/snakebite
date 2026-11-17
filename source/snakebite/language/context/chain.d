@@ -22,7 +22,7 @@ public struct Hop {
 
 public struct ClosurePlan {
     import snakebite.language.layout.frame: ClosureLayout;
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
 
     public bool needsClosure;
     public ClosureLayout layout;
@@ -68,7 +68,6 @@ public struct ClosurePlan {
         FuncDeclaration to,
         scope LayoutOf layoutOf,
     ) {
-        import dmd.aggregate: AggregateDeclaration;
         import snakebite.language.context.pair:
             fieldTowards, parentTowards, wordTowards;
         import snakebite.frontend.dmd.delegates: isDualContext;

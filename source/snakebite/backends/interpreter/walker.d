@@ -24,7 +24,7 @@ import snakebite.native.arguments: CallArguments;
 // into a host-side representation - every expression is evaluated
 // straight into a caller-designated native address, in native layout.
 public final class Interpreter: imported!"snakebite.backends.api".Backend {
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
     import snakebite.program: Program;
     import snakebite.ffi: CallbackCall;
     import snakebite.start.data: StartData;
@@ -96,7 +96,7 @@ public final class Interpreter: imported!"snakebite.backends.api".Backend {
     }
 
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
-        imported!"dmd.declaration".VarDeclaration variable,
+        imported!"snakebite.frontend.ast".VarDeclaration variable,
     ) {
         return _shared.world.data.storageOf(variable);
     }
@@ -274,18 +274,14 @@ private struct Shared {
     import snakebite.stack.tls: TlsSlots;
     import snakebite.host.threads: heapNew;
     import snakebite.ffi.callplanstore: CallPlanStore;
-    import dmd.dclass: ClassDeclaration;
-    import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type;
-    import dmd.expression: StructLiteralExp;
-    import dmd.statement: Catch, TryCatchStatement, TryFinallyStatement;
+    import snakebite.frontend.ast: Catch, ClassDeclaration, FuncDeclaration,
+        TryCatchStatement, TryFinallyStatement;
     import snakebite.ffi: CallPlan;
     import snakebite.failure.unwind: ExceptionCandidate;
     import snakebite.program: Program;
     import snakebite.language.layout.frame: ClosureLayout, FrameLayout;
     import snakebite.language.context.chain: ClosurePlan, Hop;
     import snakebite.language.context.source: ContextSource;
-    import dmd.declaration: VarDeclaration;
     import snakebite.native.value: TypeFacts;
     import snakebite.language.statics.world: StaticWorld;
     import snakebite.native.value: BitfieldAccess;
@@ -337,7 +333,7 @@ private struct Shared {
     SharedTable!(FuncDeclaration, CallShape) calls;
     // How each call through a value passes its arguments. The type of the
     // value never changes at a call site.
-    SharedTable!(imported!"dmd.expression".CallExp, ValueCall) valueCalls;
+    SharedTable!(imported!"snakebite.frontend.ast".CallExp, ValueCall) valueCalls;
     // Storage for locals that dmd moves out of an activation frame when
     // it decides that the frame must survive its call.
     SharedTable!(FuncDeclaration, ClosurePlan) closurePlans;
@@ -458,7 +454,7 @@ private enum LayoutKind { body, parameters }
 // A native call binds arguments; explicit guest entry can still execute
 // the same declaration's body and therefore needs a separate full layout.
 private struct LayoutKey {
-    import dmd.func: FuncDeclaration;
+    import snakebite.frontend.ast: FuncDeclaration;
 
     FuncDeclaration function_;
     LayoutKind kind;
@@ -497,8 +493,30 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         ContextSource, PairPlan, contextSourceOf, pairPlanOf;
     import snakebite.backends.interpreter.scout: BodyScout, Preparation;
     import snakebite.language.statics.classinfo;
-    import dmd.dclass: ClassDeclaration;
-    import dmd.dstruct: StructDeclaration;
+    import snakebite.frontend.ast: AddAssignExp, AddExp, AddrExp, AndAssignExp,
+        AndExp, ArrayLengthExp, ArrayLiteralExp, AssertExp, AssignExp,
+        AssocArrayLiteralExp, BinAssignExp, BinExp, BlitExp, BreakStatement,
+        CallExp, CaseStatement, CastExp, CatAssignExp, Catch, CatDcharAssignExp,
+        CatExp, ClassDeclaration, ClassReferenceExp, CmpExp, ComExp, CommaExp,
+        ComplexExp, CompoundStatement, CondExp, ConstructExp, ContinueStatement,
+        Declaration, DeclarationExp, DefaultStatement, DelegateExp,
+        DelegateFuncptrExp, DelegatePtrExp, DeleteExp, DivAssignExp, DivExp,
+        DoStatement, DotTypeExp, DotVarExp, EqualExp, EXP, Expression,
+        Expressions, ExpStatement, ForStatement, FuncDeclaration, FuncExp,
+        GotoCaseStatement, GotoDefaultStatement, GotoStatement, Identifier,
+        IdentityExp, IfStatement, ImportStatement, IndexExp, IntegerExp,
+        isIntegral, LabelStatement, Loc, LogicalExp, MinAssignExp, MinExp,
+        ModAssignExp, ModExp, MulAssignExp, MulExp, NegExp, NewExp, nextOf,
+        NotExp, NullExp, OrAssignExp, OrExp, PostExp, PtrExp, RealExp,
+        ReturnStatement, ScopeGuardStatement, ScopeStatement, ShlAssignExp,
+        ShlExp, ShrAssignExp, ShrExp, SliceExp, Statement, STC, StringExp,
+        StructLiteralExp, SuperExp, SwitchErrorStatement, SwitchStatement,
+        SymOffExp, Taarray, Tarray, Tbool, Tchar, Tclass, Tdelegate, Terror,
+        Tfunction, ThisExp, Tint64, Tnoreturn, Tpointer, TryCatchStatement,
+        TryFinallyStatement, Tsarray, Tstruct, Ttuple, Tuns32, Tuns8, Tvoid,
+        Twchar, TY, Type, TypeFunction, TypeidExp, UnaExp,
+        UnrolledLoopStatement, UshrAssignExp, UshrExp, VarArg, VarDeclaration,
+        VarExp, VectorArrayExp, VectorExp, WithStatement, XorAssignExp, XorExp;
     import snakebite.stack.frames: FrameStack, defaultFrameCapacity;
     import snakebite.backends.interpreter.faultslot:
         ResultWord, faultSlotOf, fastFrameLead, frameLead, pushCallFrame,
@@ -514,31 +532,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     import object:
         Error, Exception, Throwable, TypeInfo, TypeInfo_Class,
         TypeInfo_Tuple;
-    import dmd.root.string: toDString;
-    import dmd.astenums:
-        Tarray, Taarray, Tbool, Tchar, Tclass, Tdelegate, Terror, Tfunction,
-        Tnoreturn, Tint64, Tpointer, Tsarray, Tstruct, Ttuple, Tuns32, Tuns8, Tvoid,
-        Twchar, TY, STC, VarArg;
-    import dmd.arraytypes: Expressions;
-    import dmd.declaration: Declaration, VarDeclaration;
-    import dmd.expression;
     import snakebite.frontend.typefacts: integerValue;
-    import dmd.func: FuncDeclaration;
-    import dmd.identifier: Identifier;
-    import dmd.init: ExpInitializer;
-    import dmd.location: Loc;
-    import dmd.mtype: Type, TypeFunction;
-    import dmd.statement:
-        BreakStatement, CaseStatement, Catch, CompoundStatement,
-        ContinueStatement, DefaultStatement, DoStatement, ExpStatement,
-        ForStatement, GotoCaseStatement, GotoDefaultStatement, GotoStatement,
-        IfStatement,
-        ImportStatement, LabelStatement, ReturnStatement, ScopeStatement,
-        Statement, SwitchErrorStatement, SwitchStatement, ThrowStatement,
-        TryCatchStatement, ScopeGuardStatement, TryFinallyStatement,
-        UnrolledLoopStatement, WithStatement;
-    import dmd.tokens: EXP;
-    import dmd.typesem: isIntegral, nextOf;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.language.statics.data: NativeData;
     import snakebite.frontend.dmd.mangle: nativeSymbolName;
@@ -1438,7 +1432,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private TreeCallee* makeTreeCallee(FuncDeclaration function_) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         const decision = decisionFor(function_);
         const variadic = typeFunctionOf(function_).parameterList.varargs
@@ -1485,7 +1479,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     package TreeCallee* treeCalleeAt(
         FuncDeclaration function_, Expression site, Expressions* arguments,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         if (typeFunctionOf(function_).parameterList.varargs != VarArg.variadic
                 || decisionFor(function_).route == CallSelection.Route.guest)
@@ -6055,7 +6049,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     override void visit(TypeidExp expression) {
-        import dmd.dtemplate: isExpression, isType;
+        import snakebite.frontend.ast: isExpression, isType;
         import snakebite.language.statics.classinfo: typeidLoadCount;
         import snakebite.native.value: checkedStoreIntegral;
         import std.conv: text;
@@ -6368,7 +6362,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // read once, before the index or the bounds. A `$` whose length dmd
     // knows at compile time has no slot: dmd folds it into every use.
     private void bindDollar(VarDeclaration dollar, in size_t length) {
-        import dmd.astenums: STC;
+        import snakebite.frontend.ast: STC;
 
         if (dollar is null)
             return;
@@ -6615,7 +6609,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     protected override void visitLoweredNew(NewExp expression) {
-        import dmd.astenums: Tpointer;
+        import snakebite.frontend.ast: Tpointer;
         import core.stdc.string: memcpy;
         import snakebite.native.value: checkedLoadIntegral;
 
@@ -7210,7 +7204,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         CallExp expression, void* returnPlace,
         void* address, void* context, in bool fromDelegate,
     ) {
-        import dmd.typesem: nextOf;
+        import snakebite.frontend.ast: nextOf;
         import snakebite.frontend.typefacts: baseType;
 
         static if (nullChecks)
@@ -7366,7 +7360,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // code and one that host code runs, shared with every other way of
     // taking a function's address or calling it.
     private bool isNativeVariadic(FuncDeclaration function_) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         return typeFunctionOf(function_).parameterList.varargs
                 == VarArg.variadic
@@ -7443,7 +7437,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         CallExp expression, TypeFunction type, const(void)* address,
         void* context, bool hasContext, void* returnPlace,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
         if (type.parameterList.varargs == VarArg.variadic)
             return _callVariadicIndirect(
                 expression, type, address, context, hasContext, returnPlace);
@@ -7619,7 +7613,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.native.value: checkedStoreIntegral;
         import snakebite.language.call.selection: arityMismatches;
         import snakebite.frontend.dmd.delegates: outerFunctionOf;
-        import dmd.astenums: STC;
 
         // The callee's parameter types, which a body-less declaration has
         // just as much as one with a body - unlike `parameters`, which

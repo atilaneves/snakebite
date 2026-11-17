@@ -36,14 +36,13 @@ public struct PlanCache {
     // code.
     public this(
         CallPlanStore* store,
-        bool delegate(imported!"dmd.dsymbol".Dsymbol) const isRootOwned = null,
+        bool delegate(imported!"snakebite.frontend.ast".Dsymbol) const isRootOwned = null,
     ) {
         _store = store;
         _isRootOwned = isRootOwned;
     }
 
-    import dmd.func: FuncDeclaration;
-    import dmd.mtype: TypeFunction;
+    import snakebite.frontend.ast: FuncDeclaration, Type, TypeFunction;
 
     // Owns the plans that this prepares, the resolver they bind symbols
     // with and the callback bridge. This keeps the index from a declaration
@@ -137,7 +136,7 @@ public struct PlanCache {
     public const(CallPlan)* signatureOf(
         TypeFunction type, in bool context,
     ) {
-        import dmd.astenums: VarArg;
+        import snakebite.frontend.ast: VarArg;
 
         auto key = Signature(type, context);
         if (auto cached = key in _signatures)
@@ -192,8 +191,6 @@ public struct PlanCache {
             );
     }
 
-    import dmd.func: FuncDeclaration;
-    import dmd.mtype: Type;
     import snakebite.ffi.argumentplan: Register;
     import snakebite.host.sharedtable: SharedTable;
 
@@ -204,7 +201,7 @@ public struct PlanCache {
     private SharedTable!(string, CallPlan*) _rawPlans;
     private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
     private SharedTable!(FuncDeclaration, bool) _independentNativeSymbols;
-    private bool delegate(imported!"dmd.dsymbol".Dsymbol) const _isRootOwned;
+    private bool delegate(imported!"snakebite.frontend.ast".Dsymbol) const _isRootOwned;
     private shared size_t _preparations;
     version(unittest) private size_t _nativeSymbolLookups;
 
@@ -298,9 +295,9 @@ public struct PlanCache {
     // so the lookup decides. An argument that this cannot classify leaves
     // the answer to the lookup.
     private bool isInterpretedOnly(
-        imported!"dmd.func".FuncDeclaration function_,
+        imported!"snakebite.frontend.ast".FuncDeclaration function_,
     ) {
-        import dmd.dsymbol: Dsymbol;
+        import snakebite.frontend.ast: Dsymbol;
         import snakebite.frontend.dmd.functions: backendExecutes;
 
         if (_isRootOwned is null || function_.fbody is null)
@@ -316,14 +313,11 @@ public struct PlanCache {
     }
 
     private bool hasRootArgument(
-        imported!"dmd.dsymbol".Dsymbol symbol,
+        imported!"snakebite.frontend.ast".Dsymbol symbol,
         in size_t depth,
     ) {
-        import dmd.dsymbol: Dsymbol;
-        import dmd.dtemplate: isDsymbol, isTuple, isType;
-        import dmd.expression: Expression;
-        import dmd.rootobject: RootObject;
-        import dmd.typesem: nextOf, toDsymbol;
+        import snakebite.frontend.ast: Dsymbol, Expression, isDsymbol, isTuple,
+            isType, nextOf, RootObject, toDsymbol;
 
         auto instance = symbol.isTemplateInstance;
         if (instance is null || instance.tiargs is null)
@@ -601,9 +595,9 @@ public struct PlanCache {
 // Whether `CallPlan` has a store width for each register of the result of
 // `type`.
 private bool hasResultStore(
-    imported!"dmd.mtype".TypeFunction type,
+    imported!"snakebite.frontend.ast".TypeFunction type,
 ) {
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf;
     import snakebite.ffi.abi: needsHiddenReturnPointer, returnPlanOf;
     import snakebite.ffi.argumentplan: Register;
 
@@ -643,8 +637,8 @@ private bool hasResultStore(
 // steps 5 and 6): two call sites naming the same variadic function can pass
 // different extra arguments, and need different plans.
 private NativeSignature calleeOf(
-    imported!"dmd.func".FuncDeclaration function_,
-    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
+    scope imported!"snakebite.frontend.ast".Type[] extraArgumentTypes,
     in bool isVariadicCall,
     out string symbol,
 ) {
@@ -674,7 +668,7 @@ private NativeSignature calleeOf(
 // The name of the host symbol that serves `function_`: its mangled name, or
 // the name of the host wrapper when `nativeTarget` names one. The resolver
 // turns the name into an address, for a call and for a function address alike.
-private string hostSymbolOf(imported!"dmd.func".FuncDeclaration function_) {
+private string hostSymbolOf(imported!"snakebite.frontend.ast".FuncDeclaration function_) {
     import snakebite.druntime.constructoratomic:
         atomicAddSymbol, nativeTarget;
     import snakebite.frontend.dmd.mangle: mangledNameOf;
@@ -685,7 +679,7 @@ private string hostSymbolOf(imported!"dmd.func".FuncDeclaration function_) {
 
 // The failure for a `function_` whose code `symbol` is not in this process.
 private Exception unresolved(
-    imported!"dmd.func".FuncDeclaration function_, in string symbol,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_, in string symbol,
 ) {
     import std.conv: text;
 
@@ -713,9 +707,9 @@ private Exception unresolved(
 // The signature of the guest function `function_`, from its own declared
 // linkage. Compile-time only: it reads the AST.
 public NativeSignature nativeSignatureOf(
-    imported!"dmd.func".FuncDeclaration function_,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
-    import dmd.astenums: VarArg;
+    import snakebite.frontend.ast: VarArg;
     import snakebite.frontend.dmd.delegates: hasHiddenThis;
     import snakebite.frontend.dmd.mangle: completeFunctionType;
     import std.conv: text;
@@ -739,9 +733,9 @@ public NativeSignature nativeSignatureOf(
 // The signature of `function_` under `linkage`, from which `planOf` lays out
 // the plan.
 private NativeSignature signatureOfFunction(
-    imported!"dmd.func".FuncDeclaration function_,
-    in imported!"dmd.astenums".LINK linkage,
-    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
+    in imported!"snakebite.frontend.ast".LINK linkage,
+    scope imported!"snakebite.frontend.ast".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
     import snakebite.frontend.dmd.delegates: hasHiddenThis;
@@ -751,9 +745,9 @@ private NativeSignature signatureOfFunction(
 }
 
 private NativeSignature _signatureOf(
-    imported!"dmd.mtype".TypeFunction type, in bool hasContext,
-    in imported!"dmd.astenums".LINK linkage,
-    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    imported!"snakebite.frontend.ast".TypeFunction type, in bool hasContext,
+    in imported!"snakebite.frontend.ast".LINK linkage,
+    scope imported!"snakebite.frontend.ast".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
     return signatureOf(type, hasContext, linkage, extraArgumentTypes,
@@ -763,16 +757,15 @@ private NativeSignature _signatureOf(
 // The part of `_shapeOf` that reads the AST: classifies every parameter
 // and the result into a `NativeSignature`.
 private NativeSignature signatureOf(
-    imported!"dmd.mtype".TypeFunction type, in bool hasContext,
-    in imported!"dmd.astenums".LINK linkage,
-    scope imported!"dmd.mtype".Type[] extraArgumentTypes,
+    imported!"snakebite.frontend.ast".TypeFunction type, in bool hasContext,
+    in imported!"snakebite.frontend.ast".LINK linkage,
+    scope imported!"snakebite.frontend.ast".Type[] extraArgumentTypes,
     in bool isVariadicCall,
 ) {
     import snakebite.ffi.abi:
         argumentPlanOf, linkageOf, needsHiddenReturnPointer, returnPlanOf;
     import snakebite.ffi.argumentplan: ArgumentPlan, Register, supported;
-    import dmd.astenums: LINK, STC, Tdelegate, VarArg;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: LINK, nextOf, STC, Tdelegate, VarArg;
     import snakebite.frontend.typefacts: baseType;
     import std.conv: text;
 

@@ -57,7 +57,7 @@ private enum TypeKind {
 // `null`; callers still special-case `cast(void) e`'s effect-only meaning
 // before reaching here.
 public CastPlan classify(
-    imported!"dmd.mtype".Type sourceType, imported!"dmd.mtype".Type destType,
+    imported!"snakebite.frontend.ast".Type sourceType, imported!"snakebite.frontend.ast".Type destType,
 ) {
     import snakebite.frontend.typefacts: baseType;
 
@@ -74,12 +74,12 @@ public CastPlan classify(
 private CastPlan classifyByKind(
     TypeKind sourceKind,
     TypeKind destKind,
-    imported!"dmd.mtype".Type sourceType,
-    imported!"dmd.mtype".Type destType,
+    imported!"snakebite.frontend.ast".Type sourceType,
+    imported!"snakebite.frontend.ast".Type destType,
     in TypeFacts sourceFacts,
     in TypeFacts destFacts,
 ) {
-    import dmd.astenums: Tbool;
+    import snakebite.frontend.ast: Tbool;
 
     // Whatever the source is, a `bool` destination asks for its truth,
     // which `TypeFacts.Truth` states once for every type dmd lets
@@ -263,8 +263,8 @@ private CastPlan classifyPointer(
 
 private CastPlan classifyClass(
     TypeKind destKind,
-    imported!"dmd.mtype".Type sourceType,
-    imported!"dmd.mtype".Type destType,
+    imported!"snakebite.frontend.ast".Type sourceType,
+    imported!"snakebite.frontend.ast".Type destType,
     in TypeFacts sourceFacts,
     in TypeFacts destFacts,
 ) {
@@ -334,13 +334,13 @@ private CastPlan classifyDynamicArray(
 
 private CastPlan classifyStaticArray(
     TypeKind destKind,
-    imported!"dmd.mtype".Type sourceType,
-    imported!"dmd.mtype".Type destType,
+    imported!"snakebite.frontend.ast".Type sourceType,
+    imported!"snakebite.frontend.ast".Type destType,
     in TypeFacts sourceFacts,
     in TypeFacts destFacts,
 ) {
     import snakebite.frontend.typefacts: integerValue;
-    import dmd.typesem: nextOf;
+    import snakebite.frontend.ast: nextOf;
     import snakebite.frontend.typefacts: representationSize;
 
     final switch (destKind) with (TypeKind) {
@@ -388,8 +388,8 @@ private CastPlan classifyFatValue(
     }
 }
 
-private TypeKind kindOf(imported!"dmd.mtype".Type type) {
-    import dmd.astenums: TY;
+private TypeKind kindOf(imported!"snakebite.frontend.ast".Type type) {
+    import snakebite.frontend.ast: TY;
 
     final switch (type.ty) with (TY) {
     case Tarray: return TypeKind.dynamicArray;
@@ -418,8 +418,8 @@ private TypeKind kindOf(imported!"dmd.mtype".Type type) {
 // A null expression has no source representation to classify. Its cast
 // fills the destination with zeros across its native width instead.
 public CastPlan classify(
-    imported!"dmd.expression".Expression expression,
-    imported!"dmd.mtype".Type destType,
+    imported!"snakebite.frontend.ast".Expression expression,
+    imported!"snakebite.frontend.ast".Type destType,
 ) {
     if (expression.isNullExp !is null)
         return CastPlan(

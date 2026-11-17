@@ -25,7 +25,7 @@ public enum constructedObjectOffset = DualContext.receiverWord * size_t.sizeof;
 
 // Whether the hidden argument of `function_` is a pair that holds the
 // object of a constructor.
-public bool constructsThroughPair(imported!"dmd.func".FuncDeclaration function_) {
+public bool constructsThroughPair(imported!"snakebite.frontend.ast".FuncDeclaration function_) {
     import snakebite.frontend.dmd.delegates: isDualContext;
 
     return function_.isCtorDeclaration !is null && isDualContext(function_);
@@ -34,10 +34,10 @@ public bool constructsThroughPair(imported!"dmd.func".FuncDeclaration function_)
 // The byte offset in the pair of the word a lookup of `target`'s context
 // follows when it passes through `symbol`.
 public size_t wordTowards(
-    imported!"dmd.dsymbol".Dsymbol symbol,
-    imported!"dmd.dsymbol".Dsymbol target,
+    imported!"snakebite.frontend.ast".Dsymbol symbol,
+    imported!"snakebite.frontend.ast".Dsymbol target,
 ) {
-    import dmd.dsymbolsem: followInstantiationContext;
+    import snakebite.frontend.ast: followInstantiationContext;
 
     const word = symbol.followInstantiationContext(target)
         ? DualContext.outerWord : DualContext.receiverWord;
@@ -47,10 +47,10 @@ public size_t wordTowards(
 // The byte offset in an instance of `aggregate` of the context field a
 // lookup of `target`'s context follows when it passes through `aggregate`.
 public size_t fieldTowards(
-    imported!"dmd.aggregate".AggregateDeclaration aggregate,
-    imported!"dmd.dsymbol".Dsymbol target,
+    imported!"snakebite.frontend.ast".AggregateDeclaration aggregate,
+    imported!"snakebite.frontend.ast".Dsymbol target,
 ) {
-    import dmd.dsymbolsem: followInstantiationContext;
+    import snakebite.frontend.ast: followInstantiationContext;
 
     return (aggregate.followInstantiationContext(target)
         ? aggregate.vthis2 : aggregate.vthis).offset;
@@ -58,11 +58,11 @@ public size_t fieldTowards(
 
 // The symbol whose context a lookup of `target`'s context reaches next
 // after `symbol`.
-public imported!"dmd.dsymbol".Dsymbol parentTowards(
-    imported!"dmd.dsymbol".Dsymbol symbol,
-    imported!"dmd.dsymbol".Dsymbol target,
+public imported!"snakebite.frontend.ast".Dsymbol parentTowards(
+    imported!"snakebite.frontend.ast".Dsymbol symbol,
+    imported!"snakebite.frontend.ast".Dsymbol target,
 ) {
-    import dmd.dsymbolsem: toParentP;
+    import snakebite.frontend.ast: toParentP;
     import snakebite.frontend.dmd.delegates: isDualContext;
 
     return isDualContext(symbol)

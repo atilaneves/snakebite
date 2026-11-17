@@ -3,7 +3,7 @@ module snakebite.language.control.transfer;
 private:
 
 public struct ControlFlowState {
-    import dmd.identifier: Identifier;
+    import snakebite.frontend.ast: Identifier;
 
     private enum Kind {
         none, return_, break_, continue_, goto_,
@@ -136,7 +136,7 @@ public struct ControlFlowState {
 }
 
 public struct ScopeFrame {
-    import dmd.statement: Statement;
+    import snakebite.frontend.ast: Statement;
 
     public const(void)* owner;
     public bool cleanup;
@@ -157,7 +157,7 @@ public struct ScopePaths {
     // Innermost scope first. A handler or a `finally` body is not inside the
     // `try` that owns it.
     public ScopeFrame[] enclosing(
-        in imported!"dmd.statement".Statement statement,
+        in imported!"snakebite.frontend.ast".Statement statement,
     )
         @trusted
     {
@@ -168,7 +168,7 @@ public struct ScopePaths {
     }
 
     // The scope path that starts at `statement` itself.
-    public ScopeFrame[] through(imported!"dmd.statement".Statement statement)
+    public ScopeFrame[] through(imported!"snakebite.frontend.ast".Statement statement)
         @trusted
     {
         return frameOf(statement) ~ enclosing(statement);
@@ -178,13 +178,13 @@ public struct ScopePaths {
 // The statement that a label names: `gotoTarget` when dmd rewrote the
 // labelled statement (a `for` initialiser or `foreach` declarations move in
 // front of the loop), the labelled statement itself otherwise.
-public imported!"dmd.statement".Statement labelTargetOf(
-    imported!"dmd.statement".LabelStatement label,
+public imported!"snakebite.frontend.ast".Statement labelTargetOf(
+    imported!"snakebite.frontend.ast".LabelStatement label,
 ) {
     return label.gotoTarget !is null ? label.gotoTarget : label.statement;
 }
 
-public ScopePaths scopePathsOf(imported!"dmd.statement".Statement body_)
+public ScopePaths scopePathsOf(imported!"snakebite.frontend.ast".Statement body_)
     @trusted
 {
     ScopePaths result;
@@ -196,7 +196,7 @@ public ScopePaths scopePathsOf(imported!"dmd.statement".Statement body_)
     return result;
 }
 
-private ScopeFrame frameOf(imported!"dmd.statement".Statement statement)
+private ScopeFrame frameOf(imported!"snakebite.frontend.ast".Statement statement)
     @trusted
 {
     if (auto finally_ = statement.isTryFinallyStatement)
@@ -208,14 +208,13 @@ private ScopeFrame frameOf(imported!"dmd.statement".Statement statement)
 }
 
 extern(C++) private final class ScopeRecorder:
-    imported!"dmd.visitor.statement_rewrite_walker".StatementRewriteWalker
+    imported!"snakebite.frontend.ast".StatementRewriteWalker
 {
-    import dmd.visitor.statement_rewrite_walker: StatementRewriteWalker;
-    import dmd.statement:
-        BreakStatement, CaseStatement, ContinueStatement, DefaultStatement,
-        DoStatement, ForStatement, GotoCaseStatement, GotoDefaultStatement,
-        GotoStatement, LabelStatement, ReturnStatement, ScopeGuardStatement,
-        Statement, SwitchStatement, TryCatchStatement, TryFinallyStatement,
+    import snakebite.frontend.ast: BreakStatement, CaseStatement,
+        ContinueStatement, DefaultStatement, DoStatement, ForStatement,
+        GotoCaseStatement, GotoDefaultStatement, GotoStatement, LabelStatement,
+        ReturnStatement, ScopeGuardStatement, Statement, StatementRewriteWalker,
+        SwitchStatement, TryCatchStatement, TryFinallyStatement,
         UnrolledLoopStatement;
 
     alias visit = StatementRewriteWalker.visit;

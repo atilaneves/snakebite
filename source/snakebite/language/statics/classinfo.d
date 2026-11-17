@@ -4,10 +4,8 @@ module snakebite.language.statics.classinfo;
 private:
 
 
-import dmd.aggregate: AggregateDeclaration;
-import dmd.dclass: ClassDeclaration;
-import dmd.expression: Expression;
-import dmd.func: FuncDeclaration;
+import snakebite.frontend.ast: AggregateDeclaration, ClassDeclaration,
+    Expression, FuncDeclaration;
 import object: Interface, TypeInfo_Class;
 import snakebite.language.statics.data: NativeData;
 import snakebite.native.value: TypeFacts;
@@ -122,12 +120,12 @@ public struct ClassRuntimeCache {
 }
 
 public TypeInfo_Class classRuntimeInfo(
-    imported!"dmd.dclass".ClassDeclaration declaration,
+    imported!"snakebite.frontend.ast".ClassDeclaration declaration,
     ref ClassRuntimeCache cache,
     Hooks hooks,
 ) {
-    import dmd.root.string: toDString;
-    import dmd.common.blake3: blake3;
+    import snakebite.frontend.ast: blake3, hasPointers, isAbstract, STC,
+        toDString;
     import snakebite.frontend.dmd.functions: prettyNameOf;
 
     if (auto cached = declaration in cache)
@@ -139,8 +137,6 @@ public TypeInfo_Class classRuntimeInfo(
 
     auto data = hooks.data;
     auto info = data.newObject!TypeInfo_Class(declaration);
-    import dmd.astenums: STC;
-    import dmd.dsymbolsem: hasPointers, isAbstract;
 
     const isInterface = declaration.isInterfaceDeclaration !is null;
     // Same flags as `glue/toobj.d`: a class and an interface differ.
@@ -239,7 +235,7 @@ public TypeInfo_Class classRuntimeInfo(
                 hooks.methodAddress(declaration.inv, 0));
         foreach (i; firstMethod .. declaration.vtbl.length) {
             auto method = declaration.vtbl[i].isFuncDeclaration;
-            import dmd.dsymbolsem: isAbstract;
+            import snakebite.frontend.ast: isAbstract;
 
             // DMD leaves bodyless slots empty in an abstract class,
             // even when the method itself has no abstract attribute.
@@ -293,7 +289,7 @@ public TypeInfo_Class classRuntimeInfo(
                 parent !is null; parent = parent.baseClass) {
             auto parentInfo = classRuntimeInfo(parent, cache, hooks);
             foreach (i; 0 .. parent.vtblInterfaces.length) {
-                import dmd.dsymbolsem: fillVtbl;
+                import snakebite.frontend.ast: fillVtbl;
                 auto base = (*parent.vtblInterfaces)[i];
                 if (!base.fillVtbl(declaration, null, 0))
                     continue;
@@ -306,12 +302,11 @@ public TypeInfo_Class classRuntimeInfo(
 }
 
 private void*[] _interfaceVtable(
-    imported!"dmd.dclass".ClassDeclaration declaration,
-    imported!"dmd.dclass".BaseClass* base,
+    imported!"snakebite.frontend.ast".ClassDeclaration declaration,
+    imported!"snakebite.frontend.ast".BaseClass* base,
     Interface* descriptor, Hooks hooks,
 ) {
-    import dmd.arraytypes: FuncDeclarations;
-    import dmd.dsymbolsem: fillVtbl;
+    import snakebite.frontend.ast: fillVtbl, FuncDeclarations;
 
     FuncDeclarations methods;
     base.fillVtbl(declaration, &methods, 0);

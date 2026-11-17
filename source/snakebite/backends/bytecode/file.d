@@ -21,7 +21,7 @@ import snakebite.native.address: DatumRef, Target;
 import snakebite.backends.bytecode.vm:
     AssertSite, CallSite, ExceptionHandler,
     Function, hostCodeAt, hostCodeOffset, Instruction, JitSetting,
-    Role, Roles, rolesOf, withoutCount, wordAt;
+    Role, Roles, rolesOf, targetWordAt, withoutCount, wordAt;
 import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
@@ -563,7 +563,8 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
                     archive.transfer(value.tupleof[index]);
             } else static if (is(typeof(classification) == HostCode)) {
                 // Code of the host executable. Only the handler of an
-                // instruction is never null.
+                // instruction and the counting handler of a counting site are
+                // never null.
                 bool present = true;
                 static if (!is(Field == Instruction.Handler)) {
                     if (archive.isWriting)
@@ -708,6 +709,14 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
         });
 
     auto instructions = function_.instructions.dup;
+    foreach (record; function_.targetWords) {
+        auto field = targetWordAt(instructions, record);
+        if (field is null)
+            internalFailure("a branch target record names no instruction "
+                ~ "operand");
+        *field = (*field - cast(size_t) function_.instructions.ptr)
+            / Instruction.sizeof;
+    }
     foreach (index, ref instruction; instructions) {
         instruction.handler = withoutCount(instruction.handler);
         Roles roles;
@@ -716,10 +725,7 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
         static foreach (name; ["destination", "source", "sourceWidth"]) {{
             const role = mixin("roles." ~ name);
             auto field = &mixin("instruction." ~ name);
-            if (role == Role.instruction)
-                *field = (*field - cast(size_t) function_.instructions.ptr)
-                    / Instruction.sizeof;
-            else if (role == Role.address) {
+            if (role == Role.address) {
                 require(Relocated(Place.Section.instruction,
                     mixin("Place.Field." ~ name)), index, *field);
                 *field = 0;

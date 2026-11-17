@@ -6,18 +6,13 @@ private:
 import snakebite.frontend.typefacts: typeFacts;
 
 
-import dmd.expression:
-    ArrayLiteralExp, AssignExp, AssocArrayLiteralExp, CastExp, CatAssignExp,
-    CatExp, CallExp, CmpExp, EqualExp, HaltExp, IntegerExp, LogicalExp,
-    CatElemAssignExp, CatDcharAssignExp,
-    ConstructExp, DeclarationExp, Expression, IdentityExp, LoweredAssignExp,
-    NewExp, ThrowExp,
-    TupleExp;
-import dmd.statement:
-    Statement, ExpStatement, IfStatement, ReturnStatement,
-    SwitchErrorStatement, SwitchStatement, ThrowStatement, WithStatement;
-import dmd.location: Loc;
-import dmd.typesem: isString;
+import snakebite.frontend.ast: ArrayLiteralExp, AssignExp, AssocArrayLiteralExp,
+    CallExp, CastExp, CatAssignExp, CatDcharAssignExp, CatElemAssignExp, CatExp,
+    CmpExp, ConstructExp, DeclarationExp, EqualExp, Expression, ExpStatement,
+    FuncDeclaration, HaltExp, IdentityExp, IfStatement, Loc, LogicalExp,
+    LoweredAssignExp, NewExp, ReturnStatement, Statement, SwitchErrorStatement,
+    SwitchStatement, ThrowExp, ThrowStatement, TupleExp, Type, Visitor,
+    WithStatement;
 import snakebite.language.traversal.fullexpression: FullExpressionScope;
 import snakebite.language.layout.lowered: LoweredExpressionTypes;
 import snakebite.language.operators.comparison:
@@ -25,22 +20,15 @@ import snakebite.language.operators.comparison:
 import snakebite.language.control.condition:
     LogicalPlan, logicalPlan, IfPlan, ifPlan;
 import snakebite.language.storage.lifetime: NewPlan, planNew;
-import dmd.visitor: Visitor;
-import dmd.mtype: Type;
-import dmd.func: FuncDeclaration;
 import snakebite.native.value: TypeFacts;
-import snakebite.frontend.compiler: newInFrontend;
+import snakebite.frontend.compiler: inFrontend;
 import std.meta: AliasSeq;
 
 
 // A frontend update must not introduce a lowering that bypasses this policy.
-static foreach (name; __traits(allMembers, imported!"dmd.expression")) {
-    static if (__traits(compiles,
-            __traits(getMember, imported!"dmd.expression", name)))
-        static assert(hasSharedLoweringPolicy!(
-            __traits(getMember, imported!"dmd.expression", name)),
-            name ~ " needs a final shared lowering policy");
-}
+static foreach (Node; imported!"snakebite.frontend.nodeclasses".ExpressionClasses)
+    static assert(hasSharedLoweringPolicy!Node,
+        Node.stringof ~ " needs a final shared lowering policy");
 
 // Allocation lowering produces storage; constructor execution remains on
 // NewExp. Destination hooks keep that result alive across nested evaluation.
@@ -252,7 +240,7 @@ extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
     protected final bool throwIfStringSwitchInCtfeBlock(
         SwitchStatement statement,
     ) {
-        if (!newInFrontend!isString(statement.condition.type))
+        if (!inFrontend!"isString"(statement.condition.type))
             return false;
 
         return throwIfUnloweredInCtfeBlock("string switch", statement.loc);
@@ -408,17 +396,16 @@ extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
     // expressionSemantic replaces these casts with object.__ArrayCast only
     // in a code-generation scope. Raw slice resizing would skip its check.
     private static bool needsArrayCastHook(CastExp expression) {
-        import dmd.astenums: Tarray;
-        import dmd.typesem: nextOf, size, toBasetype;
+        import snakebite.frontend.ast: nextOf, Tarray;
 
-        auto source = newInFrontend!toBasetype(expression.e1.type);
-        auto target = newInFrontend!toBasetype(expression.type);
+        auto source = inFrontend!"toBasetype"(expression.e1.type);
+        auto target = inFrontend!"toBasetype"(expression.type);
         if (source.ty != Tarray || target.ty != Tarray
                 || expression.e1.isArrayLiteralExp !is null)
             return false;
 
-        const sourceSize = newInFrontend!size(source.nextOf);
-        const targetSize = newInFrontend!size(target.nextOf);
+        const sourceSize = inFrontend!"size"(source.nextOf);
+        const targetSize = inFrontend!"size"(target.nextOf);
         return sourceSize != targetSize
             && (targetSize == 0 || sourceSize % targetSize != 0);
     }
@@ -493,16 +480,14 @@ extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
     // Match expressionSemantic's _d_arrayctor/_d_arraysetctor selection,
     // including the forms which move elements and need no hook.
     private static bool needsArrayConstructionHook(ConstructExp expression) {
-        import dmd.astenums: Tarray, Tsarray;
-        import dmd.expressionsem: isLvalue;
-        import dmd.typesem: baseElemOf, equivalent, nextOf, toBasetype;
+        import snakebite.frontend.ast: nextOf, Tarray, Tsarray;
 
-        auto target = newInFrontend!toBasetype(expression.e1.type);
+        auto target = inFrontend!"toBasetype"(expression.e1.type);
         if (target.ty != Tsarray && target.ty != Tarray)
             return false;
 
         auto element = target.nextOf; // DMD type methods require mutable Type.
-        const structure = newInFrontend!baseElemOf(element).isTypeStruct;
+        const structure = inFrontend!"baseElemOf"(element).isTypeStruct;
         if (structure is null || (!structure.sym.postblit
                 && !structure.sym.hasCopyCtor && !structure.sym.dtor))
             return false;
@@ -513,19 +498,19 @@ extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
                 return false;
 
         auto rhs = expression.e2;
-        auto source = newInFrontend!toBasetype(rhs.type);
+        auto source = inFrontend!"toBasetype"(rhs.type);
         auto originalSource = source; // DMD needs mutable Type.
         if (source.ty == Tarray)
             if (auto cast_ = rhs.isCastExp)
-                if (newInFrontend!toBasetype(cast_.e1.type).ty == Tsarray) {
+                if (inFrontend!"toBasetype"(cast_.e1.type).ty == Tsarray) {
                     rhs = cast_.e1;
-                    source = newInFrontend!toBasetype(rhs.type);
+                    source = inFrontend!"toBasetype"(rhs.type);
                 }
 
         const arrayCopy = ((source.ty == Tarray && rhs.isArrayLiteralExp is null)
-                || (source.ty == Tsarray && newInFrontend!isLvalue(rhs)))
-            && newInFrontend!equivalent(element, originalSource.nextOf);
-        return arrayCopy || newInFrontend!equivalent(element, originalSource);
+                || (source.ty == Tsarray && inFrontend!"isLvalue"(rhs)))
+            && inFrontend!"equivalent"(element, originalSource.nextOf);
+        return arrayCopy || inFrontend!"equivalent"(element, originalSource);
     }
 
     protected abstract void visitUnloweredConstruct(ConstructExp expression);
@@ -586,7 +571,7 @@ extern(C++) package(snakebite) abstract class LoweringVisitor: Visitor {
     // read the old destination. The pointer temporary holds either a call
     // frame address or the frontend lowering's allocation result.
     final override void visit(ArrayLiteralExp expression) {
-        import dmd.mtype: Type;
+        import snakebite.frontend.ast: Type;
         import snakebite.language.layout.arrayliteral: ArrayLiteralPlan, planArrayLiteral;
         import snakebite.frontend.typefacts: isStoredLiteral;
         import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;

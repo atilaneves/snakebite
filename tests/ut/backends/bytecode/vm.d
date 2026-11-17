@@ -5,6 +5,7 @@ import ut;
 import snakebite.backends.bytecode.vm:
     Arg, CallSite, Function, Instruction, opAdd, opCall, opConstant,
     opLoadIndirect, opReturn, Vm;
+import snakebite.backends.bytecode.inspection: bindWithRecords;
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi: PlanCache;
 import snakebite.ffi.argumentplan: Register;
@@ -196,4 +197,32 @@ unittest {
     greet.funcptr = cast(int function()) result;
 
     greet().should == 111;
+}
+
+
+// The records of a function are checked before the function runs: a record
+// that names a word that is not an operand, or an instruction that does not
+// exist, is refused.
+@("bindInstructionReferences.refusesTargetRecordOfWrongWord")
+unittest {
+    auto instructions = [
+        Instruction(&opConstant, 0, 1, int.sizeof),
+        Instruction(&opReturn, 0, 0, int.sizeof),
+    ];
+    // Word 1 is the destination, an operand; word 0 is the handler.
+    bindWithRecords(instructions, [[0, 1]], []).should == string.init;
+    bindWithRecords(instructions, [[0, 0]], []).should
+        == "a branch target record names no instruction operand";
+    bindWithRecords(instructions, [[5, 1]], []).should
+        == "a branch target record names no instruction operand";
+}
+
+@("bindInstructionReferences.refusesCountingRecordOfMissingInstruction")
+unittest {
+    auto instructions = [
+        Instruction(&opReturn, 0, 0, int.sizeof),
+    ];
+    bindWithRecords(instructions, [], [0]).should == string.init;
+    bindWithRecords(instructions, [], [1]).should
+        == "a counting record names no instruction";
 }

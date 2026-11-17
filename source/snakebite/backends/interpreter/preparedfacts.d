@@ -2,19 +2,15 @@ module snakebite.backends.interpreter.preparedfacts;
 
 private:
 
-import dmd.declaration: VarDeclaration;
-import dmd.expression: CallExp, CastExp, StructLiteralExp, StringExp;
-import dmd.func: FuncDeclaration;
-import dmd.mtype: Type;
-import dmd.astenums: Tfunction, Ttuple, Terror;
-import dmd.typesem: baseElemOf;
+import snakebite.frontend.ast: CallExp, CastExp, FuncDeclaration, Loc,
+    StringExp, StructLiteralExp, Terror, Tfunction, Ttuple, Type,
+    VarDeclaration;
 import snakebite.frontend.typefacts: baseType;
-import dmd.location: Loc;
 import snakebite.language.statics.typeinfo: RuntimeTypes;
 import snakebite.language.storage.lifetime: AggregateInitPlan, planStructLiteral;
 import snakebite.language.operators.casts: CastPlan, classify;
 import snakebite.language.context.source: ContextSource, calleeContextSourceOf;
-import snakebite.frontend.compiler: gagged, newInFrontend;
+import snakebite.frontend.compiler: gagged, inFrontend;
 import snakebite.frontend.typefacts: typeFacts, tryTypeFacts, bitfieldAccess;
 import snakebite.native.value: TypeFacts;
 import snakebite.language.statics.data: NativeData;
@@ -82,7 +78,7 @@ package struct PreparedFacts {
 
     package void prepareZeroInitialized(Type type) {
         attempt({
-            auto element = newInFrontend!baseElemOf(type);
+            auto element = inFrontend!"baseElemOf"(type);
             if (element.isTypeStruct !is null)
                 prepareDefault(element);
         });
@@ -121,7 +117,7 @@ package struct PreparedFacts {
     }
 
     package void prepareCast(CastExp expression) {
-        import dmd.astenums: Tvoid;
+        import snakebite.frontend.ast: Tvoid;
 
         if (expression.type is null || expression.type.baseType.ty == Tvoid)
             return;

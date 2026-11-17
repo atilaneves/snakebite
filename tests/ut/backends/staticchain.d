@@ -2,9 +2,7 @@ module ut.backends.staticchain;
 
 
 import ut;
-import dmd.dsymbol: Dsymbol;
-import dmd.func: FuncDeclaration;
-import dmd.statement: Statement;
+import snakebite.frontend.ast: Dsymbol, FuncDeclaration, Statement;
 import snakebite.native.signature: SignatureTable;
 import snakebite.language.context.chain: ClosurePlan, Hop;
 import snakebite.frontend.compiler: parseSnippet;
