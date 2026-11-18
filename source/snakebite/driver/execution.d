@@ -229,16 +229,16 @@ public ExecutionReport executeLoaded(
     in string[] programArguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
-    import std.file: read;
+    import std.stdio: File;
 
-    return executeLoaded(cast(const(ubyte)[]) read(path), programArguments,
-        jit);
+    return executeLoaded(File(path, "rb"), programArguments, jit);
 }
 
 
-// As `executeLoaded` with the path, for the bytes `contents` of the file.
+// As `executeLoaded` with the path, for the open program file `file`. The
+// load reads it from its start.
 public ExecutionReport executeLoaded(
-    in ubyte[] contents,
+    imported!"std.stdio".File file,
     in string[] programArguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
@@ -249,7 +249,8 @@ public ExecutionReport executeLoaded(
     import std.stdio: stdin, stdout, stderr;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto loaded = loadProgramFile(contents, jit);
+    auto loaded = loadProgramFile(file, jit);
+    file.close;
     scope(exit) loaded.runner.end;
     scope entered = ProjectDirectory(
         loaded.header.workingDirectory, loaded.header.workingDirectory,
@@ -291,22 +292,64 @@ public struct LoadedProgram {
 }
 
 
+// Reads the program file `file`, from its start, into a new program wired to
+// a new runner with `jit`. It does not change the working directory.
+public LoadedProgram loadProgramFile(
+    imported!"std.stdio".File file,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
+    // The parts of the file go one after the other through this buffer.
+    ubyte[64 * 1024] buffer = void;
+    return loadProgramFile(file.byChunk(buffer[]), file.size, jit);
+}
+
+
 // Reads the program file whose bytes are `contents` into a new program wired
 // to a new runner with `jit`. It does not change the working directory.
 public LoadedProgram loadProgramFile(
     const(ubyte)[] contents,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
+    import std.range: only;
+
+    return loadProgramFile(only(contents), contents.length, jit);
+}
+
+
+// Reads the program file of `size` bytes that the input range `parts` gives,
+// part after part, into a new program wired to a new runner with `jit`. A
+// part stays valid until the range is advanced.
+private LoadedProgram loadProgramFile(Parts)(
+    Parts parts, in ulong size,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
     import core.memory: GC;
-    import snakebite.backends.bytecode.file: loadProgram, readHeader;
+    import snakebite.backends.bytecode.file: ProgramReader;
     import snakebite.backends.bytecode.program: Program;
     import snakebite.backends.bytecode.runner: Runner, wire;
     import snakebite.failure.report: SnakebiteException;
     import snakebite.image.dependency: DependencyImage, loadImage;
     import snakebite.image.preparation: generatorKey;
 
+    // The part that `next` gave stays valid until the next call.
+    static struct Source {
+        Parts parts;
+        bool started;
+
+        const(ubyte)[] next() {
+            if (started)
+                parts.popFront;
+            started = true;
+            return parts.empty ? null : parts.front;
+        }
+    }
+
+    if (size > size_t.max)
+        throw new SnakebiteException("the program file is too large");
+    auto source = Source(parts);
+    auto reader = ProgramReader(&source.next, cast(size_t) size);
     LoadedProgram loaded;
-    loaded.header = readHeader(contents);
+    loaded.header = reader.header;
     if (loaded.header.buildKey != generatorKey)
         throw new SnakebiteException(
             "the program file was written by another build of snakebite");
@@ -326,7 +369,7 @@ public LoadedProgram loadProgramFile(
     loaded.runner = cast(Runner*) GC.calloc(Runner.sizeof);
     wire(*loaded.program, *loaded.runner, jit);
     scope(failure) loaded.runner.end;
-    loadProgram(contents, *loaded.program, *loaded.runner, loaded.image);
+    reader.load(*loaded.program, *loaded.runner, loaded.image);
     return loaded;
 }
 

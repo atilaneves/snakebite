@@ -90,29 +90,45 @@ public void saveProgram(
 }
 
 
-// The header of the file whose bytes are `contents`.
-public Header readHeader(const(ubyte)[] contents) {
-    auto file = Archive.reading(contents);
-    file.expectText(magic);
-    Header header;
-    transferHeader(file, header);
-    return header;
+// A program file that is read front to back, one time: first its header,
+// then its program. `next` gives the next part of the bytes of the file, and
+// an empty part at the end; `size` is the number of bytes of the file.
+public struct ProgramReader {
+    @disable this(this);
+
+    private Archive _file;
+
+    public this(
+        return scope const(ubyte)[] delegate() next, in size_t size,
+    ) {
+        _file = Archive.reading(next, size);
+    }
+
+    // The header of the file. Call it once, before `load`.
+    public Header header() {
+        _file.expectText!magic;
+        Header header;
+        transferHeader(_file, header);
+        return header;
+    }
+
+    // Reads the program of the file into `program`, a new program made with
+    // `image` (the dependency image that the file was made with, or null)
+    // and wired to `runner`. Once the load is done, they are as a compile to
+    // RAM leaves them: `Program.complete` binds every function.
+    public void load(
+        ref Program program, ref Runner runner, in DependencyImage* image,
+    ) {
+        loadProgram(_file, program, runner, image);
+    }
 }
 
 
-// Reads the program of the file whose bytes are `contents` into `program`, a
-// new program made with `image` (the dependency image that the file was made
-// with, or null) and wired to `runner`. Once the load is done, they are as a
-// compile to RAM leaves them: `Program.complete` binds every function.
-public void loadProgram(
-    const(ubyte)[] contents, ref Program program, ref Runner runner,
+private void loadProgram(
+    ref Archive file, ref Program program, ref Runner runner,
     in DependencyImage* image,
 ) {
-    auto file = Archive.reading(contents);
     file._image = image;
-    file.expectText(magic);
-    Header header;
-    transferHeader(file, header);
     size_t signatureCount;
     file.scalar(signatureCount);
     foreach (index; 0 .. signatureCount) {
@@ -214,7 +230,12 @@ private struct Archive {
 
     private Direction _direction;
     private Appender!(ubyte[]) _written;
+    // Reading: the bytes of the part of the file that are not read yet, the
+    // part that comes after them, and the number of bytes of the file that
+    // are not read, these included.
     private const(ubyte)[] _unread;
+    private const(ubyte)[] delegate() _next;
+    private size_t _left;
     // The signatures, in the order of the first reference.
     private const(Signature)*[] _signatures;
     private size_t[const(Signature)*] _signatureIndex;
@@ -258,10 +279,13 @@ private struct Archive {
         return archive;
     }
 
-    static Archive reading(const(ubyte)[] contents) {
+    static Archive reading(
+        return scope const(ubyte)[] delegate() next, in size_t size,
+    ) {
         Archive archive;
         archive._direction = Direction.reading;
-        archive._unread = contents;
+        archive._next = next;
+        archive._left = size;
         return archive;
     }
 
@@ -277,12 +301,15 @@ private struct Archive {
         _written.put(cast(const(ubyte)[]) literal);
     }
 
-    void expectText(in string literal) {
-        if (_unread.length < literal.length
-                || _unread[0 .. literal.length] != cast(const(ubyte)[]) literal)
+    void expectText(string literal)() {
+        ubyte[literal.length] read;
+        if (_left < read.length)
             throw new SnakebiteException(
                 "the file is not a snakebite program of this format");
-        _unread = _unread[literal.length .. $];
+        bytes(read[]);
+        if (read[] != cast(const(ubyte)[]) literal)
+            throw new SnakebiteException(
+                "the file is not a snakebite program of this format");
     }
 
     // The bytes of `data` go to the file, or come from it.
@@ -291,11 +318,21 @@ private struct Archive {
             _written.put(cast(const(ubyte)[]) data);
             return;
         }
-        if (_unread.length < data.length)
+        if (_left < data.length)
             throw new SnakebiteException(
                 "the program file ends before the program does");
-        (cast(ubyte[]) data)[] = _unread[0 .. data.length];
-        _unread = _unread[data.length .. $];
+        _left -= data.length;
+        auto to = cast(ubyte[]) data;
+        while (to.length > _unread.length) {
+            to[0 .. _unread.length] = _unread[];
+            to = to[_unread.length .. $];
+            _unread = _next();
+            if (_unread.length == 0)
+                throw new SnakebiteException(
+                    "the program file ends before the program does");
+        }
+        to[] = _unread[0 .. to.length];
+        _unread = _unread[to.length .. $];
     }
 
     void scalar(T)(ref T value) {
@@ -306,7 +343,7 @@ private struct Archive {
     size_t length(in size_t length) {
         size_t count = length;
         scalar(count);
-        if (!isWriting && count > _unread.length)
+        if (!isWriting && count > _left)
             throw new SnakebiteException(
                 "the program file ends before the program does");
         return count;

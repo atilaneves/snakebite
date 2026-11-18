@@ -3135,6 +3135,29 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
     assert "another build" in loaded.stderr, output(loaded)
 
 
+# A file that ends before its program does is refused, and nothing runs.
+def test_load_of_file_that_ends_early_fails_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        import core.stdc.stdio: puts;
+        int main() { puts("ran"); return 3; }
+        """)
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    contents = target.read_bytes()
+    target.write_bytes(contents[:len(contents) // 2])
+
+    loaded = run_sb(f"--load={target}", cwd=tmp_path)
+    assert loaded.returncode == 1, output(loaded)
+    assert "ends before" in loaded.stderr, output(loaded)
+    assert "ran" not in loaded.stdout, output(loaded)
+
+
 # A dub project with no dependency, whose recipe gives an import path, a
 # string import path and a version. The program prints on stdout and on
 # stderr what the three give. `declarations` are more declarations of the
