@@ -120,6 +120,25 @@ frontend made, stored as data; no code runs to make it.
 A constant has a place in the blocks of a `Module` only when it goes through
 `NativeData.value` with an owner.
 
+### What a save does and what a file holds
+
+Decided by the owner on 2026-11-18.
+
+- A function is made ready to execute only where it executes: after a
+  compile to RAM and after a load, by the same code. A save does not
+  execute, so a save does not make its functions ready to execute. No code
+  turns a function that is ready to execute back into the form of the file.
+  The owner: "Why would we bind before saving? Isn't binding what's required
+  to be able to execute?"
+- The file holds only what a load needs. A field that a load does not read,
+  or that always has its default value in a file, is not written. The
+  owner: "Serialisation means not serialising things that don't matter!"
+  Issue #993 lists the fields.
+- The mangled name of a function is long, and after a load only the perf map
+  reads it. It is not a cost of each load. Not decided: compressed names, or
+  names that a load reads only when it needs them. The process that loads
+  cannot make a name itself, because it has no AST (ADR-0021).
+
 ## Consequences
 
 - The code that executes does not depend on the compiler. A test or a tool

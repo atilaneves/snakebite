@@ -22,6 +22,11 @@ into one file. The **root package** is the dub package of the project. A
 ninja is a build tool that runs commands in parallel and runs a command
 again when one of its inputs is newer than its output.
 
+The model is reggae with ninja, in the owner's words of 2026-11-18: "The
+model is reggae/ninja." Each thing that is built is a build statement with
+inputs and outputs. A design that puts such work inside another step, or
+that gives `sb` a rule for it, does not follow the model.
+
 ## Decision
 
 1. The option `--build=off|project|module|package` selects the unit. With
@@ -31,16 +36,23 @@ again when one of its inputs is newer than its output.
 2. `sb` writes a `build.ninja` file for its units and runs ninja. All three
    modes go through ninja. They differ only in the build statements.
 3. ninja decides what is stale, with its own rule. `sb` adds no rule of its
-   own. Each compile step writes a dependency file from the record that the
-   frontend keeps of the files it read: imported modules and string imports.
-   The import paths, the versions and the flags from the description of the
-   dub project are in the command line of each compile statement, so a
-   changed option changes the command. The `sb` executable is an input of
-   each compile statement (this replaces item 2 of ADR-0020).
+   own. Each compile step writes a dependency file from the list that the
+   frontend keeps of the files it read (`global.params.makeDeps.files`):
+   imported modules and string imports. `sb` adds the root files that it
+   reads itself. The place of the dependency file follows from the place of
+   the output by convention. No command line option names it. The import
+   paths, the versions and the flags from the description of the dub project
+   are in the command line of each compile statement, so a changed option
+   changes the command. The `sb` executable is an input of each compile
+   statement (this replaces item 2 of ADR-0020).
 4. `sb` writes `build.ninja` again only when its cached description of the
    dub project is not valid.
 5. A child `sb` process compiles each stale unit: it runs the frontend,
    compiles all functions of the unit to bytecode and writes the unit file.
+   The parent `sb` process gets the project directory and reads the
+   description of the dub project. The child does not get the directory and
+   does not read the description: its command line gives it what it needs
+   (item 3). The owner: "The parent gets the directory!"
    The frontend holds process-global state, so two compiles cannot share a
    process. Only the stale units go through the frontend.
 6. The process that runs the program loads it from disk and starts no
@@ -59,14 +71,23 @@ again when one of its inputs is newer than its output.
     that is native in the dependency image (ADR-0007).
 11. The files are in the project state directory that `sb` already has.
 12. The `--save` and `--load` options stay.
+13. The build of the dependency image (ADR-0007) is not a part of a compile
+    step. In the owner's words, `sb` "need only do that if the build.ninja
+    file doesn't exist or if the dub recipe or freeze file are newer than
+    it". The freeze file is `dub.selections.json`. A change of a dependency
+    is rare.
 
 ## Measurement
 
 The measured case: touch the first source file of the root package in
 lexical order, then time the rebuild. The time of the test run is not part
-of the number, because the mode must not change it. `bin/bench` makes this
-measurement. For `module` and `package`, the link time and the load time
-are reported as separate numbers.
+of the number, because the mode must not change it. For `module` and
+`package`, the link time and the load time are reported as separate numbers.
+
+The tool for this measurement is not decided. The owner wants an overhaul of
+`bin/bench` (issue #991), and no words of the owner give this measurement to
+the present tool. Until a decision, the measurement is: touch the file, run
+`sb`, and read the time of the build from its report.
 
 The gate of #958, 3 ms or less to the first guest instruction, applies to
 the load step only. The time of the ninja run is a separate number. One
@@ -84,6 +105,10 @@ measured and after the rule of #961 is on master.
 - The process that loads has no AST and starts no frontend.
 - The test of a load runs the load in a process other than the one that
   compiled.
+- A test of a saved file checks what the loaded program does. It does not
+  examine the content of the file or of a compiled function. The owner:
+  "Nobody cares as long as that data can be loaded and does what we expect
+  it to."
 
 ## Considered options
 
@@ -98,6 +123,9 @@ measured and after the rule of #961 is on master.
 ## Consequences
 
 - `sb` needs ninja at run time when `--build` is not `off`.
+- When a compile fails, ninja adds lines of its own to the output (the
+  `FAILED:` line, the command, and `ninja: build stopped`). The owner
+  accepted this on 2026-11-18.
 - `sb` needs no parser of dmd options, no `ldmd2` name and no `-lib` call.
 - The link output needs no `#!` line (ADR-0019), because `sb` starts the
   program itself.
