@@ -52,6 +52,9 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 
 // Compiles every function of the root modules that has a body. Named
 // distinctly from the other collectors: see `Collector` in `imagesource.d`.
+// A walk only finds functions; `compileFound` compiles them after the walk.
+// A compile can run semantic analysis, which appends template instances to
+// the member list of a module, and a walk must not iterate a list that grows.
 private extern(C++) final class EagerCompileCollector
         : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
     import snakebite.frontend.ast: FuncDeclaration;
@@ -60,6 +63,8 @@ private extern(C++) final class EagerCompileCollector
 
     private Bytecode _bytecode;
     private bool[FuncDeclaration] _visited;
+    // The functions to compile, in the order that the walks found them.
+    private FuncDeclaration[] _found;
 
     this(Bytecode bytecode) {
         _bytecode = bytecode;
@@ -71,8 +76,19 @@ private extern(C++) final class EagerCompileCollector
         _visited[function_] = true;
         if (function_.fbody is null || !_bytecode.isGuestFunction(function_))
             return;
-        _bytecode.compileFunction(function_);
-        function_.fbody.accept(this);
+        _found ~= function_;
+    }
+
+    // Compiles each function found, then walks its body and compiles the
+    // functions found there before the next one.
+    void compileFound() {
+        auto found = _found;
+        _found = null;
+        foreach (function_; found) {
+            _bytecode.compileFunction(function_);
+            function_.fbody.accept(this);
+            compileFound;
+        }
     }
 }
 
@@ -180,11 +196,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     // Compiles the whole program and writes it to `path`. The compile is the
-    // one a run makes, except that every function with a body compiles, not
-    // only those that run, the compiler records the relocations, and no
+    // one a run makes, except that every function of the root modules with a
+    // body compiles, not only those that run, the compiler records the
+    // relocations, and no
     // function is made ready to run (`Program.complete`). What a
     // first run fills lazily is filled first: each start handle, and the callee
-    // of each guest call site. A function that does not compile ends the
+    // of each guest call site. A template instance that the frontend adds
+    // during a compile compiles only when one of these reaches it. A function that does not compile ends the
     // save with that error, and no file is written. A load runs the program
     // in `workingDirectory`, with the dependency image `imagePath`, or with
     // none when it is empty.
@@ -197,9 +215,16 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         if (!compiledProgram.recordsAddresses)
             internalFailure("a save needs a program that records addresses");
 
-        scope collector = new EagerCompileCollector(this);
-        foreach (module_; _program.rootModules)
-            (cast() module_).accept(collector); // DMD visitors need mutable nodes.
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        // Under the frontend lock: another thread's semantic analysis can
+        // append template instances to a member list that the walks iterate.
+        withCompilerLock({
+            scope collector = new EagerCompileCollector(this);
+            foreach (module_; _program.rootModules)
+                (cast() module_).accept(collector); // DMD visitors need mutable nodes.
+            collector.compileFound;
+        });
         startData.eachHandle((handle) {
             handle.compiledCode;
         });
