@@ -2041,9 +2041,6 @@ private struct Gen {
                     done = emitInlineReturn(i, op.kind == returnValue);
                     returned |= done;
                     break;
-                case checked:
-                    done = emitChecked(i, snapshot[i], op);
-                    break;
                 case temporaryTransition:
                     // The cleanup state belongs to a real activation.
                     break;
@@ -2683,7 +2680,7 @@ private struct Gen {
         }
 
         case checked:
-            if (!checkedLoop.update && !fpLoop.backedge) {
+            if (inlineCaller is null && !checkedLoop.update && !fpLoop.backedge) {
                 checkedLoop = planCheckedLoop(i, ops);
                 if (checkedLoop.update)
                     return emitCheckedLoop(i, ins, op, original);
