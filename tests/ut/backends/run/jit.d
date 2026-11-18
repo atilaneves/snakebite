@@ -114,6 +114,39 @@ static foreach (backend; Matrix!()) {
         }, ["scan"]);
     }
 
+    @("jit.shortCircuitReadsOnlyTheSelectedFlags." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Flag { bool value; }
+            struct Output { int value; }
+
+            void assignIfSelected(const(Flag)* first, const(Flag)* second,
+                    const(Flag)* third, Output* output, int value) {
+                if (first.value || (!second.value && third.value))
+                    output.value = value;
+            }
+
+            int main() {
+                auto assign = &assignIfSelected;
+                Flag yes = Flag(true);
+                Flag no = Flag(false);
+                foreach (_; 0 .. 300) {
+                    Output result;
+                    assign(&yes, null, null, &result, 1);
+                    assert(result.value == 1);
+                    assign(&no, &yes, null, &result, 2);
+                    assert(result.value == 1);
+                    assign(&no, &no, &yes, &result, 3);
+                    assert(result.value == 3);
+                    assign(&no, &no, &no, &result, 4);
+                    assert(result.value == 3);
+                }
+                return 0;
+            }
+        }, ["assignIfSelected"]);
+    }
+
     @("jit.shiftUsesValueFromTheTakenPath." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

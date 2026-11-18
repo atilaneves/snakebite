@@ -298,6 +298,8 @@ package struct JitState {
     Scratch!size_t labels;
     PerfMap perfMap;
     Scratch!ReloadEntry reloadEntries;
+    Scratch!(Gen.BranchOnlyCandidate) branchOnlyCandidates;
+    Scratch!(Gen.BranchOnlyEntry) branchOnlyEntries;
     Scratch!(Gen.PathScratch, 1) paths;
     // The buffers of one compile in `vm.d`: the template of each instruction,
     // a snapshot of the instructions, and their handlers.
@@ -316,6 +318,8 @@ package struct JitState {
         labels.release;
         literals.release;
         reloadEntries.release;
+        branchOnlyCandidates.release;
+        branchOnlyEntries.release;
         paths.release;
         opScratch.release;
         snapshotScratch.release;
@@ -470,7 +474,11 @@ package struct JitState {
         size_t pathJump;
         enum needsHandlerEntry = size_t.max;
         size_t handlerEntryCount;
+        size_t branchOnlyEnd;
+        const branchOnly = g.proveBranchOnly(ops, branchOnlyCandidates, branchOnlyEntries);
         foreach (i; 0 .. instructions.length) {
+            if (i < branchOnlyEnd)
+                continue;
             const original = jitFallback(function_, snapshot[i], originals[i]);
             if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
@@ -511,6 +519,22 @@ package struct JitState {
             const saved = g.a.n;
             const savedFixups = g.fixupCount;
             const savedLiterals = g.literalCount;
+            if (branchOnly.length && branchOnly[i].approved
+                    && !g.fpLoop.backedge && !g.checkedLoop.update) {
+                const plan = g.planBranchOnly(i, ops);
+                if (!path.length || path[0].pc <= i
+                        || path[0].pc >= plan.end) {
+                    branchOnlyEnd = plan.end;
+                    foreach (ref label; g.labels[i + 1 .. plan.end])
+                        label = needsHandlerEntry;
+                    handlerEntryCount += plan.end - i - 1;
+                    g.emitBranchOnly(i, plan);
+                    handlerEntryCount -= plan.count - 1;
+                    if (g.outOfMemory)
+                        return Emitted.failed;
+                    continue;
+                }
+            }
             bool done;
             g.usedKnown = false;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
@@ -1838,23 +1862,34 @@ private struct Gen {
     // A template can reuse a pointer if its register stays live until the access.
     bool opnd(bool reusePointer = false)(size_t raw, ubyte scratch, out Mem m) {
         if (raw & indirectBit) {
-            const slot = (raw >> 32) & 0x7fff_ffff;
-            const disp = cast(uint) raw;
-            if (slot > 0x7fff_0000 || disp > 0x7fff_0000)
+            Mem addressSlot;
+            if (!storageOperand(raw, scratch, m, addressSlot))
                 return false;
-            const addressSlot = Mem(FRAME, cast(int) slot);
             static if (reusePointer) {
                 const cached = cachedInt(addressSlot, 8);
                 if (cached >= 0) {
-                    m = Mem(cast(ubyte) cached, cast(int) disp);
+                    m.base = cast(ubyte) cached;
                     return true;
                 }
             }
             a.ld(8, scratch, addressSlot);
-            m = Mem(scratch, cast(int) disp);
             return true;
         }
         return frameOperand(raw, m);
+    }
+
+    static bool storageOperand(size_t raw, ubyte scratch, out Mem value,
+        out Mem addressSlot)
+    {
+        import snakebite.backends.bytecode.vm: addressSlotOf;
+
+        if (!(raw & indirectBit))
+            return frameOperand(raw, value);
+        if (!frameOperand(addressSlotOf(raw), addressSlot)
+                || !frameOperand(cast(uint) raw, value))
+            return false;
+        value.base = scratch;
+        return true;
     }
 
     static bool frameOperand(size_t raw, out Mem m) pure @safe {
@@ -3655,6 +3690,271 @@ private struct Gen {
                     && dest.disp < slot.offset + slot.width)
                 return false;
         return true;
+    }
+
+    static struct BranchOnly {
+        enum limit = 16;
+
+        static struct Copy {
+            size_t pc;
+            size_t whenZero;
+            size_t whenNonzero;
+        }
+
+        size_t end;
+        size_t count;
+        Copy[limit] copies;
+    }
+
+    BranchOnly planBranchOnly(size_t first, const(JitOp)[] ops) {
+        const initial = snapshot[first];
+        const slot = initial.destination;
+        if (!branchOnlyCopy(initial, ops[first]) || slot >= frameSize)
+            return BranchOnly.init;
+
+        BranchOnly plan;
+        size_t branches;
+        for (auto pc = first; pc < ops.length && pc - first < BranchOnly.limit;
+                ++pc) {
+            const ins = snapshot[pc];
+            const op = ops[pc];
+            if (ins.destination != slot)
+                break;
+            if (branchOnlyCopy(ins, op)) {
+                plan.copies[plan.count++].pc = pc;
+            } else if (op.kind == JitOp.Kind.branch && opWidth(ins, op) == 1) {
+                size_t target;
+                if (!targetIndex(ins.source, target) || target <= pc)
+                    return BranchOnly.init;
+                ++branches;
+            } else if (op.kind != JitOp.Kind.boolOp || ins.width != 1)
+                break;
+            plan.end = pc + 1;
+        }
+        if (plan.count < 2 || branches < 2
+                || ops[plan.end - 1].kind != JitOp.Kind.branch)
+            return BranchOnly.init;
+
+        foreach (ref copy; plan.copies[0 .. plan.count]) {
+            copy.whenZero = branchOnlyTarget(copy.pc + 1, false, plan.end, ops);
+            copy.whenNonzero = branchOnlyTarget(copy.pc + 1, true, plan.end, ops);
+        }
+        return plan;
+    }
+
+    static size_t opWidth(in Instruction ins, in JitOp op) {
+        return op.width ? op.width : ins.width;
+    }
+
+    static bool branchOnlyCopy(in Instruction ins, in JitOp op) {
+        import snakebite.backends.bytecode.vm: addressSlotOf;
+
+        if (op.kind != JitOp.Kind.copy || op.copy.staticSource
+                || opWidth(ins, op) != 1)
+            return false;
+        Mem value, address;
+        if (!storageOperand(ins.source, R9, value, address))
+            return false;
+        if (!(ins.source & indirectBit))
+            return ins.source != ins.destination;
+        const slot = addressSlotOf(ins.source);
+        return ins.destination < slot || ins.destination - slot >= size_t.sizeof;
+    }
+
+    size_t branchOnlyTarget(size_t pc, bool nonzero, size_t end,
+        const(JitOp)[] ops)
+    {
+        while (pc < end) {
+            const op = ops[pc];
+            if (op.kind == JitOp.Kind.copy)
+                break;
+            if (op.kind == JitOp.Kind.boolOp)
+                nonzero = nonzero == op.boolOp.nonzero;
+            else if (nonzero == op.branch.jumpIfNonzero) {
+                targetIndex(snapshot[pc].source, pc);
+                continue;
+            }
+            ++pc;
+        }
+        return pc;
+    }
+
+    static struct BranchOnlyCandidate {
+        size_t slot;
+        size_t first;
+        size_t end;
+        ptrdiff_t changes;
+    }
+
+    static struct BranchOnlyEntry {
+        size_t earliest = size_t.max;
+        size_t latest;
+        bool approved;
+    }
+
+    const(BranchOnlyEntry)[] proveBranchOnly(const(JitOp)[] ops,
+        ref Scratch!BranchOnlyCandidate candidates,
+        ref Scratch!BranchOnlyEntry entries)
+    {
+        import snakebite.backends.bytecode.emitted: EmittedCode;
+        import snakebite.backends.bytecode.vm:
+            addressSlotOf, branchTargetField, discardResult, opReturn, opReturnVoid;
+        import std.algorithm.sorting: sort;
+
+        if (function_.exceptionHandlers.length || function_.closureSize
+                || function_.cursorOffset != size_t.max)
+            return null;
+
+        size_t count;
+        foreach (pc; 0 .. ops.length) {
+            const plan = planBranchOnly(pc, ops);
+            if (!plan.end)
+                continue;
+            auto storage = candidates.grow(count + 1);
+            if (storage is null)
+                return null;
+            storage[count++] = BranchOnlyCandidate(snapshot[pc].destination,
+                pc, plan.end);
+        }
+        if (!count)
+            return null;
+        auto ranges = candidates.ptr[0 .. count];
+        ranges.sort!((a, b) => a.slot < b.slot);
+        auto storage = entries.reserve(ops.length);
+        if (storage is null)
+            return null;
+        auto targets = storage[0 .. ops.length];
+        targets[] = BranchOnlyEntry.init;
+
+        size_t firstSlotAtOrAfter(size_t offset) {
+            size_t low;
+            size_t high = ranges.length;
+            while (low < high) {
+                const mid = low + (high - low) / 2;
+                if (ranges[mid].slot < offset)
+                    low = mid + 1;
+                else
+                    high = mid;
+            }
+            return low;
+        }
+
+        // Each access adds one to the count of each candidate byte it
+        // overlaps. A prefix sum applies the changes without visiting each
+        // candidate for a wide access.
+        void countAccess(size_t operand, size_t width) {
+            if (operand & indirectBit) {
+                operand = addressSlotOf(operand);
+                width = size_t.sizeof;
+            }
+            if (!width || operand >= frameSize)
+                return;
+            const first = firstSlotAtOrAfter(operand);
+            if (first < ranges.length)
+                ++ranges[first].changes;
+            const end = operand + (width < frameSize - operand
+                ? width : frameSize - operand);
+            const past = firstSlotAtOrAfter(end);
+            if (past < ranges.length)
+                --ranges[past].changes;
+        }
+
+        if (function_.windowSlot != size_t.max)
+            countAccess(function_.windowSlot, size_t.sizeof);
+        if (function_.returnPlace.offset != size_t.max)
+            countAccess(function_.returnPlace.offset, size_t.sizeof);
+
+        foreach (pc, ref const ins; snapshot) {
+            Instruction instruction = ins;
+            if (const field = branchTargetField(instruction)) {
+                size_t target;
+                if (!targetIndex(*field, target))
+                    return null;
+                auto entry = &targets[target];
+                if (entry.earliest == size_t.max)
+                    entry.earliest = pc;
+                entry.latest = pc;
+            }
+
+            const op = ops[pc];
+            switch (op.kind) with (JitOp.Kind) {
+                case callWindow:
+                    const site = &callSites[ins.source];
+                    if (site.cleanupStartIndex != size_t.max)
+                        return null;
+                    if (op.callWindow.indirect)
+                        countAccess(site.calleeSlotOffset, size_t.sizeof);
+                    if (ins.destination != discardResult)
+                        countAccess(ins.destination, site.returnWidth);
+                    EmittedCode.eachCallArgument(*site, &countAccess);
+                    continue;
+                case copy:
+                    if (op.copy.staticSource) {
+                        countAccess(ins.destination, opWidth(ins, op));
+                        continue;
+                    }
+                    break;
+                case zero, jump, branch, fused, boolOp, returnVoid, returnValue:
+                    break;
+                case none:
+                    // A non-chained return uses the original handler. It has
+                    // the same frame accesses as a return with a template.
+                    if (ins.handler is &opReturn || ins.handler is &opReturnVoid)
+                        break;
+                    return null;
+                default:
+                    // An unclassified operation can expose the frame.
+                    return null;
+            }
+            const access = EmittedCode.accessOf(ins.handler);
+            if (!access.known || access.takesAddress || access.widthIsSlot)
+                return null;
+            foreach (field; EmittedCode.allFields)
+                if (access.namesStorage(field))
+                    countAccess(EmittedCode.operandOf(ins, field),
+                        EmittedCode.extentOf(ins, access, field));
+        }
+
+        ptrdiff_t mentions;
+        foreach (ref const range; ranges) {
+            mentions += range.changes;
+            // Each chain instruction names the byte once. An outside edge
+            // into its interior could reach a handler with a stale value.
+            if (mentions != range.end - range.first)
+                continue;
+            bool outsideEntry;
+            foreach (ref const target; targets[range.first + 1 .. range.end])
+                outsideEntry |= target.earliest < range.first
+                    || target.latest >= range.end;
+            targets[range.first].approved = !outsideEntry;
+        }
+        return targets;
+    }
+
+    void emitBranchOnly(size_t first, in BranchOnly plan) {
+        fpSlots = FpSlots.init;
+        intSlots = IntSlots.init;
+        known = KnownConstant.init;
+        const copies = plan.copies[0 .. plan.count];
+        foreach (index, copy; copies) {
+            if (copy.pc != first)
+                labels[copy.pc] = a.n;
+            Mem source;
+            const valid = opnd(snapshot[copy.pc].source, R9, source);
+            assert(valid);
+            a.aluMI(Alu.cmp, 1, source, 0);
+            const next = index + 1 == copies.length ? plan.end : copies[index + 1].pc;
+            if (copy.whenZero == copy.whenNonzero) {
+                if (copy.whenZero != next)
+                    jmpTo(copy.whenZero);
+            } else if (copy.whenNonzero == next)
+                jccTo(CC_E, copy.whenZero);
+            else {
+                jccTo(CC_NE, copy.whenNonzero);
+                if (copy.whenZero != next)
+                    jmpTo(copy.whenZero);
+            }
+        }
     }
 
     bool emitOp(size_t i, const(JitOp)[] ops,

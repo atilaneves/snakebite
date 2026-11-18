@@ -4063,7 +4063,7 @@ static assert((fusedSlots & (fusedSlots - 1)) == 0,
     "the hash keeps the top bits, so the slot count is a power of two");
 private enum fusedSlotShift = size_t.sizeof * 8 - bsf(fusedSlots);
 
-private size_t fusedSlot(in Instruction.Handler handler) {
+private size_t fusedSlot(in Instruction.Handler handler) @nogc nothrow {
     return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> fusedSlotShift;
 }
 
@@ -4087,14 +4087,14 @@ package Instruction.Handler fusedBranchHandler(
 
 // Whether a fused compare-and-branch compares against a constant, so that
 // its `source` is a constant-pool address and not a frame operand.
-package bool fusesConstant(Instruction.Handler handler) {
+package bool fusesConstant(Instruction.Handler handler) @nogc nothrow {
     foreach (index, candidate; fusedHandlers)
         if (candidate is handler)
             return index % 2 == 1;
     return false;
 }
 
-package bool isFusedBranch(Instruction.Handler handler) {
+package bool isFusedBranch(Instruction.Handler handler) @nogc nothrow {
     for (auto slot = fusedSlot(handler); fusedSet[slot] !is null;
             slot = (slot + 1) % fusedSlots)
         if (fusedSet[slot] is handler)
@@ -4932,7 +4932,7 @@ private struct RoleTable {
     size_t count;
     size_t shift;
 
-    size_t slotOf(in Instruction.Handler handler) const {
+    size_t slotOf(in Instruction.Handler handler) const @nogc nothrow {
         return (cast(size_t) handler * 0x9E37_79B9_7F4A_7C15UL) >> shift;
     }
 
@@ -4962,7 +4962,7 @@ private immutable RoleTable roleTable;
 
 // Whether the table holds the handler's roles, and what they are. A handler
 // that is not in the table holds no address and no instruction address.
-package bool rolesOf(in Instruction.Handler handler, out Roles roles) {
+package bool rolesOf(in Instruction.Handler handler, out Roles roles) @nogc nothrow {
     if (roleTable.entries.length == 0)
         return false;
     auto slot = roleTable.slotOf(handler);
@@ -5141,7 +5141,7 @@ package void recordLocalReferences(ref Function function_) {
 
 // The field of `instruction` that holds the instruction of the same function
 // where control continues, or null.
-package size_t* branchTargetField(ref Instruction instruction) {
+package size_t* branchTargetField(ref Instruction instruction) @nogc nothrow {
     Roles roles;
     if (!rolesOf(instruction.handler, roles))
         return null;
@@ -5698,7 +5698,7 @@ package bool decodesIndirect(in Instruction.Handler handler, in Field field) {
 
 // Whether the handler reads the frame offset of an index from the low 32
 // bits of `width`. Every `opCheckedIndex` instance says so in its roles.
-package bool widthHoldsIndexSlot(in Instruction.Handler handler) {
+package bool widthHoldsIndexSlot(in Instruction.Handler handler) @nogc nothrow {
     Roles roles;
     return rolesOf(handler, roles) && roles.widthHoldsIndexSlot;
 }

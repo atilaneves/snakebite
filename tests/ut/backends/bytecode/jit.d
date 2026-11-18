@@ -3,7 +3,8 @@ module ut.backends.bytecode.jit;
 
 import ut.backends;
 import snakebite.program: Program;
-import snakebite.backends.bytecode.inspection: isJitCompiled;
+import snakebite.backends.bytecode.inspection: isJitCompiled, runBranchConditions, runBranchReentry;
+import snakebite.backends.bytecode.jit: jitSupported;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import core.atomic: atomicLoad, atomicOp, atomicStore;
@@ -123,4 +124,28 @@ unittest {
             compiled = isJitCompiled(function_);
     });
     compiled.should == true;
+}
+
+
+@("jit.branchReentryReadsTheValueFromTheFirstVisit")
+unittest {
+    bool compiled;
+    runBranchReentry(testJit.enabled, compiled).should == 1;
+    compiled.should == (jitSupported && testJit.enabled);
+}
+
+
+@("jit.branchConditionsTreatAllNonzeroBytesAsTrue")
+unittest {
+    ubyte[6] flags;
+    foreach (mask; 0 .. (1 << flags.length)) {
+        foreach (bit, ref flag; flags)
+            flag = mask & (1 << bit) ? 0x80 : 0;
+        const left = flags[0] != 0 || (flags[1] == 0 && flags[2] != 0);
+        const right = flags[3] != 0 && flags[4] != 0 && flags[5] == 0;
+        bool compiled;
+        runBranchConditions(flags, testJit.enabled, compiled).should
+            == (left && right ? 42 : 0);
+        compiled.should == (jitSupported && testJit.enabled);
+    }
 }
