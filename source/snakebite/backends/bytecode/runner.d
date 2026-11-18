@@ -31,6 +31,9 @@ public struct Runner {
     // What the functions run by this runner do with the JIT.
     private JitSetting _jit;
     private bool delegate() _hasCallbackEntries;
+    // Set for a backend made for a save: its functions are not ready to
+    // execute, so `call` ends the process.
+    private bool _refusesExecution;
     // The JIT code region and the other JIT state. Its address never
     // changes, and each `Function` compiled for this runner points to it.
     // `releaseJitCode` frees the region.
@@ -68,6 +71,10 @@ public struct Runner {
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, tlsSlots());
         }, onIdle, &releaseJitCode);
+    }
+
+    public void refuseExecution() @safe @nogc nothrow pure {
+        _refusesExecution = true;
     }
 
     public ref const(JitSetting) jitSetting() @safe @nogc nothrow pure const return {
@@ -124,6 +131,11 @@ public struct Runner {
         void* variadicCursor = null,
         const(void)* variadicTypes = null,
     ) {
+        import snakebite.failure.report: internalFailure;
+
+        if (_refusesExecution)
+            internalFailure("a backend made for a save does not execute");
+
         const layout = &compiled.hostCall;
         layout.checkArgumentCount(args.length, "bytecode");
 

@@ -4,7 +4,8 @@ module snakebite.backends.bytecode.program;
 private:
 
 import snakebite.backends.bytecode.relocation: plain, setBy;
-import snakebite.backends.bytecode.vm: bindInstructionReferences, Function,
+import snakebite.backends.bytecode.vm: bindHostCode,
+    bindInstructionReferences, Function,
     JitSetting, prepareForExecution;
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
@@ -88,15 +89,17 @@ public struct Program {
                 visit(_modules[m]._functions[f]);
     }
 
-    // Makes a function whose tables are filled ready to run on the runner
-    // that has `jit` and `jitInstance`: a compile and a load both end with
-    // this. Returns null, or the reason why the function is not valid.
+    // Makes a function in the form that the compiler builds and a file holds
+    // ready to run on the runner that has `jit` and `jitInstance`: a compile
+    // to RAM and a load both end with this, and a save does not call it.
+    // Returns null, or the reason why the function is not valid.
     public static string complete(JitInstance)(
         Function* function_, in JitSetting jit, JitInstance jitInstance,
     ) {
         function_.fixWindowFacts;
         if (const reason = bindInstructionReferences(*function_))
             return reason;
+        bindHostCode(*function_);
         prepareForExecution(function_, jit, jitInstance,
             function_.mangledName);
         return null;

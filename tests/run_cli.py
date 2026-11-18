@@ -2503,6 +2503,24 @@ def test_saved_program_with_thread_local_variables_runs_as_the_compiled_program(
         """})
 
 
+def test_saved_program_that_writes_static_variables_several_times_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int threadLocal = 5;
+        __gshared int process = 7;
+        int writes() {
+            process = 11;
+            process = process + 1;
+            threadLocal = 2;
+            process = 13;
+            return process + threadLocal;
+        }
+        int main() { return writes(); }
+        """})
+
+
 def test_saved_program_with_host_thread_local_variables_runs_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:

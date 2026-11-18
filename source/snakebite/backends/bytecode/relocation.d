@@ -14,8 +14,8 @@ import snakebite.native.address: Target;
 //
 // A word that holds code of the host executable (the handler of an
 // instruction, the entry of a builtin call, the action of a halting check) has
-// no `Reloc`: the file holds it as a distance from one handler, and a field of
-// that kind says so with `hostCode`.
+// no `Reloc`: the compiler writes it and the file holds it as a distance from
+// one handler, and a field of that kind says so with `hostCode`.
 
 // Where a word that holds an address sits: in a `Function`, or in a datum of
 // static data.
@@ -93,9 +93,9 @@ public Relocated relocated(
     return Relocated(section, field, kind);
 }
 
-// The field holds code of the host executable and has no `Reloc`: the file
-// holds it as a distance from one handler. Only a field of the handler type
-// of an instruction is never null.
+// The field holds code of the host executable and has no `Reloc`: the
+// compiler writes it as a distance from one handler, the file holds the
+// distance, and `Program.complete` makes it an address.
 public struct HostCode {}
 public enum hostCode = HostCode();
 

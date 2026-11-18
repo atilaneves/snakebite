@@ -20,8 +20,8 @@ import snakebite.backends.bytecode.runner: Runner, StartFunction;
 import snakebite.native.address: DatumRef, Target;
 import snakebite.backends.bytecode.vm:
     AssertSite, CallSite, ExceptionHandler,
-    Function, hostCodeAt, hostCodeOffset, Instruction, JitSetting,
-    Role, Roles, rolesOf, targetWordAt, withoutCount, wordAt;
+    Function, hostCodeAt, Instruction, JitSetting,
+    Role, Roles, rolesOf, wordAt;
 import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
@@ -101,7 +101,7 @@ public Header readHeader(const(ubyte)[] contents) {
 // Reads the program of the file whose bytes are `contents` into `program`, a
 // new program made with `image` (the dependency image that the file was made
 // with, or null) and wired to `runner`. Once the load is done, they are as a
-// compile leaves them: every function is bound and prepared for execution.
+// compile to RAM leaves them: `Program.complete` binds every function.
 public void loadProgram(
     const(ubyte)[] contents, ref Program program, ref Runner runner,
     in DependencyImage* image,
@@ -562,7 +562,8 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
                 } else
                     archive.transfer(value.tupleof[index]);
             } else static if (is(typeof(classification) == HostCode)) {
-                // Code of the host executable. Only the handler of an
+                // Code of the host executable, as a distance that
+                // `Program.complete` binds. Only the handler of an
                 // instruction and the counting handler of a counting site are
                 // never null.
                 bool present = true;
@@ -571,14 +572,13 @@ private void transferClassified(T)(ref Archive archive, ref T value) {
                         present = wordOf(value.tupleof[index]) != 0;
                     archive.scalar(present);
                 }
-                ptrdiff_t distance;
-                if (archive.isWriting && present)
-                    distance = hostCodeOffset(wordOf(value.tupleof[index]));
+                size_t distance;
+                if (archive.isWriting)
+                    distance = wordOf(value.tupleof[index]);
                 if (present)
                     archive.scalar(distance);
                 if (!archive.isWriting)
-                    value.tupleof[index] = present
-                        ? cast(Field) hostCodeAt(distance) : null;
+                    value.tupleof[index] = cast(Field) distance;
             }
         }
     }}
@@ -658,11 +658,9 @@ private size_t addressOf(
 }
 
 
-// `function_` as a file holds it: a copy with the instructions the way the
-// file means them (the handler of the instruction without a count, an
-// instruction address as an index, an address left to its relocation), and
-// the relocations that the file holds. A word that holds an address and no
-// relocation names it cannot be written.
+// `function_`, as the compiler built it, as a file holds it: a copy with each
+// address left to its relocation, and the relocations that the file holds. A
+// word that holds an address and no relocation names it cannot be written.
 private Function prepareToWrite(ref Archive archive, ref Function function_) {
     Function copy = function_;
     bool[size_t[3]] listed;
@@ -709,18 +707,10 @@ private Function prepareToWrite(ref Archive archive, ref Function function_) {
         });
 
     auto instructions = function_.instructions.dup;
-    foreach (record; function_.targetWords) {
-        auto field = targetWordAt(instructions, record);
-        if (field is null)
-            internalFailure("a branch target record names no instruction "
-                ~ "operand");
-        *field = (*field - cast(size_t) function_.instructions.ptr)
-            / Instruction.sizeof;
-    }
     foreach (index, ref instruction; instructions) {
-        instruction.handler = withoutCount(instruction.handler);
         Roles roles;
-        if (!rolesOf(instruction.handler, roles))
+        if (!rolesOf(cast(Instruction.Handler) hostCodeAt(
+                cast(ptrdiff_t) instruction.handler), roles))
             continue;
         static foreach (name; ["destination", "source", "sourceWidth"]) {{
             const role = mixin("roles." ~ name);

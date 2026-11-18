@@ -8,16 +8,10 @@ version (unittest):
 private:
 
 
-import snakebite.backends.bytecode.relocation: Place, Reloc;
-import snakebite.native.address: Target;
 import snakebite.backends.bytecode.vm: bindInstructionReferences,
-    CountingSite, Function, Instruction, misplacedLocalRecords, Roles,
-    TargetWord, jitCompiled, rolesOf, wordAt;
+    CountingSite, Function, Instruction, Roles, TargetWord, jitCompiled,
+    rolesOf;
 import std.conv: text;
-
-public const(Reloc)[] relocsOf(const(Function)* function_) {
-    return function_.relocs;
-}
 
 // Whether `function_` runs as JIT code.
 public bool isJitCompiled(const(Function)* function_) {
@@ -59,27 +53,6 @@ public string[] handlerRoleMismatches() {
         expect("opThenReturn!(opCopyFixed!(" ~ width.stringof ~ ", true))",
             &opThenReturn!(opCopyFixed!(width, true)), "other/address/other");
     return found;
-}
-
-// The relocs whose place does not hold the address that the reloc names.
-public string[] misplacedRelocs(const(Function)* function_) {
-    string[] found;
-    foreach (reloc; function_.relocs) {
-        const word = wordAt(*function_, reloc.place);
-        if (word is null)
-            found ~= text(reloc.place, " is outside the function");
-        else if (*word != reloc.target.address)
-            found ~= text(reloc.place, " holds ", *word, ", not ",
-                reloc.target.address);
-    }
-    return found;
-}
-
-
-// Where the local records of a complete `Function` disagree with the role
-// table and the table of counting twins.
-public string[] misplacedLocalReferences(const(Function)* function_) {
-    return misplacedLocalRecords(function_);
 }
 
 // What `bindInstructionReferences` says about a function of `instructions`
