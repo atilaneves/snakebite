@@ -138,3 +138,140 @@ static foreach (backend; Matrix!()) {
         }, ["main", "invoke", "add", "subtract", "multiply", "mask"]);
     }
 }
+
+
+// An index failure must use the callee's error location and keep a field
+// write that happened before the check.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE turns an out-of-range index into a compile-time error"),
+)) {
+    @("window.hotFieldTransferKeepsCommittedWritesOnExit." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.exception: RangeError;
+
+            class Box { int value; }
+
+            interface Transfer {
+                int apply(Box first, Box second, bool forward,
+                    int[] values, size_t index);
+            }
+
+            class Increment : Transfer {
+                static size_t indexLine;
+
+                override int apply(Box first, Box second, bool forward,
+                    int[] values, size_t index)
+                {
+                    if (forward)
+                        second.value = first.value + 1;
+                    else
+                        first.value = second.value + 2;
+                    indexLine = __LINE__ + 1;
+                    return values[index];
+                }
+            }
+
+            class Replace : Transfer {
+                override int apply(Box first, Box second, bool forward,
+                    int[] values, size_t index)
+                {
+                    first.value = 30;
+                    return values[index] + 1;
+                }
+            }
+
+            int transfer(Transfer operation, Box first, Box second,
+                bool forward, int[] values, size_t index)
+            {
+                return operation.apply(first, second, forward, values, index)
+                    + 10;
+            }
+
+            void main() {
+                Transfer increment = new Increment;
+                Transfer replace = new Replace;
+                auto first = new Box;
+                auto second = new Box;
+                int[1] values = [11];
+                foreach (round; 0 .. 1024) {
+                    first.value = 3;
+                    second.value = 7;
+                    assert(transfer(increment, first, second, true, values[], 0)
+                        == 21);
+                    assert(first.value == 3 && second.value == 4);
+                    assert(transfer(increment, first, second, false, values[], 0)
+                        == 21);
+                    assert(first.value == 6 && second.value == 4);
+                }
+                assert(transfer(replace, first, second, true, values[], 0) == 22);
+                assert(first.value == 30 && second.value == 4);
+                bool caught;
+                try {
+                    cast(void) transfer(increment, first, first, false,
+                        values[], values.length);
+                } catch (RangeError error) {
+                    caught = error.line == Increment.indexLine;
+                }
+                assert(caught && first.value == 32);
+            }
+        }, ["transfer"]);
+    }
+}
+
+
+// A checked search can call delegates with the same context and different
+// function bodies. The second function sees the current capture.
+static foreach (backend; Matrix!()) {
+    @("window.hotSearchKeepsCaptureAndResidualCall." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            bool contains(int[] values, bool delegate(int) predicate) {
+                foreach (i; 0 .. values.length)
+                    if (predicate(values[i]))
+                        return true;
+                return false;
+            }
+
+            bool search(int[] values, bool delegate(int) predicate) {
+                return contains(values, predicate);
+            }
+
+            void main() {
+                int[4] values = [2, 4, 7, 8];
+                int key;
+                int checks;
+                bool match(int value) {
+                    ++checks;
+                    return value == key;
+                }
+                bool greater(int value) {
+                    ++checks;
+                    return value > key;
+                }
+
+                auto callSearch = &search;
+                foreach (round; 0 .. 320) {
+                    key = values[0];
+                    checks = 0;
+                    assert(callSearch(values[], &match));
+                    assert(checks == 1);
+                }
+
+                foreach (round; 0 .. 1024) {
+                    key = round % 2 == 0 ? 7 : 9;
+                    checks = 0;
+                    assert(callSearch(values[], &match) == (key == 7));
+                    assert(checks == (key == 7 ? 3 : 4));
+                }
+                key = 4;
+                checks = 0;
+                assert(callSearch(values[], &greater));
+                assert(checks == 3);
+            }
+        }, ["search", "contains"]);
+    }
+}
