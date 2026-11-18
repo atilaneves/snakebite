@@ -526,6 +526,67 @@ static foreach (backend; Matrix!()) {
         }, ["copy"]);
     }
 
+    @("jit.pointerLoopReadsTheCurrentFrame." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Link { Link* next; }
+
+            int walk(Link* left, Link* right, bool enterLate) {
+                assert(left !is null);
+                if (enterLate)
+                    goto advance;
+                while (right !is null) {
+                    if (left is null)
+                        return 1;
+                advance:
+                    left = left.next;
+                    right = right.next;
+                }
+                return left is null ? 2 : 3;
+            }
+
+            int readFromAlias(Link* left) {
+                assert(left !is null);
+                Link cursor = Link(left);
+                auto right = &cursor;
+                while (right !is null) {
+                    if (cursor.next is null)
+                        return 4;
+                    cursor.next = cursor.next.next;
+                    right = right.next;
+                }
+                return cursor.next is null ? 5 : 6;
+            }
+
+            int writeThroughAlias(Link* left, Link* right, Link* replacement) {
+                assert(left !is null);
+                auto aliasOfRight = &right;
+                while (right !is null) {
+                    if (left is null)
+                        return 7;
+                    left = left.next;
+                    *aliasOfRight = replacement;
+                    right = right.next;
+                }
+                return left is null ? 8 : 9;
+            }
+
+            int main() {
+                Link last, middle = Link(&last), first = Link(&middle);
+                foreach (_; 0 .. 300) {
+                    assert(walk(&last, &first, false) == 1);
+                    assert(walk(&first, &first, false) == 2);
+                    assert(walk(&first, null, false) == 3);
+                    assert(walk(&first, &middle, true) == 3);
+                    assert(readFromAlias(&first) == 5);
+                    assert(writeThroughAlias(&first, &first, &last) == 9);
+                }
+                return 0;
+            }
+        }, ["walk", "readFromAlias", "writeThroughAlias"]);
+    }
+
     @("jit.loopUpdateUsesTheNewStep." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

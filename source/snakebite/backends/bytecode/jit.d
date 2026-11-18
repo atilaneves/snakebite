@@ -500,7 +500,22 @@ package struct JitState {
                 ++handlerEntryCount;
                 continue;
             }
+            if (g.intLoop.backedge && i > g.intLoop.backedge) {
+                g.intLoop = IntLoop.init;
+                g.intSlots = IntSlots.init;
+            }
             if (!g.checkedLoop.update && !g.fpLoop.backedge
+                    && !g.intLoop.backedge
+                    && (ops[i].kind == JitOp.Kind.fused
+                        || ops[i].kind == JitOp.Kind.branch))
+                g.intLoop = g.planIntLoop(i, ops, originals);
+            if (g.intLoop.contains(i)) {
+                if (!g.emitIntLoopInstruction(i, ops, original))
+                    return Emitted.failed;
+                continue;
+            }
+            if (!g.checkedLoop.update && !g.fpLoop.backedge
+                    && !g.intLoop.backedge
                     && ops[i].kind == JitOp.Kind.branch)
                 g.fpLoop = g.planFpLoop(i, ops, originals);
             if (g.fpLoop.backedge) {
@@ -521,7 +536,8 @@ package struct JitState {
             const savedFixups = g.fixupCount;
             const savedLiterals = g.literalCount;
             if (branchOnly.length && branchOnly[i].approved
-                    && !g.fpLoop.backedge && !g.checkedLoop.update) {
+                    && !g.fpLoop.backedge && !g.checkedLoop.update
+                    && !g.intLoop.backedge) {
                 const plan = g.planBranchOnly(i, ops);
                 if (!path.length || path[0].pc <= i
                         || path[0].pc >= plan.end) {
@@ -537,7 +553,8 @@ package struct JitState {
                 }
             }
             if (i >= fpRegionEnd && ops[i].kind == JitOp.Kind.fp3
-                    && !g.fpLoop.backedge && !g.checkedLoop.update)
+                    && !g.fpLoop.backedge && !g.checkedLoop.update
+                    && !g.intLoop.backedge)
                 fpRegionEnd = g.emitFpRegion(i, ops, originals);
             bool done;
             g.usedKnown = false;
@@ -1624,11 +1641,33 @@ private struct IntSlots {
         return !newest.width && !older.width;
     }
 
+    bool overlaps(in Mem dest, int width) const pure @safe {
+        return overwritten(newest, dest.disp, width, -1)
+            || overwritten(older, dest.disp, width, -1);
+    }
+
     void reload(ref Asm a) const {
         if (newest.width)
             a.ld(newest.width, newest.reg, Mem(FRAME, newest.offset));
         if (older.width)
             a.ld(older.width, older.reg, Mem(FRAME, older.offset));
+    }
+}
+
+private struct IntLoop {
+    enum limit = 64;
+
+    size_t head;
+    size_t backedge;
+    ulong path;
+    IntSlots seed;
+    size_t headBody;
+    size_t afterHeader;
+    size_t forwardFixup;
+
+    bool contains(size_t index) const pure @safe @nogc nothrow {
+        return backedge && index >= head && index <= backedge
+            && (path & (1UL << (index - head))) != 0;
     }
 }
 
@@ -1726,6 +1765,8 @@ private struct Gen {
     FpSlots fpSlots;
     FpLoop fpLoop;
     IntSlots intSlots;
+    IntLoop intLoop;
+    size_t intLoopInstruction = size_t.max;
     CheckedEntry checkedEntry;
     CheckedLoop checkedLoop;
     bool readIntSlot;
@@ -3591,6 +3632,169 @@ private struct Gen {
             cast(int) header.source, cast(int) start, cast(int) end);
     }
 
+    IntLoop planIntLoop(size_t head, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals)
+    {
+        foreach (backedge; head + 1 .. ops.length) {
+            if (backedge - head >= IntLoop.limit)
+                break;
+            size_t target;
+            if (!intLoopTarget(backedge, ops[backedge], target) || target != head)
+                continue;
+            const plan = proveIntLoop(head, backedge, ops, originals);
+            if (plan.backedge)
+                return plan;
+            break;
+        }
+        return IntLoop.init;
+    }
+
+    bool intLoopTarget(size_t index, in JitOp op, out size_t target) {
+        const ins = snapshot[index];
+        switch (op.kind) with (JitOp.Kind) {
+            case jump: return targetIndex(ins.destination, target);
+            case branch: return targetIndex(ins.source, target);
+            case fused: return targetIndex(ins.sourceWidth, target);
+            default: return false;
+        }
+    }
+
+    IntLoop proveIntLoop(size_t head, size_t backedge, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals)
+    {
+        enum unavailable = size_t.max;
+        size_t[IntLoop.limit] next = unavailable;
+        // A path with two possible routes to the backedge needs a join proof.
+        // Work backwards through forward edges to find a single route.
+        for (size_t i = backedge + 1; i-- > head;) {
+            if (originals[i] is null || !intLoopOp(i, ops[i]))
+                continue;
+            size_t target;
+            const branch = intLoopTarget(i, ops[i], target);
+            if (i == backedge) {
+                if (branch)
+                    next[i - head] = head;
+                continue;
+            }
+            const taken = branch && target > i && target <= backedge
+                && next[target - head] != unavailable;
+            const fallthrough = ops[i].kind != JitOp.Kind.jump
+                && next[i + 1 - head] != unavailable;
+            if (taken != fallthrough)
+                next[i - head] = taken ? target : i + 1;
+        }
+        if (next[0] == unavailable)
+            return IntLoop.init;
+
+        IntLoop plan;
+        plan.head = head;
+        plan.backedge = backedge;
+        foreach (pass; 0 .. 2) {
+            for (size_t i = head; i != backedge; i = next[i - head]) {
+                plan.path |= 1UL << (i - head);
+                const op = ops[i];
+                if (op.kind != JitOp.Kind.copy)
+                    continue;
+                const ins = snapshot[i];
+                const width = cast(int) opWidth(ins, op);
+                Mem dest, source, address;
+                frameOperand(ins.destination, dest);
+                storageOperand(ins.source, R10, source, address);
+                const advances = !op.copy.staticSource && source.base != FRAME
+                    && address.disp == dest.disp && width == size_t.sizeof;
+                if (pass == 0 && advances && plan.seed.find(dest, width) < 0) {
+                    if (plan.seed.older.width || plan.seed.overlaps(dest, width)
+                            || cast(size_t) dest.disp + width > frameSize)
+                        return IntLoop.init;
+                    const reg = plan.seed.newest.width ? RAX : R11;
+                    plan.seed.rememberCopy(dest, width, reg);
+                }
+                if (pass == 1 && plan.seed.overlaps(dest, width)
+                        && plan.seed.find(dest, width) < 0)
+                    return IntLoop.init;
+            }
+            if (plan.seed.empty)
+                return IntLoop.init;
+        }
+        plan.path |= 1UL << (backedge - head);
+        return plan;
+    }
+
+    bool intLoopOp(size_t i, in JitOp op) {
+        // The path keeps all stores and indirect reads in their original
+        // order. No handler on it can write through an alias or synchronize.
+        const ins = snapshot[i];
+        Mem operand, address;
+        switch (op.kind) with (JitOp.Kind) {
+            case copy:
+                return goodWidth(opWidth(ins, op))
+                    && !op.copy.staticSource
+                    && frameOperand(ins.destination, operand)
+                    && storageOperand(ins.source, R10, operand, address);
+            case fused:
+                int immediate;
+                return op.fused.kind != CompareKind.floating
+                    && op.fused.constantRight
+                    && goodWidth(ins.width)
+                    && (op.fused.leftInR0 || frameOperand(ins.destination, operand))
+                    && immOf(cast(int) ins.width,
+                        constantAt(ins.source, cast(int) ins.width), immediate);
+            case branch:
+                return goodWidth(opWidth(ins, op))
+                    && frameOperand(ins.destination, operand);
+            case jump:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool emitIntLoopInstruction(size_t i, const(JitOp)[] ops,
+        Instruction.Handler original)
+    {
+        // A dispatch or a cold edge reloads the canonical frame. A hot
+        // fallthrough or a local branch already has the same register map.
+        const preceding = i > intLoop.head && intLoop.contains(i - 1);
+        if (!preceding)
+            intLoop.seed.reload(a);
+        else
+            addReloadEntry(i, FpSlots.init, intLoop.seed);
+        if (i == intLoop.head)
+            intLoop.headBody = a.n;
+        if (i == intLoop.head + 1)
+            intLoop.afterHeader = a.n;
+        if (intLoop.forwardFixup) {
+            patchHere(intLoop.forwardFixup);
+            intLoop.forwardFixup = 0;
+        }
+        intSlots = intLoop.seed;
+        intLoopInstruction = i;
+        fpSlots = FpSlots.init;
+        known = KnownConstant.init;
+        const emitted = emitTemplate(i, ops, ops[i], original,
+            /*copyRun*/ true, /*carryCopy*/ true);
+        intLoopInstruction = size_t.max;
+        intSlots = IntSlots.init;
+        return emitted && !outOfMemory;
+    }
+
+    void jccIntLoop(int cc, size_t target, size_t local = 0) {
+        if (!local && intLoop.contains(intLoopInstruction)
+                && intLoop.contains(target)) {
+            if (intLoopInstruction == intLoop.backedge && target == intLoop.head)
+                local = intLoop.headBody;
+            else if (target > intLoopInstruction) {
+                const first = intLoopInstruction + 1;
+                const intervening = (1UL << (target - first)) - 1;
+                if (!(intLoop.path >> (first - intLoop.head) & intervening)) {
+                    intLoop.forwardFixup = jccLocal(cc);
+                    return;
+                }
+            }
+        }
+        jccTo(cc, target, local);
+    }
+
     FpLoop planFpLoop(size_t head, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals)
     {
@@ -4038,14 +4242,17 @@ private struct Gen {
                 && !(inFpLoop && i == fpLoop.head)) {
             // Only the preceding template's fallthrough can assume these
             // registers are live. All other entries reload the frame.
-            auto entries = reloadEntryScratch.grow(reloadEntryCount + 1);
-            if (entries is null)
-                outOfMemory = true;
-            else
-                entries[reloadEntryCount++] = ReloadEntry(i, incomingFp,
-                    reloadInt ? incomingInt : IntSlots.init);
+            addReloadEntry(i, incomingFp, reloadInt ? incomingInt : IntSlots.init);
         }
         return done;
+    }
+
+    void addReloadEntry(size_t i, in FpSlots fp, in IntSlots ints) {
+        auto entries = reloadEntryScratch.grow(reloadEntryCount + 1);
+        if (entries is null)
+            outOfMemory = true;
+        else
+            entries[reloadEntryCount++] = ReloadEntry(i, fp, ints);
     }
 
     bool isScalarCopy(size_t i, in JitOp op) const {
@@ -4115,6 +4322,16 @@ private struct Gen {
             if (scalar) {
                 const width = cast(int) size;
                 const cached = cachedInt(s, width);
+                if (intLoop.contains(intLoopInstruction)) {
+                    const assigned = intSlots.find(d, width);
+                    const reg = assigned >= 0 ? assigned : R9;
+                    if (cached < 0)
+                        a.ld(width, reg, s);
+                    else if (cached != reg)
+                        a.movRR64(reg, cached);
+                    a.st(width, d, reg);
+                    return true;
+                }
                 const remember = carryCopy && d.base == FRAME;
                 const reg = cached >= 0 ? cached
                     : remember ? intSlots.copyRegister : RAX;
@@ -4159,6 +4376,26 @@ private struct Gen {
         }
 
         case jump: {
+            if (intLoop.contains(intLoopInstruction)) {
+                const head = intLoop.head;
+                size_t exit;
+                if (intLoop.afterHeader && ops[head].kind == fused
+                        && targetIndex(snapshot[head].sourceWidth, exit)
+                        && exit == i + 1) {
+                    JitOp.Fused test = ops[head].fused;
+                    test.jumpWhen = !test.jumpWhen;
+                    return emitFused(snapshot[head], test, head + 1,
+                        intLoop.afterHeader);
+                }
+                if (i == intLoop.backedge)
+                    jmpLocalTo(intLoop.headBody);
+                else {
+                    a.b(0xE9);
+                    intLoop.forwardFixup = a.n;
+                    a.d32(0);
+                }
+                return true;
+            }
             if (fpLoop.backedge && i == fpLoop.backedge) {
                 jmpLocalTo(fpLoop.headBody);
                 return true;
@@ -4201,8 +4438,13 @@ private struct Gen {
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            a.aluMI(Alu.cmp, cast(int) w, d, 0);
-            jccTo(op.branch.jumpIfNonzero ? CC_NE : CC_E, t);
+            const cached = intLoop.contains(intLoopInstruction)
+                ? intSlots.find(d, cast(int) w) : -1;
+            if (cached >= 0)
+                a.aluRI(Alu.cmp, cast(int) w, cached, 0);
+            else
+                a.aluMI(Alu.cmp, cast(int) w, d, 0);
+            jccIntLoop(op.branch.jumpIfNonzero ? CC_NE : CC_E, t);
             return true;
         }
 
@@ -4251,7 +4493,8 @@ private struct Gen {
         }
 
         case checked:
-            if (inlineCaller is null && !checkedLoop.update && !fpLoop.backedge) {
+            if (inlineCaller is null && !checkedLoop.update && !fpLoop.backedge
+                    && !intLoop.backedge) {
                 checkedLoop = planCheckedLoop(i, ops);
                 if (checkedLoop.update)
                     return emitCheckedLoop(i, ins, op, original);
@@ -4803,7 +5046,8 @@ private struct Gen {
         int left = leftInR0 ? REG0 : cachedInt(l, w);
         const rightReg = right.constant ? -1 : cachedInt(right.memory, w);
         if (left < 0) {
-            left = intScratch(rightReg);
+            left = intLoop.contains(intLoopInstruction)
+                ? R9 : intScratch(rightReg);
             a.ld(w, left, l);
         }
         if (right.constant) {
@@ -4820,7 +5064,8 @@ private struct Gen {
             a.aluRR(Alu.cmp, w, left, rightReg);
         else
             a.alu(Alu.cmp, w, left, right.memory);
-        intSlots = IntSlots.init;
+        if (!intLoop.contains(intLoopInstruction))
+            intSlots = IntSlots.init;
     }
 
     static int integerBranchCc(in JitOp.Fused op) {
@@ -4850,7 +5095,7 @@ private struct Gen {
             emitIntCompare(w, l, right, p.leftInR0);
             const cc = integerBranchCc(p);
             if (pathNext == size_t.max)
-                jccTo(cc, t, localTarget);
+                jccIntLoop(cc, t, localTarget);
             else {
                 if (pathNext == t) {
                     *pathExit = fallthrough;
