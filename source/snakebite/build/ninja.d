@@ -15,12 +15,10 @@ public void writeBuildFile(in string directory) {
 
     auto description = dubDescribeProject(directory);
     const sources = dubSources(directory, description);
-    if (sources.linkerFiles.length)
-        throw new Exception("--build=project does not yet build the "
-            ~ "dependencies of a dub project (issue #996, step 2)");
     const files = buildFiles(directory);
     const text = buildFileText(directory, sources,
-        dubWatchedPaths(directory, description));
+        dubWatchedPaths(directory, description),
+        configurationFiles(directory));
     files.directory.mkdirRecurse;
     if (writeChanged(files.ninjaFile, text))
         return;
@@ -32,19 +30,34 @@ public void writeBuildFile(in string directory) {
 }
 
 
-// The build statements: `build.ninja` itself, the compile of the root
-// package to the program and the image module, and the dependency image.
-// `watched` are the paths whose change can change `sources`.
+// The files of the configuration of the host compiler that the frontend of
+// a compile in `directory` reads.
+private string[] configurationFiles(in string directory) {
+    import snakebite.frontend.hostcompiler: hostCompiler, hostConfigurationFiles;
+    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+
+    // The compiler looks in the directory of the compile first.
+    scope entered = ProjectDirectory(directory, directory, EndsProcess.no);
+    return hostConfigurationFiles(hostCompiler);
+}
+
+
+// The build statements: `build.ninja` itself, the libraries of the dub
+// dependencies, the compile of the root package to the program and the image
+// module, and the dependency image. `watched` are the paths whose change can
+// change `sources`, and `configuration` the files of the configuration of the
+// host compiler that the frontend of the compile reads.
 private string buildFileText(
     in string directory,
     in imported!"snakebite.project.dub".SourceSet sources,
     in string[] watched,
+    in string[] configuration,
 ) {
-    import snakebite.build: buildFiles;
+    import snakebite.build: buildFiles, dubDependenciesOption;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
-    import std.algorithm.iteration: map;
+    import std.algorithm.iteration: filter, map;
     import std.array: array, join;
-    import std.file: getcwd, thisExePath;
+    import std.file: exists, getcwd, thisExePath;
     import std.path: baseName;
 
     const files = buildFiles(directory);
@@ -67,6 +80,10 @@ private string buildFileText(
         plain(["cd", start]) ~ shell(["&&"])
             ~ plain([sb, "--build=project", "--generate", directory]),
         ["generator = 1", "restat = 1", "pool = console"]);
+    text ~= rule("dependencies",
+        plain(["cd", start]) ~ shell(["&&"])
+            ~ plain([sb, dubDependenciesOption, directory]),
+        ["restat = 1", "pool = console"]);
     text ~= rule("compile",
         plain(["cd", directory]) ~ shell(["&&"])
             ~ plain([sb, "--compile=" ~ files.program])
@@ -82,8 +99,14 @@ private string buildFileText(
 
     text ~= statement([files.ninjaFile], "generate", null, generatorInputs);
     text ~= statement(generatorInputs, "phony", null, null);
+    // `inputs` names each name that the recipe of a package can have: only
+    // the files that exist are inputs.
+    if (sources.linkerFiles.length)
+        text ~= "\n" ~ statement(sources.linkerFiles, "dependencies", null,
+            [sb, compiler]
+                ~ sources.dependencies.inputs.filter!(path => path.exists).array);
     text ~= "\n" ~ statement([files.program, files.imageSource], "compile",
-        sources.files, [sb]);
+        sources.files, [sb] ~ configuration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
     text ~= statementVariable("options", [

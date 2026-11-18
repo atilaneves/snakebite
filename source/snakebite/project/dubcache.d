@@ -263,12 +263,13 @@ private imported!"std.json".JSONValue collectWatches(
     import snakebite.project.state: projectStateDirectory;
 
     string[string] watched;
+    // What the commands that dub runs before and after it generates read is
+    // not known, so the cache does not keep the description. The paths that
+    // the walk below finds are still inputs of a build.
     foreach (package_; description.packages)
         if (package_.active && (package_.preGenerateCommands.length
-                || package_.postGenerateCommands.length)) {
+                || package_.postGenerateCommands.length))
             cacheable = false;
-            return JSONValue(watched);
-        }
     const state = projectStateDirectory(root).dirName;
     void file(in string path) {
         const value = stamp(path);

@@ -3326,32 +3326,140 @@ def test_build_project_runs_at_the_same_time_as_bin_sb(
         together()
 
 
-# A dub project with dependencies is refused until the mode builds them
-# (issue #996, step 2): no ninja error about a missing library.
-def test_build_project_refuses_a_project_with_dependencies(
-    tmp_path: Path,
-) -> None:
-    write(tmp_path / "dep" / "dub.sdl",
-          f'name "{dub_name("build-project-dep")}"\ntargetType "library"\n')
-    write(tmp_path / "dep" / "source" / "dep.d", """
+# A dub package `name` in `directory` whose function `answer` returns
+# `answer`, with a struct and a template.
+def write_dependency(directory: Path, name: str, answer: int) -> None:
+    write(directory / "dub.sdl",
+          f'name "{dub_name(name)}"\ntargetType "library"\n')
+    write(directory / "source" / "dep.d", f"""
         module dep;
-        int answer() { return 42; }
+        int answer() {{ return {answer}; }}
+        struct Point {{ int x, y; int sum() const {{ return x + y; }} }}
+        T twice(T)(T value) {{ return value * 2; }}
         """)
+
+
+# A dub project whose root package depends on the dub package in `dep` by
+# path. The root code calls the function of the dependency, a member function
+# of its struct and an instance of its template.
+def write_build_project_with_dependency(tmp_path: Path, name: str) -> Path:
+    write_dependency(tmp_path / "dep", name + "-dep", 42)
     app = tmp_path / "app"
     write(app / "dub.sdl",
-          f'name "{dub_name("build-project-with-dep")}"\ntargetType "library"\n'
-          + f'dependency "{dub_name("build-project-dep")}" path="../dep"\n')
+          f'name "{dub_name(name)}"\ntargetType "library"\n'
+          + f'dependency "{dub_name(name + "-dep")}" path="../dep"\n')
     write(app / "source" / "app.d", """
         module app;
-        import dep: answer;
-        unittest { assert(answer == 42); }
+        import core.stdc.stdio: printf;
+        import dep: answer, Point, twice;
+        unittest {
+            printf("%d %d %d\\n", answer, Point(3, 4).sum, twice(21));
+        }
         """)
+    return app
 
+
+# `--build=project` gives the result of `bin/sb DIR` for a project with a
+# dub dependency: on the first run, on a run with no change and on a run after
+# a touch of a root file.
+def test_build_project_with_a_dependency_runs_as_bin_sb(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project_with_dependency(tmp_path, "build-project-dep")
+
+    for change in (None, None, app / "source" / "app.d"):
+        if change is not None:
+            touch(change)
+        built = run_sb("--build=project", str(app), cwd=tmp_path)
+        direct = run_sb(str(app), cwd=tmp_path)
+        assert_runs_as_bin_sb(built, direct)
+        assert "42 7 42" in guest_lines(built), output(built)
+
+
+# A changed function body in the dependency changes the output of the next
+# run.
+def test_build_project_runs_a_changed_dependency(tmp_path: Path) -> None:
+    app = write_build_project_with_dependency(
+        tmp_path, "build-project-changed-dep")
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert "42 7 42" in guest_lines(first), output(first)
+
+    write_dependency(tmp_path / "dep", "build-project-changed-dep-dep", 43)
     built = run_sb("--build=project", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+    assert "43 7 42" in guest_lines(built), output(built)
 
+
+# A changed recipe changes the next run also when the recipe has commands
+# that dub runs before and after it generates the build.
+def test_build_project_reads_a_changed_recipe_with_generate_commands(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project(tmp_path, "build-project-generate-commands")
+    recipe = app / "dub.sdl"
+    recipe.write_text(recipe.read_text()
+                      + 'preGenerateCommands "true"\n'
+                      + 'postGenerateCommands "true"\n')
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert "flavoured 42 viewed" in guest_lines(first), output(first)
+
+    recipe.write_text(recipe.read_text().replace('versions "Flavour"\n', ""))
+    built = run_sb("--build=project", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+    assert "plain 42 viewed" in guest_lines(built), output(built)
+
+
+# A `dub.selections.json` that is made after the first run selects another
+# copy of the dependency, and the next run uses it.
+def test_build_project_reads_a_new_selections_file(tmp_path: Path) -> None:
+    app = write_build_project_with_dependency(
+        tmp_path, "build-project-selections")
+    write_dependency(tmp_path / "other", "build-project-selections-dep", 43)
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert "42 7 42" in guest_lines(first), output(first)
+
+    write(app / "dub.selections.json", json.dumps({
+        "fileVersion": 1,
+        "versions": {
+            dub_name("build-project-selections-dep"): {"path": "../other"},
+        },
+    }))
+    built = run_sb("--build=project", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+    assert "43 7 42" in guest_lines(built), output(built)
+
+
+# A configuration file of the host compiler that is made in the project
+# directory after the first run is the one that the frontend reads, as in
+# `bin/sb DIR`; this one gives no import path. After it is removed, the run
+# gives the result of the first run again.
+def test_build_project_reads_a_new_compiler_configuration(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project(tmp_path, "build-project-configuration")
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+
+    configurations = {
+        app / "ldc2.conf": "default: { switches = []; };\n",
+        app / "dmd.conf": "[Environment]\nDFLAGS=\n",
+    }
+    for path, text in configurations.items():
+        write(path, text)
+    built = run_sb("--build=project", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 1, output(direct)
+    assert "gives no import path" in direct.stderr, output(direct)
     assert built.returncode == 1, output(built)
-    assert "does not yet build the dependencies" in built.stderr, output(built)
-    assert "#996" in built.stderr, output(built)
+    assert direct.stderr in built.stderr, output(built)
+
+    for path in configurations:
+        path.unlink()
+    assert_runs_as_bin_sb(
+        run_sb("--build=project", str(app), cwd=tmp_path), first)
 
 
 # A compile error ends the run with status 1 and the error text of

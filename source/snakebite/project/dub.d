@@ -271,22 +271,14 @@ private void runPreBuildCommands(
 }
 
 
-// Let dub decide which targets are stale, including the full dependency
-// chain of static-library roots. The shared image needs position-
-// independent archives, which both host compilers emit by default on the
-// supported platform. The build must not add a PIC flag through `DFLAGS`:
-// dub keys its build-cache artifacts by `DFLAGS` too, so a build with an
-// environment that the description did not see produces artifacts at paths
-// the description does not name. For the same reason the build gets the
-// compiler binary of the description.
+// Runs dub's build of the dependencies (`runDubBuild`) unless the record in
+// `stateDirectory` shows that their inputs and libraries did not change.
 public void buildDubDependencies(
     in string directory, in string stateDirectory,
     in imported!"snakebite.project.dubcache".DubDescription description,
     in string[] linkerFiles,
 ) {
-    import snakebite.failure.report: SnakebiteException;
     import std.algorithm: all;
-    import std.conv: text;
     import std.file: exists, mkdirRecurse, readText, write;
     import std.path: buildPath;
 
@@ -296,6 +288,30 @@ public void buildDubDependencies(
     if (linkerFiles.all!exists && statePath.exists
             && statePath.readText == fingerprint ~ before)
         return;
+
+    runDubBuild(directory, description, linkerFiles);
+    stateDirectory.mkdirRecurse;
+    statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
+}
+
+// dub's build of the dependencies of the project in `directory`, which makes
+// `linkerFiles`. Let dub decide which targets are stale, including the full
+// dependency chain of static-library roots. The shared image needs position-
+// independent archives, which both host compilers emit by default on the
+// supported platform. The build must not add a PIC flag through `DFLAGS`:
+// dub keys its build-cache artifacts by `DFLAGS` too, so a build with an
+// environment that the description did not see produces artifacts at paths
+// the description does not name. For the same reason the build gets the
+// compiler binary of the description.
+public void runDubBuild(
+    in string directory,
+    in imported!"snakebite.project.dubcache".DubDescription description,
+    in string[] linkerFiles,
+) {
+    import snakebite.failure.report: SnakebiteException;
+    import std.algorithm: all;
+    import std.conv: text;
+    import std.file: exists;
 
     const binary = compilerBinary(directory, description.versions);
     installCompilerWrapper(binary, description);
@@ -322,8 +338,6 @@ public void buildDubDependencies(
             ": ", exception.msg, "\n", failedOutput));
     if (!linkerFiles.all!exists)
         throw new SnakebiteException("Dub build did not produce all dependency libraries");
-    stateDirectory.mkdirRecurse;
-    statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
 }
 
 // dub keeps the compiler binary in the build identity of every target, so the

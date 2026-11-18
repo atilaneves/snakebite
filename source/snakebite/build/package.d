@@ -157,6 +157,7 @@ public bool isCommand(in string[] args) {
     const separator = args.countUntil("--");
     const options = separator < 0 ? args : args[0 .. separator];
     return options.any!(argument => argument == generateOption
+        || argument == dubDependenciesOption
         || argument.startsWith("--compile=", "--image="));
 }
 
@@ -164,11 +165,14 @@ public bool isCommand(in string[] args) {
 // Runs the command of a build statement that `args` gives.
 public int runCommand(string[] args) {
     import snakebite.build.compile: compile;
+    import snakebite.build.dependencies: dependencies;
     import snakebite.build.image: image;
     import std.algorithm.searching: canFind, startsWith;
 
     if (args.canFind(generateOption))
         return generate(args);
+    if (args.canFind(dubDependenciesOption))
+        return dependencies(args);
     if (args.canFind!(argument => argument.startsWith("--compile=")))
         return compile(args);
     return image(args);
@@ -176,6 +180,10 @@ public int runCommand(string[] args) {
 
 
 private enum generateOption = "--generate";
+
+
+// The option of the command of the dependencies statement.
+public enum dubDependenciesOption = "--dub-dependencies";
 
 
 // `sb --build=project --generate DIR`: writes the `build.ninja`
