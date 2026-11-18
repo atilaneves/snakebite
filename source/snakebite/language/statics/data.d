@@ -534,6 +534,19 @@ public struct NativeData {
         return bytes;
     }
 
+    // The storage of `variable` as the start data of the program hold it
+    // (`Backend.staticStorage`). A save makes nothing ready to run: storage
+    // that another object defines is the name of its symbol, as in a word,
+    // and the load finds its address (`CallPlanStore.wordOf`).
+    public Placed startStorage(VarDeclaration declaration) {
+        auto variable = definitionOf(declaration);
+        if (recordRelocs && !variable.isThreadLocalStorage)
+            if (auto name = storageName(variable))
+                return Placed((cast(void*) name)
+                    [0 .. typeFacts(variable.type).size]);
+        return storageOf(variable);
+    }
+
     // The address of the storage of a variable that is not thread-local, with
     // what it points at: a datum of the blocks, or, for native storage, the
     // name of its symbol.

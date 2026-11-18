@@ -333,11 +333,9 @@ private struct Archive {
                 gate.where.set, gate.where.block, gate.where.offset);
             return Target.Kind.staticData;
         }
-        // The gate of a static destructor of a template instance that the
-        // program and another object can both define, of which the process
-        // has a copy: the storage has no name yet (name step 4 of #960).
-        internalFailure(
-            "the gate of a static destructor is storage of another object");
+        // Storage that another object defines: the name of its symbol.
+        reference = nameReference(gate.ptr);
+        return Target.Kind.hostSymbol;
     }
 
     void* dataAt(in size_t[3] position) {
@@ -1045,7 +1043,10 @@ private void transferGates(ref Archive archive, ref GateStorage[] gates) {
         archive.scalar(reference);
         archive.scalar(length);
         if (!archive.isWriting) {
-            gate.bytes = (cast(ubyte*) addressOf(archive, kind, reference))[0 .. length];
+            // The gate is ready to run once it is read, as after a compile
+            // to RAM.
+            gate.bytes = (cast(ubyte*) archive._program.plans.wordOf(
+                targetOf(archive, kind, reference)))[0 .. length];
             if (kind == Target.Kind.staticData)
                 gate.where = DatumRef(archive.blocksAt(reference[0]),
                     reference[1], reference[2]);

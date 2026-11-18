@@ -2721,6 +2721,42 @@ def test_saved_program_uses_its_dependency_image_after_the_load_returns(
     })
 
 
+# A static destructor of a template instance that the dependency and the
+# program both use: its gate is the storage that the dependency image holds,
+# and the program runs it from the name of that storage.
+def test_saved_program_with_a_destructor_gate_of_another_object_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "dependency" / "dub.sdl",
+          f'name "{dub_name("saved-gate-dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dependency" / "source" / "dep.d", """
+        module dep;
+        import core.stdc.stdio: printf;
+        struct Counted(T) {
+            static int count;
+            static ~this() { printf("dtor %d\\n", count); }
+            static void bump() { ++count; }
+        }
+        void useDep() { Counted!int.bump(); }
+        """)
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": dub_project_recipe("saved-gate-app")
+            + f'dependency "{dub_name("saved-gate-dep")}"'
+            + ' path="../dependency"\n',
+        "source/main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        import dep: Counted, useDep;
+        int main() {
+            useDep();
+            Counted!int.bump();
+            printf("count %d\\n", Counted!int.count);
+            return 0;
+        }
+        """,
+    })
+
+
 # A template instance that only a speculative check made, such as
 # `is(typeof(...))`, has an error in its body that the frontend gagged. The
 # native compiler generates no code for it, so the save compiles none.

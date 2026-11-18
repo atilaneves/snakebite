@@ -280,7 +280,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"snakebite.frontend.ast".VarDeclaration variable,
     ) {
-        return _world.data.storageOf(variable);
+        return _world.data.startStorage(variable);
     }
 
     // The handle is a `StartFunction`. Until its function is compiled it
