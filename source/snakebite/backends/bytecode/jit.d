@@ -216,6 +216,57 @@ package struct CrossCallRegion {
     const(JitOp)[] ops;
     const(Instruction.Handler)[] originals;
     size_t[] labels;
+    CrossCallRegion[] children;
+}
+
+private enum crossCallExpansionBudget = 256 * 1024;
+private enum crossCallRecursiveCopies = 1;
+private enum crossCallExpansionDepth = 16;
+
+// Retain one aggregate expansion budget for this compiled caller. A missing
+// region leaves the original call on its ordinary guest path.
+package size_t fitCrossCallRegions(ref CrossCallRegion[] roots,
+    size_t budget = crossCallExpansionBudget,
+    size_t recursiveCopies = crossCallRecursiveCopies)
+{
+    import snakebite.backends.bytecode.vm: Function;
+
+    const initial = budget;
+    const(Function)*[crossCallExpansionDepth] path;
+    void fit(ref CrossCallRegion[] regions, size_t depth) {
+        if (depth == path.length) {
+            regions = null;
+            return;
+        }
+        size_t kept;
+        foreach (ref region; regions) {
+            if (region.callee is null || region.snapshot.length == 0
+                    || region.snapshot.length != region.ops.length
+                    || region.snapshot.length != region.originals.length)
+                continue;
+            size_t recursiveCount;
+            foreach (callee; path[0 .. depth])
+                recursiveCount += callee == region.callee;
+            if (recursiveCount > recursiveCopies)
+                continue;
+            if (region.snapshot.length > (size_t.max - 4096)
+                    / maximumBytesPerInstruction)
+                continue;
+            const cost = region.snapshot.length * maximumBytesPerInstruction
+                + 4096;
+            if (cost > budget)
+                continue;
+
+            budget -= cost;
+            path[depth] = region.callee;
+            fit(region.children, depth + 1);
+            regions[kept++] = region;
+        }
+        regions = regions[0 .. kept];
+    }
+
+    fit(roots, 0);
+    return initial - budget;
 }
 
 private enum : ubyte {
