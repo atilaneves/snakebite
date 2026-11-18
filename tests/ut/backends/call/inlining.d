@@ -94,6 +94,45 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!()) {
+    @("inlining.recursion.allocationKeepsLinksAndReferences." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            struct Node {
+                Node* next;
+                int value;
+            }
+
+            Node* chain(int depth, ref int count) {
+                auto node = (new Node[1]).ptr;
+                node.value = ++count;
+                if (depth < 0)
+                    chain(depth + 1, count);
+                else if (depth > 1)
+                    node.next = chain(depth - 1, count);
+                return node;
+            }
+
+            void main() {
+                int count;
+                auto node = chain(5, count);
+                assert(count == 5);
+                foreach (expected; 1 .. 6) {
+                    assert(node !is null);
+                    assert(node.value == expected);
+                    node = node.next;
+                }
+                assert(node is null);
+
+                chain(-2, count);
+                assert(count == 8);
+            }
+        });
+    }
+}
+
+
+static foreach (backend; Matrix!()) {
     @("inlining.pointer.calleeReadsAndWritesThroughPointer." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
