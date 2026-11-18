@@ -35,6 +35,19 @@ import std.traits: EnumMembers;
 private alias storeWidth = storeIntegral;
 
 
+private bool incrementSaturated(ref shared uint value) nothrow @nogc {
+    import core.atomic: atomicLoad, cas, MemoryOrder;
+
+    auto previous = atomicLoad!(MemoryOrder.raw)(value);
+    while (previous != uint.max) {
+        if (cas(&value, previous, previous + 1))
+            return true;
+        previous = atomicLoad!(MemoryOrder.raw)(value);
+    }
+    return false;
+}
+
+
 // One argument a call instruction copies from the caller's frame into the
 // callee's, at compile time already resolved to both sides' byte offsets
 // and the width to copy - the same three numbers `opCopy` needs for a
@@ -329,52 +342,120 @@ public struct CallSite {
         // the other fields.
         package struct IndirectTarget {
             @plain package const(void)* entry;
+            @plain package const(void)* identity;
             @plain package const(Function)* callee;
             @plain package ptrdiff_t adjustment;
+            @plain package shared uint observations;
 
-            pragma(inline, true)
-            private const(void)* remember(const(void)* entry,
-                const(Function)* callee, in ptrdiff_t adjustment,
-            ) {
-                import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
+            package uint observed() const nothrow @nogc {
+                import core.atomic: atomicLoad, MemoryOrder;
 
-                const published = atomicLoad!(MemoryOrder.acq)(this.entry);
-                if (published !is null)
-                    return published;
-                if (atomicLoad!(MemoryOrder.raw)(this.callee) !is null
-                        || !cas(&this.callee, cast(const(Function)*) null,
-                            callee))
-                    return null;
-                this.adjustment = adjustment;
-                atomicStore!(MemoryOrder.rel)(this.entry, entry);
-                return entry;
+                return atomicLoad!(MemoryOrder.acq)(observations);
             }
+
         }
 
-        @plain package IndirectTarget indirectTarget;
-        @setBy("rememberIndirectTarget")
-        package IndirectTarget[maxIndirectTargets - 1] moreIndirectTargets;
+        @plain package shared uint indirectAttempts;
+        @plain package shared uint indirectWriters;
+        @plain package shared uint indirectVersion;
+        @plain package shared uint indirectOverflow;
+        @setBy("observeIndirectCall")
+        package IndirectTarget[maxIndirectTargets] indirectTargets;
 
         pragma(inline, true)
-        private void rememberIndirectTarget(const(void)* entry,
+        package void observeIndirectCall(const(void)* entry,
             const(Function)* callee, in ptrdiff_t adjustment,
-        ) const {
+            in bool eligible,
+        ) const nothrow @nogc {
+            import core.atomic: atomicLoad, atomicOp, atomicStore, cas,
+                MemoryOrder;
+
+            auto self = cast(CallSite*) &this;
+            atomicOp!"+="(self.indirectWriters, 1u);
+            incrementSaturated(self.indirectAttempts);
+
+            if (eligible) {
+                bool found;
+                foreach (ref target; self.indirectTargets) {
+                    if (atomicLoad!(MemoryOrder.acq)(target.identity) is entry) {
+                        incrementSaturated(target.observations);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    foreach (ref target; self.indirectTargets) {
+                        if (cas(&target.identity,
+                                cast(const(void)*) null, entry)) {
+                            target.callee = callee;
+                            target.adjustment = adjustment;
+                            incrementSaturated(target.observations);
+                            atomicStore!(MemoryOrder.rel)(target.entry, entry);
+                            found = true;
+                            break;
+                        }
+                        if (atomicLoad!(MemoryOrder.acq)(target.identity)
+                                is entry) {
+                            incrementSaturated(target.observations);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found)
+                    incrementSaturated(self.indirectOverflow);
+            }
+
+            atomicOp!"+="(self.indirectVersion, 1u);
+            atomicOp!"-="(self.indirectWriters, 1u);
+        }
+
+        package struct ReceiverProfile {
+            package struct Target {
+                @plain package const(void)* entry;
+                @plain package const(Function)* callee;
+                @plain package ptrdiff_t adjustment;
+                @plain package uint hits;
+            }
+
+            @plain package uint calls;
+            @plain package uint misses;
+            @plain package uint overflow;
+            @plain package bool stable;
+            @plain package Target[maxIndirectTargets] targets;
+        }
+
+        package ReceiverProfile receiverProfile() const nothrow @nogc {
             import core.atomic: atomicLoad, MemoryOrder;
 
-            if (atomicLoad!(MemoryOrder.raw)(
-                    moreIndirectTargets[$ - 1].callee) !is null)
-                return;
-            const first = (cast(IndirectTarget*) &indirectTarget)
-                .remember(entry, callee, adjustment);
-            if (first is null || first is entry)
-                return;
-            foreach (ref target; moreIndirectTargets) {
-                const observed = (cast(IndirectTarget*) &target)
-                    .remember(entry, callee, adjustment);
-                if (observed is null || observed is entry)
-                    return;
+            ReceiverProfile profile;
+            const versionBefore = atomicLoad!(MemoryOrder.acq)(indirectVersion);
+            const writersBefore = atomicLoad!(MemoryOrder.acq)(indirectWriters);
+            profile.calls = atomicLoad!(MemoryOrder.acq)(indirectAttempts);
+            profile.overflow = atomicLoad!(MemoryOrder.acq)(indirectOverflow);
+            uint hits;
+            foreach (index, ref const target; indirectTargets) {
+                const identity = atomicLoad!(MemoryOrder.acq)(target.identity);
+                if (identity is null)
+                    continue;
+                profile.targets[index] = ReceiverProfile.Target(identity,
+                    target.callee, target.adjustment, target.observed);
+                hits += profile.targets[index].hits;
             }
+            const writersAfter = atomicLoad!(MemoryOrder.acq)(indirectWriters);
+            const versionAfter = atomicLoad!(MemoryOrder.acq)(indirectVersion);
+            profile.stable = writersBefore == 0 && writersAfter == 0
+                && versionBefore == versionAfter
+                && profile.calls != uint.max && profile.overflow != uint.max;
+            foreach (ref const target; profile.targets)
+                if (target.hits == uint.max)
+                    profile.stable = false;
+            if (hits > profile.calls)
+                profile.stable = false;
+            profile.misses = hits <= profile.calls ? profile.calls - hits : 0;
+            return profile;
         }
+
     }
 
     // Compiles the callee of a `guest` site on its first call and keeps it
@@ -2045,19 +2126,20 @@ private const(Instruction)* callIndirectWindow(Destination destination,
     ptrdiff_t adjustment;
     const callee = cast(const(Function)*)
         guestWordOf(site.nativePlan, address, adjustment);
-    if (callee is null
-            || !callee.windowCallable
-            || callee.signature !is site.value.signature
-            || callee.activationAlignment > site.windowAlignment
-            || (callee.contextOffset != size_t.max) != site.hasContext) {
+    const canWindow = callee !is null
+        && callee.windowCallable
+        && callee.signature is site.value.signature
+        && callee.activationAlignment <= site.windowAlignment
+        && (callee.contextOffset != size_t.max) == site.hasContext;
+    static if (jitSupported && chainedDispatch && counted)
+        site.observeIndirectCall(address, callee, adjustment, canWindow);
+
+    if (!canWindow) {
         state.decodedAddress = address;
         state.decodedWord = callee;
         state.decodedAdjustment = adjustment;
         return opCallSlow!counted(pc, active, state, frame, r0, fp0);
     }
-
-    static if (jitSupported && chainedDispatch && counted)
-        site.rememberIndirectTarget(address, callee, adjustment);
 
     return enterWindow!(destination, true, counted)(
         pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,

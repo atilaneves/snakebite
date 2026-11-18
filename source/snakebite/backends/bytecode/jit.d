@@ -308,7 +308,8 @@ package struct JitState {
         const(Instruction)[] snapshot, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals)
     {
-        import core.atomic: atomicStore, MemoryOrder;
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import snakebite.backends.bytecode.vm: chainedDispatch;
 
         const instructions = function_.instructions;
         const start = region.chunkUsed;
@@ -442,8 +443,11 @@ package struct JitState {
             region.populate;
 
         const code = region.execBase + start;
-        if (function_.jitName.length)
+        if (function_.jitName.length) {
             perfMap.record(code, g.a.n, function_.jitName);
+            static if (jitSupported && chainedDispatch)
+                writeReceiverProfiles(function_);
+        }
         // One aligned 8-byte store with release order for each word, after
         // the code is complete. A thread that runs the function moves to JIT
         // code at its next dispatch.
@@ -452,6 +456,30 @@ package struct JitState {
                 *cast(shared(size_t)*) &instruction.handler,
                 cast(size_t) (code + g.labels[i]));
         return Emitted.done;
+    }
+}
+
+private void writeReceiverProfiles(T)(T* function_) nothrow @nogc {
+    import core.stdc.stdio: fprintf, stderr;
+
+    foreach (index, ref const site; function_.callSites) {
+        const profile = site.receiverProfile;
+        if (profile.calls == 0)
+            continue;
+        const caller = function_.mangledName;
+        fprintf(stderr,
+            "snakebite: receiver-profile caller=%.*s site=%zu calls=%u misses=%u overflow=%u stable=%d\n",
+            cast(int) caller.length, caller.ptr, index, profile.calls,
+            profile.misses, profile.overflow, profile.stable);
+        foreach (ref const target; profile.targets) {
+            if (target.hits == 0 || target.callee is null)
+                continue;
+            const callee = target.callee.mangledName;
+            fprintf(stderr,
+                "snakebite: receiver-profile target=%.*s entry=%p adjustment=%td hits=%u\n",
+                cast(int) callee.length, callee.ptr, target.entry,
+                target.adjustment, target.hits);
+        }
     }
 }
 
@@ -1716,8 +1744,8 @@ private struct Gen {
             static if (chainedDispatch) {
                 if (site.calleeSlotOffset > int.max)
                     return false;
-                arms[0] = readIndirectArm(site.indirectTarget);
-                foreach (ref const target; site.moreIndirectTargets) {
+                arms[0] = readIndirectArm(site.indirectTargets[0]);
+                foreach (ref const target; site.indirectTargets[1 .. $]) {
                     const arm = readIndirectArm(target);
                     if (arm.entry is null)
                         break;
