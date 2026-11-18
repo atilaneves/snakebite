@@ -72,7 +72,7 @@ package struct Operands {
 // so a new opcode starts as not copyable.
 package bool inlineOperandsOf(
     Instruction.Handler handler, out Operands roles,
-) {
+) @nogc nothrow {
     import std.meta: AliasSeq;
 
     enum S = Operand.storage;
@@ -501,7 +501,7 @@ package struct EmittedCode {
             return kind == Kind.pureWriter || kind == Kind.inPlace;
         }
 
-        bool namesStorage(in Field field) const {
+        bool namesStorage(in Field field) const @nogc nothrow {
             final switch (field) {
                 case Field.destination:
                     return roles.destination == Operand.storage;
@@ -527,7 +527,7 @@ package struct EmittedCode {
         }
     }
 
-    package static Access accessOf(in Instruction.Handler handler) {
+    package static Access accessOf(in Instruction.Handler handler) @nogc nothrow {
         // A direct-mapped cache of `classify`, thread-local: a handler never
         // changes what it is.
         static struct Entry {
@@ -545,7 +545,7 @@ package struct EmittedCode {
         return entry.access;
     }
 
-    package static Access classify(Instruction.Handler handler) {
+    package static Access classify(Instruction.Handler handler) @nogc nothrow {
         import std.meta: AliasSeq;
 
         Access access;
@@ -651,7 +651,7 @@ package struct EmittedCode {
     // field's base.
     package static size_t extentOf(
         in Instruction instruction, in Access access, in Field field,
-    ) {
+    ) @nogc nothrow {
         if (field == Field.destination && access.destinationExtent != 0)
             return access.destinationExtent;
         if (field == Field.source && access.sourceExtent != 0)
@@ -661,7 +661,8 @@ package struct EmittedCode {
         return instruction.width == 0 ? 1 : instruction.width;
     }
 
-    package static ref size_t operandOf(ref Instruction instruction, in Field field) {
+    package static ref inout(size_t) operandOf(ref inout Instruction instruction,
+        in Field field) @nogc nothrow {
         final switch (field) {
             case Field.destination: return instruction.destination;
             case Field.source: return instruction.source;
