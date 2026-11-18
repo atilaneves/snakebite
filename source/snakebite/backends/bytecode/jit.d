@@ -319,11 +319,11 @@ package struct JitState {
     }
 
     static if (chainedDispatch)
-    void linkWindow(const(Instruction)* pc, const(Function)* caller,
+    void linkWindow(bool refresh)(const(Instruction)* pc, const(Function)* caller,
         const(CallSite)* site, size_t index, Destination destination,
     ) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-        import snakebite.backends.bytecode.vm: indirectWindowFallback;
+        import snakebite.backends.bytecode.vm: indirectWindowFallback, JitTier;
 
         const instructions = caller.instructions;
         if (instructions.length < 2 || pc < instructions.ptr
@@ -338,14 +338,26 @@ package struct JitState {
             atomicLoad!(MemoryOrder.acq)(*slot);
         const linked = previous is null ? 0 : previous[-1];
         const bit = 1u << index;
-        if (linked & bit)
+        auto target = cast(CallSite.IndirectTarget*) site.indirectTargetAt(index);
+        static if (refresh) {
+            if (target.coldHit is null)
+                return;
+        } else if (linked & bit)
             return;
 
-        auto arm = Gen.readIndirectArm(*site.indirectTargetAt(index));
+        auto arm = Gen.readIndirectArm(*target);
         if (!Gen.encodableWindowArm(arm))
             return;
 
-        enum exits = 2 * Gen.handlerJumpBytes;
+        static if (refresh) {
+            if (atomicLoad!(MemoryOrder.acq)(
+                    *cast(shared const(uint)*) &arm.callee.jitState)
+                    != JitTier.compiled)
+                return;
+            const coldHit = target.coldHit;
+            target.coldHit = null;
+        }
+        enum exits = 3 * Gen.handlerJumpBytes;
         enum reserve = 2 * codeAlignment + Gen.windowArmBytes + exits;
         if (region.chunkCapacity - region.chunkUsed < reserve
                 && !region.newChunk(chunkSize))
@@ -363,7 +375,16 @@ package struct JitState {
         g.literalScratch = &literals;
         g.bmi2 = bmi2;
         const op = JitOp.CallWindow(destination, counted: true, indirect: true);
-        if (g.emitWindowBody(call, *pc, op, site, arm))
+        static if (refresh) {
+            g.refreshBase = region.execBase + start;
+            g.watchCalleeCall = target.unprofiledCall;
+        }
+        const copied = g.emitWindowBody(call, *pc, op, site, arm);
+        static if (refresh) {
+            if (!copied || !arm.expandedWatchedCall)
+                return;
+        }
+        if (copied)
             g.jumpToLive(pc + 1);
         else if (!g.emitCallWindowArm(pc, *pc, op, site, arm))
             return;
@@ -375,8 +396,13 @@ package struct JitState {
             g.a.jmpRax;
         }
         g.patchHere(arm.grow);
+        const refreshOnCarry = refresh || (copied && arm.unprofiledCall != size_t.max);
+        if (refreshOnCarry)
+            g.jumpToOriginal(pc, indirectWindowFallback!false(destination));
         g.patchHere(arm.tierUp);
-        g.jumpToOriginal(pc, indirectWindowFallback!false(destination));
+        g.jumpToOriginal(pc, refreshOnCarry
+            ? indirectWindowFallback!(false, true)(destination)
+            : indirectWindowFallback!false(destination));
         g.emitLiterals;
 
         // The byte before the entry indexes the cache records already linked.
@@ -387,6 +413,12 @@ package struct JitState {
         if (region.chunkUsed + populateSize / 4 > region.populatedEnd)
             region.populate;
         const code = region.execBase + start;
+        static if (!refresh) {
+            if (refreshOnCarry) {
+                target.unprofiledCall = arm.unprofiledCall;
+                target.coldHit = code + arm.hit;
+            }
+        }
         if (caller.jitName.length)
             perfMap.record(code, g.a.n, "late-guest-window");
         atomicStore!(MemoryOrder.rel)(*slot, cast(size_t) code);
@@ -1620,6 +1652,11 @@ private struct Gen {
     const(Function)* function_;
     size_t codeLimit;
     bool expandWindows;
+    const(ubyte)* refreshBase;
+    size_t watchCalleeCall = size_t.max;
+    size_t watchedCall = size_t.max;
+    size_t unprofiledCall = size_t.max;
+    bool expandedWatchedCall;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     size_t frameSize;
@@ -1834,6 +1871,9 @@ private struct Gen {
         const(void)* entry;
         ptrdiff_t adjustment;
         size_t mismatch;
+        size_t hit;
+        size_t unprofiledCall = size_t.max;
+        bool expandedWatchedCall;
         size_t grow;
         size_t tierUp;
 
@@ -1884,8 +1924,12 @@ private struct Gen {
                     return false;
                 foreach (index; 0 .. CallSite.maxIndirectTargets) {
                     const arm = readIndirectArm(*site.indirectTargetAt(index));
-                    if (arm.entry is null)
+                    if (arm.entry is null) {
+                        if (index == 0 && inlineDepth == 1
+                                && unprofiledCall == size_t.max)
+                            unprofiledCall = i;
                         break;
+                    }
                     if (encodableWindowArm(arm))
                         arms[count++] = arm;
                 }
@@ -1905,9 +1949,10 @@ private struct Gen {
         size_t end;
         foreach (ref arm; arms[0 .. count]) {
             const previous = a.n;
-            if (expandWindows && emitWindowBody(i, snapshot[i], op, site, arm))
+            if (expandWindows && emitWindowBody(i, snapshot[i], op, site, arm)) {
+                expandedWatchedCall |= i == watchedCall;
                 jmpTo(i + 1);
-            else {
+            } else {
                 if (inlineCaller !is null)
                     continue;
                 if (!emitCallWindowArm(&instructions[i], snapshot[i], op,
@@ -1979,6 +2024,16 @@ private struct Gen {
             a.movI(RAX, cast(size_t) entry);
             a.alu(Alu.cmp, 8, RAX, Mem(FRAME, cast(int) site.calleeSlotOffset));
             arm.mismatch = jccLocal(CC_NE);
+        }
+        arm.hit = a.n;
+        if (refreshBase !is null) {
+            // Keep the match transfer the same size in the timing control.
+            a.b(0x48);
+            a.b(0xB8);
+            const address = a.n;
+            a.q64(0);
+            a.jmpRax;
+            *cast(ulong*) (a.buf + address) = cast(size_t) (refreshBase + a.n);
         }
         loadWindow(site);
         guardWindow(op, arm);
@@ -3071,6 +3126,7 @@ private struct Gen {
         child.inlineCall = i;
         child.inlineDepth = inlineDepth + 1;
         child.expandWindows = true;
+        child.watchedCall = watchCalleeCall;
         child.inlineResultMayBeNull = op.destination == Destination.indirect;
         child.labels = targets[0 .. n + 1];
 
@@ -3086,6 +3142,8 @@ private struct Gen {
 
         a = child.a;
         literalCount = child.literalCount;
+        arm.unprofiledCall = child.unprofiledCall;
+        arm.expandedWatchedCall = child.expandedWatchedCall;
         return true;
     }
 
