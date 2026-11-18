@@ -346,6 +346,12 @@ private LoadedProgram loadProgramFile(Parts)(
 
     if (size > size_t.max)
         throw new SnakebiteException("the program file is too large");
+    // A load starts no GC collection. The file gives the size of the memory
+    // of the program, and the program keeps what the load takes, so a
+    // collection would give back almost nothing. The GC collects when it
+    // needs a new pool until its first collection has set its thresholds.
+    GC.disable;
+    scope(exit) GC.enable;
     auto source = Source(parts);
     auto reader = ProgramReader(&source.next, cast(size_t) size);
     LoadedProgram loaded;
