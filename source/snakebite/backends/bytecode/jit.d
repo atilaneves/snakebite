@@ -1753,6 +1753,23 @@ private struct Gen {
     size_t inlineCall;
     uint inlineDepth;
     bool inlineResultMayBeNull;
+    const(InlineExit)* inlineExit;
+    bool inlineLeaf;
+    int inlineLeafFrame;
+
+    static struct InlineExit {
+        static struct Argument {
+            size_t copy;
+            int source;
+            int window;
+            int callee;
+            int width;
+        }
+
+        size_t call;
+        size_t count;
+        Argument[8] arguments;
+    }
     size_t[] labels;
     Fixup* fixups;
     size_t fixupCount;
@@ -1906,7 +1923,7 @@ private struct Gen {
             const disp = cast(uint) raw;
             if (slot > 0x7fff_0000 || disp > 0x7fff_0000)
                 return false;
-            const addressSlot = Mem(FRAME, cast(int) slot);
+            const addressSlot = inlineOperand(slot);
             static if (reusePointer) {
                 const cached = cachedInt(addressSlot, 8);
                 if (cached >= 0) {
@@ -1918,7 +1935,19 @@ private struct Gen {
             m = Mem(scratch, cast(int) disp);
             return true;
         }
-        return frameOperand(raw, m);
+        if (raw > 0x7fff_0000)
+            return false;
+        m = inlineOperand(raw);
+        return true;
+    }
+
+    Mem inlineOperand(size_t raw) {
+        if (inlineLeaf)
+            foreach (ref const arg; inlineExit.arguments[0 .. inlineExit.count])
+                if (raw >= arg.callee && raw - arg.callee < arg.width)
+                    return Mem(FRAME, cast(int) raw - arg.callee
+                        + arg.source - inlineLeafFrame);
+        return Mem(FRAME, cast(int) raw);
     }
 
     static bool frameOperand(size_t raw, out Mem m) pure @safe {
@@ -2121,9 +2150,13 @@ private struct Gen {
         }
     }
 
-    void loadWindow(const(CallSite)* site) {
+    void loadWindow(const(CallSite)* site, bool materializing = false) {
         a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
-        a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
+        if (!materializing && inlineExit !is null && !inlineLeaf)
+            a.lea(R10, Mem(FRAME,
+                cast(int) (inlineLayout.windowBase - inlineLayout.frameOffset)));
+        else
+            a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
         a.lea(R11, Mem(R10, cast(int) site.windowDisp));
     }
 
@@ -3240,8 +3273,187 @@ private struct Gen {
     private enum inlineDepthLimit = 3;
     private enum inlineCodeLimit = 8 * 1024;
 
+    static bool inlineStorage(size_t offset, size_t width, size_t size) {
+        return offset <= size && width <= size - offset && offset <= int.max;
+    }
+
+    static bool overlaps(size_t first, size_t width, size_t other, size_t otherWidth) {
+        return first < other + otherWidth && other < first + width;
+    }
+
+    static size_t inlineAddressSlot(size_t raw) {
+        return (raw >> 32) & 0x7fff_ffff;
+    }
+
+    static bool inlineRead(size_t raw, size_t width, const(Function)* callee) {
+        if (raw & indirectBit) {
+            raw = inlineAddressSlot(raw);
+            width = size_t.sizeof;
+        }
+        return inlineStorage(raw, width, callee.frameSize)
+            && (callee.windowSlot == size_t.max
+                || !overlaps(raw, width, callee.windowSlot, size_t.sizeof));
+    }
+
+    static bool planInlineExit(const(Function)* callee,
+        const(Instruction)[] body, const(JitOp)[] ops, out InlineExit exit)
+    {
+        if (body.length < 3 || callee.callSites.length != 1
+                || callee.windowSlot == size_t.max)
+            return false;
+        const call = body.length - 2;
+        const site = &callee.callSites[0];
+        if (ops[$ - 1].kind != JitOp.Kind.returnVoid
+                || ops[call].kind != JitOp.Kind.callWindow
+                || !ops[call].callWindow.indirect
+                || ops[call].callWindow.destination != Destination.discard
+                || body[call].source != 0 || site.returnWidth
+                || site.windowSlot != callee.windowSlot
+                || site.args.length != site.nativeArgs.length
+                || site.args.length > exit.arguments.length)
+            return false;
+
+        exit.call = call;
+        exit.count = site.args.length;
+        foreach (i, ref const arg; site.args) {
+            const native = site.nativeArgs[i];
+            if (!(arg.callerOffset & indirectBit)
+                    || inlineAddressSlot(arg.callerOffset) != site.windowSlot
+                    || cast(uint) arg.callerOffset > int.max
+                    || arg.calleeOffset > int.max || !goodWidth(arg.width)
+                    || arg.callerOffset != native.callerOffset
+                    || arg.calleeOffset != native.calleeOffset || arg.width != native.width)
+                return false;
+            exit.arguments[i] = InlineExit.Argument(size_t.max, 0,
+                cast(int) arg.callerOffset, cast(int) arg.calleeOffset,
+                cast(int) arg.width);
+        }
+
+        foreach (i; 0 .. call) {
+            const ins = &body[i];
+            const op = &ops[i];
+            const width = op.width ? op.width : ins.width;
+            if (ins.destination & indirectBit) {
+                if (op.kind != JitOp.Kind.copy || op.copy.staticSource
+                        || ins.source & indirectBit
+                        || !inlineRead(ins.source, width, callee))
+                    return false;
+                bool found;
+                foreach (ref arg; exit.arguments[0 .. exit.count])
+                    if (ins.destination == (indirectBit | (site.windowSlot << 32)
+                            | cast(uint) arg.window) && width == arg.width
+                            && arg.copy == size_t.max) {
+                        arg.copy = i;
+                        arg.source = cast(int) ins.source;
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    return false;
+                continue;
+            }
+            if (!inlineRead(ins.destination, width, callee) || !goodWidth(width))
+                return false;
+            foreach (ref const arg; exit.arguments[0 .. exit.count])
+                if (arg.copy != size_t.max
+                        && overlaps(ins.destination, width, arg.source, arg.width))
+                    return false;
+            switch (op.kind) with (JitOp.Kind) {
+                case copy:
+                    if (!op.copy.staticSource && !inlineRead(ins.source, width, callee))
+                        return false;
+                    break;
+                case loadInd:
+                    if (!inlineRead(ins.source, size_t.sizeof, callee))
+                        return false;
+                    break;
+                case constant:
+                    break;
+                case int3:
+                    const arithmetic = op.int3;
+                    if (arithmetic.leftInR0 || arithmetic.resultInR0
+                            || (!arithmetic.twoAddress && !inlineRead(ins.source, width, callee))
+                            || (!arithmetic.constantRight && !inlineRead(
+                                integerRightOperand(*ins, arithmetic.twoAddress), width, callee)))
+                        return false;
+                    break;
+                default:
+                    return false;
+            }
+        }
+        foreach (ref const arg; exit.arguments[0 .. exit.count])
+            if (arg.copy == size_t.max)
+                return false;
+        return true;
+    }
+
+    bool leafOperand(size_t raw, size_t width, bool writes, const(Function)* callee) {
+        if (raw & indirectBit) {
+            raw = inlineAddressSlot(raw);
+            width = size_t.sizeof;
+            writes = false;
+        }
+        if (!inlineStorage(raw, width, callee.frameSize))
+            return false;
+        foreach (ref const arg; inlineExit.arguments[0 .. inlineExit.count])
+            if (overlaps(raw, width, arg.callee, arg.width)
+                    && (writes || raw < arg.callee || raw + width > arg.callee + arg.width))
+                return false;
+        return true;
+    }
+
+    bool inlineLeafBody(const(Function)* callee, const(CallSite.FastCall)* layout,
+        const(Instruction)[] body, const(JitOp)[] ops)
+    {
+        const site = &callSites[0];
+        if (callee.callSites.length || callee.windowSlot != size_t.max
+                || callee.returnPlace.offset != size_t.max)
+            return false;
+        const offset = inlineLayout.windowBase - inlineLayout.frameOffset
+            + site.windowDisp + layout.frameOffset;
+        if (offset > int.max)
+            return false;
+        foreach (ref const arg; inlineExit.arguments[0 .. inlineExit.count])
+            if (site.windowDisp + layout.frameOffset + arg.callee != arg.window
+                    || !inlineStorage(arg.callee, arg.width, callee.frameSize))
+                return false;
+        foreach (i, ref const op; ops) {
+            const ins = &body[i];
+            const width = op.width ? op.width : ins.width;
+            switch (op.kind) with (JitOp.Kind) {
+                case copy:
+                    if (!goodWidth(width) || !leafOperand(ins.destination, width, true, callee)
+                            || (!op.copy.staticSource && !leafOperand(ins.source, width, false, callee)))
+                        return false;
+                    break;
+                case int3:
+                    const arithmetic = op.int3;
+                    if (!goodWidth(width)
+                            || (!arithmetic.resultInR0
+                                && !leafOperand(ins.destination, width, true, callee))
+                            || (!arithmetic.twoAddress && !arithmetic.leftInR0
+                                && !leafOperand(ins.source, width, false, callee))
+                            || (!arithmetic.constantRight && !leafOperand(
+                                integerRightOperand(*ins, arithmetic.twoAddress), width, false, callee)))
+                        return false;
+                    break;
+                case fused:
+                    if (!goodWidth(width) || op.fused.kind == CompareKind.floating
+                            || (!op.fused.leftInR0 && !leafOperand(ins.destination, width, false, callee))
+                            || (!op.fused.constantRight && !leafOperand(ins.source, width, false, callee)))
+                        return false;
+                    break;
+                case jump, returnVoid:
+                    break;
+                default:
+                    return false;
+            }
+        }
+        return true;
+    }
+
     bool emitWindowBody(size_t i, in Instruction ins, in JitOp.CallWindow op,
-        const(CallSite)* site, ref WindowArm arm)
+        const(CallSite)* site, ref WindowArm arm, bool transfer = true)
     {
         import snakebite.backends.bytecode.vm: readJitBody;
 
@@ -3264,12 +3476,26 @@ private struct Gen {
         if (!readJitBody(callee, body[0 .. n], ops[0 .. n], originals[0 .. n]))
             return false;
 
+        InlineExit exit;
+        const leaf = inlineExit !is null;
+        if (leaf && (inlineLeaf || arm.adjustment || arm.hasPlace || arm.hasWindows
+                || op.destination != Destination.discard || site.returnWidth
+                || !inlineLeafBody(callee, arm.fast, body[0 .. n], ops[0 .. n])))
+            return false;
+        const region = transfer && !leaf && inlineCaller is null && !arm.adjustment && !arm.hasPlace
+            && op.destination == Destination.discard && !site.returnWidth
+            && planInlineExit(callee, body[0 .. n], ops[0 .. n], exit);
+
         const start = a.n;
         emitWindowChecks(op, site, arm);
-        a.st(8, Mem(R11, Activation.parent.offsetof), FRAME);
-        if (!prepareWindow(ins, op, site, arm)) {
-            a.n = start;
-            return false;
+        if (region || leaf)
+            a.lea(FRAME, Mem(R11, cast(int) arm.fast.frameOffset));
+        else {
+            a.st(8, Mem(R11, Activation.parent.offsetof), FRAME);
+            if (!prepareWindow(ins, op, site, arm)) {
+                a.n = start;
+                return false;
+            }
         }
 
         Gen child;
@@ -3297,6 +3523,11 @@ private struct Gen {
         child.inlineDepth = inlineDepth + 1;
         child.expandWindows = true;
         child.inlineResultMayBeNull = op.destination == Destination.indirect;
+        child.inlineExit = leaf ? inlineExit : region ? &exit : null;
+        child.inlineLeaf = leaf;
+        if (leaf)
+            child.inlineLeafFrame = cast(int) (inlineLayout.windowBase - inlineLayout.frameOffset
+                + site.windowDisp + arm.fast.frameOffset);
         child.labels = targets[0 .. n + 1];
 
         const done = child.emitInlineInstructions(ops[0 .. n], originals[0 .. n],
@@ -3306,6 +3537,8 @@ private struct Gen {
         fixupCap = fixupScratch.cap;
         if (!done) {
             a.n = start;
+            if (region)
+                return emitWindowBody(i, ins, op, site, arm, false);
             return false;
         }
 
@@ -3328,7 +3561,16 @@ private struct Gen {
             intSlots = IntSlots.init;
             fpSlots = FpSlots.init;
             const original = originals[i];
+            if (inlineExit !is null && !inlineLeaf) {
+                bool deferred;
+                foreach (ref const argument; inlineExit.arguments[0 .. inlineExit.count])
+                    deferred |= argument.copy == i;
+                if (deferred)
+                    continue;
+            }
             if (original is null) {
+                if (inlineExit !is null)
+                    return false;
                 a.ud2();
                 continue;
             }
@@ -3362,6 +3604,8 @@ private struct Gen {
             }
             if (outOfMemory)
                 return false;
+            if (inlineExit !is null && (!done || tierUp))
+                return false;
             if (!done) {
                 a.n = saved;
                 fixupCount = savedFixups;
@@ -3389,7 +3633,10 @@ private struct Gen {
 
         a.ud2();
         labels[$ - 1] = a.n;
-        a.ld(8, FRAME, inlineActivationField(Activation.parent.offsetof));
+        if (inlineExit is null)
+            a.ld(8, FRAME, inlineActivationField(Activation.parent.offsetof));
+        else if (!inlineLeaf)
+            a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
         foreach (fixup; fixups[firstFixup .. fixupCount])
             patchTo(fixup.position, labels[fixup.target]);
         return true;
@@ -3417,8 +3664,20 @@ private struct Gen {
             a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
         else
             materialize(*parent);
-        loadWindow(body.inlineSite);
+        loadWindow(body.inlineSite, materializing: true);
         a.lea(FRAME, Mem(R11, cast(int) body.inlineLayout.frameOffset));
+        if (body.inlineExit !is null) {
+            assert(!body.inlineLeaf);
+            a.lea(RAX, Mem(R10, cast(int) body.inlineSite.windowScratch));
+            a.st(8, Mem(R11, Activation.returnPlace.offsetof), RAX);
+
+            a.lea(R10, Mem(R11, cast(int) body.inlineLayout.windowBase));
+            a.st(8, Mem(FRAME, cast(int) body.inlineLayout.windowStore), R10);
+            foreach (ref const argument; body.inlineExit.arguments[0 .. body.inlineExit.count]) {
+                a.ld(argument.width, RAX, Mem(FRAME, argument.source));
+                a.st(argument.width, Mem(R10, argument.window), RAX);
+            }
+        }
         activateWindow(&parent.instructions[body.inlineCall], body.function_,
             body.inlineLayout);
     }
