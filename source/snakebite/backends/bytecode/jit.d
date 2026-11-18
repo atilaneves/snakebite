@@ -2243,10 +2243,10 @@ private struct Gen {
                 if (!analyzePath(candidate, ops, *scratch, true))
                     continue;
                 plan.memory = PathMemory.init;
-                plan.checked[0 .. finished] = PathChecked.init;
+                plan.actions[0 .. finished] = PathAction.init;
                 if (!analyzePath(candidate, ops, *scratch, false))
                     continue;
-                if (!plan.checked[plan.memory.first].skipBounds
+                if (!plan.actions[plan.memory.first].checked.skipBounds
                         || plan.memory.maximumIndex < 0)
                     continue;
                 // Charge two instructions for each entry comparison and the
@@ -2263,7 +2263,7 @@ private struct Gen {
                     scratch.best.guards.count = checks;
                     scratch.best.guards.guards[0 .. checks] = plan.guards.guards[0 .. checks];
                     scratch.best.memory = plan.memory;
-                    scratch.best.checked[0 .. finished] = plan.checked[0 .. finished];
+                    scratch.best.actions[0 .. finished] = plan.actions[0 .. finished];
                 }
                 continue;
             }
@@ -2518,7 +2518,8 @@ private struct Gen {
     }
 
     bool trackPathCopy(in Instruction ins, in JitOp op,
-        ref PathValues values, const(PathCall)[] calls, int pending)
+        ref PathValues values, const(PathCall)[] calls, int pending,
+        const ref PathGuards guards, PathCopy* copy)
     {
         const width = op.width ? op.width : ins.width;
         PathPlace dest, source;
@@ -2533,7 +2534,20 @@ private struct Gen {
         if (!pathPlace(ins.source, calls, pending, source, cast(uint) width))
             return false;
         const value = values.lookup(source, cast(ubyte) width);
-        return value.width && values.write(dest, value);
+        if (!value.width)
+            return false;
+        if (copy !is null) {
+            const forwarded = guards.substitute(value);
+            const previous = values.current(dest, cast(ubyte) width);
+            if (previous.width && guards.substitute(previous) == forwarded)
+                copy.kind = PathCopy.Kind.redundant;
+            else if (!forwarded.identity) {
+                int immediate;
+                if (immOf(cast(int) width, forwarded.bits, immediate))
+                    *copy = PathCopy(PathCopy.Kind.immediate, immediate);
+            }
+        }
+        return values.write(dest, value);
     }
 
     bool trackPathInteger(in Instruction ins, in JitOp op, ref PathAddress scalar,
@@ -2600,10 +2614,21 @@ private struct Gen {
         size_t saved;
     }
 
+    private struct PathCopy {
+        enum Kind : ubyte { normal, redundant, immediate }
+        Kind kind;
+        int immediate;
+    }
+
+    private struct PathAction {
+        PathChecked checked;
+        PathCopy copy;
+    }
+
     private struct PathPlan {
         PathGuards guards;
         PathMemory memory;
-        PathChecked[ObservedEdge.limit] checked;
+        PathAction[ObservedEdge.limit] actions;
     }
 
     private struct PathMemoryFacts {
@@ -2662,7 +2687,7 @@ private struct Gen {
             index = PathValue(0, size_t.sizeof, p.signed && index.width == int.sizeof
                 ? cast(ulong) cast(long) cast(int) index.bits : index.bits);
         const location = PathIndex(index, index.identity && p.signed);
-        auto action = &plan.checked[position];
+        auto action = &plan.actions[position].checked;
         if (!gatherGuards && p.access != CheckedAccess.storeUnchecked) {
             if (!index.identity) {
                 const extended = index.bits;
@@ -2780,7 +2805,8 @@ private struct Gen {
                 case jump:
                     break;
                 case copy:
-                    if (!trackPathCopy(ins, op, values, calls, pending))
+                    if (!trackPathCopy(ins, op, values, calls, pending, plan.guards,
+                            gatherGuards ? null : &plan.actions[position].copy))
                         return false;
                     break;
                 case int3:
@@ -2925,9 +2951,11 @@ private struct Gen {
             const i = step.pc;
             const op = ops[i];
             pathMemoryGuard = 0;
-            // The normal neighboring-template register cache is local to a
-            // different sequence. The path carries only its guarded value.
-            intSlots = IntSlots.init;
+            // The path's copy cache survives only consecutive scalar copies.
+            // Other instructions can change the frame or clobber its registers.
+            const carryCopy = plan !is null && isScalarCopy(i, op);
+            if (!carryCopy)
+                intSlots = IntSlots.init;
             ref const ins = snapshot[i];
             with (JitOp.Kind) switch (op.kind) {
                 case callWindow: {
@@ -2992,7 +3020,7 @@ private struct Gen {
                         guardPathMemory(plan.memory, i, pending, exits[], exitCount);
                     }
                     if (!emitChecked(i, ins, op, step.next, &jump, null,
-                            plan is null ? null : &plan.checked[position]))
+                            plan is null ? null : &plan.actions[position].checked))
                         return false;
                     if (jump != 0)
                         exits[exitCount++] = PathExit(i + 1, jump, 0, pending);
@@ -3001,7 +3029,31 @@ private struct Gen {
                 case copy:
                     if (!pathFrameStorage(ins.destination, function_.windowSlot))
                         forgetPathValue;
-                    goto case;
+                    if (step.next != i + 1)
+                        return false;
+                    if (carryCopy) {
+                        const copy = plan.actions[position].copy;
+                        final switch (copy.kind) with (PathCopy.Kind) {
+                            case redundant:
+                                break;
+                            case immediate: {
+                                Mem destination;
+                                if (!opnd(ins.destination, R9, destination))
+                                    return false;
+                                const width = cast(int) (op.width ? op.width : ins.width);
+                                a.stI(width, destination, copy.immediate);
+                                finishCopy(destination, width, true);
+                                break;
+                            }
+                            case normal:
+                                if (!emitTemplate(i, ops, op, originals[i],
+                                        copyRun: true, carryCopy: true))
+                                    return false;
+                                break;
+                        }
+                    } else if (!emitTemplate(i, ops, op, originals[i]))
+                        return false;
+                    break;
                 case int3:
                     if (step.next != i + 1 || !emitTemplate(i, ops, op, originals[i]))
                         return false;
