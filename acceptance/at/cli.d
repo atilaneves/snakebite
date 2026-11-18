@@ -9,6 +9,7 @@ import std.process: Config, environment, execute, thisProcessID;
 
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot run class finalizers"),
 )) {
@@ -175,6 +176,7 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.unconfirmed,
         "Imported function bodies lose version flags during deferred CTFE analysis"),
 )) {
@@ -233,6 +235,7 @@ static foreach (backend; Matrix!(
 
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.unconfirmed,
         "CTFE rejects calls with host arguments"),
 )) {
@@ -357,6 +360,7 @@ unittest {
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
@@ -407,6 +411,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
@@ -453,6 +458,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
@@ -494,6 +500,7 @@ static foreach (backend; Matrix!(
 // An import inside a function brings the host class into the guest the same
 // way as a module-scope import; the guest uses `Fiber` itself.
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
@@ -536,6 +543,7 @@ static foreach (backend; Matrix!(
 // As above, with a class derived from `Fiber` that the function itself
 // declares: its fields start after the host base object.
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
@@ -582,6 +590,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
@@ -625,6 +634,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read the native Fiber page size"),
 )) {
@@ -692,6 +702,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot create a native Fiber"),
 )) {
@@ -747,6 +758,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot create a native Fiber"),
 )) {
@@ -945,6 +957,7 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "dmd CTFE: variable `pool` cannot be modified at compile time"),
 )) {

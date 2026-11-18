@@ -5,7 +5,7 @@ import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.bytecode.inspection: functionAt;
 import snakebite.backends.bytecode.vm: Function, JitSetting;
 import snakebite.backends.statistics: CompilationStatistics;
-import snakebite.driver.execution: LoadedProgram, loadProgramFile;
+import snakebite.driver.execution: imagePathOf, LoadedProgram, loadProgramFile;
 import snakebite.frontend.ast: FuncDeclaration;
 import snakebite.program: Program;
 import snakebite.start.data: StartData;
@@ -48,7 +48,7 @@ public SavedFile saveProgram(const Program program, in JitSetting jit) {
     auto compiler = new Bytecode(program, jit, recordsAddresses);
     {
         auto owned = Owned!Bytecode(compiler);
-        owned.save(path, getcwd);
+        owned.save(path, getcwd, imagePathOf(cast() program));
         eachCompiledPosition(compiler, (declaration, module_, index) {
             saved.positions[declaration] = [module_, index];
         });

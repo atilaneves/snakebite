@@ -10,6 +10,7 @@ import std.process: Config, execute, thisProcessID;
 
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot read static constructor counters"),
 )) {
@@ -92,6 +93,7 @@ static foreach (backend; Matrix!()) {
 
 
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.unconfirmed,
         "CTFE cannot modify druntime test hooks"),
 )) {

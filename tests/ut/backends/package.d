@@ -75,6 +75,13 @@ public alias SaveMeetsUnnamedHostAddress = Omit!(LoadedBytecode,
     "the save meets an address of host code or data that has no symbol "
     ~ "name and ends the process; from RAM the test passes");
 
+// A test whose program runs in a child process, `bin/sb`, which compiles it.
+// No save and no load happens in the process of the test.
+public alias ChildProcessRun = Omit!(LoadedBytecode,
+    Because.inexpressible,
+    "the program runs in a child process that compiles it; the arm saves "
+    ~ "and loads in the process of the test");
+
 // The backends a test runs on: `TestBackends` minus every `Omit!(...)`.
 // Usable directly as `static foreach (backend; Matrix!(...))`.
 public template Matrix(specs...) {
