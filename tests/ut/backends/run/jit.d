@@ -524,29 +524,31 @@ static foreach (backend; Matrix!(
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
-            void work(long* result, uint depth) {
+            void work(long* result, uint depth, int n) {
                 if (depth != 0) {
-                    work(result, depth - 1);
+                    work(result, depth - 1, n);
                     return;
                 }
                 long sum;
-                foreach (i; 0 .. 5000)
+                foreach (i; 0 .. n)
                     sum += i & 7;
                 *result = sum;
             }
             class Resource {
                 long* result;
                 this(long* result) { this.result = result; }
-                ~this() { work(result, 4); }
+                ~this() { work(result, 4, 5000); }
             }
             void main() {
                 long result;
+                // Prepare the recursive call before the finalizer can use it.
+                work(&result, 4, 0);
                 auto resource = new Resource(&result);
                 const address = cast(const void*) typeid(Resource).destructor;
                 GC.runFinalizers(address[0 .. 1]);
                 assert(result == 5000 / 8 * 28);
                 result = 0;
-                work(&result, 4);
+                work(&result, 4, 5000);
                 assert(result == 5000 / 8 * 28);
             }
         });
