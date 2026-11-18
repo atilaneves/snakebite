@@ -5858,16 +5858,9 @@ static if (jitSupported) {
             // The live handler can already contain generated code.
             const handler = function_.jitHandlers is null
                 ? function_.instructions[i].handler : function_.jitHandlers[i];
-            auto templateHandler = cast(Instruction.Handler) handler;
             originals[i] = handler;
             instruction = function_.instructions[i];
-            // The code of a branch does not count; a call keeps its twin,
-            // which counts the callee.
-            if (handler !is null)
-                if (const original = handler in _countingTwins.uncountedOf)
-                    if (!isCountedCall(*original))
-                        templateHandler = *original;
-            instruction.handler = templateHandler;
+            instruction.handler = withoutBranchCounting(handler);
             if (handler is null) {
                 ops[i] = JitOp.init;
                 continue;
@@ -5882,11 +5875,7 @@ static if (jitSupported) {
     package Instruction.Handler jitFallback(const(Function)* function_,
         in Instruction snapshot, Instruction.Handler handler) nothrow @nogc
     {
-        if (handler is null)
-            return null;
-        if (const original = handler in _countingTwins.uncountedOf)
-            if (!isCountedCall(*original))
-                handler = *original;
+        handler = withoutBranchCounting(handler);
         if (handler is &callGeneral!true || handler is &callGeneral!false)
             return nativeCallJitEntry(&function_.callSites[snapshot.source],
                 handler);
@@ -5894,8 +5883,18 @@ static if (jitSupported) {
     }
 
     package bool jitCountsBranch(Instruction.Handler handler) nothrow @nogc {
-        const original = handler in _countingTwins.uncountedOf;
-        return original !is null && !isCountedCall(*original);
+        return withoutBranchCounting(handler) !is handler;
+    }
+
+    // JIT branches do not count. Calls keep the handler that counts the callee.
+    private Instruction.Handler withoutBranchCounting(
+        in Instruction.Handler handler,
+    ) nothrow @nogc {
+        if (handler !is null)
+            if (const original = handler in _countingTwins.uncountedOf)
+                if (!isCountedCall(*original))
+                    return *original;
+        return handler;
     }
 
     private Instruction.Handler nativeCallJitEntry(
