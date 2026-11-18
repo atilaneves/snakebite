@@ -207,7 +207,7 @@ private void transferHeader(ref Archive archive, ref Header header) {
 // A word of the data at `place` that refers to `target`, an interface of a
 // class information.
 private struct InterfaceWord {
-    size_t* place;
+    ubyte* place;
     Target target;
 }
 
@@ -834,7 +834,8 @@ private void transferBody(
     // information, which can be the program's own copy: it is read once
     // every other word of the data is ready.
     foreach (word; archive._interfaceWords)
-        *word.place = archive._program.plans.wordOfName(word.target);
+        writeWord(word.place,
+            archive._program.plans.wordOfName(word.target));
     foreach (m; 0 .. moduleCount)
         transferModule(archive, program, *program._modules[m]);
 }
@@ -1008,16 +1009,21 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             auto place = &bytes[link.wordOffset];
             if (link.kind == Target.Kind.interfaceTable
                     || link.kind == Target.Kind.interfaceRecord) {
-                archive._interfaceWords ~= InterfaceWord(
-                    cast(size_t*) place, target);
+                archive._interfaceWords ~= InterfaceWord(place, target);
                 continue;
             }
-            const address = isName(link.kind)
-                ? archive._program.plans.wordOfName(target) : target.address;
-            place[0 .. size_t.sizeof] =
-                (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
+            writeWord(place, isName(link.kind)
+                ? archive._program.plans.wordOfName(target) : target.address);
         }
     }
+}
+
+
+// Writes the word `address` at `place`, which a datum can hold at any
+// offset.
+private void writeWord(ubyte* place, in size_t address) {
+    place[0 .. size_t.sizeof] =
+        (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
 }
 
 private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) {
