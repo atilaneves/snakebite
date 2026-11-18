@@ -785,8 +785,12 @@ private const(Instruction)* executeWith(
         pc, activation, state, frame,
     );
     const next = operation!Parameters(execution);
-    static if (observeGuestPaths)
+    static if (observeGuestPaths) {
+        static if (countsEvents!operation || __traits(isSame, operation, runJump))
+            if (next !is null && next <= pc)
+                startPathObservation(state, activation.function_);
         observeGuestPath(state, activation, pc, next);
+    }
     static if (chainedDispatch) {
         // Every instruction stream ends in an instruction that ends the
         // activation, and that one does not use `execute`. This handler
@@ -836,8 +840,12 @@ private const(Instruction)* executeRegister(
     execution.outR0 = r0;
     execution.outFp0 = fp0;
     const next = operation!Parameters(execution);
-    static if (observeGuestPaths)
+    static if (observeGuestPaths) {
+        static if (countsEvents!operation)
+            if (next !is null && next <= pc)
+                startPathObservation(state, activation.function_);
         observeGuestPath(state, activation, pc, next);
+    }
     static if (chainedDispatch)
         return next.handler(next, activation, state, frame,
             execution.outR0, execution.outFp0);
@@ -1428,20 +1436,26 @@ static if (observeGuestPaths)
 private void observeGuestCall(DispatchState* state, Activation* active,
     const(Instruction)* pc, const(Function)* callee)
 {
+    if (callee is active.function_ && startPathObservation(state, callee))
+        observeGuestPath(state, active, pc, null, ObservedEdge.call);
+}
+
+static if (observeGuestPaths)
+private bool startPathObservation(DispatchState* state, const(Function)* callee) {
     import core.atomic: atomicLoad, MemoryOrder;
 
-    if (callee !is active.function_)
-        return;
+    if (!callee.jitCounts)
+        return false;
     const tier = atomicLoad!(MemoryOrder.acq)(
         *cast(shared(uint)*) &callee.jitState);
     if (tier == JitTier.compiled || tier == JitTier.failed) {
         if (state.observedFunction is callee)
             state.observedFunction = null;
-        return;
+        return false;
     }
     if (tier != JitTier.interpreted || callee.jitHeat >= cast(uint) -jitStep
             || callee.instructions.length >= ObservedEdge.return_)
-        return;
+        return false;
     const previous = state.observedFunction;
     if (previous !is callee) {
         if (previous !is null) {
@@ -1449,17 +1463,17 @@ private void observeGuestCall(DispatchState* state, Activation* active,
                 *cast(shared(uint)*) &previous.jitState);
             if (previousTier != JitTier.compiled && previousTier != JitTier.failed
                     && callee.jitHeat <= previous.jitHeat)
-                return;
+                return false;
         }
         // A thread suspended by the GC can hold the allocator lock.
         if (GC.inFinalizer)
-            return;
+            return false;
         if (state.observedEdges.reserve(ObservedEdge.limit) is null)
-            return;
+            return false;
         state.observedFunction = callee;
         state.observedEvents = 0;
     }
-    observeGuestPath(state, active, pc, null, ObservedEdge.call);
+    return true;
 }
 
 static if (observeGuestPaths)

@@ -1111,11 +1111,80 @@ private struct Literal {
     ulong bits;
 }
 
+private struct PathRegisters {
+    @nogc nothrow:
+
+    IntSlot[16] slots;
+    uint zeroUpper;
+    size_t next;
+
+    void clearMemory() {
+        slots[] = IntSlot.init;
+    }
+
+    void clobber(int reg, int width = 8) {
+        if (reg == FRAME)
+            clearMemory();
+        else
+            foreach (ref slot; slots)
+                if (slot.reg == reg)
+                    slot.width = 0;
+        if (width >= 4) {
+            const bit = 1U << reg;
+            zeroUpper = (zeroUpper & ~bit) | (width == 4 ? bit : 0);
+        }
+    }
+
+    int find(in Mem m, int width, int dest) const {
+        int found = -1;
+        foreach (ref const slot; slots)
+            if (slot.width == width && slot.offset == m.disp) {
+                if (slot.reg == dest)
+                    return dest;
+                found = slot.reg;
+            }
+        return found;
+    }
+
+    static bool frame(in Mem m) {
+        return m.base == FRAME && m.index < 0;
+    }
+
+    void remember(in Mem m, int width, int reg) {
+        foreach (ref slot; slots)
+            if (!slot.width || slot == IntSlot(m.disp, width, reg)) {
+                slot = IntSlot(m.disp, width, reg);
+                return;
+            }
+        slots[next++ % slots.length] = IntSlot(m.disp, width, reg);
+    }
+
+    void access(in Mem m, int width, bool write) {
+        if (!frame(m))
+            clearMemory();
+        else if (write)
+            foreach (ref slot; slots)
+                if (IntSlots.overwritten(slot, m.disp, width, -1))
+                    slot.width = 0;
+    }
+}
+
 private struct Asm {
     @nogc nothrow:
 
     ubyte* buf;
     size_t n;
+    PathRegisters* pathRegisters;
+
+    void pathWrite(int reg, int width = 8) {
+        if (pathRegisters !is null)
+            pathRegisters.clobber(reg, width);
+    }
+
+    void pathAccess(in Mem m, int width, bool write = false) {
+        if (pathRegisters !is null)
+            pathRegisters.access(m, width, write);
+    }
 
     void b(ubyte x) { buf[n++] = x; }
     void d32(int x) { *cast(int*) (buf + n) = x; n += 4; }
@@ -1191,15 +1260,42 @@ private struct Asm {
 
     // Loads and stores of width `w` with no extension.
     void ld(int w, int r, in Mem m) {
+        if (pathRegisters !is null) {
+            const tracked = PathRegisters.frame(m) && r != FRAME;
+            if (tracked) {
+                const source = pathRegisters.find(m, w, r);
+                if (source >= 0) {
+                    if (r != source || (w == 4 && !(pathRegisters.zeroUpper & (1U << r)))) {
+                        pathWrite(r, w);
+                        rrOp(w, w == 1, source, r, w == 1 ? 0x88 : 0x89);
+                        pathRegisters.remember(m, w, r);
+                    }
+                    return;
+                }
+            } else
+                pathAccess(m, w);
+            pathWrite(r, w);
+            if (tracked)
+                pathRegisters.remember(m, w, r);
+        }
         memOp(w, w == 1, r, m, w == 1 ? 0x8A : 0x8B);
     }
 
     void st(int w, in Mem m, int r) {
+        pathAccess(m, w, true);
+        if (pathRegisters !is null && PathRegisters.frame(m))
+            pathRegisters.remember(m, w, r);
         memOp(w, w == 1, r, m, w == 1 ? 0x88 : 0x89);
     }
 
     // Zero and sign extension to 64 bits.
     void ldzx(int w, int r, in Mem m) {
+        if (pathRegisters !is null && w >= 4) {
+            ld(w, r, m);
+            return;
+        }
+        pathAccess(m, w);
+        pathWrite(r, 4);
         switch (w) {
             case 1: memOp(4, byteReg: false, r, m, (0x0F << 8 | 0xB6)); break;
             case 2: memOp(4, byteReg: false, r, m, (0x0F << 8 | 0xB7)); break;
@@ -1209,6 +1305,8 @@ private struct Asm {
     }
 
     void ldsx(int w, int r, in Mem m) {
+        pathAccess(m, w);
+        pathWrite(r);
         switch (w) {
             case 1: memOp(8, byteReg: false, r, m, (0x0F << 8 | 0xBE)); break;
             case 2: memOp(8, byteReg: false, r, m, (0x0F << 8 | 0xBF)); break;
@@ -1219,11 +1317,15 @@ private struct Asm {
 
     // ALU op reg, mem.
     void alu(Alu op, int w, int r, in Mem m) {
+        pathAccess(m, w);
+        if (op != Alu.cmp)
+            pathWrite(r, w);
         memOp(w, w == 1, r, m, (op * 8 + (w == 1 ? 2 : 3)));
     }
 
     // ALU op mem, imm.
     void aluMI(Alu op, int w, in Mem m, int imm) {
+        pathAccess(m, w, op != Alu.cmp);
         if (w == 1) {
             memOp(w, byteReg: false, op, m, 0x80);
             b(cast(ubyte) imm);
@@ -1239,10 +1341,14 @@ private struct Asm {
 
     // ALU op reg, reg (reg is the destination).
     void aluRR(Alu op, int w, int dst, int src) {
+        if (op != Alu.cmp)
+            pathWrite(dst, w);
         rrOp(w, w == 1, src, dst, (op * 8 + (w == 1 ? 0 : 1)));
     }
 
     void aluRI(Alu op, int w, int r, int imm) {
+        if (op != Alu.cmp)
+            pathWrite(r, w);
         if (w == 2)
             b(0x66);
         ubyte rex = 0x40;
@@ -1270,14 +1376,18 @@ private struct Asm {
 
     // imul reg, mem and imul reg, reg (width 4 or 8).
     void imulM(int w, int r, in Mem m) {
+        pathAccess(m, w);
+        pathWrite(r, w);
         memOp(w, byteReg: false, r, m, (0x0F << 8 | 0xAF));
     }
 
     void imulRR(int w, int dst, int src) {
+        pathWrite(dst, w);
         rrOp(w, byteReg: false, dst, src, (0x0F << 8 | 0xAF));
     }
 
     void imulRI(int dst, int src, int imm) {
+        pathWrite(dst);
         rrOp(8, byteReg: false, dst, src, 0x69);
         d32(imm);
     }
@@ -1305,10 +1415,15 @@ private struct Asm {
     }
 
     void movRR64(int dst, int src) {
+        const zero = pathRegisters !is null
+            && (pathRegisters.zeroUpper & (1U << src));
+        if (dst != src)
+            pathWrite(dst, zero ? 4 : 8);
         rrOp(8, byteReg: false, src, dst, 0x89);
     }
 
     void movzxRR(int w, int dst, int src) {
+        pathWrite(dst, 4);
         switch (w) {
             case 1: rrOp(4, byteReg: true, dst, src, (0x0F << 8 | 0xB6)); break;
             case 2:
@@ -1319,6 +1434,7 @@ private struct Asm {
     }
 
     void movsxRR(int w, int r) {
+        pathWrite(r);
         switch (w) {
             case 1: rrOp(8, byteReg: true, r, r, (0x0F << 8 | 0xBE)); break;
             case 2: rrOp(8, byteReg: false, r, r, (0x0F << 8 | 0xBF)); break;
@@ -1329,6 +1445,7 @@ private struct Asm {
 
     // mov store immediate.
     void stI(int w, in Mem m, int imm) {
+        pathAccess(m, w, true);
         if (w == 1) {
             memOp(w, byteReg: false, 0, m, 0xC6);
             b(cast(ubyte) imm);
@@ -1340,6 +1457,7 @@ private struct Asm {
     }
 
     void movI(int r, ulong v) {
+        pathWrite(r, v <= uint.max ? 4 : 8);
         if (v <= uint.max) {
             if (r >= 8)
                 b(0x41);
@@ -1358,6 +1476,7 @@ private struct Asm {
     }
 
     void lea(int r, in Mem m) {
+        pathWrite(r);
         memOp(8, byteReg: false, r, m, 0x8D);
     }
 
@@ -1397,6 +1516,7 @@ private struct Asm {
     }
 
     void xmmToInteger(int integer, int xmm) {
+        pathWrite(integer);
         b(operandSizePrefix);
         rrOp(8, byteReg: false, xmm, integer, 0x0F7E);
     }
@@ -1541,7 +1661,8 @@ private struct IntSlots {
         int reg) pure @safe
     {
         return slot.width && (slot.reg == reg
-            || (slot.offset < offset + width && offset < slot.offset + slot.width));
+            || (slot.offset < cast(long) offset + width
+                && offset < cast(long) slot.offset + slot.width));
     }
 
     void rememberCopy(in Mem dest, int width, int reg) pure @safe {
@@ -2098,7 +2219,9 @@ private struct Gen {
         size_t bestLoopScore;
         foreach (start, edge; observed) {
             const startsAtCall = edge.next == ObservedEdge.call;
-            if (!startsAtCall && ops[edge.pc].kind != JitOp.Kind.fused)
+            const followsBackedge = start != 0 && observed[start - 1].next == edge.pc
+                && observed[start - 1].pc >= edge.pc;
+            if (!startsAtCall && !followsBackedge && ops[edge.pc].kind != JitOp.Kind.fused)
                 continue;
             ushort[pathDepth] resumes;
             size_t depth;
@@ -2132,7 +2255,7 @@ private struct Gen {
                 } else if (step.next < ops.length && pathOp(op)) {
                     expected = step.next;
                     if (!startsAtCall && depth == 0 && step.next == edge.pc) {
-                        if (returns && op.kind == JitOp.Kind.jump) {
+                        if (op.kind == JitOp.Kind.jump || op.kind == JitOp.Kind.fused) {
                             finished = length + 1;
                             completedReturns = returns;
                         }
@@ -2568,8 +2691,8 @@ private struct Gen {
         PathPlan candidate;
         PathValues values;
         PathMemoryFacts facts;
-        PathCall[ObservedEdge.limit] calls;
-        PathExit[2 * ObservedEdge.limit + 16] exits;
+        PathCall[2 * ObservedEdge.limit] calls;
+        PathExit[4 * ObservedEdge.limit + 32] exits;
     }
 
     bool trackPathChecked(size_t position, in Instruction ins, in JitOp op,
@@ -2805,6 +2928,7 @@ private struct Gen {
         exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
         guardPathStack(pc, pending, exits, count, R11, RAX);
         guardPathOverlap(pc, pending, exits, count, memory.descriptor.width);
+        guardPathRuntime(pc, pending, exits, count, R11, RAX, SC2);
         if (memory.scalar.width) {
             const delta = cast(int) (memory.scalar.displacement
                 - memory.descriptor.displacement);
@@ -2812,7 +2936,26 @@ private struct Gen {
             exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
             guardPathOverlap(pc, pending, exits, count, memory.scalar.width);
             guardPathStack(pc, pending, exits, count, R10, SC2);
+            guardPathRuntime(pc, pending, exits, count, R10, SC2, RAX);
         }
+    }
+
+    // A completed path never grows or switches stacks. Its two possible
+    // non-frame write ranges must also miss the runtime objects that own
+    // the stack bounds.
+    void guardPathRuntime(size_t pc, int pending, PathExit[] exits,
+        ref size_t count, int low, int high, int scratch)
+    {
+        static foreach (guard; [
+            Mem(STATE, DispatchState.sizeof), Mem(R9, FrameStack.sizeof),
+        ]) {{
+            a.lea(scratch, guard);
+            a.aluRR(Alu.cmp, 8, low, scratch);
+            const past = jccLocal(CC_AE);
+            a.aluRR(Alu.cmp, 8, guard.base, high);
+            exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
+            patchHere(past);
+        }}
     }
 
     void guardPathStack(size_t pc, int pending, PathExit[] exits,
@@ -2843,8 +2986,8 @@ private struct Gen {
         const(Instruction.Handler)[] originals,
         ref PathScratch scratch, const(PathPlan)* plan)
     {
-        auto calls = scratch.calls[0 .. path.length];
-        auto exits = scratch.exits[0 .. 2 * path.length + 16];
+        auto calls = scratch.calls[];
+        auto exits = scratch.exits[];
         size_t callCount;
         size_t exitCount;
         int pending = -1;
@@ -2854,25 +2997,45 @@ private struct Gen {
         known = KnownConstant.init;
         fpSlots = FpSlots.init;
         intSlots = IntSlots.init;
-        const entry = a.n;
+        PathRegisters registers;
         if (plan !is null)
-            foreach (ref const guard; plan.guards.guards[0 .. plan.guards.count]) {
-                const width = guard.entry.width;
-                if (cap - a.n < maximumBytesPerInstruction)
+            a.pathRegisters = &registers;
+        scope (exit) a.pathRegisters = null;
+        size_t sharedBody;
+        bool backedge;
+        for (size_t position; ; ++position) {
+            if (position == path.length) {
+                if (plan is null)
+                    break;
+                if (pending >= 0)
                     return false;
-                a.ld(width, RAX, Mem(FRAME, guard.place.offset));
-                int immediate;
-                if (immOf(width, guard.required, immediate))
-                    a.aluRI(Alu.cmp, width, RAX, immediate);
-                else {
-                    a.movI(SC2, guard.required);
-                    a.aluRR(Alu.cmp, width, RAX, SC2);
-                }
-                exits[exitCount++] = PathExit(path[0].pc, jccLocal(CC_NE));
+                position = 0;
+                backedge = true;
+                registers = PathRegisters.init;
+                intSlots = IntSlots.init;
             }
-        foreach (position, step; path) {
+            if (plan !is null && position == 0)
+                foreach (ref const guard; plan.guards.guards[0 .. plan.guards.count]) {
+                    const width = guard.entry.width;
+                    if (cap - a.n < maximumBytesPerInstruction)
+                        return false;
+                    a.ld(width, RAX, Mem(FRAME, guard.place.offset));
+                    int immediate;
+                    if (immOf(width, guard.required, immediate))
+                        a.aluRI(Alu.cmp, width, RAX, immediate);
+                    else {
+                        a.movI(SC2, guard.required);
+                        a.aluRR(Alu.cmp, width, RAX, SC2);
+                    }
+                    exits[exitCount++] = PathExit(path[0].pc, jccLocal(CC_NE));
+                }
             if (cap - a.n < maximumBytesPerInstruction)
                 return false;
+            if (backedge && position == plan.memory.first) {
+                jmpLocalTo(sharedBody);
+                break;
+            }
+            const step = path[position];
             const i = step.pc;
             const op = ops[i];
             pathMemoryGuard = 0;
@@ -2943,6 +3106,12 @@ private struct Gen {
                         if (pending >= 0)
                             return false;
                         guardPathMemory(plan.memory, i, pending, exits[], exitCount);
+                        // The shared body cannot depend on scratch registers
+                        // set by either prefix. Only the guard's XMM values
+                        // are live here.
+                        registers = PathRegisters.init;
+                        intSlots = IntSlots.init;
+                        sharedBody = a.n;
                     }
                     if (!emitChecked(i, ins, op, step.next, &jump, null,
                             plan is null ? null : &plan.actions[position].checked))
@@ -2992,14 +3161,9 @@ private struct Gen {
         if (cap - a.n < maximumBytesPerInstruction || pending >= 0
                 || (emittingPath && !reusedAcrossCall))
             return false;
+        a.pathRegisters = null;
         if (plan is null)
             jumpToPathExit(continuation);
-        else {
-            a.b(0xE9);
-            const back = a.n;
-            a.d32(0);
-            patchTo(back, entry);
-        }
         foreach (exit; exits[0 .. exitCount]) {
             if (cap - a.n < maximumBytesPerInstruction * pathDepth)
                 return false;
@@ -4794,7 +4958,7 @@ private struct Gen {
             if (offset != 0)
                 a.aluRI(Alu.add, 4, RAX, offset);
             if (p.signed)
-                a.rrOp(8, byteReg: false, RAX, RAX, signExtend32Opcode);
+                a.movsxRR(4, RAX);
         } else if (needIndex) {
             a.ld(8, RAX, idx);
             if (offset != 0)
