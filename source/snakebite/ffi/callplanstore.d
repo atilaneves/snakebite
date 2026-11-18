@@ -40,9 +40,9 @@ public struct CallPlanStore {
         throw missing(name.symbol, name.declaredBy);
     }
 
-    // As `addressOf`, but null for a symbol that no object defines: for a
-    // datum that the program and another object can both define, which uses
-    // the copy of the process when there is one.
+    // As `addressOf`, but null for a symbol that no object defines. A name
+    // with an own copy (`Names.defineOwn`) gives the copy that
+    // `chosenCopy` decides.
     public void* addressIfPresent(Name* name) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
@@ -52,8 +52,9 @@ public struct CallPlanStore {
                 found = cast(void*) callbacks.adjustedEntryOf(
                     addressOf(adjusted.code), adjusted.signature,
                     adjusted.adjustment);
-            else if (auto symbol = resolver.resolve(name.symbol))
-                found = symbol + name.distance;
+            else if (auto copy = chosenCopy(
+                    resolver.resolve(name.symbol), name.own))
+                found = copy + name.distance;
             else
                 found = Name.absent;
             atomicStore!(MemoryOrder.rel)(
@@ -62,15 +63,21 @@ public struct CallPlanStore {
         return found is Name.absent ? null : found;
     }
 
-    // This thread's address of the thread-local symbol `symbol`, which
-    // `declaredBy` declares. It is found on each thread, and never kept:
-    // another thread has another copy.
-    public void* threadLocalAddressOf(
-        in char[] symbol, in char[] declaredBy,
-    ) const {
-        if (auto address = resolver.resolveThreadLocal(symbol))
-            return address;
-        throw missing(symbol, declaredBy);
+    // The one decision for a datum that the program and another object can
+    // both define: the copy of the process, `processCopy`, when the process
+    // has the symbol, else the program's own copy `own`. Null when there is
+    // neither. A compile to RAM asks when it makes the datum ready to run, a
+    // load when it makes the loaded program ready; a compile never asks.
+    public static void* chosenCopy(
+        void* processCopy, const(void)* own,
+    ) pure nothrow @nogc {
+        return processCopy !is null ? processCopy : cast(void*) own;
+    }
+
+    // This thread's address of the thread-local symbol `symbol`, or null when
+    // the process does not have it.
+    public void* threadLocalAddressIfPresent(in char[] symbol) const {
+        return resolver.resolveThreadLocal(symbol);
     }
 
     // `linked` as the program uses it when it runs: a name gives the

@@ -58,7 +58,6 @@ static foreach (rootOwned; [true, false]) {
             &ownership.isDefinedElsewhere,
             (declaration) => declaration,
             (declaration) => Linked!(void*).init,
-            (name) => cast(void*) null,
             (declaration, place) {},
             (type) => Linked!TypeInfo.init,
         );

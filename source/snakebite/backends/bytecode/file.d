@@ -815,6 +815,7 @@ private void transferBody(
         transferBlocks(archive, program._modules[m].blocks);
     transferBlocks(archive, *program.store.blocks);
     transferStrings(archive, program.store);
+    transferOwnCopies(archive, program);
     foreach (m; 0 .. moduleCount)
         transferAddresses(archive, program._modules[m].blocks);
     transferAddresses(archive, *program.store.blocks);
@@ -931,6 +932,35 @@ private void transferStrings(ref Archive archive, ref StaticStore store) {
         else
             archive.bytes(store.newString(size));
     }
+}
+
+
+// The names that have the program's own copy of their symbol
+// (`Names.defineOwn`): the index of each and the place of its copy. A load
+// gives each name its copy before any word is made ready to run, so the
+// decision of a load (`CallPlanStore.chosenCopy`) is that of a compile to
+// RAM.
+private void transferOwnCopies(ref Archive archive, ref Program program) {
+    size_t[] names;
+    size_t[3][] places;
+    if (archive.isWriting)
+        program.plans.names.eachOwn((name) {
+            const datum = name.ownDatum;
+            names ~= archive.nameIndexOf(name);
+            places ~= archive.blocksPosition(
+                datum.set, datum.block, datum.offset);
+        });
+    archive.transfer(names);
+    archive.transfer(places);
+    if (archive.isWriting)
+        return;
+    if (places.length != names.length)
+        throw new SnakebiteException(
+            "the program file holds own copies that do not match");
+    foreach (index, place; places)
+        program.plans.names.defineOwn(archive.nameOfIndex(names[index]),
+            archive.dataAt(place), DatumRef(archive.blocksAt(place[0]),
+                place[1], place[2]));
 }
 
 

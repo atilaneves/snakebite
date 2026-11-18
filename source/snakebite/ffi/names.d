@@ -8,10 +8,17 @@ module snakebite.ffi.names;
 // a symbol. The address of the symbol is found when a word of the program is
 // made ready to run, by `CallPlanStore.addressOf`, after a compile to RAM and
 // after a load alike.
+//
+// A datum that the program and another object can both define (a static
+// variable of a template instance, the type information that dmd emits in
+// each object that needs it) is a name with the program's own copy
+// (`Names.defineOwn`). `CallPlanStore.chosenCopy` decides which copy is used
+// when the program is made ready to run.
 private:
 
 import snakebite.ffi.callplan: NativeSignature;
 import snakebite.host.sharedtable: SharedTable;
+import snakebite.native.address: DatumRef;
 
 
 // A symbol, as the program refers to it.
@@ -22,6 +29,8 @@ public struct Name {
     private size_t _distance;
     private string _declaredBy;
     private Adjusted* _adjusted;
+    private const(void)* _own;
+    private DatumRef _ownDatum;
 
     // The symbol, as the linker names it. Empty for an adjusted entry.
     public string symbol() const @safe pure nothrow @nogc {
@@ -44,6 +53,18 @@ public struct Name {
     // Null for any other name.
     public inout(Adjusted)* adjusted() inout @safe pure nothrow @nogc {
         return _adjusted;
+    }
+
+    // The start of the program's own copy of the symbol, for a datum that
+    // the program and another object can both define, or null.
+    public const(void)* own() const @safe pure nothrow @nogc {
+        return _own;
+    }
+
+    // The datum of the static data of the program that `own` is the start
+    // of.
+    public DatumRef ownDatum() const @safe pure nothrow @nogc {
+        return _ownDatum;
     }
 
     // What `CallPlanStore.addressOf` found: the address, `absent`, or null
@@ -277,6 +298,53 @@ public struct Names {
         _used = count;
         atomicStore!(MemoryOrder.rel)(_chunkCount, 1);
         return chunk;
+    }
+
+    // The name of the symbol of `name`, `distance` bytes further, with the
+    // own copy of `name`.
+    public Name* further(Name* name, in size_t distance) {
+        import snakebite.failure.report: internalFailure;
+
+        if (distance == 0)
+            return name;
+        if (name.adjusted !is null)
+            internalFailure("a word points into an entry of host code");
+        auto result = named(name.symbol, name.distance + distance,
+            name.declaredBy);
+        if (name.own !is null)
+            defineOwn(result, name.own, name.ownDatum);
+        return result;
+    }
+
+    // `start`, the datum `datum` of the static data of the program, becomes
+    // the program's own copy of the symbol of `name`, unless it has one: the
+    // copy that the program uses when the process does not have the symbol
+    // (`CallPlanStore.chosenCopy`). A compile defines it before the name is
+    // used, and a load before it makes the program ready to run.
+    public void defineOwn(Name* name, const(void)* start, in DatumRef datum) {
+        import snakebite.failure.report: internalFailure;
+
+        auto lock = this.lock;
+        lock.lock;
+        scope(exit) lock.unlock;
+        // As a linker keeps the first of two definitions of one symbol.
+        if (name._own !is null)
+            return;
+        if (name._adjusted !is null)
+            internalFailure("an entry of host code has an own copy");
+        name._own = start;
+        name._ownDatum = datum;
+    }
+
+    // Each name that has an own copy (`defineOwn`).
+    public void eachOwn(scope void delegate(Name*) visit) {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        const count = atomicLoad!(MemoryOrder.acq)(_chunkCount);
+        foreach (index, chunk; _chunks[0 .. count])
+            foreach (ref name; index + 1 == count ? chunk[0 .. _used] : chunk)
+                if (name._own !is null)
+                    visit(&name);
     }
 
     private void refuseAfterFile() const {

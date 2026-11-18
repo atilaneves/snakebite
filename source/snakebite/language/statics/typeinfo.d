@@ -160,15 +160,15 @@ public struct RuntimeTypes {
             return inFrontend!"hasPointers"(declaration.type);
         }
 
-        // The type information that dmd makes for a type is in a template
-        // instance, which the program and another object can both define:
-        // the copy of the process is used when there is one.
+        // The type information that dmd makes for a type is a variable of a
+        // template instance, which the program and another object can both
+        // define: its name, with the program's own copy.
         Info resolve(Declaration symbol, ptrdiff_t offset) {
-            OutBuffer mangled;
-            inFrontend!"mangleToBuffer"(symbol, mangled);
-            auto name = plans.names.named(mangled[], offset);
-            return plans.addressIfPresent(name) is null
-                ? Info.init : Info.named(name);
+            auto variable = symbol.isVarDeclaration;
+            if (variable is null)
+                return Info.init;
+            return Info.named(plans.names.further(
+                _data.namedWithOwnCopy(variable), offset));
         }
 
         Info flag(in size_t value) {
@@ -259,6 +259,26 @@ public struct RuntimeTypes {
     }
 
     private Linked!TypeInfo build(Type type) {
+        auto own = ownInfo(type);
+        auto classType = type.isTypeClass;
+        auto structType = type.isTypeStruct;
+        const rootOwned = classType !is null && isRootOwned(classType.sym)
+            || structType !is null && isRootOwned(structType.sym);
+        if (rootOwned || own.name !is null || type.vtinfo is null)
+            return own;
+        // dmd emits this type information in each object that needs it, so
+        // the program and another object can both define it: its name, with
+        // the program's own copy.
+        auto name = plans.names.named(type.vtinfo.ident.toString);
+        const datum = _data.addressOfData(cast(const(void)*) own.held).target;
+        plans.names.defineOwn(name, cast(const(void)*) own.held, datum.datum);
+        return Linked!TypeInfo.named(name);
+    }
+
+    // The type information of `type` that the program builds, or the name of
+    // the one that another object defines: druntime for a type of the
+    // language, and for a class `_classInfo` decides.
+    private Linked!TypeInfo ownInfo(Type type) {
         import snakebite.frontend.ast: nextOf, Taarray, Tarray, Tbool, Tchar,
             Tclass, Tcomplex32, Tcomplex64, Tcomplex80, Tdchar, Tdelegate,
             Tenum, Terror, Tfloat32, Tfloat64, Tfloat80, Tfunction, Tident,
@@ -276,13 +296,6 @@ public struct RuntimeTypes {
 
         auto classType = type.isTypeClass;
         auto structType = type.isTypeStruct;
-        const rootOwned = classType !is null && isRootOwned(classType.sym)
-            || structType !is null && isRootOwned(structType.sym);
-        if (!rootOwned) {
-            auto info = linkedInfo(type);
-            if (!info.isNull)
-                return info;
-        }
         if (type.mod != 0) {
             auto baseType = type.isShared
                 ? inFrontend!"unSharedOf"(type)
@@ -409,25 +422,6 @@ public struct RuntimeTypes {
         return _isRootOwned(declaration);
     }
 
-    // The type information of `type` that another object holds, as the
-    // name of its symbol, or null. Codegen aliases an unqualified class's
-    // TypeInfo declaration to its __Class symbol: `linkedClassInfo` decides
-    // for it. Any other type information that dmd emits can be in the
-    // program and in another object: the copy of the process is used when
-    // there is one.
-    private Linked!TypeInfo linkedInfo(Type type) {
-        auto classType = type.isTypeClass;
-        if (classType !is null && type.mod == 0
-                && classType.sym.isInterfaceDeclaration is null)
-            return Linked!TypeInfo.from(linkedClassInfo(classType.sym));
-        if (type.vtinfo is null)
-            return Linked!TypeInfo.init;
-
-        auto name = plans.names.named(type.vtinfo.ident.toString);
-        return plans.addressIfPresent(name) is null
-            ? Linked!TypeInfo.init : Linked!TypeInfo.named(name);
-    }
-
     // The type information that druntime defines for the type whose mangled
     // name is `mangled`, as the name of its symbol, which dmd gives it
     // (`TypeInfoDeclaration`).
@@ -481,17 +475,52 @@ public struct RuntimeTypes {
         return Linked!TypeInfo.held(wrapper);
     }
 
-    // The native `TypeInfo_Class` for `declaration`, or `null` when the
-    // program builds its own. Another object defines the class information
+    // The name of the class information of `declaration`, or null when only
+    // the program defines it. Another object defines the class information
     // of a class that another object defines, and a missing symbol for it
-    // is an error, as at the link of a native build. The program builds it
-    // for a class of its own. For a class of a dependency template instance
-    // the native copy is used when the process has one. Never falls back to
-    // fabrication itself, so a caller that fabricates its own metadata
-    // (`classinfo.classRuntimeInfo`) can call this without looping back
-    // through that same fabrication path. The answer is the name of the
-    // symbol of the class information (`snakebite.ffi.names`).
+    // is an error, as at the link of a native build. The program defines it
+    // for a class of its own. The program and another object can both
+    // define it for a class of a dependency template instance
+    // (`hasOwnCopy`): the name has the program's own copy, which this makes
+    // first (`_classInfo`), and with it the program's own vtable and initial
+    // image.
     public Linked!TypeInfo_Class linkedClassInfo(
+        ClassDeclaration declaration,
+    ) {
+        auto name = classInfoName(declaration);
+        if (!name.isNull && hasOwnCopy(declaration))
+            _classInfo(declaration);
+        return name;
+    }
+
+    // Whether the program and another object can both define the class
+    // information of `declaration`.
+    public bool hasOwnCopy(ClassDeclaration declaration) {
+        return !_isDefinedElsewhere(declaration) && !isRootOwned(declaration);
+    }
+
+    // `info`, which the program built for `declaration` (`hasOwnCopy`),
+    // becomes the own copy of the name of its class information, and its
+    // vtable and its initial image of theirs.
+    public void defineOwnCopy(ClassDeclaration declaration, TypeInfo_Class info) {
+        void define(Name* name, const(void)* start) {
+            plans.names.defineOwn(name, start, _data.addressOfData(start)
+                .target.datum);
+        }
+
+        define(classInfoName(declaration).name, cast(const(void)*) info);
+        // An interface has neither.
+        if (info.m_init.ptr !is null)
+            define(nativeClassSymbol(_nativeImages, declaration, "6__initZ"),
+                info.m_init.ptr);
+        if (info.vtbl.ptr !is null)
+            define(nativeClassSymbol(_nativeVtables, declaration, "6__vtblZ"),
+                info.vtbl.ptr);
+    }
+
+    // As `linkedClassInfo`, but it makes no own copy: for the code that
+    // makes it (`classinfo.classRuntimeInfo`).
+    public Linked!TypeInfo_Class classInfoName(
         ClassDeclaration declaration,
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
@@ -513,15 +542,10 @@ public struct RuntimeTypes {
     private Linked!TypeInfo_Class findLinkedClassInfo(
         ClassDeclaration declaration,
     ) {
-        const definedElsewhere = _isDefinedElsewhere(declaration);
-        if (!definedElsewhere && isRootOwned(declaration))
+        if (!_isDefinedElsewhere(declaration) && isRootOwned(declaration))
             return Linked!TypeInfo_Class.init;
-
-        auto name = plans.names.named(
-            classInfoSymbol(declaration), 0, declaration.toString);
-        if (!definedElsewhere && plans.addressIfPresent(name) is null)
-            return Linked!TypeInfo_Class.init;
-        return Linked!TypeInfo_Class.named(name);
+        return Linked!TypeInfo_Class.named(plans.names.named(
+            classInfoSymbol(declaration), 0, declaration.toString));
     }
 
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {

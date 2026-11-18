@@ -17,6 +17,8 @@ import snakebite.native.value: TypeFacts;
 public struct Hooks {
     public Linked!(void*) delegate(FuncDeclaration method, ptrdiff_t adjustment)
         methodAddress;
+    // The name of the class information of a class, or null when only the
+    // program defines it (`RuntimeTypes.classInfoName`).
     public Linked!TypeInfo_Class delegate(ClassDeclaration declaration)
         linkedClassInfo;
     // Whether another object holds the class information, the vtable and
@@ -32,6 +34,13 @@ public struct Hooks {
     // The type data are data of the program: this reserves them and writes
     // each address in them.
     public NativeData* data;
+    // Whether the program and another object can both define the class
+    // information of a class (`RuntimeTypes.hasOwnCopy`).
+    public bool delegate(ClassDeclaration declaration) hasOwnCopy;
+    // Makes the class information that the program built for such a class
+    // the own copy of its name (`RuntimeTypes.defineOwnCopy`).
+    public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
+        defineOwnCopy;
 }
 
 // How many pointers `typeid(object)` follows from the object reference
@@ -144,8 +153,11 @@ public Linked!TypeInfo_Class classRuntimeInfo(
 
     if (auto cached = declaration in cache)
         return *cached;
+    // A class that the program and another object can both define has the
+    // name of its class information, and this builds the program's own copy.
     auto linked = hooks.linkedClassInfo(declaration);
-    if (!linked.isNull) {
+    const ownCopy = !linked.isNull && hooks.hasOwnCopy(declaration);
+    if (!linked.isNull && !ownCopy) {
         cache[declaration] = linked;
         return linked;
     }
@@ -201,17 +213,6 @@ public Linked!TypeInfo_Class classRuntimeInfo(
         data.storeSlice(&info.m_init, data.reserve(
             TypeFacts(declaration.structsize, alignment), declaration));
     }
-    // Register before resolving methods: their bodies can refer to this
-    // same class while its metadata is being built.
-    auto result = Linked!TypeInfo_Class.held(info);
-    cache[declaration] = result;
-    if (hooks.registerGenerated !is null)
-        hooks.registerGenerated(declaration, info);
-
-    if (!isInterface && declaration.baseClass !is null)
-        data.storeReference(cast(void*) &info.base,
-            classRuntimeInfo(declaration.baseClass, cache, hooks));
-
     // An interface's methods live in the `Interface` tables of the classes
     // that implement it, not in its own `TypeInfo_Class`. The vtable has the
     // slots of the bases, so each slot comes from the declaration.
@@ -220,6 +221,20 @@ public Linked!TypeInfo_Class classRuntimeInfo(
         data.storeSlice(&info.vtbl, data.reserve(
             TypeFacts(length * (void*).sizeof, (void*).alignof),
             declaration), (void*).sizeof);
+
+    // Register before resolving methods: their bodies can refer to this
+    // same class while its metadata is being built. A name is used only
+    // once it has its own copy.
+    if (ownCopy)
+        hooks.defineOwnCopy(declaration, info);
+    auto result = ownCopy ? linked : Linked!TypeInfo_Class.held(info);
+    cache[declaration] = result;
+    if (hooks.registerGenerated !is null)
+        hooks.registerGenerated(declaration, info);
+
+    if (!isInterface && declaration.baseClass !is null)
+        data.storeReference(cast(void*) &info.base,
+            classRuntimeInfo(declaration.baseClass, cache, hooks));
     // An `extern(C++)` class has no classinfo slot: its first virtual
     // method is at index 0.
     const firstMethod = declaration.vtblOffset;
@@ -277,7 +292,7 @@ public Linked!TypeInfo_Class classRuntimeInfo(
     // An opaque class has no size, so its initialiser has no slots.
     if (!isInterface && info.m_init.length != 0)
         writeImage(declaration, cast(ubyte*) info.m_init.ptr,
-            Linked!(const(void)*).held(info.vtbl.ptr), cache, hooks);
+            Linked!(const(void)*).held(info.vtbl.ptr), info, cache, hooks);
     return result;
 }
 
@@ -298,11 +313,13 @@ public void initialImage(
 
     memset(place, 0, declaration.structsize);
     writeImage(declaration, cast(ubyte*) place,
-        hooks.nativeVtable(declaration), cache, hooks);
+        hooks.nativeVtable(declaration), null, cache, hooks);
 }
 
 // The words of the image of `declaration` at `place`, with the vtable
-// `vtable`. When `declaration` and its base are classes of the program, the
+// `vtable`: the image in the class information `own` that the program built
+// for `declaration`, or, with a null `own`, an image of a native class. When
+// `declaration` and its base are classes of the program, the
 // part of the bases is a copy of the image of the base. Otherwise each field
 // comes from the declarations, and an interface slot of a native class names
 // the table of that class (`Target.Kind.interfaceTable`): nothing reads the
@@ -311,13 +328,13 @@ public void initialImage(
 // which a class below that base replaces a method.
 private void writeImage(
     ClassDeclaration declaration, ubyte* place, Linked!(const(void)*) vtable,
-    ref ClassRuntimeCache cache, Hooks hooks,
+    TypeInfo_Class ownInfo, ref ClassRuntimeCache cache, Hooks hooks,
 ) {
     import snakebite.native.address: Target;
 
     auto data = hooks.data;
     auto base = declaration.baseClass;
-    const isNative = hooks.isNativeClass(declaration);
+    const isNative = ownInfo is null;
     const copiesBase = base !is null && !isNative
         && !hooks.isNativeClass(base);
     if (copiesBase)
@@ -329,8 +346,11 @@ private void writeImage(
         const own = parent is declaration && !isNative;
         if (parent is declaration || !copiesBase)
             data.fillFields(parent, place);
-        auto parentInfo = classRuntimeInfo(parent, cache, hooks);
-        const parentIsNative = hooks.isNativeClass(parent);
+        auto parentInfo = parent is declaration && !isNative
+            ? Linked!TypeInfo_Class.held(ownInfo)
+            : classRuntimeInfo(parent, cache, hooks);
+        const parentIsNative = parent is declaration
+            ? isNative : hooks.isNativeClass(parent);
         foreach (i; 0 .. parent.vtblInterfaces.length) {
             auto interface_ = (*parent.vtblInterfaces)[i];
             auto slot = place + interface_.offset;

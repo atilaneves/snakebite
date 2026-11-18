@@ -340,11 +340,26 @@ public void routingBump() {
     routingThreadCount += 2;
 }
 
+// The declarations of this module that guest code sees. One text for each
+// test of this module: two texts for one module name would conflict.
 private enum dependencyDataModule = q{
     module ut.backends.call.routing;
     __gshared int routingSharedCount;
     int routingThreadCount;
     void routingBump();
+
+    struct RoutingCounter(T) {
+        static int perThread;
+        __gshared int everyThread;
+    }
+    struct RoutingPoint { int x; }
+    enum RoutingColour { red, green }
+    class RoutingBox(T) { T value; }
+    int routingCountNative();
+    TypeInfo routingPointInfo();
+    TypeInfo routingColourInfo();
+    TypeInfo_Class routingBoxInfo();
+    bool routingIsBox(Object object);
 };
 
 private enum dependencyDataCode = q{
@@ -431,22 +446,6 @@ public bool routingIsBox(Object object) {
     return cast(RoutingBox!int) object !is null;
 }
 
-private enum sharedDefinitionModule = q{
-    module ut.backends.call.routing;
-    struct RoutingCounter(T) {
-        static int perThread;
-        __gshared int everyThread;
-    }
-    struct RoutingPoint { int x; }
-    enum RoutingColour { red, green }
-    class RoutingBox(T) { T value; }
-    int routingCountNative();
-    TypeInfo routingPointInfo();
-    TypeInfo routingColourInfo();
-    TypeInfo_Class routingBoxInfo();
-    bool routingIsBox(Object object);
-};
-
 private enum sharedDefinitionCode = q{
     // Each side adds one to each variable: with one copy of each, the native
     // side sees the guest side's addition.
@@ -505,10 +504,10 @@ private Result sharedDefinitionResult(backend, string name, Result)() {
         result = mixin(name ~ "()");
     } else {
         auto modules = parseSnippets([
-            "module routing_shared_definition_root;\n"
+            "module routing_shared_definition_" ~ name ~ ";\n"
                 ~ "import ut.backends.call.routing;\n"
                 ~ sharedDefinitionCode,
-            sharedDefinitionModule,
+            dependencyDataModule,
         ]);
         auto backend_ = ownedBackend!backend(Program([modules[0]]));
         backend_.call(findFunction(modules[0], name), &result, []);

@@ -30,10 +30,13 @@ public struct TlsDescriptor {
     public const(void)* templateBytes;
     public size_t size;
     // Set when the variable's storage is native (a dependency image's
-    // own thread-local, or an `extern` one): the linker name that
-    // `CallPlanStore.threadLocalAddressOf` answers, on each thread, with that
-    // thread's copy in the image's TLS block. No copy is made from a template then,
-    // so native code and guest code on one thread reach the same bytes.
+    // own thread-local, or an `extern` one), or can be (a variable of a
+    // template instance, which has `templateBytes` too): the linker name
+    // that `CallPlanStore.threadLocalAddressIfPresent` answers, on each
+    // thread, with that thread's copy in the image's TLS block. No copy is
+    // made from a template when the process has the symbol
+    // (`CallPlanStore.chosenCopy`), so native code and guest code on one
+    // thread reach the same bytes.
     public string nativeName;
     // The declaration of the variable, for the failure of a symbol that no
     // object defines.
@@ -101,13 +104,24 @@ public struct TlsSlots {
             return found.bytes[0 .. found.size];
 
         Entry entry = Entry(key);
+        void* native;
         if (descriptor.nativeName.length) {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
-            // would be that thread's copy.
-            entry.bytes = _store.threadLocalAddressOf(
-                descriptor.nativeName, descriptor.declaredBy);
-        } else {
+            // would be that thread's copy. A variable that the program
+            // can define too has a template: its own copy.
+            native = CallPlanStore.chosenCopy(
+                _store.threadLocalAddressIfPresent(descriptor.nativeName),
+                descriptor.templateBytes);
+            if (native is null)
+                throw CallPlanStore.missing(
+                    descriptor.nativeName, descriptor.declaredBy);
+            if (native is descriptor.templateBytes)
+                native = null;
+        }
+        if (native !is null)
+            entry.bytes = native;
+        else {
             import core.memory: GC;
             import core.stdc.stdlib: calloc;
             import core.stdc.string: memcpy;
