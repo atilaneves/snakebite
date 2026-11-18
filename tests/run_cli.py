@@ -2228,6 +2228,53 @@ def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_progr
         output(from_ram))
 
 
+# A compile needs no address of a symbol of another object: a program that
+# reads a variable that no object defines saves, and fails where the address
+# is found, when its code is made ready to run, as the compiled program does.
+def test_saved_program_that_reads_an_absent_variable_fails_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        extern(C) extern __gshared int snakebite_test_no_such_variable;
+        int main() { return snakebite_test_no_such_variable; }
+        """)
+    common = ("--backend=bytecode", "--no-optimise-image")
+    app = str(tmp_path / "app")
+    from_ram = run_sb(*common, app, cwd=tmp_path)
+    saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
+                   cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+    loaded = run_sb(f"--load={tmp_path / 'program.sbc'}", cwd=tmp_path)
+    for result in (from_ram, loaded):
+        assert result.returncode != 0, output(result)
+        assert "`snakebite_test_no_such_variable`" in result.stderr, (
+            output(result))
+
+
+# The type information of `noreturn`, which druntime does not define, and an
+# object of a class of druntime: a save names each symbol from its
+# declaration.
+def test_saved_program_with_noreturn_type_information_and_a_druntime_class_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        enum Never : noreturn* { none = null }
+        int main() {
+            auto never = (cast(TypeInfo_Pointer) typeid(Never).base).next;
+            const name = never.toString;
+            printf("%.*s %d\\n", cast(int) name.length, name.ptr,
+                cast(int) never.tsize);
+            scope exception = new Exception("scoped");
+            printf("%.*s\\n", cast(int) exception.msg.length,
+                exception.msg.ptr);
+            return 3;
+        }
+        """})
+
+
 def test_call_of_an_absent_function_names_its_declaration_on_each_backend(
     tmp_path: Path,
 ) -> None:
