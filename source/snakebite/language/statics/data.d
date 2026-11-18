@@ -628,11 +628,11 @@ public struct NativeData {
                 name = *found;
                 return;
             }
-            name = named(nativeSymbolName(variable), variable.toString);
             // An initializer that refers to its own variable reaches this
             // again, and finds the storage that `buildInitialBytes` holds.
             const own = buildInitialBytes(variable, typeFacts(variable.type));
-            planStore.names.defineOwn(name, own.ptr, own.where);
+            name = planStore.names.namedWithOwn(nativeSymbolName(variable), 0,
+                variable.toString, own.ptr, own.where);
             if (!(variable in _storageNames))
                 _storageNames.insert(variable, name);
         });

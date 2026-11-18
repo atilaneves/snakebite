@@ -227,12 +227,42 @@ public struct Names {
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
-        if (auto found = Key(cast(string) symbol, distance) in _plain)
+        return make(symbol, distance, declaredBy, null, DatumRef.init);
+    }
+
+    // As `named`, with `start`, the datum `datum` of the static data of the
+    // program, as the program's own copy of the symbol (`defineOwn`). A new
+    // name has its copy before any thread can find it.
+    public Name* namedWithOwn(
+        Symbol: const(char)[], Declaration: const(char)[] = string,
+    )(
+        Symbol symbol, in size_t distance, Declaration declaredBy,
+        const(void)* start, in DatumRef datum,
+    ) {
+        refuseAfterFile;
+        auto lock = this.lock;
+        lock.lock;
+        scope(exit) lock.unlock;
+        return make(symbol, distance, declaredBy, start, datum);
+    }
+
+    // The name of `symbol` and `distance`, found or made, with the own copy
+    // `start` unless that is null. Under `_lock`.
+    private Name* make(Symbol, Declaration)(
+        Symbol symbol, in size_t distance, Declaration declaredBy,
+        const(void)* start, in DatumRef datum,
+    ) {
+        if (auto found = Key(cast(string) symbol, distance) in _plain) {
+            if (start !is null)
+                defineOwnLocked(*found, start, datum);
             return *found;
+        }
         auto name = reserve;
         name._symbol = owned(symbol);
         name._distance = distance;
         name._declaredBy = owned(declaredBy);
+        if (start !is null)
+            defineOwnLocked(name, start, datum);
         return *_plain.insert(Key(name._symbol, distance), name);
     }
 
@@ -309,31 +339,62 @@ public struct Names {
             return name;
         if (name.adjusted !is null)
             internalFailure("a word points into an entry of host code");
-        auto result = named(name.symbol, name.distance + distance,
-            name.declaredBy);
-        if (name.own !is null)
-            defineOwn(result, name.own, name.ownDatum);
-        return result;
+        if (name.own is null)
+            return named(name.symbol, name.distance + distance,
+                name.declaredBy);
+        return namedWithOwn(name.symbol, name.distance + distance,
+            name.declaredBy, name.own, name.ownDatum);
     }
 
     // `start`, the datum `datum` of the static data of the program, becomes
     // the program's own copy of the symbol of `name`, unless it has one: the
     // copy that the program uses when the process does not have the symbol
-    // (`CallPlanStore.chosenCopy`). A compile defines it before the name is
-    // used, and a load before it makes the program ready to run.
+    // (`CallPlanStore.chosenCopy`). For a load, which gives each name its
+    // copy before it makes the program ready to run; a compile names a
+    // symbol with its copy in one step (`namedWithOwn`).
     public void defineOwn(Name* name, const(void)* start, in DatumRef datum) {
+        auto lock = this.lock;
+        lock.lock;
+        scope(exit) lock.unlock;
+        defineOwnLocked(name, start, datum);
+    }
+
+    // Under `_lock`. A copy that comes after the copy that the program uses
+    // was chosen (`keep`) would not be used: that is a failure of snakebite.
+    private void defineOwnLocked(
+        Name* name, const(void)* start, in DatumRef datum,
+    ) {
+        import core.atomic: atomicLoad, MemoryOrder;
         import snakebite.failure.report: internalFailure;
+
+        if (name._adjusted !is null)
+            internalFailure("an entry of host code has an own copy");
+        // As a linker keeps the first of two definitions of one symbol.
+        if (name._own !is null)
+            return;
+        if (atomicLoad!(MemoryOrder.raw)(name.address) !is null)
+            internalFailure("an own copy of `" ~ name._symbol
+                ~ "` comes after the copy that the program uses was chosen");
+        name._own = start;
+        name._ownDatum = datum;
+    }
+
+    // The address that `name` keeps: the one it has, or the one that
+    // `choose` gives from the own copy of `name`, or null. The own copy is
+    // read and the answer kept in one step, under the lock of `defineOwn`.
+    package void* keep(
+        Name* name, scope void* delegate(const(void)* own) choose,
+    ) {
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
-        // As a linker keeps the first of two definitions of one symbol.
-        if (name._own !is null)
-            return;
-        if (name._adjusted !is null)
-            internalFailure("an entry of host code has an own copy");
-        name._own = start;
-        name._ownDatum = datum;
+        if (auto kept = cast(void*) atomicLoad!(MemoryOrder.raw)(name.address))
+            return kept;
+        auto made = choose(name._own);
+        atomicStore!(MemoryOrder.rel)(name.address, cast(shared(void*)) made);
+        return made;
     }
 
     // Each name that has an own copy (`defineOwn`).

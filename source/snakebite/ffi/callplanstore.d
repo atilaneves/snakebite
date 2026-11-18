@@ -48,17 +48,20 @@ public struct CallPlanStore {
 
         auto found = cast(void*) atomicLoad!(MemoryOrder.acq)(name.address);
         if (found is null) {
-            if (auto adjusted = name.adjusted)
+            if (auto adjusted = name.adjusted) {
                 found = cast(void*) callbacks.adjustedEntryOf(
                     addressOf(adjusted.code), adjusted.signature,
                     adjusted.adjustment);
-            else if (auto copy = chosenCopy(
-                    resolver.resolve(name.symbol), name.own))
-                found = copy + name.distance;
-            else
-                found = Name.absent;
-            atomicStore!(MemoryOrder.rel)(
-                name.address, cast(shared(void*)) found);
+                atomicStore!(MemoryOrder.rel)(
+                    name.address, cast(shared(void*)) found);
+            }
+            else {
+                auto processCopy = resolver.resolve(name.symbol);
+                found = names.keep(name, (own) {
+                    auto copy = chosenCopy(processCopy, own);
+                    return copy is null ? Name.absent : copy + name.distance;
+                });
+            }
         }
         return found is Name.absent ? null : found;
     }

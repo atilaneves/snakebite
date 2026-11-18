@@ -150,7 +150,7 @@ public struct StaticWorld {
             _backend.classBuilt,
             &data,
             &types.hasOwnCopy,
-            &types.defineOwnCopy,
+            &types.ownClassInfo,
         );
     }
 

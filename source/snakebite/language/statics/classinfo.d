@@ -17,10 +17,10 @@ import snakebite.native.value: TypeFacts;
 public struct Hooks {
     public Linked!(void*) delegate(FuncDeclaration method, ptrdiff_t adjustment)
         methodAddress;
-    // The name of the class information of a class, or null when only the
-    // program defines it (`RuntimeTypes.classInfoName`).
+    // The name of the class information of a class that only another object
+    // defines, or null (`RuntimeTypes.classInfoName`).
     public Linked!TypeInfo_Class delegate(ClassDeclaration declaration)
-        linkedClassInfo;
+        classInfoName;
     // Whether another object holds the class information, the vtable and
     // the initial image of a class (`RuntimeTypes.isNativeClass`).
     public bool delegate(ClassDeclaration declaration) isNativeClass;
@@ -37,10 +37,10 @@ public struct Hooks {
     // Whether the program and another object can both define the class
     // information of a class (`RuntimeTypes.hasOwnCopy`).
     public bool delegate(ClassDeclaration declaration) hasOwnCopy;
-    // Makes the class information that the program built for such a class
-    // the own copy of its name (`RuntimeTypes.defineOwnCopy`).
-    public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
-        defineOwnCopy;
+    // The name of the class information of such a class, with the one that
+    // the program built as its own copy (`RuntimeTypes.ownClassInfo`).
+    public Linked!TypeInfo_Class delegate(
+        ClassDeclaration declaration, TypeInfo_Class info) ownClassInfo;
 }
 
 // How many pointers `typeid(object)` follows from the object reference
@@ -155,11 +155,13 @@ public Linked!TypeInfo_Class classRuntimeInfo(
         return *cached;
     // A class that the program and another object can both define has the
     // name of its class information, and this builds the program's own copy.
-    auto linked = hooks.linkedClassInfo(declaration);
-    const ownCopy = !linked.isNull && hooks.hasOwnCopy(declaration);
-    if (!linked.isNull && !ownCopy) {
-        cache[declaration] = linked;
-        return linked;
+    const ownCopy = hooks.hasOwnCopy(declaration);
+    if (!ownCopy) {
+        auto linked = hooks.classInfoName(declaration);
+        if (!linked.isNull) {
+            cache[declaration] = linked;
+            return linked;
+        }
     }
 
     auto data = hooks.data;
@@ -223,11 +225,10 @@ public Linked!TypeInfo_Class classRuntimeInfo(
             declaration), (void*).sizeof);
 
     // Register before resolving methods: their bodies can refer to this
-    // same class while its metadata is being built. A name is used only
-    // once it has its own copy.
-    if (ownCopy)
-        hooks.defineOwnCopy(declaration, info);
-    auto result = ownCopy ? linked : Linked!TypeInfo_Class.held(info);
+    // same class while its metadata is being built. The name is made with
+    // its own copy.
+    auto result = ownCopy ? hooks.ownClassInfo(declaration, info)
+        : Linked!TypeInfo_Class.held(info);
     cache[declaration] = result;
     if (hooks.registerGenerated !is null)
         hooks.registerGenerated(declaration, info);

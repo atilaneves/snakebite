@@ -36,9 +36,14 @@ public struct RuntimeTypes {
     // (ADR-0006); an entry is built once, under the compiler lock.
     private SharedTable!(Type, Linked!TypeInfo) _types;
     private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
-    // The answer of `linkedClassInfo` for each class, null included.
-    private SharedTable!(ClassDeclaration, Linked!TypeInfo_Class)
-        _linkedClasses;
+    // The name of the class information that only another object defines,
+    // or null, and whether the program and another object can both define
+    // it (`hasOwnCopy`): for each class, decided once.
+    private static struct LinkedClass {
+        Linked!TypeInfo_Class name;
+        bool ownCopy;
+    }
+    private SharedTable!(ClassDeclaration, LinkedClass) _linkedClasses;
     // The `__init` and the `__vtbl` symbol of each native class that asked.
     private SharedTable!(ClassDeclaration, Name*) _nativeImages;
     private SharedTable!(ClassDeclaration, Name*) _nativeVtables;
@@ -276,10 +281,10 @@ public struct RuntimeTypes {
         // dmd emits this type information in each object that needs it, so
         // the program and another object can both define it: its name, with
         // the program's own copy.
-        auto name = plans.names.named(type.vtinfo.ident.toString);
-        const datum = _data.addressOfData(cast(const(void)*) own.held).target;
-        plans.names.defineOwn(name, cast(const(void)*) own.held, datum.datum);
-        return Linked!TypeInfo.named(name);
+        const start = cast(const(void)*) own.held;
+        return Linked!TypeInfo.named(plans.names.namedWithOwn(
+            type.vtinfo.ident.toString, 0, string.init, start,
+            _data.addressOfData(start).target.datum));
     }
 
     // The type information of `type` that the program builds, or for a class
@@ -474,65 +479,80 @@ public struct RuntimeTypes {
     public Linked!TypeInfo_Class linkedClassInfo(
         ClassDeclaration declaration,
     ) {
-        auto name = classInfoName(declaration);
-        if (!name.isNull && hasOwnCopy(declaration))
-            _classInfo(declaration);
-        return name;
+        auto linked = linkedClass(declaration);
+        return linked.ownCopy ? _classInfo(declaration) : linked.name;
     }
 
     // Whether the program and another object can both define the class
     // information of `declaration`.
     public bool hasOwnCopy(ClassDeclaration declaration) {
-        return !_isDefinedElsewhere(declaration) && !isRootOwned(declaration);
+        return linkedClass(declaration).ownCopy;
     }
 
-    // `info`, which the program built for `declaration` (`hasOwnCopy`),
-    // becomes the own copy of the name of its class information, and its
-    // vtable and its initial image of theirs.
-    public void defineOwnCopy(ClassDeclaration declaration, TypeInfo_Class info) {
-        void define(Name* name, const(void)* start) {
-            plans.names.defineOwn(name, start, _data.addressOfData(start)
-                .target.datum);
-        }
-
-        define(classInfoName(declaration).name, cast(const(void)*) info);
-        // An interface has neither.
-        if (info.m_init.ptr !is null)
-            define(nativeClassSymbol(_nativeImages, declaration, "6__initZ"),
-                info.m_init.ptr);
-        if (info.vtbl.ptr !is null)
-            define(nativeClassSymbol(_nativeVtables, declaration, "6__vtblZ"),
-                info.vtbl.ptr);
-    }
-
-    // As `linkedClassInfo`, but it makes no own copy: for the code that
-    // makes it (`classinfo.classRuntimeInfo`).
+    // The name of the class information of `declaration` when only another
+    // object defines it, else null: for the code that makes the program's
+    // own (`classinfo.classRuntimeInfo`).
     public Linked!TypeInfo_Class classInfoName(
         ClassDeclaration declaration,
     ) {
+        return linkedClass(declaration).name;
+    }
+
+    // The name of the class information of `declaration` (`hasOwnCopy`),
+    // with `info`, which the program built, as its own copy, and the names
+    // of its vtable and its initial image with theirs. Each name has its
+    // copy from the step that makes it (`Names.namedWithOwn`).
+    public Linked!TypeInfo_Class ownClassInfo(
+        ClassDeclaration declaration, TypeInfo_Class info,
+    ) {
+        Name* named(string symbol, const(void)* start) {
+            return plans.names.namedWithOwn(symbol, 0, declaration.toString,
+                start, _data.addressOfData(start).target.datum);
+        }
+
+        void nameData(
+            ref SharedTable!(ClassDeclaration, Name*) table,
+            in string suffix, const(void)* start,
+        ) {
+            auto name = named(classSymbol(declaration, suffix), start);
+            if (!(declaration in table))
+                table.insert(declaration, name);
+        }
+
+        // An interface has neither.
+        if (info.m_init.ptr !is null)
+            nameData(_nativeImages, "6__initZ", info.m_init.ptr);
+        if (info.vtbl.ptr !is null)
+            nameData(_nativeVtables, "6__vtblZ", info.vtbl.ptr);
+        return Linked!TypeInfo_Class.named(named(
+            classInfoSymbol(declaration), cast(const(void)*) info));
+    }
+
+    // What `linkedClassInfo` needs of `declaration`, decided once.
+    private LinkedClass linkedClass(ClassDeclaration declaration) {
         import snakebite.frontend.compiler: withCompilerLock;
 
         if (auto found = declaration in _linkedClasses)
             return *found;
 
-        Linked!TypeInfo_Class info;
+        LinkedClass linked;
         withCompilerLock({
             if (auto found = declaration in _linkedClasses)
-                info = *found;
+                linked = *found;
             else
-                info = *_linkedClasses.insert(
-                    declaration, findLinkedClassInfo(declaration));
+                linked = *_linkedClasses.insert(
+                    declaration, findLinkedClass(declaration));
         });
-        return info;
+        return linked;
     }
 
-    private Linked!TypeInfo_Class findLinkedClassInfo(
-        ClassDeclaration declaration,
-    ) {
-        if (!_isDefinedElsewhere(declaration) && isRootOwned(declaration))
-            return Linked!TypeInfo_Class.init;
-        return Linked!TypeInfo_Class.named(plans.names.named(
-            classInfoSymbol(declaration), 0, declaration.toString));
+    private LinkedClass findLinkedClass(ClassDeclaration declaration) {
+        if (_isDefinedElsewhere(declaration))
+            return LinkedClass(Linked!TypeInfo_Class.named(plans.names.named(
+                classInfoSymbol(declaration), 0, declaration.toString)));
+        if (isRootOwned(declaration))
+            return LinkedClass.init;
+        return LinkedClass(Linked!TypeInfo_Class.init, true);
     }
 
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {
