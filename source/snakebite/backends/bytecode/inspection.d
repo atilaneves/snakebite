@@ -18,6 +18,17 @@ public bool isJitCompiled(const(Function)* function_) {
     return jitCompiled(function_);
 }
 
+// Each function of `program` with its mangled name. A program that was saved
+// and loaded has the names of its functions.
+public void eachNamedFunction(
+    ref imported!"snakebite.backends.bytecode.program".Program program,
+    scope void delegate(const(char)[], const(Function)*) visit,
+) {
+    program.eachFunction((function_) {
+        visit(function_.mangledName, function_);
+    });
+}
+
 // Whether the role table says that the handler's `field` holds an address
 // (`Role.address`) or an instruction (`Role.instruction`); "none" when the
 // table does not know the handler.
