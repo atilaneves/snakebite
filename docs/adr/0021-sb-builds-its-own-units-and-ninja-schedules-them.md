@@ -75,10 +75,17 @@ that gives `sb` a rule for it, does not follow the model.
     own: one for the libraries of the dub dependencies and one for the
     `.so` file of the image. It is not a part of a compile step, and a
     change of a dependency is rare. The compile child loads no dependency
-    image. What the image needs from the root code is in the output of the
-    compile, and the statement that builds the `.so` takes it from there.
-    The owner, on the frontend result that the `.so` needs: "this could be
-    in the .sbc".
+    image. What the image needs from the root code is a second output of
+    the compile statement, a file of its own, and the statement that builds
+    the `.so` takes it from there.
+14. The values of a compile come from the dub recipe. `--build` is for a
+    dub project and takes no option that changes the compile. So nothing
+    changes a compile without a change of the recipe, of the freeze file or
+    of a source file. The owner: "How do the options change without the dub
+    recipe or freeze file changing?"
+15. The code of the build is in a package of its own in the codebase. The
+    owner: "everything related to this had better be in its own
+    module/package in the codebase".
 
 ## Measurement
 
