@@ -189,6 +189,12 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
+}
+
+static foreach (backend; Matrix!(
+    Omit!(LoadedBytecode, Because.unconfirmed,
+        "after a load, `orbit` gets no JIT code; from RAM it does"),
+)) {
     @("jit.floatingPointLoopCanEnterAtTheCounterUpdate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -234,6 +240,9 @@ static foreach (backend; Matrix!()) {
             }
         }, ["orbit"]);
     }
+}
+
+static foreach (backend; Matrix!()) {
 
     @("jit.hotForLoopChecksItsFirstIterationAndContinue." ~ backend.stringof)
     @Tags(backend.stringof)

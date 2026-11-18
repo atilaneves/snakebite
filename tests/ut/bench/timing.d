@@ -42,6 +42,8 @@ static foreach (BackendType; Matrix!(
         "and the native oracle is none"),
     Omit!(Ctfe, Because.unconfirmed, "the CTFE backend takes no host " ~
         "arguments"),
+    Omit!(LoadedBytecode, Because.inexpressible, "the benchmark makes a " ~
+        "backend by its name, and no name loads a saved program"),
 )) {
     @("benchmark.passesProgramArguments." ~ BackendType.stringof)
     unittest {

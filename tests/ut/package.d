@@ -3,6 +3,7 @@ module ut;
 public import unit_threaded;
 public import snakebite;
 public import snakebite.backends.bytecode.vm: JitSetting;
+public import ut.loaded: LoadedBytecode, LoadedOwner;
 
 import core.runtime: Runtime;
 import snakebite.backends.bytecode: Bytecode;
@@ -46,10 +47,12 @@ public mixin template planCache() {
 }
 
 // A handle on a new backend of type `B` for `program`. A `Bytecode` backend
-// gets the JIT setting of this run of `bin/ut`.
-public Owned!B ownedBackend(B)(const Program program) {
+// and a `LoadedBytecode` get the JIT setting of this run of `bin/ut`.
+public auto ownedBackend(B)(const Program program) {
     static if (is(B == Bytecode))
         return Owned!B(new Bytecode(program, testJit));
+    else static if (is(B == LoadedBytecode))
+        return LoadedOwner(program, testJit);
     else
         return Owned!B(program);
 }

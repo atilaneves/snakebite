@@ -28,8 +28,9 @@ import std.traits: isInstanceOf;
 public struct Native {}
 
 // Every implementation a guest program can run on in a test: the native
-// oracle plus every real backend.
-public alias TestBackends = AliasSeq!(Native, Backends);
+// oracle, every real backend, and the `Bytecode` backend after a save and a
+// load.
+public alias TestBackends = AliasSeq!(Native, Backends, LoadedBytecode);
 
 // Why a backend is missing from a test's `Matrix!(...)`. Every `Omit!(...)`
 // names one of these so the omission is documentation, not silence.
@@ -66,6 +67,13 @@ public struct Omit(B, Because why, string note = "") {
     public enum note_ = note;
 }
 
+// A save of the program meets a word that holds the address of host code or
+// data that has no symbol name, and the save ends the process.
+public alias SaveMeetsUnnamedHostAddress = Omit!(LoadedBytecode,
+    Because.unconfirmed,
+    "the save meets an address of host code or data that has no symbol "
+    ~ "name and ends the process; from RAM the test passes");
+
 // The backends a test runs on: `TestBackends` minus every `Omit!(...)`.
 // Usable directly as `static foreach (backend; Matrix!(...))`.
 public template Matrix(specs...) {
@@ -80,7 +88,11 @@ public template Matrix(specs...) {
             alias Omitted = AliasSeq!(specs[0].Backend, Omitted!(specs[1 .. $]));
     }
 
-    private enum bool notOmitted(B) = staticIndexOf!(B, Omitted!specs) == -1;
+    // A test without the `Bytecode` arm has no `LoadedBytecode` arm: the
+    // second runs what the first compiles, after a save and a load.
+    private enum bool notOmitted(B) = staticIndexOf!(B, Omitted!specs) == -1
+        && (!is(B == LoadedBytecode)
+            || staticIndexOf!(Bytecode, Omitted!specs) == -1);
 
     public alias Matrix = Filter!(notOmitted, TestBackends);
 }
@@ -166,10 +178,12 @@ public void shouldBeStatusOfWithJitCode(
     in string file = __FILE__,
     in size_t line = __LINE__,
 ) {
-    static if (!is(BackendType == Bytecode))
+    static if (!is(BackendType == Bytecode)
+            && !is(BackendType == LoadedBytecode))
         shouldBeStatusOf!(BackendType, code, module_)(expected, file, line);
     else {
         import snakebite.backends.bytecode.inspection: isJitCompiled;
+        import snakebite.backends.bytecode.vm: Function;
 
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
@@ -182,12 +196,17 @@ public void shouldBeStatusOfWithJitCode(
         foreach (name; jitted) {
             bool found;
             bool compiled;
-            backend.eachCompiled((declaration, function_) {
-                if (declaration.ident.toString == name) {
-                    found = true;
-                    compiled = isJitCompiled(function_);
-                }
-            });
+            void visit(const(Function)* function_) {
+                found = true;
+                compiled = isJitCompiled(function_);
+            }
+            static if (is(BackendType == Bytecode))
+                backend.eachCompiled((declaration, function_) {
+                    if (declaration.ident.toString == name)
+                        visit(function_);
+                });
+            else
+                backend.eachLoaded(name, &visit);
             if (!found)
                 throw new UnitTestException(
                     text("`", name, "` was not compiled"), file, line);
