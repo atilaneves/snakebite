@@ -10,6 +10,7 @@ import snakebite.backends.bytecode.vm: bindHostCode,
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
 import snakebite.image.dependency: DependencyImage;
+import snakebite.memory.program: loadedProgramGrows, ProgramMemory;
 import snakebite.native.signature: SignatureTable;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.stack.tls: TlsSlots;
@@ -40,6 +41,11 @@ public struct Program {
         store = StaticStore(() => heapNew!TlsSlots(planStore), recordsAddresses);
     }
 
+    // The memory of a program that a load made; a compile to RAM takes
+    // none.
+    @setBy("loadProgram")
+    public ProgramMemory memory;
+
     public bool recordsAddresses() const @safe pure nothrow @nogc {
         return store.recordsAddresses;
     }
@@ -67,11 +73,23 @@ public struct Program {
     // code point to a `Module`. One append per module.
     @plain package Module*[] _modules;
 
-    // An empty module for the compiler to fill.
+    // An empty module for the compiler to fill. A loaded program does not
+    // grow.
     public Module* newModule() @safe nothrow pure {
+        if (memory.isTaken)
+            loadedProgramGrows;
         auto module_ = new Module;
         _modules ~= module_;
         return module_;
+    }
+
+    // `count` empty modules, in `memory`, for a load to fill.
+    public void newModules(in size_t count) {
+        _modules = memory.data.array!(Module*)(count);
+        foreach (ref module_; _modules) {
+            module_ = memory.data.make!Module;
+            module_.blocks.takeFrom(&memory);
+        }
     }
 
     public size_t functionCount() const @safe pure nothrow @nogc {
@@ -141,16 +159,29 @@ public struct Module {
     @plain package Function*[] _functions;
 
     // An empty function for the compiler to fill. A compile that fails
-    // takes it out again with `discardFunction`.
+    // takes it out again with `discardFunction`. A loaded program does not
+    // grow: the GC does not scan `_functions` of a loaded module.
     public Function* newFunction() @safe nothrow pure {
+        if (blocks.isLoaded)
+            loadedProgramGrows;
         auto function_ = new Function;
         _functions ~= function_;
         return function_;
     }
 
+    // `count` empty functions, in `memory`, for a load to fill.
+    public void newFunctions(ref ProgramMemory memory, in size_t count) {
+        auto functions = memory.data.array!Function(count);
+        _functions = memory.data.array!(Function*)(count);
+        foreach (index, ref function_; _functions)
+            function_ = &functions[index];
+    }
+
     // Takes out the function that `newFunction` returned, for a compile that
     // failed. Functions that were made after it stay.
     public void discardFunction(Function* function_) @safe nothrow pure {
+        if (blocks.isLoaded)
+            loadedProgramGrows;
         foreach_reverse (i, kept; _functions)
             if (kept is function_) {
                 _functions = _functions[0 .. i] ~ _functions[i + 1 .. $];

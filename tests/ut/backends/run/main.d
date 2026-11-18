@@ -71,6 +71,34 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode, LoadedBytecode)) {
     }
 }
 
+// A file comes in parts, and a scalar of the file can start in one part and
+// end in the next. With parts of 7 bytes, each word of the file is split.
+@("ret.int.loadedInOddParts")
+@Tags("LoadedBytecode")
+unittest {
+    auto program = Program([parseSnippet(q{
+        struct Pair { long a; int b; }
+        immutable Pair[3] pairs = [Pair(1, 2), Pair(3, 4), Pair(5, 6)];
+        __gshared const(Pair)* first = &pairs[0];
+        string word = "seven";
+
+        int sum(in Pair[] all) {
+            int total;
+            foreach (pair; all)
+                total += cast(int) pair.a + pair.b;
+            return total;
+        }
+
+        int main() {
+            return sum(pairs[]) + first.b + cast(int) word.length + 14;
+        }
+    })], "snakebite");
+
+    auto instance = loadedInParts(program, 7);
+    run(instance.startData, instance.compilationStatistics, ["snakebite"])
+        .should == 42;
+}
+
 // One host-to-guest entry binds every argument class, not just a
 // `main`'s `string[]`: an integer, a pointer, a slice, a struct, a `ref`
 // and an `out` parameter all reach the frame in native layout, whether

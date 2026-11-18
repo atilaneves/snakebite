@@ -3135,6 +3135,73 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
     assert "another build" in loaded.stderr, output(loaded)
 
 
+# The offset of the first of the two memory sizes of a program file: after
+# the magic text and the three strings of the header.
+def memory_size_offset(contents: bytes) -> int:
+    offset = len(b"snakebite-program-v1\n")
+    for _ in range(3):
+        length = int.from_bytes(contents[offset:offset + 8], "little")
+        offset += 8 + length
+    return offset
+
+
+# The bytes of a program file whose program ends early: the file is cut in
+# half, or it gives a memory size that the rest of the file cannot fill.
+def cut_in_half(contents: bytes) -> bytes:
+    return contents[:len(contents) // 2]
+
+
+def too_much_memory(contents: bytes) -> bytes:
+    offset = memory_size_offset(contents)
+    return (contents[:offset] + (1 << 62).to_bytes(8, "little")
+            + contents[offset + 8:])
+
+
+# A file that ends before its program does is refused, and nothing runs.
+@pytest.mark.parametrize("damage", [cut_in_half, too_much_memory])
+def test_load_of_file_that_ends_early_fails_and_runs_nothing(
+    tmp_path: Path, damage: Callable[[bytes], bytes],
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        import core.stdc.stdio: puts;
+        int main() { puts("ran"); return 3; }
+        """)
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    target.write_bytes(damage(target.read_bytes()))
+
+    loaded = run_sb(f"--load={target}", cwd=tmp_path)
+    assert loaded.returncode == 1, output(loaded)
+    assert "ends before" in loaded.stderr, output(loaded)
+    assert "ran" not in loaded.stdout, output(loaded)
+
+
+# A program file that cannot seek, such as a pipe, has no size to check the
+# counts of the file against: the load refuses it, and nothing runs.
+def test_load_of_pipe_fails_and_runs_nothing(tmp_path: Path) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        import core.stdc.stdio: puts;
+        int main() { puts("ran"); return 3; }
+        """)
+    target = tmp_path / "program.sbc"
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   f"--save={target}", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+
+    loaded = subprocess.run(
+        [sb_path(), "--load=/dev/stdin"], input=target.read_bytes(),
+        capture_output=True, check=False, timeout=120, cwd=tmp_path)
+    stderr = loaded.stderr.decode()
+    assert loaded.returncode == 1, stderr
+    assert "has no size" in stderr, stderr
+    assert b"ran" not in loaded.stdout, stderr
+
+
 # A dub project with no dependency, whose recipe gives an import path, a
 # string import path and a version. The program prints on stdout and on
 # stderr what the three give. `declarations` are more declarations of the

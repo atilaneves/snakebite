@@ -25,6 +25,8 @@ import snakebite.backends.bytecode.vm:
     Role, Roles, rolesOf, wordAt;
 import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
+import snakebite.memory.program: bytesFor, MemoryNeed, pageAlignment,
+    ProgramMemory;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
 import snakebite.ffi.names: Name;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
@@ -67,16 +69,32 @@ public void saveProgram(
     Header written = Header(
         header.buildKey, header.imagePath, header.workingDirectory);
     transferHeader(file, written);
-    size_t signatureCount = body_._signatures.length;
-    file.scalar(signatureCount);
+    // The memory that the load of the rest takes, before the rest: the save
+    // counts it as it writes the rest (`Archive.need`).
+    const needAt = file._written.data.length;
+    MemoryNeed need;
+    file.scalar(need.data);
+    file.scalar(need.scanned);
+    // A load reads the header before it has the memory.
+    file._need = MemoryNeed.init;
+    file.length(body_._signatures.length);
     foreach (signature; body_._signatures) {
         // The walk takes a mutable record; a write changes nothing in it.
         auto record = Signature(signature.parameters.dup, signature.variadic);
-        file.transfer(record);
+        transferSignature(file, record);
     }
-    file.transfer(body_._symbols);
+    transferTemporary(file, body_._symbols);
     transferNames(file, body_);
     file.append(body_._written.data);
+    // Only the body takes scanned memory.
+    assert(file._need.scanned == MemoryNeed.init.scanned);
+    need.data = file._need.data + body_._need.data;
+    need.scanned = body_._need.scanned;
+    auto needBytes = file._written.data[needAt .. needAt + 2 * size_t.sizeof];
+    needBytes[0 .. size_t.sizeof] =
+        (cast(const(ubyte)*) &need.data)[0 .. size_t.sizeof];
+    needBytes[size_t.sizeof .. $] =
+        (cast(const(ubyte)*) &need.scanned)[0 .. size_t.sizeof];
 
     const partial = path ~ ".partial";
     scope(failure) {
@@ -90,40 +108,69 @@ public void saveProgram(
 }
 
 
-// The header of the file whose bytes are `contents`.
-public Header readHeader(const(ubyte)[] contents) {
-    auto file = Archive.reading(contents);
-    file.expectText(magic);
-    Header header;
-    transferHeader(file, header);
-    return header;
+// A program file that is read front to back, one time: first its header,
+// then its program. `next` gives the next part of the bytes of the file, and
+// an empty part at the end; `size` is the number of bytes of the file.
+public struct ProgramReader {
+    @disable this(this);
+
+    private Archive _file;
+
+    public this(
+        return scope const(ubyte)[] delegate() next, in size_t size,
+    ) {
+        _file = Archive.reading(next, size);
+    }
+
+    // The header of the file. Call it once, before `load`.
+    public Header header() {
+        _file.expectText!magic;
+        Header header;
+        transferHeader(_file, header);
+        return header;
+    }
+
+    // Reads the program of the file into `program`, a new program made with
+    // `image` (the dependency image that the file was made with, or null)
+    // and wired to `runner`. Once the load is done, they are as a compile to
+    // RAM leaves them: `Program.complete` binds every function.
+    public void load(
+        ref Program program, ref Runner runner, in DependencyImage* image,
+    ) {
+        loadProgram(_file, program, runner, image);
+    }
 }
 
 
-// Reads the program of the file whose bytes are `contents` into `program`, a
-// new program made with `image` (the dependency image that the file was made
-// with, or null) and wired to `runner`. Once the load is done, they are as a
-// compile to RAM leaves them: `Program.complete` binds every function.
-public void loadProgram(
-    const(ubyte)[] contents, ref Program program, ref Runner runner,
+private void loadProgram(
+    ref Archive file, ref Program program, ref Runner runner,
     in DependencyImage* image,
 ) {
-    auto file = Archive.reading(contents);
     file._image = image;
-    file.expectText(magic);
-    Header header;
-    transferHeader(file, header);
-    size_t signatureCount;
-    file.scalar(signatureCount);
-    foreach (index; 0 .. signatureCount) {
-        Signature signature;
-        file.transfer(signature);
-        file._signatures ~= program.signatures.intern(
-            signature.parameters, signature.variadic);
-    }
-    file.transfer(file._symbols);
     file._program = &program;
     file._runner = &runner;
+    file._memory = &program.memory;
+    MemoryNeed need;
+    file.scalar(need.data);
+    file.scalar(need.scanned);
+    // As `Archive.length` checks a count: a size that the rest of the file
+    // cannot fill is of a damaged file.
+    if (need.data / maxLoadBytesPerFileByte
+            + need.scanned / maxLoadBytesPerFileByte > file.unreadLength)
+        throw new SnakebiteException(
+            "the program file ends before the program does");
+    program.memory.reserve(need, &program);
+    program.store.takeFrom(&program.memory);
+    const signatureCount = file.length(0);
+    // The load needs the signatures of the file only while it runs.
+    file._signatures = new const(Signature)*[signatureCount];
+    foreach (ref interned; file._signatures) {
+        Signature signature;
+        transferSignature(file, signature);
+        interned = program.signatures.intern(
+            signature.parameters, signature.variadic);
+    }
+    transferTemporary(file, file._symbols);
     transferNames(file, file);
     transferBody(file, program, &runner);
 
@@ -133,6 +180,29 @@ public void loadProgram(
             throw new SnakebiteException(
                 "the program file is not valid: " ~ reason);
     });
+    program.memory.checkFull;
+}
+
+
+// The most memory that a load takes for one byte of the file: two pages, for
+// a datum that starts a block of static data at a page (`transferBlocks`).
+// Each record that a load makes for a byte of the file is smaller.
+private enum maxLoadBytesPerFileByte = 2 * pageAlignment;
+static assert(Function.sizeof + (Function*).sizeof < maxLoadBytesPerFileByte);
+static assert(Module.sizeof + (Module*).sizeof < maxLoadBytesPerFileByte);
+static assert(CallSite.sizeof < maxLoadBytesPerFileByte);
+static assert(__traits(classInstanceSize, StartFunction)
+    < maxLoadBytesPerFileByte);
+
+
+// A signature of the file. `SignatureTable.intern` copies the parameters, so
+// the load needs the record only while it runs.
+private void transferSignature(ref Archive archive, ref Signature signature) {
+    static assert(FieldNameTuple!Signature
+        == AliasSeq!("parameters", "variadic"));
+
+    transferTemporary(archive, signature.parameters);
+    archive.transfer(signature.variadic);
 }
 
 
@@ -151,20 +221,23 @@ private void transferNames(ref Archive archive, ref Archive source) {
     auto declarationEnds = source._declarationEnds;
     auto declarations = source._declarations;
     auto signatures = source._adjustedSignatures;
-    archive.transfer(adjusted);
-    archive.transfer(targets);
-    archive.transfer(distances);
-    archive.transfer(declarationEnds);
+    // The load needs the tables only while it runs; the names keep the text
+    // of the declarations and the signatures.
+    transferTemporary(archive, adjusted);
+    transferTemporary(archive, targets);
+    transferTemporary(archive, distances);
+    transferTemporary(archive, declarationEnds);
     // The text of the declarations as one block of bytes.
     const textLength = archive.length(declarations.length);
-    if (archive.isWriting)
+    if (archive.isWriting) {
+        archive.need!char(textLength);
         archive.bytes(cast(char[]) declarations);
-    else {
-        auto text = new char[textLength];
+    } else {
+        auto text = archive.newArray!char(textLength);
         archive.bytes(text);
         declarations = cast(string) text;
     }
-    archive.transfer(signatures);
+    transferTemporary(archive, signatures);
     if (archive.isWriting)
         return;
     const count = adjusted.length;
@@ -214,7 +287,12 @@ private struct Archive {
 
     private Direction _direction;
     private Appender!(ubyte[]) _written;
+    // Reading: the bytes of the part of the file that are not read yet, what
+    // gives the parts that come after it, and the number of bytes of the file
+    // in those parts.
     private const(ubyte)[] _unread;
+    private const(ubyte)[] delegate() _next;
+    private size_t _left;
     // The signatures, in the order of the first reference.
     private const(Signature)*[] _signatures;
     private size_t[const(Signature)*] _signatureIndex;
@@ -229,6 +307,9 @@ private struct Archive {
     private string[] _symbols;
     private size_t[string] _symbolIndex;
     private CallPlan*[] _plans;
+    // Reading: the relocations of names, from the read of their function to
+    // `Program.complete`.
+    private Reloc[][] _namedRelocs;
     // The names that the program refers to (`transferNames`). Writing: the
     // index of each name, and what makes it again. Reading: the names.
     private size_t[const(Name)*] _nameIndex;
@@ -242,6 +323,21 @@ private struct Archive {
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
+    // Reading: the memory of the program, once there is a program.
+    private ProgramMemory* _memory;
+    // Writing: the memory that a load of what this wrote takes.
+    private MemoryNeed _need;
+
+    // `count` new elements, in the data of the memory of the program once
+    // there is one. A writer counts them with `need`.
+    T[] newArray(T)(in size_t count) {
+        return _memory is null ? new T[count] : _memory.data.array!T(count);
+    }
+
+    // Counts what `newArray!T(count)` takes on a load.
+    void need(T)(in size_t count) {
+        _need.data += bytesFor(count * T.sizeof);
+    }
 
     static Archive writing(ref Program program) {
         Archive archive;
@@ -258,10 +354,13 @@ private struct Archive {
         return archive;
     }
 
-    static Archive reading(const(ubyte)[] contents) {
+    static Archive reading(
+        return scope const(ubyte)[] delegate() next, in size_t size,
+    ) {
         Archive archive;
         archive._direction = Direction.reading;
-        archive._unread = contents;
+        archive._next = next;
+        archive._left = size;
         return archive;
     }
 
@@ -277,12 +376,15 @@ private struct Archive {
         _written.put(cast(const(ubyte)[]) literal);
     }
 
-    void expectText(in string literal) {
-        if (_unread.length < literal.length
-                || _unread[0 .. literal.length] != cast(const(ubyte)[]) literal)
+    void expectText(string literal)() {
+        ubyte[literal.length] read;
+        if (unreadLength < read.length)
             throw new SnakebiteException(
                 "the file is not a snakebite program of this format");
-        _unread = _unread[literal.length .. $];
+        bytes(read[]);
+        if (read[] != cast(const(ubyte)[]) literal)
+            throw new SnakebiteException(
+                "the file is not a snakebite program of this format");
     }
 
     // The bytes of `data` go to the file, or come from it.
@@ -291,14 +393,47 @@ private struct Archive {
             _written.put(cast(const(ubyte)[]) data);
             return;
         }
-        if (_unread.length < data.length)
+        auto to = cast(ubyte[]) data;
+        if (to.length > _unread.length)
+            return readAcrossParts(to);
+        to[] = _unread[0 .. to.length];
+        _unread = _unread[to.length .. $];
+    }
+
+    // The number of bytes of the file that are not read.
+    size_t unreadLength() const @safe pure nothrow @nogc {
+        return _unread.length + _left;
+    }
+
+    // Reads `to` from the rest of this part and from the parts after it.
+    private void readAcrossParts(ubyte[] to) {
+        if (to.length > unreadLength)
             throw new SnakebiteException(
                 "the program file ends before the program does");
-        (cast(ubyte[]) data)[] = _unread[0 .. data.length];
-        _unread = _unread[data.length .. $];
+        while (to.length > _unread.length) {
+            to[0 .. _unread.length] = _unread[];
+            to = to[_unread.length .. $];
+            _unread = _next();
+            if (_unread.length == 0)
+                throw new SnakebiteException(
+                    "the program file ends before the program does");
+            // Bytes after the size that the caller gave are not the file.
+            if (_unread.length > _left)
+                _unread = _unread[0 .. _left];
+            _left -= _unread.length;
+        }
+        to[] = _unread[0 .. to.length];
+        _unread = _unread[to.length .. $];
     }
 
     void scalar(T)(ref T value) {
+        if (!isWriting && T.sizeof <= _unread.length) {
+            import core.stdc.string: memcpy;
+
+            memcpy(cast(void*) &value, _unread.ptr, T.sizeof);
+            _unread = _unread[T.sizeof .. $];
+            return;
+        }
         bytes((cast(ubyte*) &value)[0 .. T.sizeof]);
     }
 
@@ -306,7 +441,7 @@ private struct Archive {
     size_t length(in size_t length) {
         size_t count = length;
         scalar(count);
-        if (!isWriting && count > _unread.length)
+        if (!isWriting && count > unreadLength)
             throw new SnakebiteException(
                 "the program file ends before the program does");
         return count;
@@ -542,15 +677,22 @@ private void transfer(T)(ref Archive archive, ref T value) {
     } else static if (is(T : real) || is(T == bool) || is(T : dchar)) {
         archive.scalar(value);
     } else static if (is(T == E[], E)) {
-        const count = archive.length(value.length);
-        if (archive.isWriting) {
-            foreach (ref element; value)
-                archive.transfer(element);
-        } else {
-            auto fresh = new Unqual!E[count];
-            foreach (ref element; fresh)
-                archive.transfer(element);
-            value = cast(T) fresh;
+        // A load needs the relocations only while it runs: it applies them,
+        // and `Program.complete` the ones of names (`transferModule`).
+        static if (is(Unqual!E == Reloc))
+            transferTemporary(archive, value);
+        else {
+            const count = archive.length(value.length);
+            if (archive.isWriting) {
+                archive.need!(Unqual!E)(count);
+                foreach (ref element; value)
+                    archive.transfer(element);
+            } else {
+                auto fresh = archive.newArray!(Unqual!E)(count);
+                foreach (ref element; fresh)
+                    archive.transfer(element);
+                value = cast(T) fresh;
+            }
         }
     } else static if (is(T == E[N], E, size_t N)) {
         foreach (ref element; value)
@@ -567,6 +709,22 @@ private void transfer(T)(ref Archive archive, ref T value) {
             archive.transfer(value.tupleof[index]);
     } else
         static assert(false, "the file holds no " ~ T.stringof);
+}
+
+// As `transfer` for an array that a load needs only while it runs: the array
+// is a GC array that nothing references after the load, outside the memory
+// of the program. What its elements point to is in the memory of the program.
+private void transferTemporary(T : E[], E)(ref Archive archive, ref T value) {
+    const count = archive.length(value.length);
+    if (archive.isWriting) {
+        foreach (ref element; value)
+            archive.transfer(element);
+    } else {
+        auto fresh = new Unqual!E[count];
+        foreach (ref element; fresh)
+            archive.transfer(element);
+        value = cast(T) fresh;
+    }
 }
 
 // A struct of the VM: each field as it says. A field whose classification
@@ -794,16 +952,21 @@ private void transferBody(
 ) {
     // The shape first, so that a function can refer to any other.
     size_t moduleCount = archive.length(program._modules.length);
-    if (!archive.isWriting)
-        foreach (m; 0 .. moduleCount)
-            program.newModule;
+    if (archive.isWriting) {
+        // As `Program.newModules` and `Module.newFunctions` take them.
+        archive.need!(Module*)(moduleCount);
+        archive._need.data += moduleCount * bytesFor(Module.sizeof);
+    } else
+        program.newModules(moduleCount);
     foreach (m; 0 .. moduleCount) {
         size_t functionCount =
             archive.length(archive.isWriting
                 ? program._modules[m]._functions.length : 0);
-        if (!archive.isWriting)
-            foreach (f; 0 .. functionCount)
-                program._modules[m].newFunction;
+        if (archive.isWriting) {
+            archive.need!Function(functionCount);
+            archive.need!(Function*)(functionCount);
+        } else
+            program._modules[m].newFunctions(program.memory, functionCount);
     }
     transferStartData(archive, program);
     transferPlans(archive, program);
@@ -811,6 +974,11 @@ private void transferBody(
     // All data before any function: a function can point into any module.
     // The bytes of all data come before the addresses in them: a datum can
     // point into any block or string.
+    if (archive.isWriting) {
+        foreach (m; 0 .. moduleCount)
+            program._modules[m].blocks.addLoadNeed(archive._need);
+        program.store.addLoadNeed(archive._need);
+    }
     foreach (m; 0 .. moduleCount)
         transferBlocks(archive, program._modules[m].blocks);
     transferBlocks(archive, *program.store.blocks);
@@ -837,9 +1005,11 @@ private void transferPlans(ref Archive archive, ref Program program) {
             names ~= name is null ? size_t.max : archive.nameIndexOf(name);
             failures ~= failure;
         });
-    archive.transfer(signatures);
-    archive.transfer(names);
-    archive.transfer(failures);
+    // The load needs the lists only while it runs; the plans keep the
+    // signatures and the failure texts.
+    transferTemporary(archive, signatures);
+    transferTemporary(archive, names);
+    transferTemporary(archive, failures);
     if (archive.isWriting)
         return;
     if (names.length != signatures.length
@@ -1001,6 +1171,10 @@ private void transferModule(
                     applyReloc(*function_, reloc);
             function_.relocs = named == 0 ? null
                 : function_.relocs[0 .. named];
+            // The GC does not scan the function: the archive holds the
+            // relocations until `Program.complete` drops them.
+            if (named != 0)
+                archive._namedRelocs ~= function_.relocs;
         }
     }
 }
@@ -1018,8 +1192,10 @@ private void transferStartData(ref Archive archive, ref Program program) {
     archive.transfer(start.hasCEntryPoint);
     archive.transfer(start.betterC);
     const count = archive.length(start.modules.length);
-    if (!archive.isWriting)
-        start.modules = new ModuleStart*[count];
+    if (archive.isWriting)
+        archive.need!(ModuleStart*)(count);
+    else
+        start.modules = archive.newArray!(ModuleStart*)(count);
     foreach (i, ref record; start.modules) {
         size_t position;
         if (archive.isWriting) {
@@ -1071,8 +1247,10 @@ private void transferStart(ref Archive archive, ref ModuleStart record) {
 // A gate is the storage of a variable: a target and a length.
 private void transferGates(ref Archive archive, ref GateStorage[] gates) {
     const count = archive.length(gates.length);
-    if (!archive.isWriting)
-        gates = new GateStorage[count];
+    if (archive.isWriting)
+        archive.need!GateStorage(count);
+    else
+        gates = archive.newArray!GateStorage(count);
     foreach (ref gate; gates) {
         Target.Kind kind;
         size_t[3] reference;
@@ -1101,8 +1279,10 @@ private void transferGates(ref Archive archive, ref GateStorage[] gates) {
 
 private void transferHandles(ref Archive archive, ref FunctionHandle[] handles) {
     const count = archive.length(handles.length);
-    if (!archive.isWriting)
-        handles = new FunctionHandle[count];
+    if (archive.isWriting)
+        archive.need!FunctionHandle(count);
+    else
+        handles = archive.newArray!FunctionHandle(count);
     foreach (ref handle; handles)
         transferHandle(archive, handle);
 }
@@ -1115,9 +1295,12 @@ private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
         if (compiled is null)
             internalFailure("a start function is not one of the bytecode backend");
         position = archive.positionOf(compiled);
+        // The GC scans the object: it holds the runner.
+        archive._need.scanned +=
+            bytesFor(__traits(classInstanceSize, StartFunction));
     }
     archive.scalar(position);
     if (!archive.isWriting)
-        handle = new StartFunction(
+        handle = archive._memory.scanned.make!StartFunction(
             archive._runner, archive.functionAt(position[0], position[1]));
 }

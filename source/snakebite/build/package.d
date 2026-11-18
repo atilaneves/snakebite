@@ -80,8 +80,10 @@ public struct NinjaRun {
 
     public int status;
     public Duration duration;
-    // The bytes of the program that the build wrote, when `status` is 0.
-    public immutable(ubyte)[] program;
+    // The program file that the build wrote, open, when `status` is 0. A
+    // later build replaces the file under its name, so the open file keeps
+    // the program of this build.
+    public imported!"std.stdio".File program;
 }
 
 
@@ -124,13 +126,13 @@ private struct BuildLock {
 // `directory`, and writes the file first when it does not exist. ninja
 // starts the commands that make the program, if they must run. The run holds
 // the lock of the build from before it checks `build.ninja` until it has the
-// program file in memory, so no other run changes a build file in between.
+// program file open, so no other run changes a build file in between.
 public NinjaRun buildProject(in string directory) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import std.file: exists, mkdirRecurse, read;
+    import std.file: exists, mkdirRecurse;
     import std.process: spawnProcess, wait;
-    import std.stdio: stderr, stdout;
+    import std.stdio: File, stderr, stdout;
 
     const files = buildFiles(directory);
     files.directory.mkdirRecurse;
@@ -145,7 +147,7 @@ public NinjaRun buildProject(in string directory) {
         .wait;
     const duration = stopWatch.peek;
     return NinjaRun(status, duration,
-        status == 0 ? cast(immutable(ubyte)[]) files.program.read : null);
+        status == 0 ? File(files.program, "rb") : File.init);
 }
 
 
