@@ -79,11 +79,15 @@ private extern(C++) final class EagerCompileCollector
         _found ~= function_;
     }
 
-    // Compiles each function found, then walks its body for more.
+    // Compiles each function found, then walks its body and compiles the
+    // functions found there before the next one.
     void compileFound() {
-        for (size_t i = 0; i < _found.length; ++i) {
-            _bytecode.compileFunction(_found[i]);
-            _found[i].fbody.accept(this);
+        auto found = _found;
+        _found = null;
+        foreach (function_; found) {
+            _bytecode.compileFunction(function_);
+            function_.fbody.accept(this);
+            compileFound;
         }
     }
 }
