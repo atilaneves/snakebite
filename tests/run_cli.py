@@ -3327,21 +3327,47 @@ def test_build_project_runs_at_the_same_time_as_bin_sb(
 
 
 # A dub package `name` in `directory` whose function `answer` returns
-# `answer`, with a struct and a template.
+# `answer`, with a struct, a template, a class, an exception class, a
+# thread-local and a shared variable and a template with a static variable.
 def write_dependency(directory: Path, name: str, answer: int) -> None:
     write(directory / "dub.sdl",
           f'name "{dub_name(name)}"\ntargetType "library"\n')
-    write(directory / "source" / "dep.d", f"""
+    write(directory / "source" / "dep.d", """
         module dep;
-        int answer() {{ return {answer}; }}
-        struct Point {{ int x, y; int sum() const {{ return x + y; }} }}
-        T twice(T)(T value) {{ return value * 2; }}
-        """)
+        int answer() { return ANSWER; }
+        struct Point { int x, y; int sum() const { return x + y; } }
+        T twice(T)(T value) { return value * 2; }
+
+        class Animal {
+            int legs() const { return 4; }
+            string name() const { return "animal"; }
+        }
+        class DepError : Exception {
+            int code;
+            this(int code) { super("dep"); this.code = code; }
+        }
+        void fail(int code) { throw new DepError(code); }
+
+        int perThread = 1;
+        shared int everywhere = 100;
+        int bumpPerThread() { return perThread += 2; }
+        int bumpEverywhere() {
+            import core.atomic: atomicOp;
+            return atomicOp!"+="(everywhere, 200);
+        }
+
+        int counted(T)() { static int count; return ++count; }
+        int countedInDep() { return counted!int(); }
+        """.replace("ANSWER", str(answer)))
 
 
 # A dub project whose root package depends on the dub package in `dep` by
 # path. The root code calls the function of the dependency, a member function
-# of its struct and an instance of its template.
+# of its struct and an instance of its template; uses a class of the
+# dependency, extends it and catches its exception class; reads and writes its
+# thread-local and shared variables, which the dependency also writes; and
+# instantiates the template with a static variable that the dependency also
+# instantiates.
 def write_build_project_with_dependency(tmp_path: Path, name: str) -> Path:
     write_dependency(tmp_path / "dep", name + "-dep", 42)
     app = tmp_path / "app"
@@ -3350,30 +3376,69 @@ def write_build_project_with_dependency(tmp_path: Path, name: str) -> Path:
           + f'dependency "{dub_name(name + "-dep")}" path="../dep"\n')
     write(app / "source" / "app.d", """
         module app;
+        import core.atomic: atomicLoad, atomicOp;
         import core.stdc.stdio: printf;
-        import dep: answer, Point, twice;
+        import dep;
+        class Dog : Animal {
+            override string name() const { return "dog"; }
+        }
         unittest {
             printf("%d %d %d\\n", answer, Point(3, 4).sum, twice(21));
+
+            const Animal animal = new Animal, dog = new Dog;
+            printf("%.*s %d %.*s %d\\n",
+                cast(int) animal.name.length, animal.name.ptr, animal.legs,
+                cast(int) dog.name.length, dog.name.ptr, dog.legs);
+            try
+                fail(7);
+            catch (DepError error)
+                printf("caught %d\\n", error.code);
+
+            perThread += 10;
+            const thread = bumpPerThread;
+            atomicOp!"+="(everywhere, 1000);
+            const shared_ = bumpEverywhere;
+            printf("%d %d %d %d\\n", thread, perThread, shared_,
+                atomicLoad(everywhere));
+
+            const first = counted!int(), second = countedInDep;
+            printf("%d %d\\n", first, second);
         }
         """)
     return app
 
 
+# The lines that the program of `write_build_project_with_dependency` prints
+# when `answer` returns `answer`.
+def dependency_lines(answer: int) -> list[str]:
+    return [f"{answer} 7 42", "animal 4 dog 4", "caught 7", "13 13 1300 1300",
+            "1 2"]
+
+
+def assert_prints_dependency_lines(
+    result: subprocess.CompletedProcess[str], answer: int,
+) -> None:
+    for line in dependency_lines(answer):
+        assert line in guest_lines(result), output(result)
+
+
 # `--build=project` gives the result of `bin/sb DIR` for a project with a
-# dub dependency: on the first run, on a run with no change and on a run after
-# a touch of a root file.
+# dub dependency: on the first run, on a run with no change, on a run after a
+# touch of a root file and on a run after a touch of a source file of the
+# dependency.
 def test_build_project_with_a_dependency_runs_as_bin_sb(
     tmp_path: Path,
 ) -> None:
     app = write_build_project_with_dependency(tmp_path, "build-project-dep")
 
-    for change in (None, None, app / "source" / "app.d"):
+    for change in (None, None, app / "source" / "app.d",
+                   tmp_path / "dep" / "source" / "dep.d"):
         if change is not None:
             touch(change)
         built = run_sb("--build=project", str(app), cwd=tmp_path)
         direct = run_sb(str(app), cwd=tmp_path)
         assert_runs_as_bin_sb(built, direct)
-        assert "42 7 42" in guest_lines(built), output(built)
+        assert_prints_dependency_lines(built, 42)
 
 
 # A changed function body in the dependency changes the output of the next
@@ -3382,13 +3447,13 @@ def test_build_project_runs_a_changed_dependency(tmp_path: Path) -> None:
     app = write_build_project_with_dependency(
         tmp_path, "build-project-changed-dep")
     first = run_sb("--build=project", str(app), cwd=tmp_path)
-    assert "42 7 42" in guest_lines(first), output(first)
+    assert_prints_dependency_lines(first, 42)
 
     write_dependency(tmp_path / "dep", "build-project-changed-dep-dep", 43)
     built = run_sb("--build=project", str(app), cwd=tmp_path)
     direct = run_sb(str(app), cwd=tmp_path)
     assert_runs_as_bin_sb(built, direct)
-    assert "43 7 42" in guest_lines(built), output(built)
+    assert_prints_dependency_lines(built, 43)
 
 
 # A changed recipe changes the next run also when the recipe has commands
