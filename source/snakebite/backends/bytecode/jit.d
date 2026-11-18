@@ -301,9 +301,15 @@ package struct JitState {
     Scratch!JitOp opScratch;
     Scratch!Instruction snapshotScratch;
     Scratch!(Instruction.Handler) originalScratch;
+    // The large buffers of one compile. They are on the heap: a tier-up runs
+    // on the native stack of the guest, and a guest `Fiber` of the default
+    // size has 16 KiB.
+    EmitBuffers* buffers;
 
     // Gives back the memory of the region and the buffers.
     void release() {
+        import core.stdc.stdlib: free;
+
         region.release;
         fixups.release;
         labels.release;
@@ -312,6 +318,17 @@ package struct JitState {
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
+        free(buffers);
+        buffers = null;
+    }
+
+    // Null if no memory; a compile then makes no code that needs them.
+    EmitBuffers* reserveBuffers() {
+        import core.stdc.stdlib: calloc;
+
+        if (buffers is null)
+            buffers = cast(EmitBuffers*) calloc(1, EmitBuffers.sizeof);
+        return buffers;
     }
 
     static if (chainedDispatch)
@@ -357,6 +374,7 @@ package struct JitState {
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
         g.literalScratch = &literals;
+        g.buffers = reserveBuffers;
         g.bmi2 = bmi2;
         const op = JitOp.CallWindow(destination, counted: true, indirect: true);
         if (g.emitWindowBody(call, *pc, op, site, arm))
@@ -410,6 +428,7 @@ package struct JitState {
         g.fixupScratch = &fixups;
         g.literalScratch = &literals;
         g.reloadEntryScratch = &reloadEntries;
+        g.buffers = reserveBuffers;
         g.bmi2 = bmi2;
         g.instructions = instructions;
         g.snapshot = snapshot;
@@ -1588,6 +1607,27 @@ private struct FpLoop {
     size_t joinFixups;
 }
 
+// The state of one level of `Gen.emitWindowBody`.
+private struct InlineBody {
+    import snakebite.backends.bytecode.vm: Instruction;
+
+    Gen gen;
+    Instruction[Gen.inlineInstructionLimit] instructions;
+    JitOp[Gen.inlineInstructionLimit] ops;
+    Instruction.Handler[Gen.inlineInstructionLimit] originals;
+    size_t[Gen.inlineInstructionLimit + 1] labels;
+}
+
+// See `JitState.buffers`.
+private struct EmitBuffers {
+    // One for each depth. A body is complete before the next one at its
+    // depth starts.
+    InlineBody[Gen.inlineDepthLimit] inlineBodies;
+    // Of `Gen.emitObservedPath`.
+    Gen.PathCall[Gen.pathBudget] pathCalls;
+    Gen.PathExit[2 * Gen.pathBudget] pathExits;
+}
+
 private struct Gen {
     import snakebite.backends.bytecode.vm: Activation, CallSite,
         chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
@@ -1602,6 +1642,7 @@ private struct Gen {
     Scratch!Fixup* fixupScratch;
     Scratch!Literal* literalScratch;
     Scratch!ReloadEntry* reloadEntryScratch;
+    EmitBuffers* buffers;
     FpSlots fpSlots;
     FpLoop fpLoop;
     IntSlots intSlots;
@@ -2184,8 +2225,10 @@ private struct Gen {
         const(ObservedEdge)[] path, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals)
     {
-        PathCall[pathBudget] calls = void;
-        PathExit[2 * pathBudget] exits = void;
+        if (buffers is null)
+            return false;
+        auto calls = buffers.pathCalls[];
+        auto exits = buffers.pathExits[];
         size_t callCount;
         size_t exitCount;
         int pending = -1;
@@ -2360,7 +2403,8 @@ private struct Gen {
 
         const callee = arm.callee;
         const n = callee.instructions.length;
-        if (callee.jit !is function_.jit || inlineDepth >= inlineDepthLimit
+        if (buffers is null || callee.jit !is function_.jit
+                || inlineDepth >= inlineDepthLimit
                 || n == 0 || n > inlineInstructionLimit)
             return false;
         for (const(Gen)* ancestor = &this; ancestor !is null;
@@ -2370,11 +2414,11 @@ private struct Gen {
         if (codeLimit - a.n < maximumBytesPerInstruction)
             return false;
 
-        Instruction[inlineInstructionLimit] body = void;
-        JitOp[inlineInstructionLimit] ops = void;
-        Instruction.Handler[inlineInstructionLimit] originals = void;
-        size_t[inlineInstructionLimit + 1] targets = void;
-        if (!readJitBody(callee, body[0 .. n], ops[0 .. n], originals[0 .. n]))
+        auto level = &buffers.inlineBodies[inlineDepth];
+        auto body = level.instructions[0 .. n];
+        auto ops = level.ops[0 .. n];
+        auto originals = level.originals[0 .. n];
+        if (!readJitBody(callee, body, ops, originals))
             return false;
 
         const start = a.n;
@@ -2385,7 +2429,8 @@ private struct Gen {
             return false;
         }
 
-        Gen child;
+        auto child = &level.gen;
+        *child = Gen.init;
         child.a = a;
         child.codeLimit = codeLimit - maximumBytesPerInstruction;
         if (child.codeLimit > start + inlineCodeLimit)
@@ -2395,11 +2440,12 @@ private struct Gen {
         child.fixupCap = fixupCap;
         child.fixupCount = fixupCount;
         child.literalScratch = literalScratch;
+        child.buffers = buffers;
         child.literalCount = literalCount;
         child.bmi2 = bmi2;
         child.function_ = callee;
         child.instructions = callee.instructions;
-        child.snapshot = body[0 .. n];
+        child.snapshot = body;
         child.frameSize = callee.frameSize;
         child.constants = callee.constants;
         child.callSites = callee.callSites;
@@ -2410,10 +2456,9 @@ private struct Gen {
         child.inlineDepth = inlineDepth + 1;
         child.expandWindows = true;
         child.inlineResultMayBeNull = op.destination == Destination.indirect;
-        child.labels = targets[0 .. n + 1];
+        child.labels = level.labels[0 .. n + 1];
 
-        const done = child.emitInlineInstructions(ops[0 .. n], originals[0 .. n],
-            fixupCount);
+        const done = child.emitInlineInstructions(ops, originals, fixupCount);
         // A nested emitter can grow the shared scratch buffer even on refusal.
         fixups = fixupScratch.ptr;
         fixupCap = fixupScratch.cap;
