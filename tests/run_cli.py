@@ -6900,28 +6900,31 @@ def app_using_unused_member(backend: str, expected: int) -> str:
 def test_transitive_dub_dependencies_reach_the_image(
     tmp_path: Path, backend: str,
 ) -> None:
+    app_name = dub_name("image-app")
+    middle_name = dub_name("image-middle")
+    leaf_name = dub_name("image-leaf")
     write(
         tmp_path / "app" / "dub.sdl",
-        """
-        name "image-app"
+        f"""
+        name "{app_name}"
         targetType "library"
         targetName "image-app"
         postBuildCommands "test ! -e reject-build"
-        dependency "image-middle" path="../middle"
-        configuration "unittest" {
+        dependency "{middle_name}" path="../middle"
+        configuration "unittest" {{
             targetType "executable"
-        }
+        }}
         """,
     )
     app_source = tmp_path / "app" / "source" / "app.d"
     write(app_source, app_using_unused_member(backend, 73))
     write(
         tmp_path / "middle" / "dub.sdl",
-        """
-        name "image-middle"
+        f"""
+        name "{middle_name}"
         targetType "staticLibrary"
         preBuildCommands "test ! -e reject-build"
-        dependency "image-leaf" path="../leaf archives"
+        dependency "{leaf_name}" path="../leaf archives"
         """,
     )
     write(
@@ -6933,7 +6936,10 @@ def test_transitive_dub_dependencies_reach_the_image(
         """,
     )
     leaf = tmp_path / "leaf archives"
-    write(leaf / "dub.sdl", 'name "image-leaf"\ntargetType "staticLibrary"\n')
+    write(
+        leaf / "dub.sdl",
+        f'name "{leaf_name}"\ntargetType "staticLibrary"\ntargetName "image-leaf"\n',
+    )
     write(
         leaf / "source" / "image_leaf.d",
         "module image_leaf;\nint leaf() { return 41; }\n",

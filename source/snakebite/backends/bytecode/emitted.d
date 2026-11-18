@@ -50,8 +50,8 @@ package enum indirectCopyWidths = [1, 2, 4, 8, 16, 32];
 
 
 // How a copied instruction names frame storage. `ignored` marks a field
-// that holds no storage operand.
-package enum Operand { ignored, storage, constant, callSite }
+// that holds no storage operand. A call result can be discarded.
+package enum Operand { ignored, storage, constant, callSite, result }
 
 package struct Operands {
     Operand destination;
@@ -59,6 +59,11 @@ package struct Operands {
     // The right operand of a three-address instruction, held in
     // `sourceWidth`.
     Operand right;
+
+    bool hasStorageDestination(in size_t operand) const {
+        return destination == Operand.storage
+            || (destination == Operand.result && operand != discardResult);
+    }
 }
 
 // The operand roles of every handler a copied function may use, and
@@ -161,6 +166,8 @@ package bool inlineOperandsOf(
 package bool copyOperandsOf(
     Instruction.Handler handler, out Operands roles,
 ) {
+    import std.meta: AliasSeq;
+
     enum S = Operand.storage;
     enum N = Operand.ignored;
     if (inlineOperandsOf(handler, roles))
@@ -169,10 +176,24 @@ package bool copyOperandsOf(
         roles = Operands(S, Operand.callSite);
         return true;
     }
-    if (handler is &opCall) {
+    if (handler is &opCall || handler is &opCallWindowFrame
+            || handler is &opCallWindowIndirect) {
+        roles = Operands(Operand.result, Operand.callSite);
+        return true;
+    }
+    if (handler is &opCallWindowDiscard) {
         roles = Operands(N, Operand.callSite);
         return true;
     }
+    static foreach (operation; AliasSeq!(
+        opDivideSigned, opDivideSigned32, opDivideUnsigned,
+        opModuloSigned, opModuloSigned32, opModuloUnsigned,
+        opCastAs!(CastKind.sliceToPointer),
+    ))
+        if (handler is &operation) {
+            roles = Operands(S, S);
+            return true;
+        }
     // The left array is read from `destination`, which then takes the
     // result; `width` is an element size.
     if (handler is &opArrayEqual || handler is &opStaticArrayEqual) {

@@ -758,9 +758,22 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
             scope compiler = new FunctionCompiler(
                 this, function_, layout, returnFacts, isVoidReturn,
-                isRefReturn);
+                isRefReturn,
+                compiledProgram.recordsAddresses ? null : placeholder);
             const(InlineBody)* builtInlineBody;
-            *placeholder = compiler.build(body_, builtInlineBody);
+            auto built = compiler.build(body_, builtInlineBody);
+            const window = builtInlineBody is null ? null : builtInlineBody.callWindow;
+            if (window !is null && window.callee is placeholder) {
+                // Build the recursive entry against the same published word.
+                // Callers copy the canonical one-level body. Only its
+                // surviving recursive edge enters the two-level body.
+                scope recursive = new FunctionCompiler(
+                    this, function_, layout, returnFacts, isVoidReturn,
+                    isRefReturn, null, builtInlineBody);
+                const(InlineBody)* unused;
+                built = recursive.build(body_, unused);
+            }
+            *placeholder = built;
             if (builtInlineBody !is null)
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
@@ -835,10 +848,12 @@ package struct InlineBody {
     package FrameRange[] exposedFrames;
 
     package const(CallSite)* callWindow() const {
+        const(CallSite)* farthest;
         foreach (ref site; callSites)
-            if (site.windowSlot != size_t.max)
-                return &site;
-        return null;
+            if (site.windowSlot != size_t.max
+                    && (farthest is null || site.windowEnd > farthest.windowEnd))
+                farthest = &site;
+        return farthest;
     }
 }
 
@@ -1009,6 +1024,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // use, and the farthest any window reaches.
     private size_t _windowDepth;
     private size_t _windowReach;
+    private const(Function)* _recursiveTarget;
+    private const(InlineBody)* _recursiveBody;
     // Where the receiver of the call being compiled is to be written, in the
     // window of the call, or `size_t.max`. The first code that computes the
     // receiver takes it.
@@ -1183,7 +1200,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in TypeFacts returnFacts,
         in bool isVoidReturn,
         in bool isRefReturn,
+        const(Function)* recursiveTarget = null,
+        const(InlineBody)* recursiveBody = null,
     ) {
+        _recursiveTarget = recursiveTarget;
+        _recursiveBody = recursiveBody;
         _bytecode = bytecode;
         _function = function_;
         _layout = layout;
@@ -1241,7 +1262,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                     && _code.instructions[$ - 1].handler !is &opJump)
                 || branchesPastEnd)
             emit(&opReturnVoid, 0, 0, 0);
-        auto inlineBody = inlineBodyOfBuilt;
+        auto inlineBody = _recursiveBody is null ? inlineBodyOfBuilt : null;
         const resultPlace = redirectReturns;
         // A cold entry uses the complete original frame, including its
         // return-place slot. Nested copies already reserve that frame.
@@ -1359,7 +1380,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         }
         const ordinaryCalls = _code.callSites.length - coldSites
             - (_hookSites - coldHooks);
-        if (ordinaryCalls > 1
+        import std.algorithm.searching: any;
+
+        const recursive = _code.callSites.data.any!(site => isSelfWindow(site));
+        if ((!recursive && ordinaryCalls > 1)
                 || (ordinaryCalls != 0 && _code.cold.length != 0)
                 || _code.assertSites.length != 0
                 || _code.exceptionHandlers.length != 0
@@ -1376,7 +1400,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Operands roles;
             if (!copyOperandsOf(instruction.handler, roles))
                 return null;
-            if (ordinaryCalls != 0) {
+            if (ordinaryCalls != 0 && !recursive) {
                 Instruction probe = instruction;
                 const target = branchTargetField(probe);
                 if (target !is null && *target <= i)
@@ -1389,7 +1413,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 ++delegateCalls;
             }
         }
-        if (delegateCalls != ordinaryCalls)
+        if (!recursive && delegateCalls != ordinaryCalls)
             return null;
         auto instructions = _code.instructions.dup;
         CallSite[] sites;
@@ -1402,15 +1426,23 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 continue;
             if (site.cleanupStartIndex != size_t.max)
                 return null;
+            if (recursive) {
+                const nativeCall = site.kind == CallSite.Kind.native
+                    && site.nativePlan !is null;
+                if (!nativeCall && !isSelfWindow(site))
+                    return null;
+            }
             siteMap[index] = sites.length;
             site.args = site.args.dup;
             sites ~= site;
         }
-        foreach (i, ref instruction; instructions)
-            if (!_code.inCold(i) && (instruction.handler is &opCall
-                    || instruction.handler is &opCallIndirectWindowFrame
-                    || instruction.handler is &opColdThrow))
+        foreach (i, ref instruction; instructions) {
+            Operands roles;
+            if (!_code.inCold(i)
+                    && copyOperandsOf(instruction.handler, roles)
+                    && roles.source == Operand.callSite)
                 instruction.source = siteMap[instruction.source];
+        }
         if (_code.cold.length != 0) {
             auto bytecode = _bytecode;
             auto function_ = _function;
@@ -1433,6 +1465,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             instructions, _code.constants.dup, _tempSize, _tempAlignment,
             relocs, sites, _allocations.dup, _exposesFrame,
             _exposedFrames.dup);
+    }
+
+    private bool isSelfWindow(in CallSite site) const {
+        return _recursiveTarget !is null && site.kind == CallSite.Kind.guest
+            && site.callee is _recursiveTarget && site.windowSlot != size_t.max;
     }
 
     // Whether an instruction of a copied body leaves its `destination`
@@ -1504,7 +1541,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         foreach (instruction; body_.instructions) {
             if (leavesDestination(instruction))
                 continue;
-            size_t written = instruction.width == 0 ? 1 : instruction.width;
+            size_t written = instruction.handler is &opCall
+                ? body_.callSites[instruction.source].returnWidth
+                : instruction.width == 0 ? 1 : instruction.width;
             static foreach (operation; AliasSeq!(
                 opIndexSlice, opIndexStatic, opIndexPointer,
             ))
@@ -1735,10 +1774,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             return offset + base;
         }
         size_t place(in size_t operand) {
-            if ((operand & (1UL << 63)) == 0)
-                return rebase(operand);
-            const slot = (operand >> 32) & 0x7fff_ffffUL;
-            return indirectStorage(rebase(slot)) | (operand & 0xffff_ffffUL);
+            return isFrameOperand(operand) ? rebase(operand)
+                : withAddressSlot(operand, rebase(addressSlotOf(operand)));
         }
 
         const instructions = body_.instructions;
@@ -1818,7 +1855,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             Instruction copied = instruction;
             if (isCold)
                 copied.destination = base + instruction.destination;
-            else if (roles.destination == Operand.storage)
+            else if (roles.hasStorageDestination(copied.destination))
                 copied.destination = writesDirect[i]
                     ? destOffset : place(copied.destination);
             if (roles.source == Operand.storage)
@@ -1830,11 +1867,12 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 site.args = site.args.dup;
                 foreach (ref arg; site.args)
                     arg.callerOffset = place(arg.callerOffset);
-                if (copied.handler is &opCallIndirectWindowFrame) {
+                if (site.windowSlot != size_t.max)
                     site.windowSlot = windowSlot;
+                if (copied.handler is &opCallIndirectWindowFrame) {
                     site.calleeSlotOffset = rebase(site.calleeSlotOffset);
                     site.nativeArgs = site.args;
-                } else {
+                } else if (site.windowSlot == size_t.max) {
                     ++_hookSites;
                 }
                 _code.callSites ~= site;
@@ -2133,7 +2171,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 Operands roles;
                 if (!copyOperandsOf(instruction.handler, roles))
                     internalFailure("a deferred inline body has known operands");
-                if (roles.destination == Operand.storage)
+                if (roles.hasStorageDestination(instruction.destination))
                     instruction.destination = place(instruction.destination);
                 if (roles.source == Operand.storage)
                     instruction.source = place(instruction.source);
@@ -9275,7 +9313,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private const(InlineBody)* inlinableBodyOf(FuncDeclaration callee) {
-        const body_ = _bytecode.inlineBodyOf(callee);
+        const body_ = callee is _function && _recursiveBody !is null
+            ? _recursiveBody : _bytecode.inlineBodyOf(callee);
         // A copied window keeps its original displacement. An open window
         // may already hold arguments whose call has yet to run.
         if (_windowDepth != 0 && body_ !is null && body_.callWindow !is null)
@@ -9449,10 +9488,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // The delegate outlives this compiler, so it captures the backend
         // and not `this`.
         auto bytecode = _bytecode;
-        _code.callSites ~= CallSite.guest(
-            deferred(() => bytecode.compileFunction(callee)), args,
-            returnShape.returnFacts.size, window,
-        );
+        if (_recursiveTarget !is null && callee is _function) {
+            auto site = CallSite.guest(
+                _recursiveTarget, args, returnShape.returnFacts.size);
+            site.useWindow(window);
+            _code.callSites ~= site;
+        } else
+            _code.callSites ~= CallSite.guest(
+                deferred(() => bytecode.compileFunction(callee)), args,
+                returnShape.returnFacts.size, window,
+            );
         emit(windowCallHandler(destOffset), destOffset, siteIndex, 0);
         emitReceiverResult(returnShape, destOffset, receiverOffset);
     }
