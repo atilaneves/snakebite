@@ -63,6 +63,11 @@ created or merged.
 
 Test behaviours, not implementations.
 
+One exception: speed is a behaviour that a test of the result cannot see.
+A program gives the same result when the JIT does not start, so a test can
+check one yes or no for each function, "it was JIT-compiled"
+(`shouldBeStatusOfWithJitCode`). A test checks no more of the JIT than that.
+
 Find if an existing test with `Omit` exists for the backend in question
 instead of writing a new test.
 
