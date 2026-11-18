@@ -315,11 +315,19 @@ package struct JitState {
     }
 
     static if (chainedDispatch)
-    void linkWindow(const(Instruction)* pc, const(CallSite)* site,
-        size_t index, Destination destination, in bool mapCode,
+    void linkWindow(const(Instruction)* pc, const(Function)* caller,
+        const(CallSite)* site, size_t index, Destination destination,
     ) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
         import snakebite.backends.bytecode.vm: indirectWindowFallback;
+
+        const instructions = caller.instructions;
+        if (instructions.length < 2 || pc < instructions.ptr
+                || pc >= &instructions[$ - 1])
+            return;
+        const call = cast(size_t) (pc - instructions.ptr);
+        if (&instructions[call] !is pc)
+            return;
 
         auto slot = cast(shared(size_t)*) &site.lateWindowEntry;
         const previous = cast(const(ubyte)*)
@@ -333,16 +341,27 @@ package struct JitState {
         if (!Gen.encodableWindowArm(arm))
             return;
 
-        enum reserve = codeAlignment + Gen.windowArmBytes
-            + 2 * Gen.handlerJumpBytes;
+        enum exits = 2 * Gen.handlerJumpBytes;
+        enum reserve = 2 * codeAlignment + Gen.windowArmBytes + exits;
         if (region.chunkCapacity - region.chunkUsed < reserve
                 && !region.newChunk(chunkSize))
             return;
         const start = region.chunkUsed + codeAlignment;
         Gen g;
         g.a.buf = region.writeBase + start;
+        // Keep room for the continuation, the exits and the final alignment.
+        g.codeLimit = region.chunkCapacity - start - exits - codeAlignment;
+        g.function_ = caller;
+        g.instructions = instructions;
+        g.fixupScratch = &fixups;
+        g.fixups = fixups.ptr;
+        g.fixupCap = fixups.cap;
+        g.literalScratch = &literals;
+        g.bmi2 = bmi2;
         const op = JitOp.CallWindow(destination, counted: true, indirect: true);
-        if (!g.emitCallWindowArm(pc, *pc, op, site, arm))
+        if (g.emitWindowBody(call, *pc, op, site, arm))
+            g.jumpToLive(pc + 1);
+        else if (!g.emitCallWindowArm(pc, *pc, op, site, arm))
             return;
         g.patchHere(arm.mismatch);
         if (previous is null)
@@ -354,6 +373,7 @@ package struct JitState {
         g.patchHere(arm.grow);
         g.patchHere(arm.tierUp);
         g.jumpToOriginal(pc, indirectWindowFallback!false(destination));
+        g.emitLiterals;
 
         // The byte before the entry indexes the cache records already linked.
         // No caller can enter the new arm until the release store below.
@@ -363,7 +383,7 @@ package struct JitState {
         if (region.chunkUsed + populateSize / 4 > region.populatedEnd)
             region.populate;
         const code = region.execBase + start;
-        if (mapCode)
+        if (caller.jitName.length)
             perfMap.record(code, g.a.n, "late-guest-window");
         atomicStore!(MemoryOrder.rel)(*slot, cast(size_t) code);
     }
@@ -1878,7 +1898,9 @@ private struct Gen {
         size_t end;
         foreach (ref arm; arms[0 .. count]) {
             const previous = a.n;
-            if (!expandWindows || !emitWindowBody(i, op, site, arm)) {
+            if (expandWindows && emitWindowBody(i, snapshot[i], op, site, arm))
+                jmpTo(i + 1);
+            else {
                 if (inlineCaller !is null)
                     continue;
                 if (!emitCallWindowArm(&instructions[i], snapshot[i], op,
@@ -2331,7 +2353,7 @@ private struct Gen {
     private enum inlineDepthLimit = 3;
     private enum inlineCodeLimit = 8 * 1024;
 
-    bool emitWindowBody(size_t i, in JitOp.CallWindow op,
+    bool emitWindowBody(size_t i, in Instruction ins, in JitOp.CallWindow op,
         const(CallSite)* site, ref WindowArm arm)
     {
         import snakebite.backends.bytecode.vm: readJitBody;
@@ -2358,7 +2380,7 @@ private struct Gen {
         const start = a.n;
         emitWindowChecks(op, site, arm);
         a.st(8, Mem(R11, Activation.parent.offsetof), FRAME);
-        if (!prepareWindow(snapshot[i], op, site, arm)) {
+        if (!prepareWindow(ins, op, site, arm)) {
             a.n = start;
             return false;
         }
@@ -2402,7 +2424,6 @@ private struct Gen {
 
         a = child.a;
         literalCount = child.literalCount;
-        jmpTo(i + 1);
         return true;
     }
 
