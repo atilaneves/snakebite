@@ -5748,7 +5748,7 @@ static if (jitSupported) {
 
     // What a function is in: `compiling` while one thread makes its code, and
     // `failed` when it cannot have any.
-    private enum JitTier : uint { interpreted, compiling, compiled, failed }
+    package enum JitTier : uint { interpreted, compiling, compiled, failed }
 
     // The tables that classify handlers. They are the same for each
     // instance and nothing writes them after they are built, so they are

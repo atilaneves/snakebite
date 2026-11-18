@@ -306,7 +306,7 @@ package struct JitState {
 
     Emitted emitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals)
+        const(Instruction.Handler)[] originals, bool expandWindows)
     {
         import core.atomic: atomicStore, MemoryOrder;
         import snakebite.backends.bytecode.vm: jitFallback;
@@ -320,6 +320,7 @@ package struct JitState {
         Gen g;
         g.function_ = function_;
         g.codeLimit = cap;
+        g.expandWindows = expandWindows;
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
         g.literalScratch = &literals;
@@ -804,14 +805,21 @@ package struct JitLock {
         if (snapshot.length == 0)
             return false;
         ref state = this.state;
-        auto result = state.emitFunction(function_, snapshot, ops, originals);
+        auto result = state.emitFunction(function_, snapshot, ops, originals,
+            true);
         if (result == Emitted.full) {
             const worst = snapshot.length
                 * (maximumBytesPerInstruction + Instruction.Handler.sizeof)
                 + 4096;
             if (!state.region.newChunk(worst))
                 return false;
-            result = state.emitFunction(function_, snapshot, ops, originals);
+            result = state.emitFunction(function_, snapshot, ops, originals,
+                true);
+            // The fresh chunk is sized for the original templates. A large
+            // expanded body can fit at first and leave too little room later.
+            if (result == Emitted.full)
+                result = state.emitFunction(function_, snapshot, ops, originals,
+                    false);
         }
         return result == Emitted.done;
     }
@@ -1489,6 +1497,7 @@ private struct Gen {
     bool bmi2;
     const(Function)* function_;
     size_t codeLimit;
+    bool expandWindows;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     size_t frameSize;
@@ -1500,6 +1509,7 @@ private struct Gen {
     const(CallSite.FastCall)* inlineLayout;
     size_t inlineCall;
     uint inlineDepth;
+    bool inlineResultMayBeNull;
     size_t[] labels;
     Fixup* fixups;
     size_t fixupCount;
@@ -1772,7 +1782,7 @@ private struct Gen {
         size_t end;
         foreach (ref arm; arms[0 .. count]) {
             const previous = a.n;
-            if (!emitWindowBody(i, op, site, arm)) {
+            if (!expandWindows || !emitWindowBody(i, op, site, arm)) {
                 if (inlineCaller !is null)
                     continue;
                 if (!emitCallWindowArm(i, op, site, arm))
@@ -1985,6 +1995,8 @@ private struct Gen {
         child.inlineLayout = arm.fast;
         child.inlineCall = i;
         child.inlineDepth = inlineDepth + 1;
+        child.expandWindows = true;
+        child.inlineResultMayBeNull = op.destination == Destination.indirect;
         child.labels = targets[0 .. n + 1];
 
         const done = child.emitInlineInstructions(ops[0 .. n], originals[0 .. n],
@@ -2006,7 +2018,7 @@ private struct Gen {
     bool emitInlineInstructions(const(JitOp)[] ops,
         const(Instruction.Handler)[] originals, size_t firstFixup)
     {
-        import snakebite.backends.bytecode.vm: jitCountsBranch;
+        import snakebite.backends.bytecode.vm: jitCountsBranch, JitTier;
 
         bool returned;
         foreach (i, ref const op; ops) {
@@ -2026,15 +2038,16 @@ private struct Gen {
             const savedFixups = fixupCount;
             const savedLiterals = literalCount;
             size_t tierUp;
+            const heat = Mem(PCREG, Function.jitHeat.offsetof);
             if (function_.jitHandlers is null && jitCountsBranch(original)) {
                 a.movI(PCREG, cast(size_t) function_);
-                const heat = Mem(PCREG, Function.jitHeat.offsetof);
                 a.ld(4, RAX, heat);
                 a.aluRI(Alu.add, 4, RAX, jitStep);
                 tierUp = jccLocal(CC_B);
                 a.st(4, heat, RAX);
             }
 
+            const body = a.n;
             bool done;
             switch (op.kind) with (JitOp.Kind) {
                 case returnValue, returnVoid:
@@ -2060,6 +2073,14 @@ private struct Gen {
                 const skip = a.n;
                 a.d32(0);
                 patchHere(tierUp);
+                // A compiled handler does not count this branch. Complete
+                // the event here if another entry has published the code.
+                a.aluMI(Alu.cmp, 4, Mem(PCREG, Function.jitState.offsetof),
+                    JitTier.compiled);
+                const pending = jccLocal(CC_NE);
+                a.st(4, heat, RAX);
+                jmpLocalTo(body);
+                patchHere(pending);
                 jumpToHandler(i, original);
                 patchHere(skip);
             }
@@ -2083,17 +2104,10 @@ private struct Gen {
         const ins = snapshot[i];
         if (hasValue && ins.width > 64)
             return false;
-        if (hasValue && ins.width != 0) {
-            Mem source;
-            if (!opnd(ins.source, SC2, source))
-                return false;
-            a.ld(8, R11, inlineActivationField(Activation.returnPlace.offsetof));
-            a.lea(RAX, source);
-            a.aluRR(Alu.cmp, 8, RAX, R11);
-            const aliased = jccLocal(CC_E);
-            copyChunks(source, Mem(R11, 0), ins.width);
-            patchHere(aliased);
-        }
+        if (hasValue && ins.width != 0 && !emitReturnValue(ins,
+                inlineActivationField(Activation.returnPlace.offsetof),
+                inlineResultMayBeNull))
+            return false;
         jmpTo(instructions.length);
         return true;
     }
@@ -2123,20 +2137,9 @@ private struct Gen {
         a.alu(Alu.cmp, 8, R11, Mem(ACTIVE, Activation.cleanupMark.offsetof));
         const cleanup = jccLocal(CC_NE);
 
-        if (hasValue && ins.width != 0) {
-            Mem source;
-            if (!opnd(ins.source, SC2, source))
-                return false;
-            a.ld(8, R11, Mem(ACTIVE, Activation.returnPlace.offsetof));
-            a.aluRI(Alu.cmp, 8, R11, 0);
-            const discard = jccLocal(CC_E);
-            a.lea(RAX, source);
-            a.aluRR(Alu.cmp, 8, RAX, R11);
-            const aliased = jccLocal(CC_E);
-            copyChunks(source, Mem(R11, 0), ins.width);
-            patchHere(aliased);
-            patchHere(discard);
-        }
+        if (hasValue && ins.width != 0 && !emitReturnValue(ins,
+                Mem(ACTIVE, Activation.returnPlace.offsetof), true))
+            return false;
 
         a.ld(8, RAX, Mem(ACTIVE, Activation.frameMark.offsetof));
         a.alu(Alu.add, 8, RAX, Mem(R9, FrameStack.baseOffset));
@@ -2150,6 +2153,26 @@ private struct Gen {
         patchHere(root);
         patchHere(cleanup);
         jumpToHandler(i, original);
+        return true;
+    }
+
+    bool emitReturnValue(in Instruction ins, in Mem place, bool mayBeNull) {
+        Mem source;
+        if (!opnd(ins.source, SC2, source))
+            return false;
+        a.ld(8, R11, place);
+        size_t discard;
+        if (mayBeNull) {
+            a.aluRI(Alu.cmp, 8, R11, 0);
+            discard = jccLocal(CC_E);
+        }
+        a.lea(RAX, source);
+        a.aluRR(Alu.cmp, 8, RAX, R11);
+        const aliased = jccLocal(CC_E);
+        copyChunks(source, Mem(R11, 0), ins.width);
+        patchHere(aliased);
+        if (mayBeNull)
+            patchHere(discard);
         return true;
     }
 
