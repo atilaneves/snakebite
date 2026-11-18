@@ -355,25 +355,37 @@ public struct CallSite {
         @setBy("rememberIndirectTarget")
         package IndirectTarget[maxIndirectTargets - 1] moreIndirectTargets;
 
+        // Keep the destination in process-private memory so a child can
+        // link new code without changing the parent's dispatch.
+        @unsaved package const(ubyte)* lateWindowEntry;
+
         pragma(inline, true)
-        private void rememberIndirectTarget(const(void)* entry,
+        private size_t rememberIndirectTarget(bool link = false)(const(void)* entry,
             const(Function)* callee, in ptrdiff_t adjustment,
         ) const {
             import core.atomic: atomicLoad, MemoryOrder;
 
-            if (atomicLoad!(MemoryOrder.raw)(
-                    moreIndirectTargets[$ - 1].callee) !is null)
-                return;
-            const first = (cast(IndirectTarget*) &indirectTarget)
-                .remember(entry, callee, adjustment);
-            if (first is null || first is entry)
-                return;
-            foreach (ref target; moreIndirectTargets) {
-                const observed = (cast(IndirectTarget*) &target)
+            static if (!link)
+                if (atomicLoad!(MemoryOrder.raw)(
+                        moreIndirectTargets[$ - 1].callee) !is null)
+                    return maxIndirectTargets;
+            foreach (index; 0 .. maxIndirectTargets) {
+                const target = indirectTargetAt(index);
+                const observed = (cast(IndirectTarget*) target)
                     .remember(entry, callee, adjustment);
-                if (observed is null || observed is entry)
-                    return;
+                if (observed is entry)
+                    return index;
+                if (observed is null)
+                    break;
             }
+            return maxIndirectTargets;
+        }
+
+        package const(IndirectTarget)* indirectTargetAt(size_t index)
+            const return pure @safe nothrow @nogc
+        {
+            return index == 0 ? &indirectTarget
+                : &moreIndirectTargets[index - 1];
         }
     }
 
@@ -2038,7 +2050,7 @@ public alias opCallIndirectWindowDiscard =
 // call. Any other value, and a callee that the window does not fit, take
 // `opCallSlow`, which reads the arguments from the window.
 private const(Instruction)* callIndirectWindow(Destination destination,
-    bool counted = false)(
+    bool counted = false, bool link = false)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2062,12 +2074,42 @@ private const(Instruction)* callIndirectWindow(Destination destination,
         return opCallSlow!counted(pc, active, state, frame, r0, fp0);
     }
 
-    static if (jitSupported && chainedDispatch && counted)
-        site.rememberIndirectTarget(address, callee, adjustment);
+    static if (jitSupported && chainedDispatch && counted) {
+        const index = site.rememberIndirectTarget!link(address, callee,
+            adjustment);
+        static if (link)
+            if (index != CallSite.maxIndirectTargets)
+                linkIndirectWindow(pc, active.function_, site, index,
+                    destination);
+    }
 
     return enterWindow!(destination, true, counted)(
         pc, active, state, frame, r0, fp0, site, &callee.windowFacts, callee,
         adjustment);
+}
+
+static if (jitSupported && chainedDispatch) {
+    package Instruction.Handler indirectWindowFallback(bool link)(
+        Destination destination,
+    ) nothrow @nogc {
+        final switch (destination) with (Destination) {
+            static foreach (kind; EnumMembers!Destination)
+                case kind: return &callIndirectWindow!(kind, true, link);
+        }
+    }
+
+    pragma(inline, false)
+    private void linkIndirectWindow(const(Instruction)* pc,
+        const(Function)* caller, const(CallSite)* site, size_t index,
+        Destination destination,
+    ) nothrow @nogc {
+        if (GC.inFinalizer)
+            return;
+        auto lock = JitLock.tryTake(*(cast(Function*) caller).jit);
+        if (lock.held && lock.jitUsable)
+            lock.state.linkWindow(pc, site, index, destination,
+                caller.jitName.length != 0);
+    }
 }
 
 // Links the activation of `fast.callee` in the window of `site` and enters

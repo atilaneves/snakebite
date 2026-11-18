@@ -272,7 +272,8 @@ private enum : ubyte {
 // What the JIT keeps from one compile to the next. It belongs to the JIT lock
 // of its `JitInstance`: only `JitLock.owned` gives access to it.
 package struct JitState {
-    import snakebite.backends.bytecode.vm: Function, Instruction;
+    import snakebite.backends.bytecode.vm:
+        CallSite, Destination, Function, Instruction, chainedDispatch;
 
     @nogc nothrow:
 
@@ -302,6 +303,60 @@ package struct JitState {
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
+    }
+
+    static if (chainedDispatch)
+    void linkWindow(const(Instruction)* pc, const(CallSite)* site,
+        size_t index, Destination destination, in bool mapCode,
+    ) {
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import snakebite.backends.bytecode.vm: indirectWindowFallback;
+
+        auto slot = cast(shared(size_t)*) &site.lateWindowEntry;
+        const previous = cast(const(ubyte)*)
+            atomicLoad!(MemoryOrder.acq)(*slot);
+        const linked = previous is null ? 0 : previous[-1];
+        const bit = 1u << index;
+        if (linked & bit)
+            return;
+
+        auto arm = Gen.readIndirectArm(*site.indirectTargetAt(index));
+        if (!Gen.encodableWindowArm(arm))
+            return;
+
+        enum reserve = codeAlignment + Gen.windowArmBytes
+            + 2 * Gen.handlerJumpBytes;
+        if (region.chunkCapacity - region.chunkUsed < reserve
+                && !region.newChunk(chunkSize))
+            return;
+        const start = region.chunkUsed + codeAlignment;
+        Gen g;
+        g.a.buf = region.writeBase + start;
+        const op = JitOp.CallWindow(destination, counted: true, indirect: true);
+        if (!g.emitCallWindowArm(pc, *pc, op, site, arm))
+            return;
+        g.patchHere(arm.mismatch);
+        if (previous is null)
+            g.jumpToOriginal(pc, indirectWindowFallback!true(destination));
+        else {
+            g.a.movI(RAX, cast(size_t) previous);
+            g.a.jmpRax;
+        }
+        g.patchHere(arm.grow);
+        g.patchHere(arm.tierUp);
+        g.jumpToOriginal(pc, indirectWindowFallback!false(destination));
+
+        // The byte before the entry indexes the cache records already linked.
+        // No caller can enter the new arm until the release store below.
+        g.a.buf[-1] = cast(ubyte) (linked | bit);
+        region.chunkUsed = (start + g.a.n + codeAlignment - 1)
+            & ~(codeAlignment - 1UL);
+        if (region.chunkUsed + populateSize / 4 > region.populatedEnd)
+            region.populate;
+        const code = region.execBase + start;
+        if (mapCode)
+            perfMap.record(code, g.a.n, "late-guest-window");
+        atomicStore!(MemoryOrder.rel)(*slot, cast(size_t) code);
     }
 
     Emitted emitFunction(Function* function_,
@@ -729,7 +784,7 @@ private enum populateSize = 1UL << 17;
 private enum codeAlignment = 16;
 // The most that the code of one instruction can need. Emission checks this much
 // room before each instruction.
-private enum maximumBytesPerInstruction = 1088;
+private enum maximumBytesPerInstruction = 1152;
 // Druntime and Phobos declare none of these: no `memfd_create`, no
 // `MFD_CLOEXEC`, no `MADV_POPULATE_*`, and `core.sys.linux.sys.mman` declares
 // `madvise` only when `_DEFAULT_SOURCE` is true, which it is not for glibc.
@@ -1727,9 +1782,10 @@ private struct Gen {
     // The reservation also covers the fallback and any FP seed loads.
     private enum windowArmBytes = 23 + 35 + 40 + 71 + 31 + 51;
     private enum handlerJumpBytes = 22;
+    private enum lateDispatchBytes = 25 + handlerJumpBytes;
     private enum fpSeedBytes = 8 * FpSlots.count;
     static assert(CallSite.maxIndirectTargets * windowArmBytes
-        + handlerJumpBytes + fpSeedBytes <= maximumBytesPerInstruction);
+        + handlerJumpBytes + lateDispatchBytes + fpSeedBytes <= maximumBytesPerInstruction);
     static assert(Activation.sizeof <= byte.max + 1
         && Instruction.sizeof <= byte.max
         && FrameStack.fastEndOffset <= byte.max
@@ -1753,14 +1809,14 @@ private struct Gen {
             return false;
 
         WindowArm[CallSite.maxIndirectTargets] arms;
-        auto count = 1;
+        size_t count;
+        const link = op.indirect && op.counted && inlineCaller is null;
         if (op.indirect) {
             static if (chainedDispatch) {
                 if (site.calleeSlotOffset > int.max)
                     return false;
-                arms[0] = readIndirectArm(site.indirectTarget);
-                foreach (ref const target; site.moreIndirectTargets) {
-                    const arm = readIndirectArm(target);
+                foreach (index; 0 .. CallSite.maxIndirectTargets) {
+                    const arm = readIndirectArm(*site.indirectTargetAt(index));
                     if (arm.entry is null)
                         break;
                     if (encodableWindowArm(arm))
@@ -1774,10 +1830,10 @@ private struct Gen {
                     *cast(shared(uint)*) &fast.state)
                     != CallSite.FastCall.State.ready)
                 return false;
-            arms[0] = WindowArm(fast.callee, fast);
+            arms[count++] = WindowArm(fast.callee, fast);
+            if (!encodableWindowArm(arms[0]))
+                return false;
         }
-        if (!encodableWindowArm(arms[0]))
-            return false;
 
         size_t end;
         foreach (ref arm; arms[0 .. count]) {
@@ -1785,17 +1841,32 @@ private struct Gen {
             if (!expandWindows || !emitWindowBody(i, op, site, arm)) {
                 if (inlineCaller !is null)
                     continue;
-                if (!emitCallWindowArm(i, op, site, arm))
+                if (!emitCallWindowArm(&instructions[i], snapshot[i], op,
+                        site, arm))
                     return false;
             }
             if (end != 0 && op.indirect)
                 patchTo(arms[end - 1].mismatch, previous);
             arms[end++] = arm;
         }
-        if (!end)
+        if (!end && !link)
             return false;
-        if (op.indirect)
+        if (op.indirect && end)
             patchHere(arms[end - 1].mismatch);
+        static if (chainedDispatch) {
+            import snakebite.backends.bytecode.vm: indirectWindowFallback;
+
+            if (link) {
+                // An x86 load acquires the destination published by the linker.
+                a.movI(RAX, cast(size_t) &site.lateWindowEntry);
+                a.ld(8, RAX, Mem(RAX, 0));
+                a.aluRI(Alu.cmp, 8, RAX, 0);
+                const uncached = jccLocal(CC_E);
+                a.jmpRax;
+                patchHere(uncached);
+                jumpToHandler(i, indirectWindowFallback!true(op.destination));
+            }
+        }
         foreach (ref const arm; arms[0 .. end]) {
             patchHere(arm.grow);
             if (op.counted)
@@ -1918,13 +1989,13 @@ private struct Gen {
         a.movRR64(ACTIVE, R11);
     }
 
-    bool emitCallWindowArm(size_t i, in JitOp.CallWindow op,
-        const(CallSite)* site, ref WindowArm arm)
+    bool emitCallWindowArm(const(Instruction)* pc, in Instruction ins,
+        in JitOp.CallWindow op, const(CallSite)* site, ref WindowArm arm)
     {
         emitWindowChecks(op, site, arm);
-        if (!prepareWindow(snapshot[i], op, site, arm))
+        if (!prepareWindow(ins, op, site, arm))
             return false;
-        activateWindow(&instructions[i], arm.callee, arm.fast);
+        activateWindow(pc, arm.callee, arm.fast);
         jumpToLive(arm.callee.instructions.ptr);
         return true;
     }
@@ -2236,13 +2307,17 @@ private struct Gen {
             jumpToLive(&instructions[i]);
             return;
         }
+        jumpToOriginal(&instructions[i], handler);
+    }
+
+    void jumpToOriginal(const(Instruction)* pc, Instruction.Handler handler) {
         // The unchained dispatcher gets its register arguments from the state.
         static if (!chainedDispatch) {
             a.st(8, Mem(STATE, DispatchState.r0.offsetof), REG0);
             a.sse(doublePrefix, storeOpcode, fp0Register,
                 Mem(STATE, DispatchState.fp0.offsetof));
         }
-        a.movI(PCREG, cast(size_t) &instructions[i]);
+        a.movI(PCREG, cast(size_t) pc);
         a.movI(RAX, cast(size_t) handler);
         a.jmpRax;
     }

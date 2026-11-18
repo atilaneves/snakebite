@@ -125,6 +125,13 @@ static foreach (backend; Matrix!()) {
                 // The pointer call lets invoke tier up even if the direct
                 // call is inlined into main.
                 auto indirectInvoke = &invoke;
+                foreach (round; 0 .. 1024L) {
+                    assert(invoke(operations[0], round) == round + 17);
+                    assert(indirectInvoke(operations[0], round) == round + 17);
+                }
+
+                // The later calls add targets, change the current receiver,
+                // and exceed the number of targets the call can remember.
                 foreach (round; 0 .. 3072L) {
                     const index = round % operations.length;
                     long[6] expected = [
