@@ -323,12 +323,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return result;
     }
 
-    package bool hasNativeSymbol(FuncDeclaration function_) {
-        return _world.plans.hasNativeSymbol(function_);
-    }
-
-    package bool hasIndependentNativeSymbol(FuncDeclaration function_) {
-        return _world.plans.hasIndependentNativeSymbol(function_);
+    package bool isDefinedElsewhere(FuncDeclaration function_) const {
+        return _program.isDefinedElsewhere(function_);
     }
 
     package bool isGuestFunction(FuncDeclaration function_) const {
@@ -9125,10 +9121,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto type = typeFunctionOf(callee);
 
-        const hasNativeSymbol = _bytecode.hasNativeSymbol(callee);
         const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
-            callee, &_bytecode.isGuestFunction, hasNativeSymbol,
-            _bytecode.hasIndependentNativeSymbol(callee),
+            callee, &_bytecode.isDefinedElsewhere,
         ), site);
         final switch (decision.route) with (CallSelection.Route) {
         case native:
@@ -9337,9 +9331,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
         const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
-            callee, &_bytecode.isGuestFunction,
-            _bytecode.hasNativeSymbol(callee),
-            _bytecode.hasIndependentNativeSymbol(callee),
+            callee, &_bytecode.isDefinedElsewhere,
         ), site);
         if (decision.route != CallSelection.Route.guest)
             return size_t.max;

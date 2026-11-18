@@ -46,7 +46,7 @@ public imported!"dmd.dstruct".StructDeclaration findStruct(
 // root-owned guest code apart from a called dependency (docs/adr/0009).
 //
 // `rootModules` is a set the caller builds once, not the root module list
-// itself: `Program.isInterpreted` asks this question again for every
+// itself: `Program.isRootOwned` asks this question again for every
 // guest call the interpreter dispatches, so an `O(1)` lookup keyed by
 // module beats a linear scan repeated that often. A one-time frontend
 // walk, such as the inline-asm load check, pays the same small cost to
@@ -57,6 +57,71 @@ public bool isRootOwned(
     in bool[imported!"dmd.dmodule".Module] rootModules,
 ) {
     return (moduleOf(declaration) in rootModules) !is null;
+}
+
+// Whether another object defines `declaration`, as the linker of a native
+// build sees it: a declaration with no body or an `extern` one, and each
+// declaration of a dependency module that its archive defines (ADR-0009).
+// Such a declaration is native code or native data, and a missing symbol for
+// it is a link error, never a reason to use the body. The program defines
+// the rest: what a root module declares, a function literal, and what a
+// template instance holds, because a native build emits an instance into the
+// object that uses it. The exception is an instance whose body no backend
+// executes: the dependency image holds it (ADR-0009, decision 1). What is
+// nested in a function (its static locals and nested functions) is defined
+// where that function is: in the archive for a function of a dependency that
+// is not in a template instance. The answer comes from the declaration
+// alone, never from a loaded image, so a compile with no image gives the same
+// answer.
+public bool isDefinedElsewhere(
+    imported!"dmd.dsymbol".Dsymbol declaration,
+    in bool[imported!"dmd.dmodule".Module] rootModules,
+) {
+    import dmd.astenums: STC;
+
+    auto function_ = declaration.isFuncDeclaration;
+    if (function_ !is null && function_.fbody is null)
+        return true;
+    if (auto named = declaration.isDeclaration)
+        if (named.storage_class & STC.extern_)
+            return true;
+    if (isRootOwned(declaration, rootModules))
+        return false;
+
+    auto owner = function_ is null ? ownerOf(declaration)
+        : Owner(contextOf(function_).outerFunction,
+            contextOf(function_).instantiated);
+    // What is nested in a function is defined where that function is.
+    if (owner.outer !is null)
+        return isDefinedElsewhere(owner.outer, rootModules);
+    if (function_ is null)
+        return !owner.instantiated;
+    if (function_.isFuncLiteralDeclaration !is null)
+        return false;
+    return !owner.instantiated || !backendExecutes(function_);
+}
+
+private struct Owner {
+    imported!"dmd.func".FuncDeclaration outer;
+    bool instantiated;
+}
+
+// As `contextOf`, for a declaration that is not a function.
+private Owner ownerOf(imported!"dmd.dsymbol".Dsymbol declaration) {
+    import snakebite.frontend.lock: withCompilerQuery;
+    import snakebite.memory.gc: insideFrontend;
+
+    Owner owner() {
+        return Owner(outerFunctionOf(declaration),
+            declaration.isInstantiated !is null);
+    }
+
+    if (insideFrontend)
+        return owner;
+
+    Owner result;
+    withCompilerQuery({ result = owner; });
+    return result;
 }
 
 // Arena lifetime does not make parent links immutable. scopeCreateGlobal
@@ -209,20 +274,6 @@ private ref ThreadMetadata metadata() {
     if (_metadata.generation != generation)
         _metadata = ThreadMetadata(generation);
     return _metadata;
-}
-
-// ImportC parses imported definitions even when the source list excludes
-// their module. Header declarations share that module's source selection.
-// D dependency bodies remain available for exact-symbol fallback.
-public bool bodyIsSelected(
-    const(imported!"dmd.dmodule".Module) module_,
-    in bool rootOwned,
-) {
-    import dmd.astenums: FileType;
-
-    if (rootOwned)
-        return true;
-    return module_ is null || module_.filetype != FileType.c;
 }
 
 // `function_`'s type as the function type it must be. A `FuncDeclaration`

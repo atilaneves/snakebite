@@ -28,6 +28,10 @@ static foreach (rootOwned; [true, false]) {
                 assert(*available, "ownership queried after preparation");
                 return rootOwned;
             }
+            bool isDefinedElsewhere(Dsymbol) const {
+                assert(*available, "ownership queried after preparation");
+                return !rootOwned;
+            }
         }
         bool available = true;
         auto ownership = Ownership(&available);
@@ -43,6 +47,7 @@ static foreach (rootOwned; [true, false]) {
         auto data = NativeData(
             &store,
             &ownership.isRootOwned,
+            &ownership.isDefinedElsewhere,
             (declaration) => declaration,
             (declaration) => cast(void*) &nativeValue,
             (name) => cast(void*) null,

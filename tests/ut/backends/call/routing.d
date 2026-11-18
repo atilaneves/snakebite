@@ -2,9 +2,8 @@ module ut.backends.call.routing;
 
 
 // A root-owned callee is interpreted. A non-root declaration uses native
-// code when that code exists; a callee with no native symbol uses the exact
-// body DMD produced for it. Names and packages do not
-// decide how a call runs.
+// code, and a missing native symbol for it is an error. Names and packages
+// do not decide how a call runs.
 
 
 import ut.backends;
@@ -82,50 +81,193 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// ADR-0009 keeps a dependency's own body when its exact native symbol is
-// absent. Direct calls and callable addresses must select that same body,
-// including a D dependency body with C linkage.
-static foreach (backend; Matrix!()) {
-    @("nonRootOwned.missingNativeUsesOwnBody." ~ backend.stringof)
+// ADR-0009, decision 3: a dependency function with no native symbol is an
+// error for the missing symbol, with or without a body, as the link of a
+// native build reports it. No archive holds `routing_helper`. A direct call
+// and the address of the function each end with an error that names the
+// symbol; the body, which would answer 42, does not run.
+private enum missingHelperModule = q{
+    module routing_helper;
+    int fortyTwo() { return 42; }
+    extern(C) int cFortyTwo() { return 42; }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a missing symbol fails the native link before a test can run"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE runs each body from source and calls no native code"),
+)) {
+    @("nonRootOwned.missingNativeIsAnError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto modules = parseSnippets([
+            q{
+                module routing_root;
+                import routing_helper;
+                int direct() { return fortyTwo(); }
+                int cDirect() { return cFortyTwo(); }
+                int address() {
+                    auto pointer = &fortyTwo;
+                    return pointer();
+                }
+            },
+            missingHelperModule,
+        ]);
+        auto program = Program([modules[0]]);
+        auto backend_ = ownedBackend!backend(program);
+
+        static foreach (entry; [
+            ["direct", "_D14routing_helper8fortyTwoFZi"],
+            ["cDirect", "`cFortyTwo`"],
+            ["address", "_D14routing_helper8fortyTwoFZi"],
+        ]) {{
+            int result;
+            const thrown = backend_
+                .call(findFunction(modules[0], entry[0]), &result, [])
+                .shouldThrow;
+            entry[1].should.be in thrown.msg;
+        }}
+    }
+}
+
+
+// ADR-0009, decision 3 holds for data and class information too: a variable
+// or a class of a dependency that the process does not have is an error that
+// names the symbol, not a reason to use the program's own copy. No archive
+// holds `routing_data`.
+private enum missingDataModule = q{
+    module routing_data;
+    __gshared int sharedValue = 3;
+    int threadValue = 4;
+    class Missing { int field; }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a missing symbol fails the native link before a test can run"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE runs each body from source and reads no native data"),
+)) {
+    @("nonRootOwned.missingNativeDataIsAnError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto modules = parseSnippets([
+            q{
+                module routing_data_root;
+                import routing_data;
+                int readShared() { return sharedValue; }
+                int readThread() { return threadValue; }
+                int makeClass() { return (new Missing).field; }
+            },
+            missingDataModule,
+        ]);
+        auto backend_ = ownedBackend!backend(Program([modules[0]]));
+
+        static foreach (entry; [
+            ["readShared", "sharedValue"],
+            ["readThread", "threadValue"],
+            ["makeClass", "7Missing7__ClassZ"],
+        ]) {{
+            int result;
+            const thrown = backend_
+                .call(findFunction(modules[0], entry[0]), &result, [])
+                .shouldThrow;
+            entry[1].should.be in thrown.msg;
+            "it is not in this process".should.be in thrown.msg;
+        }}
+    }
+}
+
+
+// What is nested in a function is defined where that function is: another
+// object defines the static locals of a dependency function that is not in a
+// template instance. The program defines those of a function of its own.
+@("isDefinedElsewhere.nestedInAFunction")
+unittest {
+    import snakebite.frontend.ast: Identifier;
+
+    auto modules = parseSnippets([
+        q{
+            module nested_root;
+            int own() { static int counter; return ++counter; }
+        },
+        q{
+            module nested_dep;
+            int plain() { static int counter; return ++counter; }
+        },
+    ]);
+    auto program = Program([modules[0]]);
+
+    auto local(typeof(findFunction(modules[0], "own")) function_) {
+        return function_.localsymtab.lookup(Identifier.idPool("counter"));
+    }
+    auto plain = findFunction(modules[1], "plain");
+
+    program.isDefinedElsewhere(local(findFunction(modules[0], "own")))
+        .should == false;
+    program.isDefinedElsewhere(local(plain)).should == true;
+}
+
+
+// The native copy of `variadicInstanceModule`'s template instance below. The
+// process has it, and its answer differs from the body's, so a call that
+// reaches it is told apart from one that runs the body.
+private extern(C) int snakebite_ut_variadic_instance_sum(int first, ...) {
+    return first + 5000;
+}
+
+private enum variadicInstanceModule = q{
+    module variadic_instance_dep;
+    struct Holder(T) {
+        pragma(mangle, "snakebite_ut_variadic_instance_sum")
+        extern(C) static int sum(int first, ...) {
+            return first + 1000;
+        }
+    }
+};
+
+// A C-variadic function of a dependency template instance has one meaning,
+// whether it is called directly or through its address: the body runs
+// (ADR-0009, decision 1), even when the process holds a copy of the instance.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not run C-style variadic functions"),
+)) {
+    @("instanceVariadic.directAndAddressAgree." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         static if (is(backend == Native)) {
-            int fortyTwo() { return 42; }
-            extern(C) int cFortyTwo() { return 42; }
-            const direct = fortyTwo();
-            auto pointer = &fortyTwo;
-            direct.should == 42;
-            pointer().should == 42;
-            cFortyTwo().should == 42;
-            auto cPointer = &cFortyTwo;
-            cPointer().should == 42;
+            extern(C) int sum(T)(T first, ...) { return first + 1000; }
+
+            const direct = sum!int(1, 2);
+            extern(C) int function(int, ...) pointer = &sum!int;
+            direct.should == 1001;
+            pointer(1, 2).should == 1001;
         } else {
             auto modules = parseSnippets([
                 q{
-                    module routing_root;
-                    import routing_helper;
-                    int answer() {
-                        assert(fortyTwo() == 42);
-                        assert(cFortyTwo() == 42);
-                        auto cPointer = &cFortyTwo;
-                        assert(cPointer() == 42);
-                        auto pointer = &fortyTwo;
-                        return pointer();
+                    module variadic_instance_root;
+                    import variadic_instance_dep: Holder;
+
+                    int direct() {
+                        return Holder!int.sum(1, 2);
+                    }
+                    int address() {
+                        extern(C) int function(int, ...) pointer =
+                            &Holder!int.sum;
+                        return pointer(1, 2);
                     }
                 },
-                q{
-                    module routing_helper;
-                    int fortyTwo() { return 42; }
-                    extern(C) int cFortyTwo() { return 42; }
-                },
+                variadicInstanceModule,
             ]);
-            auto program = Program([modules[0]]);
-            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = ownedBackend!backend(Program([modules[0]]));
 
-            int result;
-            auto backend_ = ownedBackend!backend(program);
-            backend_.call(function_, &result, []);
-            result.should == 42;
+            foreach (name; ["direct", "address"]) {
+                int result;
+                backend_.call(findFunction(modules[0], name), &result, []);
+                result.should == 1001;
+            }
         }
     }
 }

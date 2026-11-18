@@ -68,15 +68,17 @@ public struct StaticWorld {
     ) {
         _program = program;
         _backend = backend;
-        plans = PlanCache(planStore, &_program.isRootOwned);
+        plans = PlanCache(planStore);
         callSelection.linksFunctions = program.definesLinkableFunctions;
         data = NativeData(store, &_program.isRootOwned,
+            &_program.isDefinedElsewhere,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
             &classRuntimeInfo, (type) => types.get(type),
             backend.blocksOf, &callableKind);
         types = RuntimeTypes(&_program.isRootOwned,
+            &_program.isDefinedElsewhere,
             (name) => plans.resolve(name),
             &callableAddress,
             &classRuntimeInfo, &data);
@@ -142,16 +144,13 @@ public struct StaticWorld {
             return null;
 
         const(void)* word;
-        const hasNativeSymbol = plans.hasNativeSymbol(method);
-        if (callSelection.usesNativeVariadicAddress(method, hasNativeSymbol))
+        if (callSelection.usesNativeVariadicAddress(
+                method, &isDefinedElsewhere))
             return plans.addressOf(method);
-        if (callSelection.usesGuestBody(method,
-                (callee) => _program.isInterpreted(callee),
-                hasNativeSymbol,
-                plans.hasIndependentNativeSymbol(method))) {
+        if (callSelection.usesGuestBody(method, &isDefinedElsewhere)) {
             word = _backend.guestWord(method);
             if (callSelection.storesGuestWord(
-                    method, hasNativeSymbol, adjustment))
+                    method, &isDefinedElsewhere, adjustment))
                 return cast(void*) word;
         }
         auto address = plans.callableAddress(word, method, adjustment);
@@ -160,6 +159,10 @@ public struct StaticWorld {
         if (adjustment == 0 && _backend.addressGiven !is null)
             _backend.addressGiven(method, address);
         return address;
+    }
+
+    private bool isDefinedElsewhere(FuncDeclaration function_) const {
+        return _program.isDefinedElsewhere(function_);
     }
 
     // What `callableAddress` returned: a guest function, the callback entry

@@ -72,7 +72,7 @@ public abstract class Backend {
     import snakebite.frontend.ast: FuncDeclaration;
 
     // The program this backend runs. Whether a callee is interpreted or
-    // called natively is the program's one decision (`isInterpreted`),
+    // called natively is the program's one decision (`isDefinedElsewhere`),
     // so every backend is constructed knowing which program it runs.
     protected const Program _program;
 

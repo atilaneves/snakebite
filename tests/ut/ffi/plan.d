@@ -122,62 +122,29 @@ unittest {
 }
 
 
-// Nothing but `bin/ut` itself defines this symbol: no dependency image, no
-// separately loaded shared object. `CallSelection.buildDecision`
-// (`snakebite.language.call.selection`) asks `hasIndependentNativeSymbol`, never
-// `hasNativeSymbol`, for a template instance, precisely so a guest call
-// through one never reuses this process's own copy - the mismatch that
-// broke a guest program's own `dirEntries` call against `bin/sb`'s
-// instantiation of the same template (docs/adr/0008, docs/adr/0009).
+// Nothing but `bin/ut` itself defines this symbol.
 private extern(C) int snakebite_ut_plan_executable_only_target() {
     return 91;
 }
 
-@("hasIndependentNativeSymbol.excludesExecutableOnlyAnswer")
+// A declaration names native code that this process has; a symbol it lacks
+// is reported as missing.
+@("hasNativeSymbol.findsTheSymbolOfADeclaration")
 unittest {
-    auto guestModule = parseSnippet(q{
-        pragma(mangle, "snakebite_ut_plan_executable_only_target")
-        extern(C) int target();
-    });
-    auto function_ = findFunction(guestModule, "target");
-    assert(function_ !is null, "No function `target` in the guest program");
-
-    mixin planCache;
-    cache.hasNativeSymbol(function_).should == true;
-    cache.hasIndependentNativeSymbol(function_).should == false;
-}
-
-
-// A function the program defines has no native copy, even when the process
-// has a symbol of the same linker name; a declaration without a body still
-// names native code.
-@("hasNativeSymbol.rootBodyIsNotNativeButRootDeclarationIs")
-unittest {
-    import snakebite.frontend.dmd.functions: moduleOf;
-
     auto guestModule = parseSnippet(q{
         pragma(mangle, "snakebite_ut_plan_executable_only_target")
         extern(C) int declared();
 
-        pragma(mangle, "snakebite_ut_plan_executable_only_target")
-        extern(C) int defined() { return 1; }
+        pragma(mangle, "snakebite_ut_plan_missing_symbol")
+        extern(C) int missing();
     });
     auto declared = findFunction(guestModule, "declared");
-    auto defined = findFunction(guestModule, "defined");
-    assert(declared !is null && defined !is null);
+    auto missing = findFunction(guestModule, "missing");
+    assert(declared !is null && missing !is null);
 
-    static struct Ownership {
-        typeof(guestModule) root;
-        bool owns(imported!"snakebite.frontend.ast".Dsymbol symbol) const {
-            return moduleOf(symbol) is root;
-        }
-    }
-    const ownership = Ownership(guestModule);
-    auto planStore = CallPlanStore(null);
-    auto cache = PlanCache(&planStore, &ownership.owns);
+    mixin planCache;
     cache.hasNativeSymbol(declared).should == true;
-    cache.hasNativeSymbol(defined).should == false;
-    cache.hasIndependentNativeSymbol(defined).should == false;
+    cache.hasNativeSymbol(missing).should == false;
 }
 
 

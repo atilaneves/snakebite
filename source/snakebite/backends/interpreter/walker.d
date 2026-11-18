@@ -287,8 +287,8 @@ private struct Shared {
     import snakebite.native.value: BitfieldAccess;
     import snakebite.host.sharedtable: SharedTable;
 
-    // The program being run: its `isInterpreted` is the one decision for
-    // whether a callee is walked or called natively.
+    // The program being run: its `isDefinedElsewhere` is the one decision
+    // for whether a callee is walked or called natively.
     const Program program;
     // Declared before what points into it, so that it is destroyed after.
     // The interpreter keeps its own signatures, and uses this for the store
@@ -578,8 +578,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private CStack!ActiveExceptionScope _activeExceptionScopes;
     private CStack!ExceptionCandidate _candidateScratch;
     package RuntimeTypes* _runtimeTypes;
-    // The program being run: its `isInterpreted` is the one decision for
-    // whether a callee is walked here or called natively, made on every
+    // The program being run: its `isDefinedElsewhere` is the one decision
+    // for whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
     package const Program _program;
     // How to reach each already-compiled function this guest calls,
@@ -981,14 +981,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         version(unittest) ++_foreignNameLookups;
     }
 
-    private bool hasNativeSymbol(FuncDeclaration function_) {
-        return _plans.hasNativeSymbol(function_);
-    }
-
-    private bool hasIndependentNativeSymbol(FuncDeclaration function_) {
-        return _plans.hasIndependentNativeSymbol(function_);
-    }
-
     // `function_`'s frame layout, from the shared table; computed on its
     // first call on any thread. The returned pointer stays valid and is
     // the same on every thread.
@@ -1006,9 +998,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private const(FrameLayout)* callLayoutOf(FuncDeclaration function_) {
         const decision = _callSelection.decisionOf(
             function_,
-            (callee) => _program.isInterpreted(callee),
-            hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_),
+            (callee) => _program.isDefinedElsewhere(callee),
         );
         return layoutOf(function_, decision.route == CallSelection.Route.guest
             ? LayoutKind.body : LayoutKind.parameters);
@@ -1259,9 +1249,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto body_ = function_.fbody;
         const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             function_,
-            (callee) => _program.isInterpreted(callee),
-            hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_),
+            (callee) => _program.isDefinedElsewhere(callee),
         ), callSite);
         if (!callbackEntry) final switch (decision.route)
             with (CallSelection.Route) {
@@ -1560,9 +1548,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private CallSelection.Decision decisionFor(FuncDeclaration function_) {
         return _callSelection.decisionOf(
             function_,
-            (callee) => _program.isInterpreted(callee),
-            hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_),
+            (callee) => _program.isDefinedElsewhere(callee),
         );
     }
 
@@ -2224,9 +2210,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         const decision = _callSelection.decisionOf(
             function_,
-            (callee) => _program.isInterpreted(callee),
-            hasNativeSymbol(function_),
-            hasIndependentNativeSymbol(function_),
+            (callee) => _program.isDefinedElsewhere(callee),
         );
         if (decision.route != CallSelection.Route.guest)
             return;
@@ -2265,9 +2249,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             calleeContextPlanOf(site.isCallExp, callee);
         const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             callee,
-            (function_) => _program.isInterpreted(function_),
-            hasNativeSymbol(callee),
-            hasIndependentNativeSymbol(callee),
+            (callee) => _program.isDefinedElsewhere(callee),
         ), site);
 
         if (decision.route == CallSelection.Route.guest
@@ -6791,9 +6773,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const destination = function_.fbody is null
             ? _callSelection.decisionOf(
                 function_,
-                (callee) => _program.isInterpreted(callee),
-                hasNativeSymbol(function_),
-                hasIndependentNativeSymbol(function_),
+                (callee) => _program.isDefinedElsewhere(callee),
             ).destinationParameter
             : size_t.max;
         _bindArguments(typeFunctionOf(function_), arguments, loc,
@@ -7365,7 +7345,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return typeFunctionOf(function_).parameterList.varargs
                 == VarArg.variadic
             && !_callSelection.isVariadicGuest(
-                function_, hasNativeSymbol(function_));
+                function_, (callee) => _program.isDefinedElsewhere(callee));
     }
 
     // The call plan depends on the types of the extra arguments at this

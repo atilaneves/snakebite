@@ -35,6 +35,7 @@ public struct NativeData {
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
     private bool delegate(Dsymbol) const _isRootOwned;
+    private bool delegate(Dsymbol) const _isDefinedElsewhere;
     private VarDeclaration delegate(VarDeclaration) _linkedVariable;
     // An `extern` variable's definition, found once for each variable.
     private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
@@ -83,6 +84,7 @@ public struct NativeData {
     public this(
         StaticStore* store,
         bool delegate(Dsymbol) const isRootOwned,
+        bool delegate(Dsymbol) const isDefinedElsewhere,
         VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
         ThreadLocalAddress threadLocalAddress,
@@ -92,6 +94,7 @@ public struct NativeData {
         FunctionKind functionKind = null,
     ) {
         _isRootOwned = isRootOwned;
+        _isDefinedElsewhere = isDefinedElsewhere;
         _linkedVariable = linkedVariable;
         _symbolAddress = symbolAddress;
         _threadLocalAddress = threadLocalAddress;
@@ -485,11 +488,9 @@ public struct NativeData {
     // (finding 1.3 - compiled D gives every thread its own copy of a
     // module-level or `static` local that is not `shared`/`__gshared`),
     // otherwise the one copy every thread shares. Native storage when
-    // the variable has it (`hasNativeStorage`); this program's own
+    // the variable has it (`storageKindOf`); this program's own
     // otherwise.
     public Placed storageOf(VarDeclaration declaration) {
-        import std.string: fromStringz;
-
         auto variable = definitionOf(declaration);
         if (auto found = variable in _statics)
             return *found;
@@ -499,13 +500,15 @@ public struct NativeData {
             return Placed(_store.tlsSlots.slotFor(
                 cast(const(TlsDescriptor)*) tlsDescriptorOf(variable).ptr));
 
-        if (hasNativeStorage(variable)) {
+        const kind = storageKindOf(variable);
+        if (kind != StorageKind.own) {
             // const would also make the referenced storage read-only here.
             auto address = _symbolAddress(variable);
             if (address !is null)
                 return *_statics.insert(
                     variable, Placed(address[0 .. facts.size]));
-            assert(!isExtern(variable), variable.toChars.fromStringz);
+            if (kind == StorageKind.native)
+                throw unresolved(variable);
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
@@ -554,7 +557,8 @@ public struct NativeData {
             }
             const facts = typeFacts(variable.type);
             string nativeName;
-            if (hasNativeStorage(variable)) {
+            const kind = storageKindOf(variable);
+            if (kind != StorageKind.own) {
                 import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
                 const name = nativeSymbolName(variable);
@@ -562,8 +566,8 @@ public struct NativeData {
                 // address is not the descriptor's to keep.
                 if (_threadLocalAddress(name) !is null)
                     nativeName = name;
-                else
-                    assert(!isExtern(variable), name);
+                else if (kind == StorageKind.native)
+                    throw unresolved(variable);
             }
             Placed template_;
             if (nativeName.length == 0)
@@ -613,16 +617,32 @@ public struct NativeData {
         return *_definitions.insert(variable, _linkedVariable(variable));
     }
 
-    // Whether `variable`'s storage is native rather than this program's
-    // own. An `extern` declaration's is by definition. A dependency's is
-    // too: a module dmd only reached through an `import` has its machine
-    // code in the dependency image, and its globals with it, and that
-    // code reads and writes them there. One storage per variable, or a
-    // native setter and an interpreted reader would each see their own.
-    // A dependency variable with no native symbol (a template instance
-    // only guest code made) keeps this program's own storage.
-    private bool hasNativeStorage(VarDeclaration variable) const {
-        return isExtern(variable) || !_isRootOwned(variable);
+    private enum StorageKind {
+        // Another object defines the variable: its storage is native, and a
+        // missing symbol is an error, as at the link of a native build. Native
+        // code reads and writes it there, so one storage serves both sides.
+        native,
+        own,
+        // The program defines it, and a dependency can define it too: a
+        // static variable of a template instance, or one nested in a
+        // function of one. A native build keeps one copy of it, so the
+        // native copy is used when the process has one.
+        nativeIfPresent,
+    }
+
+    private StorageKind storageKindOf(VarDeclaration variable) const {
+        if (_isDefinedElsewhere(variable))
+            return StorageKind.native;
+        return _isRootOwned(variable)
+            ? StorageKind.own : StorageKind.nativeIfPresent;
+    }
+
+    private static Exception unresolved(VarDeclaration variable) {
+        import snakebite.ffi.symbol: unresolvedSymbol;
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
+
+        return unresolvedSymbol(
+            nativeSymbolName(variable), variable.toString);
     }
 
     private static bool isExtern(VarDeclaration variable) {
