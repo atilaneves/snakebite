@@ -124,6 +124,7 @@ package struct JitOp {
         ubyte indexWidth;
         bool signed;
         bool constantValue;
+        bool sharedAccess;
     }
 
     // `width` is the size of the destination.
@@ -208,6 +209,7 @@ package struct JitOp {
 }
 
 package struct ObservedEdge {
+    package enum limit = 2048;
     package ushort pc;
     // A call enters the first instruction and a return resumes in its caller.
     package enum call = ushort.max;
@@ -423,7 +425,8 @@ package struct JitState {
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
 
-        const path = g.selectObservedPath(function_, ops, observed);
+        Gen.PathPlan loopPlan;
+        const path = g.selectObservedPath(function_, ops, observed, loopPlan);
         size_t pathJump;
         enum needsHandlerEntry = size_t.max;
         size_t handlerEntryCount;
@@ -536,7 +539,8 @@ package struct JitState {
         if (pathJump != 0) {
             const startOfPath = g.a.n;
             const target = g.emitObservedPath(cap, function_, path, ops,
-                originals) ? startOfPath : pathJump + int.sizeof;
+                originals, loopPlan.memory.saved ? &loopPlan : null)
+                ? startOfPath : pathJump + int.sizeof;
             if (target != startOfPath)
                 g.a.n = startOfPath;
             g.patchTo(pathJump, target);
@@ -2079,15 +2083,19 @@ private struct Gen {
     private enum pathDepth = 4;
 
     const(ObservedEdge)[] selectObservedPath(const(Function)* function_,
-        const(JitOp)[] ops, const(ObservedEdge)[] observed)
+        const(JitOp)[] ops, const(ObservedEdge)[] observed, ref PathPlan bestPlan)
     {
         if (observed.length == 0 || function_.returnPlace.offset != size_t.max)
             return null;
 
         size_t bestScore;
         const(ObservedEdge)[] best;
+        const(ObservedEdge)[] bestLoop;
+        size_t bestLoopScore;
+        PathPlan plan;
         foreach (start, edge; observed) {
-            if (edge.next != ObservedEdge.call)
+            const startsAtCall = edge.next == ObservedEdge.call;
+            if (!startsAtCall && ops[edge.pc].kind != JitOp.Kind.fused)
                 continue;
             ushort[pathDepth] resumes;
             size_t depth;
@@ -2097,7 +2105,7 @@ private struct Gen {
             size_t completedReturns;
             size_t expected = edge.pc;
             foreach (step; observed[start .. $]) {
-                if (length == pathBudget || step.pc != expected)
+                if ((startsAtCall && length == pathBudget) || step.pc != expected)
                     break;
                 const op = ops[step.pc];
                 if (step.next == ObservedEdge.call
@@ -2114,12 +2122,19 @@ private struct Gen {
                         break;
                     expected = resumes[--depth];
                     ++returns;
-                    if (!depth) {
+                    if (startsAtCall && !depth) {
                         finished = length + 1;
                         completedReturns = returns;
                     }
                 } else if (step.next < ops.length && pathOp(op)) {
                     expected = step.next;
+                    if (!startsAtCall && depth == 0 && step.next == edge.pc) {
+                        if (returns && op.kind == JitOp.Kind.jump) {
+                            finished = length + 1;
+                            completedReturns = returns;
+                        }
+                        break;
+                    }
                 } else
                     break;
                 ++length;
@@ -2128,22 +2143,60 @@ private struct Gen {
                 continue;
             const candidate = observed[start .. start + finished];
             size_t hits;
-            foreach (other, entry; observed[0 .. $ - finished + 1])
-                if (entry == edge && candidate == observed[other .. other + finished])
+            bool earlier;
+            foreach (other, entry; observed[0 .. $ - finished + 1]) {
+                if (entry == edge && candidate == observed[other .. other + finished]) {
+                    if (!startsAtCall && other < start) {
+                        earlier = true;
+                        break;
+                    }
                     ++hits;
+                }
+            }
+            if (earlier || hits < 2)
+                continue;
+            if (!startsAtCall) {
+                plan.guards.count = 0;
+                plan.memory = PathMemory.init;
+                if (!analyzePath(candidate, ops, plan, true))
+                    continue;
+                plan.memory = PathMemory.init;
+                plan.checked[0 .. finished] = PathChecked.init;
+                if (!analyzePath(candidate, ops, plan, false))
+                    continue;
+                if (!plan.checked[plan.memory.first].skipBounds)
+                    continue;
+                // Charge two instructions for each entry comparison and the
+                // range checks even when the cold exit will never be taken.
+                const guardCost = 36 + 2 * plan.guards.count;
+                const saved = plan.memory.saved;
+                if (saved <= guardCost)
+                    continue;
+                const loopScore = hits * (saved - guardCost);
+                if (loopScore > bestLoopScore) {
+                    bestLoopScore = loopScore;
+                    bestLoop = candidate;
+                    bestPlan = plan;
+                }
+                continue;
+            }
             const score = hits * completedReturns;
-            if (hits >= 2 && score >= bestScore
+            if (score >= bestScore
                     && (score > bestScore || candidate.length > best.length)) {
                 bestScore = score;
                 best = candidate;
             }
         }
+        if (bestLoopScore > bestScore)
+            return bestLoop;
+        bestPlan.memory.saved = 0;
         return best;
     }
 
     static bool pathOp(in JitOp op) {
         with (JitOp.Kind)
-            return op.kind == copy || op.kind == jump || op.kind == checked
+            return op.kind == copy || op.kind == jump
+                || (op.kind == checked && !op.checked.sharedAccess)
                 || (op.kind == int3 && !op.int3.resultInR0 && !op.int3.leftInR0)
                 || (op.kind == fused && !op.fused.leftInR0
                     && op.fused.kind != CompareKind.floating);
@@ -2171,6 +2224,483 @@ private struct Gen {
         size_t pc;
         int parent = -1;
         WindowArm arm;
+        int frameInWindow;
+    }
+
+    private struct PathPlace {
+        int offset;
+        bool window;
+
+        bool overlaps(PathPlace other, int width, int otherWidth) const @nogc nothrow {
+            return window == other.window
+                && offset < cast(long) other.offset + otherWidth
+                && other.offset < cast(long) offset + width;
+        }
+    }
+
+    private struct PathValue {
+        uint identity;
+        ubyte width;
+        ulong bits;
+
+        PathValue shifted(ulong difference) const @nogc nothrow {
+            const sum = bits + difference;
+            const mask = ulong.max >> ((ulong.sizeof - width) * 8);
+            return PathValue(identity, width, sum & mask);
+        }
+    }
+
+    private struct PathValues {
+        @nogc nothrow:
+        private struct Slot {
+            PathPlace place;
+            PathValue value;
+            bool entry;
+        }
+
+        Slot[2 * ObservedEdge.limit] slots = void;
+        size_t count;
+        uint nextIdentity = 1;
+
+        PathValue lookup(PathPlace place, ubyte width) {
+            bool entry = !place.window;
+            foreach_reverse (ref const slot; slots[0 .. count]) {
+                if (!place.overlaps(slot.place, width, slot.value.width))
+                    continue;
+                if (slot.place == place && slot.value.width == width)
+                    return slot.value;
+                entry = false;
+                break;
+            }
+            const value = PathValue(nextIdentity++, width);
+            if (!write(place, value, entry))
+                return PathValue.init;
+            return value;
+        }
+
+        PathValue current(PathPlace place, ubyte width) const {
+            foreach_reverse (ref const slot; slots[0 .. count]) {
+                if (!place.overlaps(slot.place, width, slot.value.width))
+                    continue;
+                if (slot.place == place && slot.value.width == width)
+                    return slot.value;
+                break;
+            }
+            return PathValue.init;
+        }
+
+        bool write(PathPlace place, PathValue value, bool entry = false) {
+            if (count == slots.length)
+                return false;
+            slots[count++] = Slot(place, value, entry);
+            return true;
+        }
+
+        bool entryPlace(PathValue value, out PathPlace place) const {
+            if (!value.identity)
+                return false;
+            foreach (ref const slot; slots[0 .. count]) {
+                if (slot.entry && slot.value.identity == value.identity) {
+                    place = slot.place;
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    bool pathWindowFrame(const(CallSite)* site, in WindowArm arm,
+        const(PathCall)[] calls, int parent, out int frame)
+    {
+        long offset = cast(long) site.windowDisp + arm.fast.frameOffset;
+        if (parent >= 0) {
+            const enclosing = calls[parent];
+            offset += cast(long) enclosing.frameInWindow + enclosing.arm.fast.windowBase
+                - enclosing.arm.fast.frameOffset;
+        }
+        if (offset < 0 || offset > int.max)
+            return false;
+        frame = cast(int) offset;
+        return true;
+    }
+
+    bool pathPlace(size_t raw, const(PathCall)[] calls, int pending,
+        out PathPlace place)
+    {
+        const inWindow = (raw & indirectBit) != 0;
+        if (inWindow && ((raw >> 32) & 0x7fff_ffff) != function_.windowSlot)
+            return false;
+        long offset = inWindow ? cast(uint) raw : cast(long) raw;
+        if (pending >= 0) {
+            const call = calls[pending];
+            offset += call.frameInWindow;
+            if (inWindow)
+                offset += cast(long) call.arm.fast.windowBase - call.arm.fast.frameOffset;
+        }
+        if (offset < 0 || offset > int.max)
+            return false;
+        place = PathPlace(cast(int) offset, inWindow || pending >= 0);
+        return true;
+    }
+
+    private struct PathGuard {
+        PathPlace place;
+        PathValue entry;
+        ulong required;
+    }
+
+    private struct PathGuards {
+        @nogc nothrow:
+        PathGuard[pathDepth] guards = void;
+        size_t count;
+
+        PathValue substitute(PathValue value) const {
+            foreach (ref const guard; guards[0 .. count])
+                if (guard.entry.identity == value.identity)
+                    return PathValue(0, value.width, guard.required)
+                        .shifted(value.bits);
+            return value;
+        }
+
+        bool constrain(PathValue value, ulong bits, const ref PathValues values) {
+            PathPlace place;
+            if (!values.entryPlace(value, place))
+                return true;
+            const entry = PathValue(value.identity, value.width);
+            const required = PathValue(0, value.width, bits).shifted(-value.bits).bits;
+            foreach (ref const guard; guards[0 .. count])
+                if (guard.entry == entry)
+                    return guard.required == required;
+            if (count == guards.length)
+                return false;
+            guards[count++] = PathGuard(place, entry, required);
+            return true;
+        }
+    }
+
+    bool constrainPath(in ObservedEdge step, in JitOp.Fused comparison,
+        ref PathGuards guards, ref PathValues values,
+        const(PathCall)[] calls, int pending)
+    {
+        const ins = snapshot[step.pc];
+        if (!comparison.constantRight || !goodWidth(ins.width))
+            return true;
+        size_t target;
+        if (!targetIndex(ins.sourceWidth, target))
+            return false;
+        const taken = step.next == target;
+        const condition = taken == comparison.jumpWhen;
+        if (!(condition && comparison.comparison == Comparison.equal)
+                && !(!condition && comparison.comparison == Comparison.notEqual))
+            return true;
+        PathPlace place;
+        if (!pathPlace(ins.destination, calls, pending, place))
+            return false;
+        const width = cast(ubyte) ins.width;
+        return guards.constrain(values.lookup(place, width),
+            constantAt(ins.source, width), values);
+    }
+
+    private struct PathAddress {
+        PathValue base;
+        uint displacement;
+        ubyte width;
+    }
+
+    bool pathAddressOf(size_t raw, ubyte width, ref PathValues values,
+        const(PathCall)[] calls, int pending, out PathAddress address)
+    {
+        if (!(raw & indirectBit))
+            return false;
+        PathPlace base;
+        const slot = (raw >> 32) & 0x7fff_ffff;
+        if (!pathPlace(slot, calls, pending, base))
+            return false;
+        const value = values.lookup(base, size_t.sizeof);
+        const displacement = cast(uint) raw;
+        if (!value.identity || value.bits || displacement > 0x7fff_0000)
+            return false;
+        address = PathAddress(value, displacement, width);
+        return true;
+    }
+
+    bool trackPathCopy(in Instruction ins, in JitOp op,
+        ref PathValues values, const(PathCall)[] calls, int pending)
+    {
+        const width = op.width ? op.width : ins.width;
+        PathPlace dest, source;
+        if (!goodWidth(width) || !pathPlace(ins.destination, calls, pending, dest))
+            return false;
+        if (op.copy.staticSource)
+            return values.write(dest, PathValue(0, cast(ubyte) width,
+                constantAt(ins.source, cast(int) width)));
+        if (!pathPlace(ins.source, calls, pending, source))
+            return false;
+        const value = values.lookup(source, cast(ubyte) width);
+        return value.width && values.write(dest, value);
+    }
+
+    bool trackPathInteger(in Instruction ins, in JitOp op, ref PathAddress scalar,
+        ref PathValues values, const(PathCall)[] calls, int pending)
+    {
+        const arithmetic = op.int3;
+        const w = op.width ? op.width : ins.width;
+        if (!goodWidth(w) || !arithmetic.constantRight)
+            return false;
+        const width = cast(ubyte) w;
+        const leftRaw = arithmetic.twoAddress ? ins.destination : ins.source;
+        PathPlace dest, left;
+        if (!pathPlace(ins.destination, calls, pending, dest)) {
+            if (ins.destination != leftRaw)
+                return false;
+            PathAddress address;
+            if (!pathAddressOf(ins.destination, width, values, calls, pending, address)
+                    || (scalar.width && scalar != address))
+                return false;
+            scalar = address;
+            return true;
+        }
+        if (!pathPlace(leftRaw, calls, pending, left))
+            return false;
+        const prior = values.lookup(left, width);
+        const right = constantAt(ins.sourceWidth, width);
+        if (!prior.width)
+            return false;
+        with (JitOp.IntOperation) final switch (arithmetic.operation) {
+            case add:
+                return values.write(dest, prior.shifted(right));
+            case subtract:
+                return values.write(dest, prior.shifted(-right));
+            case multiply, and, or, xor:
+                return values.write(dest, PathValue(values.nextIdentity++, width));
+        }
+    }
+
+    private struct PathIndex {
+        PathValue value;
+        bool signed;
+    }
+
+    private struct PathElement {
+        PathIndex index;
+        PathValue value;
+        PathPlace place;
+        size_t operand = size_t.max;
+    }
+
+    private struct PathChecked {
+        bool skipBounds;
+        bool skipStore;
+        size_t forwarded = size_t.max;
+    }
+
+    private struct PathMemory {
+        PathAddress descriptor;
+        PathAddress scalar;
+        PathPlace receiver;
+        int width;
+        int maximumIndex = -1;
+        size_t first = size_t.max;
+        size_t saved;
+    }
+
+    private struct PathPlan {
+        PathGuards guards;
+        PathMemory memory;
+        PathChecked[ObservedEdge.limit] checked;
+    }
+
+    private struct PathMemoryFacts {
+        PathIndex[ObservedEdge.limit] bounded = void;
+        size_t checks;
+        PathElement[ObservedEdge.limit] elements = void;
+        size_t known;
+    }
+
+    bool trackPathChecked(size_t position, in Instruction ins, in JitOp op,
+        ref PathValues values, const(PathCall)[] calls, int pending,
+        ref PathPlan plan, ref PathMemoryFacts facts, bool gatherGuards)
+    {
+        const p = op.checked;
+        auto memory = &plan.memory;
+        const check = p.access == CheckedAccess.check;
+        PathAddress descriptor;
+        enum descriptorBytes = arrayPointerOffset + size_t.sizeof;
+        if (p.sharedAccess || p.fixedLength
+                || !pathAddressOf(ins.source, descriptorBytes, values, calls, pending,
+                    descriptor)
+                || (memory.descriptor.width && memory.descriptor != descriptor))
+            return false;
+        memory.descriptor = descriptor;
+        if (!check) {
+            if (memory.width && memory.width != op.width)
+                return false;
+            memory.width = op.width;
+        }
+        if (memory.first == size_t.max) {
+            if (p.access != CheckedAccess.load || memory.scalar.width || pending >= 0
+                    || !values.entryPlace(descriptor.base, memory.receiver)
+                    || values.current(memory.receiver, size_t.sizeof) != descriptor.base)
+                return false;
+            memory.first = position;
+        }
+        PathPlace indexPlace;
+        if (!pathPlace(cast(uint) ins.width, calls, pending, indexPlace))
+            return false;
+        auto index = values.lookup(indexPlace, p.indexWidth);
+        if (!index.width)
+            return false;
+        index = index.shifted(cast(long) cast(int) (ins.width >> 32));
+        if (!gatherGuards)
+            index = plan.guards.substitute(index);
+        if (!index.identity)
+            index = PathValue(0, size_t.sizeof, p.signed && index.width == int.sizeof
+                ? cast(ulong) cast(long) cast(int) index.bits : index.bits);
+        const location = PathIndex(index, index.identity && p.signed);
+        auto action = &plan.checked[position];
+        if (!gatherGuards && p.access != CheckedAccess.storeUnchecked) {
+            if (!index.identity) {
+                const extended = index.bits;
+                if (extended > int.max)
+                    return false;
+                if (extended > memory.maximumIndex)
+                    memory.maximumIndex = cast(int) extended;
+                action.skipBounds = true;
+            } else {
+                foreach (ref const earlier; facts.bounded[0 .. facts.checks])
+                    if (earlier == location) {
+                        action.skipBounds = true;
+                        break;
+                    }
+                if (!action.skipBounds)
+                    facts.bounded[facts.checks++] = location;
+            }
+            if (action.skipBounds)
+                memory.saved += 3;
+        }
+        if (check)
+            return true;
+        PathPlace valuePlace;
+        if (!p.constantValue && !pathPlace(ins.destination, calls, pending, valuePlace))
+            return false;
+        PathElement* previous;
+        if (!gatherGuards)
+            foreach (ref earlier; facts.elements[0 .. facts.known])
+                if (earlier.index == location) {
+                    previous = &earlier;
+                    break;
+                }
+        if (p.access == CheckedAccess.load) {
+            const fresh = PathValue(values.nextIdentity++, op.width);
+            const value = previous is null ? fresh : previous.value;
+            if (previous !is null && previous.operand != size_t.max) {
+                PathPlace readable;
+                if (pathPlace(previous.operand, calls, pending, readable)
+                        && readable == previous.place
+                        && values.current(readable, op.width) == value) {
+                    action.forwarded = previous.operand;
+                    memory.saved += 2;
+                }
+            }
+            if (!gatherGuards) {
+                const replacement = PathElement(location, value,
+                    valuePlace, ins.destination);
+                if (previous is null)
+                    facts.elements[facts.known++] = replacement;
+                else
+                    *previous = replacement;
+            }
+            return values.write(valuePlace, value);
+        }
+        const value = p.constantValue
+            ? PathValue(0, op.width, constantAt(ins.destination, op.width))
+            : values.lookup(valuePlace, op.width);
+        if (!value.width)
+            return false;
+        if (gatherGuards)
+            return true;
+        if (previous !is null && previous.value == value) {
+            action.skipStore = true;
+            memory.saved += 3;
+        } else {
+            size_t preserved;
+            foreach (ref const earlier; facts.elements[0 .. facts.known])
+                if (!earlier.index.value.identity && !index.identity
+                        && earlier.index.value.bits != index.bits)
+                    facts.elements[preserved++] = earlier;
+            facts.known = preserved;
+            facts.elements[facts.known++] = PathElement(location, value);
+        }
+        return true;
+    }
+
+    bool analyzePath(const(ObservedEdge)[] edges, const(JitOp)[] ops,
+        ref PathPlan plan, bool gatherGuards)
+    {
+        PathValues values;
+        PathMemoryFacts facts;
+        PathCall[pathDepth] frames = void;
+        int pending = -1;
+        PathGuards ignored;
+        foreach (position, ref const step; edges) {
+            const op = ops[step.pc];
+            ref const ins = snapshot[step.pc];
+            const calls = frames[0 .. pending + 1];
+            with (JitOp.Kind) switch (op.kind) {
+                case callWindow:
+                    if (pending + 1 == pathDepth)
+                        return false;
+                    const arm = observedWindow(function_, step.pc, op.callWindow);
+                    int child;
+                    if (!arm.callee || arm.adjustment || arm.hasPlace
+                            || !pathWindowFrame(&callSites[ins.source], arm, calls,
+                                pending, child))
+                        return false;
+                    frames[pending + 1] = PathCall(step.pc, pending, arm, child);
+                    ++pending;
+                    break;
+                case returnVoid:
+                    if (pending < 0)
+                        return false;
+                    --pending;
+                    break;
+                case jump:
+                    break;
+                case copy:
+                    if (!trackPathCopy(ins, op, values, calls, pending))
+                        return false;
+                    break;
+                case int3:
+                    if (!trackPathInteger(ins, op, plan.memory.scalar, values, calls, pending))
+                        return false;
+                    break;
+                case fused:
+                    if (!constrainPath(step, op.fused, gatherGuards ? plan.guards : ignored,
+                            values, calls, pending))
+                        return false;
+                    break;
+                case checked:
+                    if (!trackPathChecked(position, ins, op, values, calls, pending,
+                            plan, facts, gatherGuards))
+                        return false;
+                    break;
+                default:
+                    return false;
+            }
+        }
+        auto memory = &plan.memory;
+        if (pending >= 0 || memory.first == size_t.max || memory.width == 0
+                || values.current(memory.receiver, size_t.sizeof) != memory.descriptor.base)
+            return false;
+        if (memory.scalar.width) {
+            const scalar = memory.scalar;
+            const descriptor = memory.descriptor;
+            if (scalar.base != descriptor.base
+                    || (scalar.displacement < cast(ulong) descriptor.displacement + descriptor.width
+                        && descriptor.displacement < cast(ulong) scalar.displacement + scalar.width))
+                return false;
+        }
+        return true;
     }
 
     private struct PathExit {
@@ -2180,22 +2710,104 @@ private struct Gen {
         int call = -1;
     }
 
+    private enum pathLength = FpSlots.firstRegister + 1;
+    private enum pathPointer = FpSlots.firstRegister + 2;
+
+    void guardPathMemory(in PathMemory memory, size_t pc, int pending,
+        PathExit[] exits, ref size_t count)
+    {
+        a.ld(8, R10, Mem(FRAME, memory.receiver.offset));
+        a.aluRI(Alu.add, 8, R10, cast(int) memory.descriptor.displacement);
+        exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
+        a.movRR64(R11, R10);
+        a.aluRI(Alu.add, 8, R11, memory.descriptor.width);
+        exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
+        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+        guardPathStack(pc, pending, exits, count, R10, R11);
+
+        // The range includes the index of the first load, so a failing load
+        // can resume before it reads the pointer field.
+        a.ld(8, RAX, Mem(R10, arrayLengthOffset));
+        if (memory.maximumIndex >= 0) {
+            a.aluRI(Alu.cmp, 8, RAX, memory.maximumIndex);
+            exits[count++] = PathExit(pc, jccLocal(CC_BE), 0, pending);
+        }
+        a.integerToXmm(pathLength, RAX);
+        a.ld(8, R11, Mem(R10, arrayPointerOffset));
+        a.integerToXmm(pathPointer, R11);
+        a.movI(SC2, size_t.max / memory.width);
+        a.aluRR(Alu.cmp, 8, RAX, SC2);
+        exits[count++] = PathExit(pc, jccLocal(CC_A), 0, pending);
+        a.lea(RAX, Mem(R11, 0, RAX, cast(ubyte) memory.width));
+        a.aluRR(Alu.cmp, 8, RAX, R11);
+        exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
+        guardPathStack(pc, pending, exits, count, R11, RAX);
+        guardPathOverlap(pc, pending, exits, count, memory.descriptor.width);
+        if (memory.scalar.width) {
+            const delta = cast(int) (memory.scalar.displacement
+                - memory.descriptor.displacement);
+            a.aluRI(delta < 0 ? Alu.sub : Alu.add, 8, R10, delta < 0 ? -delta : delta);
+            exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
+            guardPathOverlap(pc, pending, exits, count, memory.scalar.width);
+            guardPathStack(pc, pending, exits, count, R10, SC2);
+        }
+    }
+
+    void guardPathStack(size_t pc, int pending, PathExit[] exits,
+        ref size_t count, int low, int high)
+    {
+        a.alu(Alu.cmp, 8, low, Mem(R9, FrameStack.fastEndOffset));
+        const past = jccLocal(CC_AE);
+        a.alu(Alu.cmp, 8, high, Mem(R9, FrameStack.baseOffset));
+        exits[count++] = PathExit(pc, jccLocal(CC_A), 0, pending);
+        patchHere(past);
+    }
+
+    void guardPathOverlap(size_t pc, int pending, PathExit[] exits,
+        ref size_t count, int width)
+    {
+        a.movRR64(SC2, R10);
+        a.aluRI(Alu.add, 8, SC2, width);
+        exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
+        a.aluRR(Alu.cmp, 8, RAX, R10);
+        const before = jccLocal(CC_BE);
+        a.aluRR(Alu.cmp, 8, R11, SC2);
+        exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
+        patchHere(before);
+    }
+
     bool emitObservedPath(size_t cap, const(Function)* function_,
         const(ObservedEdge)[] path, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals)
+        const(Instruction.Handler)[] originals, const(PathPlan)* plan)
     {
-        PathCall[pathBudget] calls = void;
-        PathExit[2 * pathBudget] exits = void;
+        PathCall[ObservedEdge.limit] calls = void;
+        PathExit[2 * ObservedEdge.limit + 16] exits = void;
         size_t callCount;
         size_t exitCount;
         int pending = -1;
         size_t continuation;
-        emittingPath = transferPathValues;
+        emittingPath = transferPathValues && plan is null;
         scope (exit) emittingPath = false;
         known = KnownConstant.init;
         fpSlots = FpSlots.init;
         intSlots = IntSlots.init;
-        foreach (step; path) {
+        const entry = a.n;
+        if (plan !is null)
+            foreach (ref const guard; plan.guards.guards[0 .. plan.guards.count]) {
+                const width = guard.entry.width;
+                if (cap - a.n < maximumBytesPerInstruction)
+                    return false;
+                a.ld(width, RAX, Mem(FRAME, guard.place.offset));
+                int immediate;
+                if (immOf(width, guard.required, immediate))
+                    a.aluRI(Alu.cmp, width, RAX, immediate);
+                else {
+                    a.movI(SC2, guard.required);
+                    a.aluRR(Alu.cmp, width, RAX, SC2);
+                }
+                exits[exitCount++] = PathExit(path[0].pc, jccLocal(CC_NE));
+            }
+        foreach (position, step; path) {
             if (cap - a.n < maximumBytesPerInstruction)
                 return false;
             const i = step.pc;
@@ -2262,7 +2874,13 @@ private struct Gen {
                     if (op.checked.access == CheckedAccess.load
                             && !pathFrameStorage(ins.destination, function_.windowSlot))
                         forgetPathValue;
-                    if (!emitChecked(i, ins, op, step.next, &jump))
+                    if (plan !is null && position == plan.memory.first) {
+                        if (pending >= 0)
+                            return false;
+                        guardPathMemory(plan.memory, i, pending, exits[], exitCount);
+                    }
+                    if (!emitChecked(i, ins, op, step.next, &jump, null,
+                            plan is null ? null : &plan.checked[position]))
                         return false;
                     if (jump != 0)
                         exits[exitCount++] = PathExit(i + 1, jump, 0, pending);
@@ -2283,9 +2901,16 @@ private struct Gen {
                 exits[exitCount++] = PathExit(i, pathMemoryGuard, 0, pending);
         }
         if (cap - a.n < maximumBytesPerInstruction || pending >= 0
-                || (transferPathValues && !reusedAcrossCall))
+                || (emittingPath && !reusedAcrossCall))
             return false;
-        jumpToPathExit(continuation);
+        if (plan is null)
+            jumpToPathExit(continuation);
+        else {
+            a.b(0xE9);
+            const back = a.n;
+            a.d32(0);
+            patchTo(back, entry);
+        }
         foreach (exit; exits[0 .. exitCount]) {
             if (cap - a.n < maximumBytesPerInstruction * pathDepth)
                 return false;
@@ -4031,6 +4656,7 @@ private struct Gen {
         size_t i, in Instruction ins, in JitOp op,
         size_t pathNext = size_t.max, size_t* pathJump = null,
         const(JitOp)[] ops = null,
+        const(PathChecked)* path = null,
     ) {
         const p = op.checked;
         const packed = ins.width;
@@ -4038,6 +4664,13 @@ private struct Gen {
         const hi = packed >> 32;
         const es = op.width;
         const access = p.access;
+        const specialized = path !is null;
+        const skipBounds = specialized && path.skipBounds;
+        const skipStore = specialized && path.skipStore;
+        const forwarded = specialized && path.forwarded != size_t.max;
+        const needElement = access != CheckedAccess.check && !skipStore;
+        const needIndex = (needElement && !forwarded)
+            || (access != CheckedAccess.storeUnchecked && !skipBounds);
         size_t target;
         Mem d, s;
         static if (!resident) {
@@ -4045,10 +4678,10 @@ private struct Gen {
                     || (access != CheckedAccess.storeUnchecked
                         && !targetIndex(ins.sourceWidth, target)))
                 return false;
-            if (access != CheckedAccess.check && !p.constantValue
+            if (needElement && !p.constantValue
                     && !opnd(ins.destination, R9, d))
                 return false;
-            if (!opnd(ins.source, R10, s))
+            if (!specialized && !opnd(ins.source, R10, s))
                 return false;
         }
         const onPath = pathNext != size_t.max;
@@ -4057,7 +4690,7 @@ private struct Gen {
             return false;
         const idx = Mem(FRAME, cast(int) idxOff);
         const offset = p.fixedLength ? 0 : cast(int) hi;
-        if (resident || p.indexWidth == 4) {
+        if (needIndex && (resident || p.indexWidth == 4)) {
             static if (!resident) {
                 a.ld(4, RAX, idx);
                 // Sign extension follows, and the slice needs no address setup.
@@ -4069,7 +4702,7 @@ private struct Gen {
                 a.aluRI(Alu.add, 4, RAX, offset);
             if (p.signed)
                 a.rrOp(8, byteReg: false, RAX, RAX, signExtend32Opcode);
-        } else {
+        } else if (needIndex) {
             a.ld(8, RAX, idx);
             if (offset != 0)
                 a.aluRI(Alu.add, 8, RAX, offset);
@@ -4078,8 +4711,11 @@ private struct Gen {
         static if (resident) {
             a.aluRR(Alu.cmp, 8, RAX, checkedLength);
             jccTo(CC_AE, i + 1);
-        } else if (access != CheckedAccess.storeUnchecked) {
-            if (p.fixedLength) {
+        } else if (access != CheckedAccess.storeUnchecked && !skipBounds) {
+            if (specialized) {
+                a.xmmToInteger(SC2, pathLength);
+                a.aluRR(Alu.cmp, 8, RAX, SC2);
+            } else if (p.fixedLength) {
                 if (hi <= int.max)
                     a.aluRI(Alu.cmp, 8, RAX, cast(int) hi);
                 else {
@@ -4090,15 +4726,22 @@ private struct Gen {
                 a.alu(Alu.cmp, 8, RAX, Mem(s.base, s.disp + cast(int) arrayLengthOffset));
             failJump = jccLocal(CC_AE);
         }
-        if (access != CheckedAccess.check) {
+        if (needElement) {
+            Mem element;
             static if (!resident) {
-                if (p.fixedLength)
+                if (forwarded) {
+                    if (!opnd(path.forwarded, R10, element))
+                        return false;
+                } else if (specialized)
+                    a.xmmToInteger(SC2, pathPointer);
+                else if (p.fixedLength)
                     a.lea(SC2, s);
                 else
                     a.ld(8, SC2, Mem(s.base,
                         s.disp + cast(int) arrayPointerOffset));
             }
-            const element = Mem(SC2, 0, RAX, cast(ubyte) es);
+            if (!forwarded)
+                element = Mem(SC2, 0, RAX, cast(ubyte) es);
             if (onPath && retainedWidth != 0 && access != CheckedAccess.load) {
                 a.lea(R11, element);
                 a.xmmToInteger(R10, pathAddress);
