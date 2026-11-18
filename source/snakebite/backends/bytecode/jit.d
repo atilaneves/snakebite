@@ -475,6 +475,7 @@ package struct JitState {
         enum needsHandlerEntry = size_t.max;
         size_t handlerEntryCount;
         size_t branchOnlyEnd;
+        size_t fpRegionEnd;
         const branchOnly = g.proveBranchOnly(ops, branchOnlyCandidates, branchOnlyEntries);
         foreach (i; 0 .. instructions.length) {
             if (i < branchOnlyEnd)
@@ -535,6 +536,9 @@ package struct JitState {
                     continue;
                 }
             }
+            if (i >= fpRegionEnd && ops[i].kind == JitOp.Kind.fp3
+                    && !g.fpLoop.backedge && !g.checkedLoop.update)
+                fpRegionEnd = g.emitFpRegion(i, ops, originals);
             bool done;
             g.usedKnown = false;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
@@ -1493,12 +1497,14 @@ private struct Asm {
     void repStosb() { b(0xF3); b(0xAA); }
 }
 
-private struct FpSlots {
+private alias FpSlots = ScalarFpSlots!(3, 4);
+
+private struct ScalarFpSlots(int first, int capacity) {
     @nogc nothrow:
 
     // XMM3 through XMM6 are caller-saved in both handler conventions.
-    enum firstRegister = 3;
-    enum count = 4;
+    enum firstRegister = first;
+    enum count = capacity;
 
     static struct Slot {
         int offset = -1;
@@ -1646,6 +1652,38 @@ private struct CheckedLoop {
     int protectedEnd;
     size_t body;
     size_t updateFixup;
+}
+
+private struct FpRegion {
+    enum instructionLimit = 64;
+    enum ubyte[3] pointerRegisters = [R9, R10, R11];
+    enum int width = double.sizeof;
+
+    enum Kind : ubyte { arithmetic, copy, squareRoot }
+
+    static struct Step {
+        Kind kind;
+        JitOp.Fp3 fp;
+        Mem destination;
+        Mem left;
+        size_t literalAddress;
+        Mem right;
+    }
+
+    static struct Range {
+        Mem slot;
+        int first;
+        int end;
+    }
+
+    static struct Ranges {
+        Range[pointerRegisters.length] entries;
+        size_t count;
+    }
+
+    Step[instructionLimit] steps;
+    size_t length;
+    Ranges ranges;
 }
 
 private struct FpLoop {
@@ -4882,6 +4920,153 @@ private struct Gen {
         return true;
     }
 
+    size_t emitFpRegion(size_t first, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals)
+    {
+        import snakebite.backends.bytecode.emitted: EmittedCode;
+
+        FpRegion region;
+        const end = planFpRegion(first, ops, originals, region);
+        if (region.length < 4 || codeLimit - a.n - literalBytes
+                < 128 + 64 * region.length + maximumBytesPerInstruction)
+            return end;
+
+        const ranges = region.ranges.entries[0 .. region.ranges.count];
+        foreach (ref const step; region.steps[0 .. region.length]) {
+            if (step.fp.resultInFp0 || step.destination.base != FRAME)
+                continue;
+            foreach (ref const range; ranges)
+                if (EmittedCode.overlaps(step.destination.disp, FpRegion.width,
+                        range.slot.disp, size_t.sizeof))
+                    return end;
+        }
+
+        size_t[FpRegion.pointerRegisters.length] misses;
+        foreach (i, ref const range; ranges) {
+            const pointer = FpRegion.pointerRegisters[i];
+            const span = frameSize + range.end - range.first - 1;
+            a.ld(size_t.sizeof, pointer, range.slot);
+            // A displacement range can overlap at either end of the frame.
+            a.lea(RAX, Mem(pointer, range.end - 1));
+            a.aluRR(Alu.sub, size_t.sizeof, RAX, FRAME);
+            a.aluRI(Alu.cmp, size_t.sizeof, RAX, cast(int) span);
+            misses[i] = jccLocal(CC_B);
+        }
+
+        ScalarFpSlots!(2, 14) slots;
+        foreach (ref const step; region.steps[0 .. region.length]) {
+            const left = step.fp.leftInFp0 ? fp0Register
+                : slots.find(step.left, FpRegion.width);
+            const right = step.kind == FpRegion.Kind.arithmetic
+                && !step.literalAddress ? slots.find(step.right, FpRegion.width) : -1;
+            const acc = step.fp.resultInFp0 ? fp0Register
+                : step.destination.base == FRAME
+                    ? slots.assign(step.destination, FpRegion.width, left, right)
+                    : XMM1;
+            final switch (step.kind) with (FpRegion.Kind) {
+                case arithmetic:
+                    emitFpArithmetic(FpRegion.width, step.fp.operation, acc,
+                        step.left, left, FloatRight(step.right, step.literalAddress), right);
+                    break;
+                case copy:
+                    emitFpMove(doublePrefix, acc, step.left, left);
+                    break;
+                case squareRoot:
+                    enum ubyte sqrtOpcode = 0x51;
+                    if (left >= 0)
+                        a.sseRR(doublePrefix, sqrtOpcode, acc, left);
+                    else
+                        a.sse(doublePrefix, sqrtOpcode, acc, step.left);
+                    break;
+            }
+            // Keep frame and indirect stores in order even if an FP trap
+            // can observe the frame before the next instruction.
+            if (!step.fp.resultInFp0)
+                a.sse(doublePrefix, storeOpcode, acc, step.destination);
+        }
+        jmpTo(end);
+        foreach (miss; misses[0 .. ranges.length])
+            patchHere(miss);
+        return end;
+    }
+
+    size_t planFpRegion(size_t first, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals, ref FpRegion region)
+    {
+        import snakebite.backends.bytecode.vm: opFloatSqrt;
+
+        if (frameSize > int.max / 2)
+            return first;
+        foreach (pc; first .. ops.length) {
+            if (region.length == FpRegion.instructionLimit || originals[pc] is null)
+                break;
+            ref const op = ops[pc];
+            ref const ins = snapshot[pc];
+            FpRegion.Step step;
+            // Only a complete instruction can add to the entry guards.
+            auto ranges = region.ranges;
+            if (op.kind == JitOp.Kind.fp3 && ins.width == FpRegion.width) {
+                step.fp = op.fp3;
+                if (step.fp.constantRight)
+                    step.literalAddress = ins.sourceWidth;
+                else if (!fpRegionOperand(ins.sourceWidth, ranges, step.right))
+                    break;
+            } else if (op.kind == JitOp.Kind.copy && !op.copy.staticSource
+                    && (op.width ? op.width : ins.width) == FpRegion.width
+                    && !isLiteralCopy(ins, op, FpRegion.width)) {
+                step.kind = FpRegion.Kind.copy;
+            } else {
+                // The DMD host's double sqrt uses x87, including its
+                // control word, intermediate precision and exception flags.
+                version (LDC) {
+                    if (originals[pc] !is &opFloatSqrt || ins.width != FpRegion.width)
+                        break;
+                    step.kind = FpRegion.Kind.squareRoot;
+                } else
+                    break;
+            }
+            const source = step.kind == FpRegion.Kind.squareRoot
+                ? ins.destination : ins.source;
+            if ((!step.fp.leftInFp0 && !fpRegionOperand(source, ranges, step.left))
+                    || (!step.fp.resultInFp0
+                        && !fpRegionOperand(ins.destination, ranges, step.destination)))
+                break;
+
+            region.ranges = ranges;
+            region.steps[region.length++] = step;
+        }
+        return first + region.length;
+    }
+
+    bool fpRegionOperand(size_t raw, ref FpRegion.Ranges ranges,
+        out Mem memory) const {
+        Mem slot;
+        if (!storageOperand(raw, FpRegion.pointerRegisters[0], memory, slot))
+            return false;
+        if (!(raw & indirectBit))
+            return memory.disp + FpRegion.width <= frameSize;
+        if (slot.disp + size_t.sizeof > frameSize)
+            return false;
+        size_t i;
+        for (; i < ranges.count; ++i)
+            if (ranges.entries[i].slot.disp == slot.disp)
+                break;
+        if (i == ranges.count) {
+            if (i == ranges.entries.length)
+                return false;
+            ++ranges.count;
+            ranges.entries[i] = FpRegion.Range(slot, memory.disp,
+                memory.disp + FpRegion.width);
+        } else {
+            import std.algorithm.comparison: min, max;
+            ranges.entries[i].first = min(ranges.entries[i].first, memory.disp);
+            ranges.entries[i].end = max(ranges.entries[i].end,
+                memory.disp + FpRegion.width);
+        }
+        memory.base = FpRegion.pointerRegisters[i];
+        return true;
+    }
+
     bool emitFp3(in Instruction ins, in JitOp op) {
         const p = op.fp3;
         const w = cast(int) ins.width;
@@ -4889,7 +5074,6 @@ private struct Gen {
             return false;
         if (p.leftInFp0 && w != 8)
             return false;
-        const prefix = w == 8 ? doublePrefix : singlePrefix;
         Mem d, l;
         if (!p.resultInFp0 && !opnd(ins.destination, R9, d))
             return false;
@@ -4904,20 +5088,31 @@ private struct Gen {
         int acc = fp0Register;
         if (!p.resultInFp0)
             acc = d.base == FRAME ? fpSlots.assign(d, w, left, rightReg) : XMM1;
-        if (left < 0)
-            a.sse(prefix, loadOpcode, acc, l);
-        else if (acc != left)
-            a.sseRR(noPrefix, moveAlignedOpcode, acc, left);
-        if (rightReg >= 0)
-            a.sseRR(prefix, _floatOpcodes[p.operation], acc, rightReg);
-        else
-            sseRight(w, prefix, _floatOpcodes[p.operation], acc, right);
+        emitFpArithmetic(w, p.operation, acc, l, left, right, rightReg);
         if (!p.resultInFp0) {
-            a.sse(prefix, storeOpcode, acc, d);
+            a.sse(w == 8 ? doublePrefix : singlePrefix, storeOpcode, acc, d);
             if (d.base != FRAME)
                 refreshFpAfterStore(d, w);
         }
         return true;
+    }
+
+    void emitFpArithmetic(int width, JitOp.FloatOperation operation,
+        int acc, in Mem left, int leftReg, in FloatRight right, int rightReg)
+    {
+        const prefix = width == 8 ? doublePrefix : singlePrefix;
+        emitFpMove(prefix, acc, left, leftReg);
+        if (rightReg >= 0)
+            a.sseRR(prefix, _floatOpcodes[operation], acc, rightReg);
+        else
+            sseRight(width, prefix, _floatOpcodes[operation], acc, right);
+    }
+
+    void emitFpMove(ubyte prefix, int acc, in Mem source, int reg) {
+        if (reg < 0)
+            a.sse(prefix, loadOpcode, acc, source);
+        else if (acc != reg)
+            a.sseRR(noPrefix, moveAlignedOpcode, acc, reg);
     }
 
     private void refreshFpAfterStore(in Mem destination, int width) {

@@ -222,6 +222,89 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
+
+    @("jit.floatingPointStoresUseTheCurrentAliasedValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.math: sqrt;
+
+            double update(double* first, double* second, double local,
+                    bool useLocal, bool skip) {
+                assert(first !is null && second !is null);
+                if (useLocal)
+                    first = &local;
+
+                double value = 1;
+                if (skip)
+                    goto store;
+                value = *first + *second;
+                value = sqrt(value * value);
+            store:
+                value = value + *first;
+                *first = value;
+                *second = *first + 1;
+                return *first + *second + local;
+            }
+
+            int main() {
+                foreach (i; 0 .. 300) {
+                    double first = 2;
+                    double second = 3;
+                    if (update(&first, &second, 5, false, false) != 20
+                            || first != 7 || second != 8)
+                        return 1;
+                    first = 2;
+                    if (update(&first, &first, 5, false, false) != 19
+                            || first != 7)
+                        return 2;
+                    second = 3;
+                    if (update(&first, &second, 5, true, false) != 40
+                            || first != 7 || second != 14)
+                        return 3;
+                    first = 2;
+                    second = 3;
+                    if (update(&first, &second, 5, false, true) != 12
+                            || first != 3 || second != 4)
+                        return 4;
+                }
+                return 0;
+            }
+        }, ["update"]);
+    }
+
+    @("jit.floatingPointStoreReadsEarlierPointerWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            void update(double* first, double* second, double* third,
+                    double* output) {
+                assert(output !is null);
+                double value = *first + *second;
+                value = value * *third;
+                value = value - *second;
+                *first = value + *third;
+                *output = *first + *second;
+            }
+
+            int main() {
+                foreach (i; 0 .. 300) {
+                    double first = 2;
+                    double second = 3;
+                    double third = 4;
+                    double output = 0;
+                    update(&first, &second, &third, &output);
+                    if (first != 21 || output != 24)
+                        return 1;
+                    update(&first, &second, &third, &second);
+                    if (first != 97 || second != 100)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["update"]);
+    }
+
 }
 
 static foreach (backend; Matrix!()) {
