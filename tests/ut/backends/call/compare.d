@@ -712,6 +712,57 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("compare.singleByteLiteralCondition." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Holder {
+                const(char)[] value;
+            }
+
+            const(char)[] read(const(char)[] value, ref int reads) {
+                ++reads;
+                return value;
+            }
+
+            int compareByte(ref Holder field, const(char)[] value) {
+                int reads;
+                int bits;
+                if (field.value == "\xFF")
+                    bits |= 1;
+                if ("\xFF" != value)
+                    bits |= 2;
+                if ("\0" == read(value, reads))
+                    bits |= 4;
+                int checks;
+                do {
+                    ++checks;
+                } while (read(checks == 1 ? value : null, reads) == "\xFF");
+                assert(reads == checks + 1);
+                return bits + 8 * checks;
+            }
+
+            int main() {
+                char[] bytes = ['\xFF', '\0', 'A'];
+                Holder field;
+                foreach (_; 0 .. 300) {
+                    field.value = bytes[0 .. 1];
+                    assert(compareByte(field, bytes[0 .. 1]) == 17);
+                    assert(compareByte(field, bytes[1 .. 2]) == 15);
+                    field.value = bytes[0 .. 2];
+                    assert(compareByte(field, bytes[2 .. 3]) == 10);
+                    assert(compareByte(field, bytes[0 .. 2]) == 10);
+                    assert(compareByte(field, bytes[0 .. 0]) == 10);
+                    field.value = null;
+                    assert(compareByte(field, null) == 10);
+                }
+                return 0;
+            }
+        }, ["compareByte"]);
+    }
+}
+
 // rt-simple instantiates array round trips for exactly these six scalar
 // element types. Listing all six here keeps the supported scope explicit.
 static foreach (backend; Matrix!()) {

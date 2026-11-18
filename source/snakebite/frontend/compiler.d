@@ -315,6 +315,21 @@ public bool returnsOnStack(
     });
 }
 
+public bool readSingleByteLiteral(
+    in imported!"dmd.expression".StringExp literal, out ubyte value,
+) {
+    if (literal is null)
+        return false;
+
+    return compiler.inside(() {
+        if (literal.len != 1 || literal.sz != ubyte.sizeof)
+            return false;
+
+        value = literal.peekData[0];
+        return true;
+    });
+}
+
 // CTFE copies and constant folding can produce literals after DMD's GC
 // check attached allocation lowering. Storage and escape decisions remain
 // with the caller; DMD supplies the real, element-typed druntime call.
