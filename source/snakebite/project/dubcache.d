@@ -229,26 +229,6 @@ private string entries(in string path) {
     return text(names).sha256Of.toHexString.idup;
 }
 
-// The paths whose change can change what dub says about the project in the
-// absolute directory `root`: the one walk of the project that the description
-// cache (`cachedDubDescription`) and the build (ADR-0021) share. A path may
-// not exist: it is watched for the day that it does.
-public string[] watchedPaths(
-    in string root, in string compiler,
-    in imported!"dub.description".ProjectDescription description,
-) {
-    import std.algorithm.iteration: map, uniq;
-    import std.algorithm.sorting: sort;
-    import std.array: array;
-    import std.path: buildNormalizedPath;
-
-    // Whether the cache may keep the description does not matter to a build.
-    bool cacheable;
-    return collectWatches(root, compiler, description, cacheable).object
-        .keys.map!(path => path.buildNormalizedPath).array.sort.uniq.array;
-}
-
-
 private imported!"std.json".JSONValue collectWatches(
     in string root, in string compiler,
     in imported!"dub.description".ProjectDescription description,
@@ -263,13 +243,12 @@ private imported!"std.json".JSONValue collectWatches(
     import snakebite.project.state: projectStateDirectory;
 
     string[string] watched;
-    // What the commands that dub runs before and after it generates read is
-    // not known, so the cache does not keep the description. The paths that
-    // the walk below finds are still inputs of a build.
     foreach (package_; description.packages)
         if (package_.active && (package_.preGenerateCommands.length
-                || package_.postGenerateCommands.length))
+                || package_.postGenerateCommands.length)) {
             cacheable = false;
+            return JSONValue(watched);
+        }
     const state = projectStateDirectory(root).dirName;
     void file(in string path) {
         const value = stamp(path);

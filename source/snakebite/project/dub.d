@@ -36,6 +36,18 @@ public struct DubDependencies {
     public string[] inputs() const {
         return _directory.length ? dubInputs(_directory, _description) : null;
     }
+
+    // The linker files that dub's build makes: the libraries of the targets.
+    // The other linker files (a `.o`, a `.a` or a `.so` that a recipe names)
+    // exist before the build.
+    public string[] targets() const {
+        import std.algorithm.iteration: filter;
+        import std.algorithm.searching: canFind;
+        import std.array: array;
+
+        const artifacts = cacheArtifacts(_description.project).values;
+        return _linkerFiles.filter!(file => artifacts.canFind(file)).array.dup;
+    }
 }
 
 
@@ -67,21 +79,47 @@ public SourceSet dubSources(
 }
 
 
-// The paths that exist and whose change can change `description`: the inputs
-// of a build of the project in `directory`. A path that does not exist is
-// no input: ninja takes a missing input with no rule as always changed.
-public string[] dubWatchedPaths(
-    in string directory,
+// The files and the directories whose change can change the build of the
+// project of `description`, as reggae names them for its `build.ninja`: the
+// recipe files and `dub.selections.json` of each package that exist, and the
+// directory of each source file that the build compiles. `rootFiles` are the
+// source files of the root package. A file that does not exist is no input.
+public string[] dubBuildInputs(
     in imported!"snakebite.project.dubcache".DubDescription description,
+    in string[] rootFiles,
 ) {
-    import snakebite.image.preparation: defaultCompiler;
-    import snakebite.project.dubcache: watchedPaths;
-    import std.algorithm.iteration: filter;
+    import dub.description: SourceFileRole;
+    import std.algorithm.iteration: filter, map, uniq;
+    import std.algorithm.sorting: sort;
     import std.array: array;
     import std.file: exists;
+    import std.path: buildNormalizedPath, buildPath, dirName;
 
-    return watchedPaths(directory, defaultCompiler, description.project)
-        .filter!(path => path.exists).array;
+    const project = description.project;
+    string[] recipes;
+    string[] sources = rootFiles.dup;
+    foreach (package_; project.packages) {
+        if (!package_.active)
+            continue;
+        foreach (name; ["dub.sdl", "dub.json", "package.json", "dub.selections.json"])
+            recipes ~= buildPath(package_.path, name);
+        if (package_.name == project.rootPackage)
+            continue;
+        foreach (file; package_.files)
+            if (file.role == SourceFileRole.source && !file.path.isLinkerFile)
+                sources ~= buildPath(package_.path, file.path);
+    }
+    return (recipes.filter!(path => path.exists).array
+            ~ sources.map!dirName.array)
+        .map!buildNormalizedPath.array.sort.uniq.array;
+}
+
+
+// A file of a recipe's `sourceFiles` that goes to the linker.
+private bool isLinkerFile(in string path) @safe pure {
+    import std.algorithm.searching: endsWith;
+
+    return path.endsWith(".a", ".o", ".so") != 0;
 }
 
 
@@ -589,9 +627,7 @@ public SourceSet dubSources(
                 if (file.role == SourceFileRole.source)
                     sourceFiles ~= buildPath(package_.path, file.path);
         }
-    import std.algorithm: endsWith;
-    const isLinkerFile = (string path) => path.endsWith(".a", ".o", ".so");
-    const files = sourceFiles.filter!(path => !isLinkerFile(path)).array;
+    const files = sourceFiles.filter!(path => !path.isLinkerFile).array;
     // dub names each dependency by the copy it leaves in the package's
     // target path, and whichever compiler built that package last owns the
     // copy (issue #401). The artifact in dub's build cache is keyed by

@@ -77,12 +77,22 @@ public string[] hostImportPaths(in HostCompiler host, lazy string onPath = first
 /// when the configuration is a directory. The compiler looks for its
 /// configuration in the current directory first.
 public string[] hostConfigurationFiles(in HostCompiler host) {
+    return configurationAndFiles(hostConfiguration(host, firstOnPath(compilerName)).configuration);
+}
+
+/// The configuration files that the compiler `binary` reads, and the
+/// directory that holds them when the configuration is a directory. The
+/// compiler looks for its configuration in the current directory first.
+public string[] compilerConfigurationFiles(in string binary) {
+    return configurationAndFiles(configurationOf(binary));
+}
+
+private string[] configurationAndFiles(in string configuration) {
     import std.file: isDir;
 
-    string configuration = hostConfiguration(host, firstOnPath(compilerName)).configuration;
     return configuration.isDir
         ? configuration ~ configurationFiles(configuration)
-        : [configuration];
+        : [configuration.idup];
 }
 
 private struct FoundConfiguration {
@@ -93,7 +103,6 @@ private struct FoundConfiguration {
 // The compiler binary that `hostImportPaths` takes, and the configuration
 // file or directory that it finds.
 private FoundConfiguration hostConfiguration(in HostCompiler host, lazy string onPath) {
-    import dmd.frontend: findDMDConfig, findLDCConfig;
     import std.file: exists, isFile;
 
     const binary = host.binary.exists && host.binary.isFile
@@ -103,6 +112,13 @@ private FoundConfiguration hostConfiguration(in HostCompiler host, lazy string o
         throw new SnakebiteException("`" ~ host.binary ~ "` built this binary and is gone, and `"
             ~ compilerName ~ "` is not on PATH: its configuration file gives the import paths of "
             ~ "druntime and Phobos");
+    return FoundConfiguration(binary, configurationOf(binary));
+}
+
+// The configuration file or directory that the compiler `binary` finds.
+private string configurationOf(in string binary) {
+    import dmd.frontend: findDMDConfig, findLDCConfig;
+    import std.file: exists;
 
     version (LDC)
         const configuration = findLDCConfig(binary);
@@ -111,7 +127,7 @@ private FoundConfiguration hostConfiguration(in HostCompiler host, lazy string o
     if (configuration is null || !configuration.exists)
         throw new SnakebiteException("`" ~ binary ~ "` has no configuration file (`"
             ~ configurationFile ~ "`)");
-    return FoundConfiguration(binary, configuration);
+    return configuration;
 }
 
 // LDC reads a directory of `*.conf` files in name order as well as one file;
