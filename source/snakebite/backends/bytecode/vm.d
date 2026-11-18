@@ -1091,6 +1091,9 @@ public struct Function {
     static if (jitSupported)
         @setBy("prepareForExecution")
         package imported!"snakebite.backends.bytecode.jit".JitInstance* jit;
+    static if (jitSupported)
+        @setBy("jitFunction")
+        package const(Instruction.Handler)* jitHandlers;
 
     package void fixWindowFacts() {
         activationAlignment = frameAlignment > uint(Activation.alignof)
@@ -5745,7 +5748,7 @@ static if (jitSupported) {
 
     // What a function is in: `compiling` while one thread makes its code, and
     // `failed` when it cannot have any.
-    private enum JitTier : uint { interpreted, compiling, compiled, failed }
+    package enum JitTier : uint { interpreted, compiling, compiled, failed }
 
     // The tables that classify handlers. They are the same for each
     // instance and nothing writes them after they are built, so they are
@@ -5824,10 +5827,10 @@ static if (jitSupported) {
     {
         if (!lock.jitUsable)
             return false;
-        ref tables = *jitTables;
+        if (jitTables is null)
+            return false;
         ref scratch = lock.state;
-        auto instructions = function_.instructions;
-        const n = instructions.length;
+        const n = function_.instructions.length;
         auto snapshotMemory = scratch.snapshotScratch.reserve(n);
         auto opMemory = scratch.opScratch.reserve(n);
         auto originalMemory = scratch.originalScratch.reserve(n);
@@ -5837,36 +5840,66 @@ static if (jitSupported) {
         auto snapshot = snapshotMemory[0 .. n];
         auto ops = opMemory[0 .. n];
         auto originals = originalMemory[0 .. n];
-        foreach (index; 0 .. n) {
-            auto handler = instructions[index].handler;
-            // The code of a branch does not count; a call keeps its twin, which
-            // counts the callee.
-            if (handler !is null) {
-                if (const original = handler in _countingTwins.uncountedOf)
-                    if (!isCountedCall(*original))
-                        handler = *original;
-            }
-            originals[index] = handler;
-            snapshot[index] = instructions[index];
-            snapshot[index].handler = handler;
+        if (!readJitBody(function_, snapshot, ops, originals))
+            return false;
+        return lock.jitFunction(function_, snapshot, ops, originals);
+    }
+
+    // The instance lock protects the switch from handler words to saved
+    // handler identities. Operands stay in the original instructions.
+    package bool readJitBody(const(Function)* function_,
+        scope Instruction[] snapshot, scope JitOp[] ops,
+        scope Instruction.Handler[] originals) nothrow @nogc
+    {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        ref tables = *atomicLoad!(MemoryOrder.acq)(_jitTables);
+        foreach (i, ref instruction; snapshot) {
+            // The live handler can already contain generated code.
+            const handler = function_.jitHandlers is null
+                ? function_.instructions[i].handler : function_.jitHandlers[i];
+            originals[i] = handler;
+            instruction = function_.instructions[i];
+            instruction.handler = withoutBranchCounting(handler);
             if (handler is null) {
-                ops[index] = JitOp.init;
+                ops[i] = JitOp.init;
                 continue;
             }
-            // Templates use the operand layout from before specialisation.
-            if (!tables.unspecialise(snapshot[index]))
+            if (!tables.unspecialise(instruction))
                 return false;
-            ops[index] = tables.jitGet(snapshot[index].handler);
-            if (handler is &callGeneral!true || handler is &callGeneral!false)
-                originals[index] = nativeCallJitEntry(
-                    &function_.callSites[snapshot[index].source], handler);
+            ops[i] = tables.jitGet(instruction.handler);
         }
-        return lock.jitFunction(function_, snapshot, ops, originals);
+        return true;
+    }
+
+    package Instruction.Handler jitFallback(const(Function)* function_,
+        in Instruction snapshot, Instruction.Handler handler) nothrow @nogc
+    {
+        handler = withoutBranchCounting(handler);
+        if (handler is &callGeneral!true || handler is &callGeneral!false)
+            return nativeCallJitEntry(&function_.callSites[snapshot.source],
+                handler);
+        return handler;
+    }
+
+    package bool jitCountsBranch(Instruction.Handler handler) nothrow @nogc {
+        return withoutBranchCounting(handler) !is handler;
+    }
+
+    // JIT branches do not count. Calls keep the handler that counts the callee.
+    private Instruction.Handler withoutBranchCounting(
+        in Instruction.Handler handler,
+    ) nothrow @nogc {
+        if (handler !is null)
+            if (const original = handler in _countingTwins.uncountedOf)
+                if (!isCountedCall(*original))
+                    return *original;
+        return handler;
     }
 
     private Instruction.Handler nativeCallJitEntry(
         const(CallSite)* site, Instruction.Handler original,
-    ) nothrow {
+    ) nothrow @nogc {
         import core.atomic: atomicLoad, MemoryOrder;
 
         if (site.kind != CallSite.Kind.native)
