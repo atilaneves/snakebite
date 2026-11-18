@@ -620,3 +620,63 @@ private long openJitFiles() {
     }
     return count;
 }
+
+static foreach (backend; Matrix!()) {
+    @("jit.checkedLoadsFollowTheirEntryPath." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int readPair(I, T)(T[] values, I i, I j, bool skipFirst) {
+                assert(values.length == 3);
+                T first = 9;
+                if (skipFirst)
+                    goto second;
+                first = values[i - 1];
+            second:
+                T last = values[j - 1];
+                return first * 10 + last;
+            }
+
+            int main() {
+                int[] ints = [1, 2, 3];
+                ushort[] shorts = [1, 2, 3];
+                foreach (_; 0 .. 300) {
+                    assert(readPair(ints, 3, 3, false) == 33);
+                    assert(readPair(ints, 1, 3, false) == 13);
+                    assert(readPair(ints, 3, 2, true) == 92);
+                    assert(readPair(shorts, 2U, 2U, false) == 22);
+                    assert(readPair(shorts, 1UL, 3UL, false) == 13);
+                }
+                return 0;
+            }
+        }, ["readPair"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot reinterpret a uint array as a byte pointer"),
+)) {
+    @("jit.checkedLoadsObserveOverlappingWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            uint loadOverlap(int index, uint seed) {
+                assert(index == 0);
+                uint[2] bytes = [seed, seed];
+                auto data = (cast(ubyte*) bytes.ptr)[0 .. bytes.sizeof];
+                auto shifted = (cast(uint*) (data.ptr + 1))[0 .. 1];
+                bytes[0] = shifted[index];
+                uint observed = shifted[index];
+                assert(observed == *cast(uint*) (data.ptr + 1));
+                return observed;
+            }
+
+            int main() {
+                foreach (_; 0 .. 300)
+                    assert(loadOverlap(0, 0x32107654) == 0x54543210);
+                return 0;
+            }
+        }, ["loadOverlap"]);
+    }
+}
