@@ -1068,6 +1068,96 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("jit.byteBranchesPreserveValuesOnEachEntry." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int byteBranches(ubyte[] values, int index, int entry, ubyte saved) {
+                assert(values.length != 0);
+                ubyte first = saved;
+                ubyte second = 73;
+                ubyte third = saved;
+                if (entry == 1)
+                    goto copy;
+                if (entry == 2)
+                    goto test;
+                first = values[index];
+                if (!first)
+                    return first;
+            copy:
+                second = first;
+                third = second;
+            test:
+                if (!third)
+                    return 256 + second;
+                if (first)
+                    return 256 * first + third;
+                return third;
+            }
+
+            int main() {
+                ubyte[] values = [0, 2, 255];
+                foreach (_; 0 .. 300) {
+                    assert(byteBranches(values, 0, 0, 73) == 0);
+                    assert(byteBranches(values, 1, 0, 73) == 0x0202);
+                    assert(byteBranches(values, 2, 0, 73) == 0xFFFF);
+                    assert(byteBranches(values, 3, 1, 0) == 256);
+                    assert(byteBranches(values, 3, 2, 0) == 329);
+                    assert(byteBranches(values, 3, 1, 255) == 0xFFFF);
+                    assert(byteBranches(values, 3, 2, 2) == 0x0202);
+                }
+                return 0;
+            }
+        }, ["byteBranches"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot slice a pointer to a scalar or catch a bounds failure"),
+)) {
+    @("jit.byteBranchesKeepAliasedReadsAndBoundsChecks." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.exception: ArrayIndexError;
+
+            int aliasedByteBranches(int index, ubyte first, ubyte second,
+                    bool aliasesFirst) {
+                auto values = aliasesFirst
+                    ? (&first)[0 .. 1] : (&second)[0 .. 1];
+                assert(values.length != 0);
+                first = values[index];
+                if (!first)
+                    return second;
+                second = first;
+                if (second)
+                    return second;
+                return -1;
+            }
+
+            int main() {
+                foreach (_; 0 .. 300) {
+                    assert(aliasedByteBranches(0, 255, 2, true) == 255);
+                    assert(aliasedByteBranches(0, 255, 2, false) == 2);
+                    assert(aliasedByteBranches(0, 0, 2, true) == 2);
+                    assert(aliasedByteBranches(0, 255, 0, false) == 0);
+                }
+                foreach (aliasesFirst; [false, true]) {
+                    try {
+                        aliasedByteBranches(1, 255, 2, aliasesFirst);
+                        return 1;
+                    } catch (ArrayIndexError error) {
+                        assert(error.index == 1 && error.length == 1);
+                    }
+                }
+                return 0;
+            }
+        }, ["aliasedByteBranches"]);
+    }
+}
+
 private enum permutationVisits = q{
     // A mutable value with a fixed address can change between calls.
     private __gshared int mutableIndex;
