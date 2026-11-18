@@ -36,6 +36,9 @@ public struct RuntimeTypes {
     private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
     // The answer of `linkedClassInfo` for each class, null included.
     private SharedTable!(ClassDeclaration, TypeInfo_Class) _linkedClasses;
+    // The `__init` and the `__vtbl` symbol of each native class that asked.
+    private SharedTable!(ClassDeclaration, const(void)*) _nativeImages;
+    private SharedTable!(ClassDeclaration, const(void)*) _nativeVtables;
     // The structs that `buildStructInfo` is filling. Read and written under
     // the compiler lock only.
     private TypeInfo_Struct[StructDeclaration] _building;
@@ -76,16 +79,10 @@ public struct RuntimeTypes {
     // the class information of a class holds its image too: for a native
     // class it is its `__init` symbol, with the size from the declaration.
     private const(void)[] classInitializer(ClassDeclaration declaration) {
-        import snakebite.ffi.symbol: unresolvedSymbol;
-
         if (!isNativeClass(declaration))
             return _classInfo(declaration).m_init;
-
-        const symbol = classSymbol(declaration, "6__initZ");
-        auto image = _resolve(symbol);
-        if (image is null)
-            throw unresolvedSymbol(symbol, declaration.toString);
-        return image[0 .. declaration.structsize];
+        return nativeClassSymbol(_nativeImages, declaration, "6__initZ")
+            [0 .. declaration.structsize];
     }
 
     // The class information of `declaration`: native, or built by the
@@ -102,13 +99,34 @@ public struct RuntimeTypes {
 
     // The address of the vtable of the native class `declaration`.
     public const(void)* nativeVtable(ClassDeclaration declaration) {
-        import snakebite.ffi.symbol: unresolvedSymbol;
+        return nativeClassSymbol(_nativeVtables, declaration, "6__vtblZ");
+    }
 
-        const symbol = classSymbol(declaration, "6__vtblZ");
-        auto vtable = _resolve(symbol);
-        if (vtable is null)
-            throw unresolvedSymbol(symbol, declaration.toString);
-        return vtable;
+    // The address of the datum `suffix` of the native class `declaration`,
+    // found once for each class and kept in `table`.
+    private const(void)* nativeClassSymbol(
+        ref SharedTable!(ClassDeclaration, const(void)*) table,
+        ClassDeclaration declaration, in string suffix,
+    ) {
+        import snakebite.ffi.symbol: unresolvedSymbol;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        if (auto found = declaration in table)
+            return *found;
+
+        const(void)* address;
+        withCompilerLock({
+            if (auto found = declaration in table) {
+                address = *found;
+                return;
+            }
+            const symbol = classSymbol(declaration, suffix);
+            address = _resolve(symbol);
+            if (address is null)
+                throw unresolvedSymbol(symbol, declaration.toString);
+            table.insert(declaration, address);
+        });
+        return address;
     }
 
     public immutable(void)* rtInfo(AggregateDeclaration declaration) {

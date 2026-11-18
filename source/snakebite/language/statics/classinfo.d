@@ -81,13 +81,20 @@ public struct ClassRuntimeCache {
     public TypeInfo_Class build(
         scope TypeInfo_Class delegate() make,
     ) {
+        TypeInfo_Class info;
+        run({ info = make(); });
+        return info;
+    }
+
+    // Runs `work`, which can build class information (an initial image
+    // does), as `build` runs `make`.
+    public void run(scope void delegate() work) {
         import snakebite.frontend.compiler: withCompilerLock;
 
-        TypeInfo_Class info;
         withCompilerLock({
             ++_depth;
             scope(exit) --_depth;
-            // A partial entry `make` registered (`classRuntimeInfo`
+            // A partial entry `work` registered (`classRuntimeInfo`
             // registers before it resolves methods and fields, so a
             // class that reaches itself finds it) must not survive a
             // throw out of the outermost construction: a later `in`
@@ -96,11 +103,10 @@ public struct ClassRuntimeCache {
             scope (failure)
                 if (_depth == 1)
                     _pending = null;
-            info = make();
+            work();
             if (_depth == 1)
                 publish;
         });
-        return info;
     }
 
     public TypeInfo_Class* opBinaryRight(string op: "in")(
@@ -292,20 +298,22 @@ public void initialImage(
 
 // The words of the image of `declaration` at `place`, with the vtable
 // `vtable`. When `declaration` and its base are classes of the program, the
-// part of the bases is a copy of the image of the base, and an interface
-// slot of a base gets a table of its own only when `declaration` replaces a
-// method of the interface. Otherwise each part comes from the declarations
-// and each interface slot gets a table built here: nothing reads the image
-// or the tables of a native class.
+// part of the bases is a copy of the image of the base. Otherwise each field
+// comes from the declarations, and an interface slot of a native class names
+// the table of that class (`Target.Kind.interfaceTable`): nothing reads the
+// image or the tables of a native class here. A table is made here for the
+// interfaces of a class of the program, and for an interface of a base of
+// which a class below that base replaces a method.
 private void writeImage(
     ClassDeclaration declaration, ubyte* place, in void* vtable,
     ref ClassRuntimeCache cache, Hooks hooks,
 ) {
-    import snakebite.frontend.ast: fillVtbl;
+    import snakebite.native.address: Target;
 
     auto data = hooks.data;
     auto base = declaration.baseClass;
-    const copiesBase = base !is null && !hooks.isNativeClass(declaration)
+    const isNative = hooks.isNativeClass(declaration);
+    const copiesBase = base !is null && !isNative
         && !hooks.isNativeClass(base);
     if (copiesBase)
         data.copyBytes(place, classRuntimeInfo(base, cache, hooks).m_init);
@@ -313,58 +321,63 @@ private void writeImage(
 
     for (auto parent = declaration; parent !is null;
             parent = parent.baseClass) {
-        const own = parent is declaration;
-        if (own || !copiesBase)
+        const own = parent is declaration && !isNative;
+        if (parent is declaration || !copiesBase)
             data.fillFields(parent, place);
+        auto parentInfo = classRuntimeInfo(parent, cache, hooks);
+        const parentIsNative = hooks.isNativeClass(parent);
         foreach (i; 0 .. parent.vtblInterfaces.length) {
             auto interface_ = (*parent.vtblInterfaces)[i];
-            if (!own && copiesBase
-                    && !interface_.fillVtbl(declaration, null, 0))
+            auto slot = place + interface_.offset;
+            if (!own && !replaces(declaration, parent, interface_, copiesBase)) {
+                if (!copiesBase)
+                    data.storeInterface(slot, Target.Kind.interfaceTable,
+                        parentInfo, i);
                 continue;
-            auto descriptor = interfaceDescriptor(
-                declaration, parent, i, cache, hooks);
-            auto table = _interfaceVtable(
-                declaration, interface_, descriptor.record, hooks);
-            if (own || descriptor.isNew)
-                data.storeSlice(&descriptor.record.vtbl, table,
+            }
+            auto table = _interfaceVtable(declaration, interface_, hooks);
+            if (table.length != 0 && interface_.sym.vtblOffset) {
+                if (parentIsNative)
+                    data.storeInterface(&table[0],
+                        Target.Kind.interfaceRecord, parentInfo, i);
+                else
+                    data.storeReference(&table[0],
+                        &parentInfo.interfaces[i]);
+            }
+            if (own)
+                data.storeSlice(&parentInfo.interfaces[i].vtbl, table,
                     (void*).sizeof);
-            data.storeReference(place + interface_.offset, table.ptr);
+            data.storeReference(slot, table.ptr);
         }
     }
 }
 
-private struct Descriptor {
-    Interface* record;
-    // Whether the record was made for the table of `declaration`.
-    bool isNew;
-}
-
-// The `Interface` record that the table of `declaration` for interface `i` of
-// `parent` starts with. A class of the program holds its records in its class
-// information. The record of a native class is not read: a record with the
-// same values is made from the declarations.
-private Descriptor interfaceDescriptor(
-    ClassDeclaration declaration, ClassDeclaration parent, in size_t i,
-    ref ClassRuntimeCache cache, Hooks hooks,
+// Whether a class from `declaration` down to the class below `parent`
+// replaces a method of the interface `interface_` of `parent`, so that the
+// object has a table that `parent` does not have. When the image of the base
+// is a copy, only `declaration` is asked: the copy holds the tables of the
+// bases.
+private bool replaces(
+    ClassDeclaration declaration, ClassDeclaration parent,
+    imported!"snakebite.frontend.ast".BaseClass* interface_,
+    in bool copiesBase,
 ) {
-    if (!hooks.isNativeClass(parent))
-        return Descriptor(
-            &classRuntimeInfo(parent, cache, hooks).interfaces[i], false);
+    import snakebite.frontend.ast: fillVtbl;
 
-    auto data = hooks.data;
-    auto interface_ = (*parent.vtblInterfaces)[i];
-    auto record = cast(Interface*) data.reserve(
-        TypeFacts(Interface.sizeof, (void*).alignof), declaration).ptr;
-    data.storeReference(cast(void*) &record.classinfo,
-        cast(void*) classRuntimeInfo(interface_.sym, cache, hooks));
-    record.offset = interface_.offset;
-    return Descriptor(record, true);
+    for (auto below = declaration; below !is parent;
+            below = below.baseClass) {
+        if (interface_.fillVtbl(below, null, 0))
+            return true;
+        if (copiesBase)
+            return false;
+    }
+    return false;
 }
 
 private void*[] _interfaceVtable(
     imported!"snakebite.frontend.ast".ClassDeclaration declaration,
     imported!"snakebite.frontend.ast".BaseClass* base,
-    Interface* descriptor, Hooks hooks,
+    Hooks hooks,
 ) {
     import snakebite.frontend.ast: fillVtbl, FuncDeclarations;
 
@@ -376,10 +389,9 @@ private void*[] _interfaceVtable(
     auto table = cast(void*[]) data.reserve(
         TypeFacts(methods.length * (void*).sizeof, (void*).alignof),
         declaration).bytes;
-    const first = base.sym.vtblOffset;
-    if (first)
-        data.storeReference(&table[0], descriptor);
-    foreach (i; first .. methods.length) {
+    // The first word of the table is the `Interface` record: the caller
+    // writes it.
+    foreach (i; base.sym.vtblOffset .. methods.length) {
         auto method = methods[i];
         if (method is null)
             continue;

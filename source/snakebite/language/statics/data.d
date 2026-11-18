@@ -6,7 +6,7 @@ private:
 
 import snakebite.frontend.ast: Module;
 import snakebite.failure.report: internalFailure;
-import snakebite.native.address: Address, DatumRef, Target;
+import snakebite.native.address: Address, DatumRef, Target, wordOf;
 import snakebite.frontend.typefacts;
 import snakebite.native.staticstore: Placed, StaticBlocks, StaticStore;
 import snakebite.native.value:
@@ -311,8 +311,10 @@ public struct NativeData {
             link.set = cast(const(StaticBlocks)*) target.datum.set;
             link.block = target.datum.block;
             link.offset = target.datum.offset + offset;
-        } else
+        } else {
             link.address = target.address + offset;
+            link.index = target.index;
+        }
         recordLink(place, link);
     }
 
@@ -411,6 +413,16 @@ public struct NativeData {
     private Address functionAddress(in void* address) {
         return Address(_functionKind is null
             ? Target.Kind.hostSymbol : _functionKind(address), address);
+    }
+
+    // The word at `place` becomes the table (`interfaceTable`) or the record
+    // (`interfaceRecord`) `interfaces[index]` of the class information
+    // `info` of another object.
+    public void storeInterface(
+        void* place, in Target.Kind kind, in TypeInfo_Class info,
+        in size_t index,
+    ) {
+        storeAddress(&this, place, Address.ofInterface(kind, info, index));
     }
 
     // The slice at `place` becomes `data`, which is bytes of a datum, of
@@ -836,7 +848,7 @@ private void storeAddress(
     in size_t offset = 0, in size_t size = size_t.sizeof,
 ) {
     const where = target.target;
-    checkedStoreIntegral(place, where.address + offset, size);
+    checkedStoreIntegral(place, wordOf(where) + offset, size);
     if (nativeData !is null)
         nativeData.recordAddress(place, where, offset);
 }

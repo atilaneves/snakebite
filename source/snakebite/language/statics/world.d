@@ -127,9 +127,8 @@ public struct StaticWorld {
     private void writeClassImage(ClassDeclaration declaration, void* place) {
         import snakebite.language.statics.classinfo: initialImage;
 
-        _classRuntime.build(() {
+        _classRuntime.run({
             initialImage(declaration, place, _classRuntime, hooks);
-            return TypeInfo_Class.init;
         });
     }
 

@@ -18,7 +18,7 @@ import snakebite.backends.bytecode.relocation:
     classificationOf, eachRelocated, HostCode, isClassified, Place, Plain,
     Reloc, Relocated, SetBy;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
-import snakebite.native.address: DatumRef, Target;
+import snakebite.native.address: DatumRef, Target, wordOf;
 import snakebite.backends.bytecode.vm:
     AssertSite, CallSite, ExceptionHandler,
     Function, hostCodeAt, Instruction, JitSetting,
@@ -634,6 +634,13 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             const position = archive.symbolPosition(
                 cast(const(void)*) target.address);
             return [position[0], position[1], 0];
+        case interfaceTable:
+        case interfaceRecord:
+            const position = archive.symbolPosition(
+                cast(const(void)*) target.address);
+            if (position[1] != 0)
+                internalFailure("a word names an interface of an address that is not a class information");
+            return [position[0], target.index, 0];
     }
 }
 
@@ -656,6 +663,14 @@ private size_t addressOf(
             return cast(size_t) archive.dataAt(reference);
         case adoptedString:
             return cast(size_t) archive.stringAt(reference);
+        case interfaceTable:
+        case interfaceRecord:
+            auto info = cast(TypeInfo_Class) archive.symbolAt(reference[0]);
+            if (reference[1] >= info.interfaces.length)
+                throw new SnakebiteException(
+                    "the program file names an interface that a class does not have");
+            return wordOf(Target(kind, cast(size_t) cast(void*) info,
+                DatumRef.init, cast(uint) reference[1]));
     }
 }
 
@@ -920,7 +935,8 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
 
 private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) {
     if (link.kind != Target.Kind.staticData)
-        return referenceOf(archive, Target(link.kind, link.address));
+        return referenceOf(archive,
+            Target(link.kind, link.address, DatumRef.init, link.index));
     return archive.blocksPosition(link.set, link.block, link.offset);
 }
 
