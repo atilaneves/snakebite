@@ -7597,6 +7597,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (isComparison) {
             auto comparison = condition.isBinExp;
             const plan = comparisonPlan(comparison);
+            if (plan.kind == ComparisonPlan.Kind.dynamicArray
+                    && plan.elementSize == ubyte.sizeof
+                    && emitByteLiteralBranch(condition.isEqualExp, jumpWhen,
+                        position, branches))
+                return;
             const floating = plan.kind == ComparisonPlan.Kind.floating;
             if (floating || plan.kind == ComparisonPlan.Kind.integral
                     || plan.kind == ComparisonPlan.Kind.reference) {
@@ -7623,6 +7628,71 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         branches ~= _code.instructions.length;
         emit(jumpWhen ? &opBranchTrue : &opBranchFalse, offset, 0,
             conditionWidth(condition));
+    }
+
+    private bool emitByteLiteralBranch(
+        EqualExp equality, in bool jumpWhen,
+        in FullExpressionScope.Position position, ref size_t[] branches,
+    ) {
+        import snakebite.frontend.ast: Tarray;
+        import snakebite.frontend.compiler: readSingleByteLiteral;
+        import snakebite.native.value:
+            arrayLengthOffset, arrayPointerOffset, arrayValueSize;
+
+        if (equality is null || equality.lowering !is null)
+            return false;
+
+        // Reading a string literal has no side effects in either operand
+        // position. The other operand still evaluates exactly once.
+        auto slice = equality.e1;
+        auto literal = equality.e2.isStringExp;
+        if (literal is null) {
+            literal = equality.e1.isStringExp;
+            slice = equality.e2;
+        }
+        auto type = slice.type.baseType;
+        ubyte value;
+        if (type.ty != Tarray || slice.type.isShared || type.isShared
+                || type.nextOf.isShared || !readSingleByteLiteral(literal, value)
+                || FullExpressionScope.hasOperandDestructors(equality))
+            return false;
+
+        size_t array;
+        inFullExpression(position, equality, {
+            array = isPlainPlace(slice) ? placeOf(slice, true) : size_t.max;
+            if (array == size_t.max) {
+                array = reserveTemp(typeFacts(type));
+                evalInto(slice, array, arrayValueSize);
+            }
+        });
+
+        const jumpOnEqual = jumpWhen == (equality.op == EXP.equal);
+        const lengthBranch = _code.instructions.length;
+        emit(fusedBranchHandler(Comparison.equal, CompareKind.unsigned,
+                false, true),
+            placeAt(array, arrayLengthOffset), constantWord(1), size_t.sizeof);
+
+        size_t pointer = placeAt(array, arrayPointerOffset);
+        if (isIndirect(pointer)) {
+            const slot = reserveTemp(pointerFacts);
+            emit(&opCopy, slot, pointer, size_t.sizeof);
+            pointer = slot;
+        }
+
+        const data = _bytecode._world.data.value(Type.tuns8,
+            (&value)[0 .. 1], _function);
+        const byteConstant = Address(Target.Kind.constantPool, data.ptr,
+            data.where);
+        branches ~= _code.instructions.length;
+        emit(fusedBranchHandler(Comparison.equal, CompareKind.unsigned,
+                jumpOnEqual, true),
+            indirectStorage(pointer), byteConstant, ubyte.sizeof);
+
+        if (jumpOnEqual)
+            patchTarget(lengthBranch, _code.instructions.length);
+        else
+            branches ~= lengthBranch;
+        return true;
     }
 
     private void emitCompareBranch(
