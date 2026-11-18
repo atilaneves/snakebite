@@ -517,29 +517,36 @@ static foreach (backend; Matrix!(
         "CTFE cannot access class destructors through TypeInfo"),
 )) {
     // The destructor runs in a GC finalizer, which must not allocate, and
-    // its loop makes `work` hot there. A function that gets hot in a finalizer
-    // keeps its handlers until a later event, so there is no JIT code to see.
+    // its recursive calls and loop make `work` hot there. A function that
+    // gets hot in a finalizer keeps its handlers until a later event.
     @("jit.functionBecomesHotInAFinalizer." ~ backend.stringof)
     @Tags(backend.stringof, "forced-finalizers")
     unittest {
         0.shouldBeStatusOf!(backend, q{
             import core.memory: GC;
-            long work(long n) {
+            void work(long* result, uint depth) {
+                if (depth != 0) {
+                    work(result, depth - 1);
+                    return;
+                }
                 long sum;
-                foreach (i; 0 .. n)
+                foreach (i; 0 .. 5000)
                     sum += i & 7;
-                return sum;
+                *result = sum;
             }
             class Resource {
                 long* result;
                 this(long* result) { this.result = result; }
-                ~this() { *result = work(5000); }
+                ~this() { work(result, 4); }
             }
             void main() {
                 long result;
                 auto resource = new Resource(&result);
                 const address = cast(const void*) typeid(Resource).destructor;
                 GC.runFinalizers(address[0 .. 1]);
+                assert(result == 5000 / 8 * 28);
+                result = 0;
+                work(&result, 4);
                 assert(result == 5000 / 8 * 28);
             }
         });

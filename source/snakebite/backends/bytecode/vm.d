@@ -1438,6 +1438,9 @@ private void observeGuestCall(DispatchState* state, Activation* active,
                     && callee.jitHeat <= previous.jitHeat)
                 return;
         }
+        // A thread suspended by the GC can hold the allocator lock.
+        if (GC.inFinalizer)
+            return;
         if (state.observedEdges.reserve(observedEdgeBudget) is null)
             return;
         state.observedFunction = callee;
