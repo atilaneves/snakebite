@@ -613,6 +613,104 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+private enum recursiveVisits = q{
+    final class Search {
+        int[1] visits;
+        int[] updates;
+
+        void walk(uint depth, size_t index) {
+            visits[0] += 1;
+            if (depth == 0)
+                return;
+            walk(depth - 1, index);
+            updates[index] = visits[0] + 10;
+            walk(depth - 1, index);
+        }
+    }
+
+    void warmUp(Search search) {
+        foreach (_; 0 .. 350) {
+            search.visits[0] = 0;
+            search.walk(3, 0);
+            assert(search.visits[0] == 15);
+            assert(search.updates[0] == 24);
+        }
+    }
+};
+
+static foreach (backend; Matrix!()) {
+    @("jit.recursiveCallsObserveAnAliasedStore." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, recursiveVisits ~ q{
+            void cold(int* visits, uint depth) {
+                ++*visits;
+                if (depth != 0)
+                    cold(visits, depth - 1);
+            }
+
+            int main() {
+                int coldVisits;
+                cold(&coldVisits, 5);
+                assert(coldVisits == 6);
+
+                auto search = new Search;
+                int[1] separate;
+                search.updates = separate[];
+                warmUp(search);
+
+                search.updates = search.visits[];
+                search.visits[0] = 0;
+                search.walk(3, 0);
+                assert(search.visits[0] == 85);
+
+                search.updates = separate[];
+                search.visits[0] = 0;
+                search.walk(4, 0);
+                assert(search.visits[0] == 31);
+                assert(separate[0] == 40);
+                return 0;
+            }
+        }, ["walk"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("jit.recursiveBoundsFailureKeepsEarlierEffects." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, recursiveVisits ~ q{
+            import core.exception: ArrayIndexError;
+
+            int main() {
+                auto search = new Search;
+                int[1] separate;
+                search.updates = separate[];
+                warmUp(search);
+                search.visits[0] = 0;
+                try {
+                    search.walk(3, 5);
+                    return 1;
+                } catch (ArrayIndexError error) {
+                    assert(error.index == 5 && error.length == 1);
+                    assert(search.visits[0] == 4);
+                    assert(separate[0] == 24);
+                }
+
+                search.visits[0] = 0;
+                search.walk(2, 0);
+                assert(search.visits[0] == 7);
+                assert(separate[0] == 16);
+                return 0;
+            }
+        }, ["walk"]);
+    }
+}
+
+
 // The number of JIT code files that this process has open.
 private long openJitFiles() {
     import std.algorithm: canFind;

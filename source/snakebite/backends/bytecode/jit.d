@@ -2083,8 +2083,10 @@ private struct Gen {
                         const parent = calls[pending].arm.fast;
                         const child = call.arm.fast;
                         const site = &callSites[snapshot[call.pc].source];
-                        const delta = cast(long) parent.windowBase + site.windowDisp
-                            + child.frameOffset - parent.frameOffset;
+                        const delta = cast(long) parent.windowBase
+                            + cast(long) site.windowDisp
+                            + cast(long) child.frameOffset
+                            - cast(long) parent.frameOffset;
                         if (delta > int.max || delta < -int.max)
                             return false;
                         a.lea(FRAME, Mem(FRAME, -cast(int) delta));
