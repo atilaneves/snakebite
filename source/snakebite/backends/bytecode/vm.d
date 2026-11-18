@@ -1,11 +1,13 @@
 module snakebite.backends.bytecode.vm;
 
+version = ObserveGuestPath;
+
 
 private:
 
 
 import snakebite.failure.report: internalFailure;
-import snakebite.backends.bytecode.jit: jitSupported;
+import snakebite.backends.bytecode.jit: jitSupported, ObservedEdge;
 
 
 import snakebite.ffi.callplanstore: CallPlanStore;
@@ -764,6 +766,8 @@ private const(Instruction)* executeWith(
         pc, activation, state, frame,
     );
     const next = operation!Parameters(execution);
+    version (ObserveGuestPath)
+        observeGuestPath(state, activation, pc, next);
     static if (chainedDispatch) {
         // Every instruction stream ends in an instruction that ends the
         // activation, and that one does not use `execute`. This handler
@@ -813,6 +817,8 @@ private const(Instruction)* executeRegister(
     execution.outR0 = r0;
     execution.outFp0 = fp0;
     const next = operation!Parameters(execution);
+    version (ObserveGuestPath)
+        observeGuestPath(state, activation, pc, next);
     static if (chainedDispatch)
         return next.handler(next, activation, state, frame,
             execution.outR0, execution.outFp0);
@@ -1366,6 +1372,7 @@ private struct RootActivation {
 }
 
 package struct DispatchState {
+
     FrameStack* frames;
     // The activation that runs. A chained build keeps it up to date at every
     // call and return; other builds set it only where a handler can throw.
@@ -1387,7 +1394,33 @@ package struct DispatchState {
     const(void)* decodedAddress;
     const(void)* decodedWord;
     ptrdiff_t decodedAdjustment;
+    version (ObserveGuestPath) {
+        const(Function)* observedFunction;
+        ObservedEdge[2048] observedEdges;
+        size_t observedEvents;
+    }
+
 }
+
+version (ObserveGuestPath)
+private void observeGuestPath(DispatchState* state, Activation* active,
+    const(Instruction)* pc, const(Instruction)* next,
+    ushort transfer = ushort.max)
+{
+    if (state.observedFunction !is active.function_
+            || state.observedFunction is null
+            || state.observedEvents == state.observedEdges.length)
+        return;
+    const first = active.function_.instructions.ptr;
+    const index = pc - first;
+    const target = next is null ? transfer : next - first;
+    if (index < 0 || index >= ObservedEdge.return_
+            || target < 0 || target > ushort.max)
+        return;
+    state.observedEdges[state.observedEvents++] =
+        ObservedEdge(cast(ushort) index, cast(ushort) target);
+}
+
 
 // Thrown after guest code has resumed from a handler that took an exception
 // that cleanup threw while an exception that is no `Throwable` unwound. It
@@ -2122,8 +2155,21 @@ private const(Instruction)* enterWindow(Destination destination, bool indirect,
     *cast(void**) (calleeFrame + fast.placeStore) = place;
     *cast(ubyte**) (calleeFrame + fast.windowStore) =
         cast(ubyte*) activation + fast.windowBase;
+    static if (counted && !indirect) {
+        version (ObserveGuestPath) {
+            if (callee is active.function_ && state.observedFunction is null
+                    && callee.jitState == JitTier.interpreted
+                    && callee.jitHeat < cast(uint) -jitStep
+                    && callee.instructions.length < ObservedEdge.return_) {
+                state.observedFunction = callee;
+                state.observedEvents = 0;
+            }
+            if (callee is active.function_)
+                observeGuestPath(state, active, pc, null, ObservedEdge.call);
+        }
+    }
     static if (counted)
-        countCall(callee);
+        countCall(callee, state);
     activation.pc = callee.instructions.ptr;
     activation.function_ = callee;
     activation.cleanupMark = frames.cleanupMark;
@@ -2690,6 +2736,8 @@ package const(Instruction)* returnHandler(size_t width, bool frameOnly)(
             memcpy(place, source, width);
     }
     static if (chainedDispatch) {
+        version (ObserveGuestPath)
+            observeGuestPath(state, activation, pc, null, ObservedEdge.return_);
         const resume = leaveToCaller(activation, state);
         if (resume !is null) {
             ulong none0 = void;
@@ -2747,6 +2795,8 @@ public const(Instruction)* opReturnVoid(
 ) {
     activation.pc = pc;
     static if (chainedDispatch) {
+        version (ObserveGuestPath)
+            observeGuestPath(state, activation, pc, null, ObservedEdge.return_);
         const resume = leaveToCaller(activation, state);
         if (resume !is null) {
             ulong none0 = void;
@@ -5637,10 +5687,10 @@ static if (jitSupported) {
     }
 
     pragma(inline, true)
-    private void countCall(const(Function)* callee) {
+    private void countCall(const(Function)* callee, DispatchState* state = null) {
         auto function_ = cast(Function*) callee;
         if (addHeat(function_, jitStep))
-            jitTierUp(function_);
+            jitTierUp(function_, state);
     }
 
     private bool isCountedCall(in Instruction.Handler handler) nothrow @nogc {
@@ -5688,7 +5738,7 @@ static if (jitSupported) {
         ulong r0,
         double fp0,
     ) {
-        if (jitTierUp(cast(Function*) active.function_)) {
+        if (jitTierUp(cast(Function*) active.function_, state)) {
             // The word of this instruction now holds JIT code.
             import core.atomic: atomicLoad, MemoryOrder;
             const compiled = cast(Instruction.Handler)
@@ -5790,7 +5840,7 @@ static if (jitSupported) {
     // holds the lock can be one that the GC suspended. The function then counts
     // another `jitThreshold` events and tries again.
     pragma(inline, false)
-    private bool jitTierUp(Function* function_) nothrow {
+    private bool jitTierUp(Function* function_, DispatchState* dispatch) nothrow {
         import core.atomic: atomicLoad, atomicStore, cas, MemoryOrder;
 
         auto state = cast(shared(uint)*) &function_.jitState;
@@ -5813,14 +5863,21 @@ static if (jitSupported) {
             return false;
         }
 
-        const ok = compileUnderLock(lock, function_);
+        const(ObservedEdge)[] observed;
+        version (ObserveGuestPath) {
+            if (dispatch !is null && dispatch.observedFunction is function_) {
+                observed = dispatch.observedEdges[0 .. dispatch.observedEvents];
+                dispatch.observedFunction = null;
+            }
+        }
+        const ok = compileUnderLock(lock, function_, observed);
         atomicStore!(MemoryOrder.rel)(*state,
             cast(uint) (ok ? JitTier.compiled : JitTier.failed));
         return ok;
     }
 
-    private bool compileUnderLock(ref JitLock lock, Function* function_)
-        nothrow
+    private bool compileUnderLock(ref JitLock lock, Function* function_,
+        const(ObservedEdge)[] observed) nothrow
     {
         if (!lock.jitUsable)
             return false;
@@ -5861,7 +5918,7 @@ static if (jitSupported) {
                 originals[index] = nativeCallJitEntry(
                     &function_.callSites[snapshot[index].source], handler);
         }
-        return lock.jitFunction(function_, snapshot, ops, originals);
+        return lock.jitFunction(function_, snapshot, ops, originals, observed);
     }
 
     private Instruction.Handler nativeCallJitEntry(

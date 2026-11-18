@@ -207,6 +207,15 @@ package struct JitOp {
     }
 }
 
+package struct ObservedEdge {
+    package ushort pc;
+    // A call enters the first instruction and a return resumes in its caller.
+    package enum call = ushort.max;
+    package enum return_ = call - 1;
+    package ushort next;
+}
+
+
 private enum : ubyte {
     RAX = 0, RCX = 1, RDX = 2, RSI = 6, RDI = 7, R8 = 8, R9 = 9, R10 = 10,
     R11 = 11,
@@ -306,7 +315,8 @@ package struct JitState {
 
     Emitted emitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals)
+        const(Instruction.Handler)[] originals,
+        const(ObservedEdge)[] observed)
     {
         import core.atomic: atomicStore, MemoryOrder;
 
@@ -331,12 +341,19 @@ package struct JitState {
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
 
+        const path = g.selectObservedPath(function_, ops, observed);
+        size_t pathJump;
         enum needsHandlerEntry = size_t.max;
         size_t handlerEntryCount;
         foreach (i; 0 .. instructions.length) {
             if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
             g.labels[i] = g.a.n;
+            if (path.length != 0 && i == path[0].pc) {
+                g.a.b(0xE9);
+                pathJump = g.a.n;
+                g.a.d32(0);
+            }
             if (g.checkedLoop.update && i == g.checkedLoop.update) {
                 g.jumpToHandler(i, originals[i]);
                 g.emitCheckedLoopUpdate;
@@ -430,6 +447,18 @@ package struct JitState {
             entry.intSlots.reload(g.a);
             g.a.b(0xE9);
             g.a.d32(cast(int) (body - (g.a.n + int.sizeof)));
+        }
+
+        if (pathJump != 0) {
+            const startOfPath = g.a.n;
+            const target = g.emitObservedPath(cap, function_, path, ops,
+                originals) ? startOfPath : pathJump + int.sizeof;
+            if (target != startOfPath)
+                g.a.n = startOfPath;
+            g.patchTo(pathJump, target);
+            if (function_.jitName.length && target == startOfPath)
+                perfMap.record(region.execBase + start + startOfPath,
+                    g.a.n - startOfPath, "observed-guest-path");
         }
 
         foreach (f; g.fixups[0 .. g.fixupCount])
@@ -780,18 +809,19 @@ package struct JitLock {
     // function does not reserve room for its worst case before it emits.
     package bool jitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals)
+        const(Instruction.Handler)[] originals,
+        const(ObservedEdge)[] observed)
     {
         if (snapshot.length == 0)
             return false;
         ref state = this.state;
-        auto result = state.emitFunction(function_, snapshot, ops, originals);
+        auto result = state.emitFunction(function_, snapshot, ops, originals, observed);
         if (result == Emitted.full) {
             const worst = snapshot.length * maximumBytesPerInstruction
                 + 4096;
             if (!state.region.newChunk(worst))
                 return false;
-            result = state.emitFunction(function_, snapshot, ops, originals);
+            result = state.emitFunction(function_, snapshot, ops, originals, observed);
         }
         return result == Emitted.done;
     }
@@ -1251,6 +1281,16 @@ private struct Asm {
         d32(0);
     }
 
+    void integerToXmm(int xmm, int integer) {
+        b(operandSizePrefix);
+        rrOp(8, byteReg: false, xmm, integer, 0x0F6E);
+    }
+
+    void xmmToInteger(int integer, int xmm) {
+        b(operandSizePrefix);
+        rrOp(8, byteReg: false, xmm, integer, 0x0F7E);
+    }
+
     void sseRR(ubyte prefix, ubyte op, int dst, int src) {
         if (prefix)
             b(prefix);
@@ -1596,8 +1636,12 @@ private struct Gen {
         return p;
     }
 
+    void patchTo(size_t p, size_t target) {
+        *cast(int*) (a.buf + p) = cast(int) (target - (p + int.sizeof));
+    }
+
     void patchHere(size_t p) {
-        *cast(int*) (a.buf + p) = cast(int) (a.n - (p + 4));
+        patchTo(p, a.n);
     }
 
     // The branch target stored as an address in a field.
@@ -1783,24 +1827,31 @@ private struct Gen {
     bool emitCallWindowArm(size_t i, in JitOp.CallWindow op,
         const(CallSite)* site, ref WindowArm arm)
     {
-        const ins = snapshot[i];
         const entry = arm.entry;
-        const callee = arm.callee;
-        const fast = arm.fast;
-        const adjustment = arm.adjustment;
         if (entry !is null) {
             a.movI(RAX, cast(size_t) entry);
             a.alu(Alu.cmp, 8, RAX, Mem(FRAME, cast(int) site.calleeSlotOffset));
             arm.mismatch = jccLocal(CC_NE);
         }
+        addressWindow(site);
+        guardWindow(op, arm);
+        if (!publishWindow(i, op, site, arm))
+            return false;
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+        return true;
+    }
+
+    void addressWindow(const(CallSite)* site) {
         a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
         a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
         a.lea(R11, Mem(R10, cast(int) site.windowDisp));
-        a.lea(RAX, Mem(R11, cast(int) fast.reachBytes));
+    }
+
+    void guardWindow(in JitOp.CallWindow op, ref WindowArm arm) {
+        a.lea(RAX, Mem(R11, cast(int) arm.fast.reachBytes));
         a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.fastEndOffset));
         arm.grow = jccLocal(CC_A);
-
-        a.movI(PCREG, cast(size_t) callee);
+        a.movI(PCREG, cast(size_t) arm.callee);
         if (op.counted) {
             const heat = Mem(PCREG, Function.jitHeat.offsetof);
             a.ld(4, RAX, heat);
@@ -1809,6 +1860,14 @@ private struct Gen {
             arm.tierUp = jccLocal(CC_B);
             a.st(4, heat, RAX);
         }
+    }
+
+    bool publishWindow(size_t i, in JitOp.CallWindow op,
+        const(CallSite)* site, in WindowArm arm)
+    {
+        const ins = snapshot[i];
+        const callee = arm.callee;
+        const fast = arm.fast;
         a.st(8, Mem(R11, Activation.function_.offsetof), PCREG);
 
         Mem place;
@@ -1818,20 +1877,8 @@ private struct Gen {
             return false;
         a.lea(RAX, place);
         a.st(8, Mem(R11, Activation.returnPlace.offsetof), RAX);
-        a.lea(FRAME, Mem(R11, cast(int) fast.frameOffset));
+        setWindowFrame(arm);
         a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
-        if (arm.hasPlace)
-            a.st(8, Mem(FRAME, cast(int) fast.placeStore), RAX);
-        if (adjustment != 0) {
-            const context = Mem(FRAME, cast(int) callee.contextOffset);
-            a.ld(8, RAX, context);
-            a.aluRI(Alu.add, 8, RAX, cast(int) adjustment);
-            a.st(8, context, RAX);
-        }
-        if (arm.hasWindows) {
-            a.lea(RAX, Mem(R11, cast(int) fast.windowBase));
-            a.st(8, Mem(FRAME, cast(int) fast.windowStore), RAX);
-        }
 
         a.ld(8, RAX, Mem(R9, FrameStack.topOffset));
         a.alu(Alu.sub, 8, RAX, Mem(R9, FrameStack.baseOffset));
@@ -1851,8 +1898,298 @@ private struct Gen {
         a.st(8, Mem(R11, Activation.pc.offsetof), PCREG);
         a.st(8, Mem(STATE, DispatchState.current.offsetof), R11);
         a.movRR64(ACTIVE, R11);
-        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+        return true;
+    }
 
+    void setWindowFrame(in WindowArm arm) {
+        const callee = arm.callee;
+        const fast = arm.fast;
+        const adjustment = arm.adjustment;
+        a.lea(FRAME, Mem(R11, cast(int) fast.frameOffset));
+        if (arm.hasPlace)
+            a.st(8, Mem(FRAME, cast(int) fast.placeStore), RAX);
+        if (adjustment != 0) {
+            const context = Mem(FRAME, cast(int) callee.contextOffset);
+            a.ld(8, RAX, context);
+            a.aluRI(Alu.add, 8, RAX, cast(int) adjustment);
+            a.st(8, context, RAX);
+        }
+        if (arm.hasWindows) {
+            a.lea(RAX, Mem(R11, cast(int) fast.windowBase));
+            a.st(8, Mem(FRAME, cast(int) fast.windowStore), RAX);
+        }
+    }
+
+    private enum transferPathValues = true;
+    private enum pathAddress = FpSlots.firstRegister;
+    private bool emittingPath;
+    private int retainedWidth;
+    private size_t pathMemoryGuard;
+    private bool retainedAcrossCall;
+    private bool reusedAcrossCall;
+
+    private enum pathBudget = 96;
+    private enum pathDepth = 4;
+
+    const(ObservedEdge)[] selectObservedPath(const(Function)* function_,
+        const(JitOp)[] ops, const(ObservedEdge)[] observed)
+    {
+        if (observed.length == 0 || function_.returnPlace.offset != size_t.max)
+            return null;
+
+        size_t bestScore;
+        const(ObservedEdge)[] best;
+        foreach (start, edge; observed) {
+            if (edge.next != ObservedEdge.call)
+                continue;
+            ushort[pathDepth] resumes;
+            size_t depth;
+            size_t returns;
+            size_t length;
+            size_t finished;
+            size_t completedReturns;
+            size_t expected = edge.pc;
+            foreach (step; observed[start .. $]) {
+                if (length == pathBudget || step.pc != expected)
+                    break;
+                const op = ops[step.pc];
+                if (step.next == ObservedEdge.call
+                        && op.kind == JitOp.Kind.callWindow) {
+                    if (depth == pathDepth
+                            || !observedWindow(function_, step.pc,
+                                op.callWindow).callee)
+                        break;
+                    resumes[depth++] = cast(ushort) (step.pc + 1);
+                    expected = 0;
+                } else if (step.next == ObservedEdge.return_
+                        && op.kind == JitOp.Kind.returnVoid) {
+                    if (!depth)
+                        break;
+                    expected = resumes[--depth];
+                    ++returns;
+                    if (!depth) {
+                        finished = length + 1;
+                        completedReturns = returns;
+                    }
+                } else if (step.next < ops.length && pathOp(op)) {
+                    expected = step.next;
+                } else
+                    break;
+                ++length;
+            }
+            if (!finished)
+                continue;
+            const candidate = observed[start .. start + finished];
+            size_t hits;
+            foreach (other, entry; observed[0 .. $ - finished + 1])
+                if (entry == edge && candidate == observed[other .. other + finished])
+                    ++hits;
+            const score = hits * completedReturns;
+            if (hits >= 2 && score >= bestScore
+                    && (score > bestScore || candidate.length > best.length)) {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    static bool pathOp(in JitOp op) {
+        with (JitOp.Kind)
+            return op.kind == copy || op.kind == jump || op.kind == checked
+                || (op.kind == int3 && !op.int3.resultInR0 && !op.int3.leftInR0)
+                || (op.kind == fused && !op.fused.leftInR0
+                    && op.fused.kind != CompareKind.floating);
+    }
+
+    WindowArm observedWindow(const(Function)* function_, size_t i,
+        in JitOp.CallWindow op)
+    {
+        import core.atomic: atomicLoad, MemoryOrder;
+
+        const site = &callSites[snapshot[i].source];
+        if (op.indirect || op.destination != Destination.discard
+                || site.windowSlot > int.max || site.windowDisp > int.max
+                || site.windowScratch > int.max
+                || atomicLoad!(MemoryOrder.acq)(
+                    *cast(shared(uint)*) &site.fast.state)
+                    != CallSite.FastCall.State.ready
+                || site.fast.callee !is function_)
+            return WindowArm.init;
+        const arm = WindowArm(function_, &site.fast);
+        return encodableWindowArm(arm) ? arm : WindowArm.init;
+    }
+
+    private struct PathCall {
+        size_t pc;
+        int parent = -1;
+        WindowArm arm;
+    }
+
+    private struct PathExit {
+        size_t target;
+        size_t firstJump;
+        size_t secondJump;
+        int call = -1;
+    }
+
+    bool emitObservedPath(size_t cap, const(Function)* function_,
+        const(ObservedEdge)[] path, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals)
+    {
+        PathCall[pathBudget] calls = void;
+        PathExit[2 * pathBudget] exits = void;
+        size_t callCount;
+        size_t exitCount;
+        int pending = -1;
+        size_t continuation;
+        emittingPath = transferPathValues;
+        scope (exit) emittingPath = false;
+        known = KnownConstant.init;
+        fpSlots = FpSlots.init;
+        intSlots = IntSlots.init;
+        foreach (step; path) {
+            if (cap - a.n < maximumBytesPerInstruction)
+                return false;
+            const i = step.pc;
+            const op = ops[i];
+            pathMemoryGuard = 0;
+            // The normal neighboring-template register cache is local to a
+            // different sequence. The path carries only its guarded value.
+            intSlots = IntSlots.init;
+            ref const ins = snapshot[i];
+            with (JitOp.Kind) switch (op.kind) {
+                case callWindow: {
+                    auto arm = observedWindow(function_, i, op.callWindow);
+                    if (arm.callee is null)
+                        return false;
+                    const site = &callSites[ins.source];
+                    addressWindow(site);
+                    guardWindow(op.callWindow, arm);
+                    exits[exitCount++] = PathExit(i, arm.grow, arm.tierUp, pending);
+                    setWindowFrame(arm);
+                    retainedAcrossCall = retainedWidth != 0;
+                    calls[callCount] = PathCall(i, pending, arm);
+                    pending = cast(int) callCount++;
+                    break;
+                }
+                case returnVoid: {
+                    const call = calls[pending];
+                    pending = call.parent;
+                    continuation = call.pc + 1;
+                    if (pending < 0)
+                        a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
+                    else {
+                        const parent = calls[pending].arm.fast;
+                        const child = call.arm.fast;
+                        const site = &callSites[snapshot[call.pc].source];
+                        const delta = cast(long) parent.windowBase + site.windowDisp
+                            + child.frameOffset - parent.frameOffset;
+                        if (delta > int.max || delta < -int.max)
+                            return false;
+                        a.lea(FRAME, Mem(FRAME, -cast(int) delta));
+                    }
+                    retainedAcrossCall = retainedWidth != 0;
+                    break;
+                }
+                case jump: {
+                    size_t target;
+                    if (!targetIndex(ins.destination, target) || step.next != target)
+                        return false;
+                    break;
+                }
+                case fused: {
+                    size_t target, exit;
+                    size_t jump;
+                    if (!targetIndex(ins.sourceWidth, target)
+                            || !emitFused(ins, op.fused, target,
+                                0, i + 1, step.next, &exit, &jump))
+                        return false;
+                    exits[exitCount++] = PathExit(exit, jump, 0, pending);
+                    break;
+                }
+                case checked: {
+                    size_t jump;
+                    if (op.checked.access == CheckedAccess.load
+                            && !pathFrameStorage(ins.destination, function_.windowSlot))
+                        forgetPathValue;
+                    if (!emitChecked(i, ins, op, step.next, &jump))
+                        return false;
+                    if (jump != 0)
+                        exits[exitCount++] = PathExit(i + 1, jump, 0, pending);
+                    break;
+                }
+                case copy:
+                    if (!pathFrameStorage(ins.destination, function_.windowSlot))
+                        forgetPathValue;
+                    goto case;
+                case int3:
+                    if (step.next != i + 1 || !emitTemplate(i, ops, op, originals[i]))
+                        return false;
+                    break;
+                default:
+                    return false;
+            }
+            if (pathMemoryGuard != 0)
+                exits[exitCount++] = PathExit(i, pathMemoryGuard, 0, pending);
+        }
+        if (cap - a.n < maximumBytesPerInstruction || pending >= 0
+                || (transferPathValues && !reusedAcrossCall))
+            return false;
+        jumpToPathExit(continuation);
+        foreach (exit; exits[0 .. exitCount]) {
+            if (cap - a.n < maximumBytesPerInstruction * pathDepth)
+                return false;
+            patchHere(exit.firstJump);
+            if (exit.secondJump)
+                patchHere(exit.secondJump);
+            if (!restorePathFrames(calls[0 .. callCount], exit.call, ops))
+                return false;
+            if (exit.target == path[0].pc)
+                jumpToHandler(exit.target, originals[exit.target]);
+            else
+                jumpToPathExit(exit.target);
+        }
+        return true;
+    }
+
+    void jumpToPathExit(size_t i) {
+        if (i >= instructions.length) {
+            a.ud2();
+            return;
+        }
+        a.movI(PCREG, cast(size_t) &instructions[i]);
+        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+    }
+
+    static bool pathFrameStorage(size_t raw, size_t windowSlot) pure @safe {
+        return !(raw & indirectBit)
+            || ((raw >> 32) & 0x7fff_ffff) == windowSlot;
+    }
+
+    void forgetPathValue() {
+        retainedWidth = 0;
+        retainedAcrossCall = false;
+    }
+
+    bool restorePathFrames(const(PathCall)[] calls, int pending, const(JitOp)[] ops) {
+        if (pending < 0)
+            return true;
+
+        a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
+        int[pathDepth] chain = void;
+        size_t count;
+        for (; pending >= 0; pending = calls[pending].parent)
+            chain[count++] = pending;
+        foreach_reverse (member; chain[0 .. count]) {
+            const call = &calls[member];
+            const site = &callSites[snapshot[call.pc].source];
+            addressWindow(site);
+            a.movI(PCREG, cast(size_t) call.arm.callee);
+            if (!publishWindow(call.pc, ops[call.pc].callWindow, site, call.arm))
+                return false;
+        }
         return true;
     }
 
@@ -2426,7 +2763,7 @@ private struct Gen {
                 if (checkedLoop.update)
                     return emitCheckedLoop(i, ins, op, original);
             }
-            return emitChecked(i, ins, op, ops);
+            return emitChecked(i, ins, op, size_t.max, null, ops);
 
         case castFixed: {
             Mem d, s;
@@ -2732,7 +3069,16 @@ private struct Gen {
         if (!binary(ins, p.twoAddress, p.constantRight, p.leftInR0,
                 p.resultInR0, w, d, l, rhs))
             return false;
-        const left = p.leftInR0 ? REG0 : cachedInt(l, w);
+        const sameCell = !p.leftInR0 && !p.resultInR0 && p.constantRight
+            && (ins.destination & indirectBit)
+            && (p.twoAddress || ins.source == ins.destination);
+        auto left = p.leftInR0 ? REG0 : cachedInt(l, w);
+        if (emittingPath) {
+            if (sameCell)
+                left = pathScalarLeft(l, w);
+            else if (ins.destination & indirectBit)
+                forgetPathValue;
+        }
         const rightReg = rhs.constant ? -1 : cachedInt(rhs.memory, w);
         const acc = p.resultInR0 ? REG0
             : left >= 0 && left != REG0 ? left : intScratch(rightReg);
@@ -2787,7 +3133,36 @@ private struct Gen {
             intSlots = IntSlots.init;
         else
             storeInt(d, w, acc);
+        if (emittingPath && sameCell)
+            a.movRR64(REG0, acc);
         return true;
+    }
+
+    int pathScalarLeft(in Mem left, int width) {
+        // All runtime values still have their ordinary memory representation.
+        // Retain a non-frame cell so that frame and window stores cannot alias
+        // it. A different cell exits before reading or writing either one.
+        a.lea(RAX, left);
+        if (retainedWidth == width) {
+            a.xmmToInteger(SC2, pathAddress);
+            a.aluRR(Alu.cmp, 8, RAX, SC2);
+            pathMemoryGuard = jccLocal(CC_NE);
+            reusedAcrossCall |= retainedAcrossCall;
+            return REG0;
+        }
+
+        a.integerToXmm(pathAddress, RAX);
+        a.ld(8, R11, Mem(STATE, DispatchState.frames.offsetof));
+        a.ld(8, SC2, Mem(R11, FrameStack.baseOffset));
+        a.aluRI(Alu.sub, 8, SC2, width - 1);
+        a.aluRR(Alu.sub, 8, RAX, SC2);
+        a.ld(8, R11, Mem(R11, FrameStack.fastEndOffset));
+        a.aluRR(Alu.sub, 8, R11, SC2);
+        a.aluRR(Alu.cmp, 8, RAX, R11);
+        pathMemoryGuard = jccLocal(CC_B);
+        retainedWidth = width;
+        retainedAcrossCall = false;
+        return -1;
     }
 
     bool emitSignedDivide(in Instruction ins, in JitOp op) {
@@ -2958,7 +3333,9 @@ private struct Gen {
     }
 
     bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
-        size_t localTarget = 0)
+        size_t localTarget = 0, size_t fallthrough = size_t.max,
+        size_t pathNext = size_t.max, size_t* pathExit = null,
+        size_t* pathJump = null)
     {
         const w = cast(int) ins.width;
         Mem l;
@@ -2974,7 +3351,19 @@ private struct Gen {
             if (!integerRight(ins.source, p.constantRight, w, R10, right))
                 return false;
             emitIntCompare(w, l, right, p.leftInR0);
-            jccTo(integerBranchCc(p), t, localTarget);
+            const cc = integerBranchCc(p);
+            if (pathNext == size_t.max)
+                jccTo(cc, t, localTarget);
+            else {
+                if (pathNext == t) {
+                    *pathExit = fallthrough;
+                    *pathJump = jccLocal(cc ^ 1);
+                } else if (pathNext == fallthrough) {
+                    *pathExit = t;
+                    *pathJump = jccLocal(cc);
+                } else
+                    return false;
+            }
             return true;
         }
         if (w != 8 && w != 4)
@@ -3278,7 +3667,9 @@ private struct Gen {
     }
 
     bool emitChecked(bool resident = false)(
-        size_t i, in Instruction ins, in JitOp op, const(JitOp)[] ops = null,
+        size_t i, in Instruction ins, in JitOp op,
+        size_t pathNext = size_t.max, size_t* pathJump = null,
+        const(JitOp)[] ops = null,
     ) {
         const p = op.checked;
         const packed = ins.width;
@@ -3299,6 +3690,10 @@ private struct Gen {
             if (!opnd(ins.source, R10, s))
                 return false;
         }
+        const onPath = pathNext != size_t.max;
+        if (onPath && pathNext != (access == CheckedAccess.storeUnchecked
+                ? i + 1 : target))
+            return false;
         const idx = Mem(FRAME, cast(int) idxOff);
         const offset = p.fixedLength ? 0 : cast(int) hi;
         if (resident || p.indexWidth == 4) {
@@ -3343,11 +3738,19 @@ private struct Gen {
                         s.disp + cast(int) arrayPointerOffset));
             }
             const element = Mem(SC2, 0, RAX, cast(ubyte) es);
+            if (onPath && retainedWidth != 0 && access != CheckedAccess.load) {
+                a.lea(R11, element);
+                a.xmmToInteger(R10, pathAddress);
+                a.aluRR(Alu.sub, 8, R11, R10);
+                a.aluRI(Alu.add, 8, R11, es - 1);
+                a.aluRI(Alu.cmp, 8, R11, retainedWidth + es - 1);
+                pathMemoryGuard = jccLocal(CC_B);
+            }
             if (access == CheckedAccess.load) {
                 a.ld(es, R11, element);
                 a.st(es, d, R11);
                 static if (!resident) {
-                    if (target > i && d.base == FRAME) {
+                    if (!onPath && target > i && d.base == FRAME) {
                         const sourceSlot = cast(int) ((ins.source >> 32) & 0x7fff_ffff);
                         const sourceStable = s.base == FRAME
                             ? p.fixedLength || !frameWriteOverlaps(d, es, s.disp,
@@ -3382,10 +3785,14 @@ private struct Gen {
             checkedLoop.updateFixup = a.n;
             a.d32(0);
         } else {
-            if (access != CheckedAccess.storeUnchecked)
-                jmpTo(target);
-            if (failJump != size_t.max)
-                patchHere(failJump);
+            if (onPath)
+                *pathJump = failJump == size_t.max ? 0 : failJump;
+            else {
+                if (access != CheckedAccess.storeUnchecked)
+                    jmpTo(target);
+                if (failJump != size_t.max)
+                    patchHere(failJump);
+            }
         }
         return true;
     }
