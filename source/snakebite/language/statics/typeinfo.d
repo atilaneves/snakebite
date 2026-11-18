@@ -282,9 +282,8 @@ public struct RuntimeTypes {
         return Linked!TypeInfo.named(name);
     }
 
-    // The type information of `type` that the program builds, or the name of
-    // the one that another object defines: druntime for a type of the
-    // language, and for a class `_classInfo` decides.
+    // The type information of `type` that the program builds, or for a class
+    // the one that `_classInfo` decides.
     private Linked!TypeInfo ownInfo(Type type) {
         import snakebite.frontend.ast: nextOf, Taarray, Tarray, Tbool, Tchar,
             Tclass, Tcomplex32, Tcomplex64, Tcomplex80, Tdchar, Tdelegate,
@@ -381,31 +380,6 @@ public struct RuntimeTypes {
 
         if (info is null) {
             final switch (type.ty) {
-                case Tvoid: return hostTypeInfo!(void.mangleof);
-                case Tbool: return hostTypeInfo!(bool.mangleof);
-                case Tchar: return hostTypeInfo!(char.mangleof);
-                case Twchar: return hostTypeInfo!(wchar.mangleof);
-                case Tdchar: return hostTypeInfo!(dchar.mangleof);
-                case Tint8: return hostTypeInfo!(byte.mangleof);
-                case Tint16: return hostTypeInfo!(short.mangleof);
-                case Tint32: return hostTypeInfo!(int.mangleof);
-                case Tint64: return hostTypeInfo!(long.mangleof);
-                case Tuns8: return hostTypeInfo!(ubyte.mangleof);
-                case Tuns16: return hostTypeInfo!(ushort.mangleof);
-                case Tuns32: return hostTypeInfo!(uint.mangleof);
-                case Tuns64: return hostTypeInfo!(ulong.mangleof);
-                case Tfloat32: return hostTypeInfo!(float.mangleof);
-                case Tfloat64: return hostTypeInfo!(double.mangleof);
-                case Tfloat80: return hostTypeInfo!(real.mangleof);
-                // The mangled names of `ifloat`, `idouble`, `ireal`,
-                // `cfloat`, `cdouble` and `creal`, which are deprecated.
-                case Timaginary32: return hostTypeInfo!"o";
-                case Timaginary64: return hostTypeInfo!"p";
-                case Timaginary80: return hostTypeInfo!"j";
-                case Tcomplex32: return hostTypeInfo!"q";
-                case Tcomplex64: return hostTypeInfo!"r";
-                case Tcomplex80: return hostTypeInfo!"c";
-                case Tnull: return hostTypeInfo!(typeof(null).mangleof);
                 // druntime has none: dmd puts a `TypeInfo` object in each
                 // object that needs it (`builtinTypeInfo`), and the program
                 // makes its own.
@@ -420,6 +394,13 @@ public struct RuntimeTypes {
                 case Tclass, Tstruct, Tenum, Tfunction, Tdelegate,
                     Tpointer, Tsarray, Taarray, Tvector, Ttuple, Tarray:
                     internalFailure();
+
+                // `build` gives these to druntime (`builtinTypeInfo`).
+                case Tvoid, Tbool, Tchar, Twchar, Tdchar, Tint8, Tint16,
+                    Tint32, Tint64, Tuns8, Tuns16, Tuns32, Tuns64, Tfloat32,
+                    Tfloat64, Tfloat80, Timaginary32, Timaginary64,
+                    Timaginary80, Tcomplex32, Tcomplex64, Tcomplex80, Tnull:
+                    internalFailure();
             }
         }
         return Linked!TypeInfo.held(info);
@@ -432,11 +413,6 @@ public struct RuntimeTypes {
     // The type information that druntime defines for the type whose mangled
     // name is `mangled`, as the name of its symbol, which dmd gives it
     // (`TypeInfoDeclaration`).
-    private Linked!TypeInfo hostTypeInfo(string mangled)() {
-        return druntimeTypeInfo(mangled);
-    }
-
-    // As `hostTypeInfo`, for a name that is known only as the program runs.
     private Linked!TypeInfo druntimeTypeInfo(in char[] mangled) {
         import std.conv: text;
 
