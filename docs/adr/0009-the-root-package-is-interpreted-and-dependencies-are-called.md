@@ -33,11 +33,11 @@ modules.
 2. Every function from a dependency module is called across the
    barrier. The call resolves through the dependency image
    (ADR-0007) or through the host.
-3. A function that is not root-owned, has a body, and the resolver
-   finds no host address for it, is interpreted. A declaration
-   without a body, when the resolver also finds no host address, is
-   an error. A real build reports this same case as an unresolved
-   symbol at link time.
+3. A function that is not root-owned and that has no native symbol
+   is an error for the missing symbol, with or without a body. A real
+   build reports this same case as an unresolved symbol at link time.
+   The owner decided this on 2026-11-16 (issue #960); before that, a
+   function with a body was interpreted.
 4. The `pragma(mangle)` declarations the interpreter currently skips
    use the same entry point as every other call without a body.
 
@@ -50,9 +50,11 @@ step is the reason this project exists.
 
 ## Consequences
 
-The root-owned predicate is the one question both call dispatch and
-type metadata construction ask. A backend must not keep its own
-copy of this predicate.
+The root-owned predicate is the one question that type metadata
+construction asks. Call dispatch and static data ask one question
+more: does another object define this symbol? The answer comes from
+the declaration only, not from a loaded dependency image (issue
+#960). A backend must not keep its own copy of either predicate.
 
 The exception of decision 1 is also one predicate,
 `backendExecutes` in `source/snakebite/frontend/dmd/functions.d`,

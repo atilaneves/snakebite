@@ -54,8 +54,8 @@ that it owns are not kept elsewhere with only a note in the `Module`. A
 reference to another module (an import) is a reference: the `Module` holds
 it as a position in the list of modules of the program, with the module
 names beside it. The owner of a template instance is the module that
-declares the template. This fits the present model, where a whole dub
-package is compiled at once. A saved file is a list of modules.
+declares the template. ADR-0021 item 9 changes this for the `module` and
+`package` modes. A saved file is a list of modules.
 
 The compiler makes a `Module` at the first function or datum of its D
 module. `buildStartData` asks the compiler for the storage of the record of
@@ -119,6 +119,29 @@ frontend made, stored as data; no code runs to make it.
 
 A constant has a place in the blocks of a `Module` only when it goes through
 `NativeData.value` with an owner.
+
+### What a save does and what a file holds
+
+Decided by the owner on 2026-11-18.
+
+- The form of the file is chosen by one measure. The owner: "What matters
+  is a file format such that loading is as fast as possible compared to
+  compiling from scratch. That's it. Saving would be nice too."
+
+- A function is made ready to execute only where it executes: after a
+  compile to RAM and after a load, by the same code. A save does not
+  execute, so a save does not make its functions ready to execute. No code
+  turns a function that is ready to execute back into the form of the file.
+  The owner: "Why would we bind before saving? Isn't binding what's required
+  to be able to execute?"
+- The file holds only what is needed. The owner: "Serialisation means not
+  serialising things that don't matter!" and "Any and everything that isn't
+  required for a test to pass is not needed." A field that no test needs is
+  not written. Issue #993 lists fields that a load does not read.
+- A save writes the mangled name of a function only when the perf map is
+  on. A compile to RAM computes the name only then, and after a load only
+  the perf map reads it. The owner: "Why not save it only if perf map is on
+  as well?"
 
 ## Consequences
 
