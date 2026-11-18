@@ -130,14 +130,14 @@ Decided by the owner on 2026-11-18.
   turns a function that is ready to execute back into the form of the file.
   The owner: "Why would we bind before saving? Isn't binding what's required
   to be able to execute?"
-- The file holds only what a load needs. A field that a load does not read,
-  or that always has its default value in a file, is not written. The
-  owner: "Serialisation means not serialising things that don't matter!"
-  Issue #993 lists the fields.
-- The mangled name of a function is long, and after a load only the perf map
-  reads it. It is not a cost of each load. Not decided: compressed names, or
-  names that a load reads only when it needs them. The process that loads
-  cannot make a name itself, because it has no AST (ADR-0021).
+- The file holds only what is needed. The owner: "Serialisation means not
+  serialising things that don't matter!" and "Any and everything that isn't
+  required for a test to pass is not needed." A field that no test needs is
+  not written. Issue #993 lists fields that a load does not read.
+- A save writes the mangled name of a function only when the perf map is
+  on. A compile to RAM computes the name only then, and after a load only
+  the perf map reads it. The owner: "Why not save it only if perf map is on
+  as well?"
 
 ## Consequences
 
