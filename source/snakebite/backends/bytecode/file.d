@@ -230,9 +230,9 @@ private struct Archive {
 
     private Direction _direction;
     private Appender!(ubyte[]) _written;
-    // Reading: the bytes of the part of the file that are not read yet, the
-    // part that comes after them, and the number of bytes of the file that
-    // are not read, these included.
+    // Reading: the bytes of the part of the file that are not read yet, what
+    // gives the parts that come after it, and the number of bytes of the file
+    // in those parts.
     private const(ubyte)[] _unread;
     private const(ubyte)[] delegate() _next;
     private size_t _left;
@@ -303,7 +303,7 @@ private struct Archive {
 
     void expectText(string literal)() {
         ubyte[literal.length] read;
-        if (_left < read.length)
+        if (unreadLength < read.length)
             throw new SnakebiteException(
                 "the file is not a snakebite program of this format");
         bytes(read[]);
@@ -318,11 +318,23 @@ private struct Archive {
             _written.put(cast(const(ubyte)[]) data);
             return;
         }
-        if (_left < data.length)
+        auto to = cast(ubyte[]) data;
+        if (to.length > _unread.length)
+            return readAcrossParts(to);
+        to[] = _unread[0 .. to.length];
+        _unread = _unread[to.length .. $];
+    }
+
+    // The number of bytes of the file that are not read.
+    size_t unreadLength() const @safe pure nothrow @nogc {
+        return _unread.length + _left;
+    }
+
+    // Reads `to` from the rest of this part and from the parts after it.
+    private void readAcrossParts(ubyte[] to) {
+        if (to.length > unreadLength)
             throw new SnakebiteException(
                 "the program file ends before the program does");
-        _left -= data.length;
-        auto to = cast(ubyte[]) data;
         while (to.length > _unread.length) {
             to[0 .. _unread.length] = _unread[];
             to = to[_unread.length .. $];
@@ -330,12 +342,23 @@ private struct Archive {
             if (_unread.length == 0)
                 throw new SnakebiteException(
                     "the program file ends before the program does");
+            // Bytes after the size that the caller gave are not the file.
+            if (_unread.length > _left)
+                _unread = _unread[0 .. _left];
+            _left -= _unread.length;
         }
         to[] = _unread[0 .. to.length];
         _unread = _unread[to.length .. $];
     }
 
     void scalar(T)(ref T value) {
+        if (!isWriting && T.sizeof <= _unread.length) {
+            import core.stdc.string: memcpy;
+
+            memcpy(cast(void*) &value, _unread.ptr, T.sizeof);
+            _unread = _unread[T.sizeof .. $];
+            return;
+        }
         bytes((cast(ubyte*) &value)[0 .. T.sizeof]);
     }
 
@@ -343,7 +366,7 @@ private struct Archive {
     size_t length(in size_t length) {
         size_t count = length;
         scalar(count);
-        if (!isWriting && count > _left)
+        if (!isWriting && count > unreadLength)
             throw new SnakebiteException(
                 "the program file ends before the program does");
         return count;
