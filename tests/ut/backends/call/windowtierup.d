@@ -282,3 +282,71 @@ static foreach (backend; Matrix!()) {
         }, ["search", "contains"]);
     }
 }
+
+
+static foreach (backend; Matrix!()) {
+    @("window.hotVoidRelayKeepsReceiverAndSample." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            abstract class Meter {
+                int total;
+                abstract void record(int sample);
+            }
+
+            final class Sum : Meter {
+                override void record(int sample) { total += sample; }
+            }
+
+            final class Count : Meter {
+                override void record(int sample) { ++total; }
+            }
+
+            final class Peak : Meter {
+                int samples;
+
+                override void record(int sample) {
+                    ++samples;
+                    if (sample > total)
+                        total = sample;
+                }
+            }
+
+            alias Observer = void function(Meter, int);
+            void ignore(Meter meter, int sample) {}
+            void relay(Meter meter, int sample) { meter.record(sample); }
+            void notify(Observer observer, Meter meter, int sample) {
+                observer(meter, sample);
+            }
+
+            void main() {
+                auto sum = new Sum;
+                auto count = new Count;
+                auto peak = new Peak;
+                auto send = &notify;
+                auto train = &relay;
+
+                enum training = 1024;
+                foreach (_; 0 .. training) {
+                    send(&ignore, sum, 3);
+                    train(count, 3);
+                    train(sum, 3);
+                }
+
+                // Both receivers go through the same call site. Peak only
+                // enters it after the relay has run with the trained receiver.
+                enum common = 24_000;
+                enum residual = 80_000;
+                foreach (i; 0 .. common + residual) {
+                    Meter meter = i < common ? cast(Meter) sum : peak;
+                    send(&relay, meter, i < common ? 3 : i - common);
+                }
+
+                assert(sum.total == 3 * (training + common));
+                assert(count.total == training);
+                assert(peak.total == residual - 1);
+                assert(peak.samples == residual);
+            }
+        }, ["notify", "relay"]);
+    }
+}
