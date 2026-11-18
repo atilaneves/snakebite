@@ -587,6 +587,36 @@ static foreach (backend; Matrix!()) {
         }, ["walk", "readFromAlias", "writeThroughAlias"]);
     }
 
+    @("jit.pointerLoopTakesTheForwardJumpBeforeRepeating." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Link { Link* next; }
+
+            int visit(Link* cursor) {
+                assert(cursor !is null);
+            head:
+                if (cursor !is null) {
+                    cursor = cursor.next;
+                    goto check;
+                }
+                return 1;
+            check:
+                if (cursor is null)
+                    return 2;
+                goto head;
+            }
+
+            int main() {
+                Link last, first = Link(&last);
+                foreach (_; 0 .. 300)
+                    if (visit(&first) != 2)
+                        return 3;
+                return 0;
+            }
+        }, ["visit"]);
+    }
+
     @("jit.loopUpdateUsesTheNewStep." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

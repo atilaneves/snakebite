@@ -4379,7 +4379,8 @@ private struct Gen {
             if (intLoop.contains(intLoopInstruction)) {
                 const head = intLoop.head;
                 size_t exit;
-                if (intLoop.afterHeader && ops[head].kind == fused
+                if (i == intLoop.backedge && intLoop.afterHeader
+                        && ops[head].kind == fused
                         && targetIndex(snapshot[head].sourceWidth, exit)
                         && exit == i + 1) {
                     JitOp.Fused test = ops[head].fused;
