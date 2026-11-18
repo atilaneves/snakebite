@@ -316,14 +316,21 @@ package struct JitState {
     Emitted emitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals,
-        const(ObservedEdge)[] observed)
+        const(ObservedEdge)[] observed, bool expandWindows)
     {
         import core.atomic: atomicStore, MemoryOrder;
+        import snakebite.backends.bytecode.vm: jitFallback;
 
         const instructions = function_.instructions;
         const start = region.chunkUsed;
-        const cap = region.chunkCapacity - start;
+        const handlerBytes = originals.length * Instruction.Handler.sizeof;
+        if (region.chunkCapacity - start < handlerBytes)
+            return Emitted.full;
+        const cap = region.chunkCapacity - start - handlerBytes;
         Gen g;
+        g.function_ = function_;
+        g.codeLimit = cap;
+        g.expandWindows = expandWindows;
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
         g.literalScratch = &literals;
@@ -346,6 +353,7 @@ package struct JitState {
         enum needsHandlerEntry = size_t.max;
         size_t handlerEntryCount;
         foreach (i; 0 .. instructions.length) {
+            const original = jitFallback(function_, snapshot[i], originals[i]);
             if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
             g.labels[i] = g.a.n;
@@ -355,7 +363,7 @@ package struct JitState {
                 g.a.d32(0);
             }
             if (g.checkedLoop.update && i == g.checkedLoop.update) {
-                g.jumpToHandler(i, originals[i]);
+                g.jumpToHandler(i, original);
                 g.emitCheckedLoopUpdate;
                 continue;
             }
@@ -388,7 +396,7 @@ package struct JitState {
             bool done;
             g.usedKnown = false;
             if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
-                done = g.emitOp(i, ops, originals[i]);
+                done = g.emitOp(i, ops, original);
             else {
                 g.fpSlots = FpSlots.init;
                 g.intSlots = IntSlots.init;
@@ -406,7 +414,7 @@ package struct JitState {
                 if (originals[i] is null)
                     g.a.ud2();
                 else
-                    g.jumpToHandler(i, originals[i]);
+                    g.jumpToHandler(i, original);
                 g.known = Gen.KnownConstant.init;
             } else {
                 if (g.usedKnown) {
@@ -429,7 +437,8 @@ package struct JitState {
                 // Dispatch and branches can enter here without the values
                 // that the preceding machine code supplies.
                 label = g.a.n;
-                g.jumpToHandler(i, originals[i]);
+                g.jumpToHandler(i,
+                    jitFallback(function_, snapshot[i], originals[i]));
                 if (--handlerEntryCount == 0)
                     break;
             }
@@ -465,12 +474,23 @@ package struct JitState {
             *cast(int*) (g.a.buf + f.position) = cast(int) (
                 g.labels[f.target] - (f.position + 4));
 
-        const size = (g.a.n + codeAlignment - 1) & ~(codeAlignment - 1UL);
+        const handlerStart = (g.a.n + codeAlignment - 1)
+            & ~(codeAlignment - 1UL);
+        if (handlerStart > cap)
+            return Emitted.full;
+        auto identity = cast(Instruction.Handler*) (g.a.buf + handlerStart);
+        identity[0 .. originals.length] = originals[];
+        const size = (handlerStart + handlerBytes + codeAlignment - 1)
+            & ~(codeAlignment - 1UL);
+        if (size > region.chunkCapacity - start)
+            return Emitted.full;
         region.chunkUsed = start + size;
         if (region.chunkUsed + populateSize / 4 > region.populatedEnd)
             region.populate;
 
         const code = region.execBase + start;
+        function_.jitHandlers =
+            cast(const(Instruction.Handler)*) (code + handlerStart);
         if (function_.jitName.length)
             perfMap.record(code, g.a.n, function_.jitName);
         // One aligned 8-byte store with release order for each word, after
@@ -815,13 +835,21 @@ package struct JitLock {
         if (snapshot.length == 0)
             return false;
         ref state = this.state;
-        auto result = state.emitFunction(function_, snapshot, ops, originals, observed);
+        auto result = state.emitFunction(function_, snapshot, ops, originals,
+            observed, true);
         if (result == Emitted.full) {
-            const worst = snapshot.length * maximumBytesPerInstruction
+            const worst = snapshot.length
+                * (maximumBytesPerInstruction + Instruction.Handler.sizeof)
                 + 4096;
             if (!state.region.newChunk(worst))
                 return false;
-            result = state.emitFunction(function_, snapshot, ops, originals, observed);
+            result = state.emitFunction(function_, snapshot, ops, originals,
+                observed, true);
+            // The fresh chunk is sized for the original templates. A large
+            // expanded body can fit at first and leave too little room later.
+            if (result == Emitted.full)
+                result = state.emitFunction(function_, snapshot, ops, originals,
+                    observed, false);
         }
         return result == Emitted.done;
     }
@@ -1507,11 +1535,21 @@ private struct Gen {
     bool readIntSlot;
     size_t reloadEntryCount;
     bool bmi2;
+    const(Function)* function_;
+    size_t codeLimit;
+    bool expandWindows;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     size_t frameSize;
     const(long)[] constants;
     const(CallSite)[] callSites;
+    // Set while emitting a body whose activation has yet to be installed.
+    const(Gen)* inlineCaller;
+    const(CallSite)* inlineSite;
+    const(CallSite.FastCall)* inlineLayout;
+    size_t inlineCall;
+    uint inlineDepth;
+    bool inlineResultMayBeNull;
     size_t[] labels;
     Fixup* fixups;
     size_t fixupCount;
@@ -1781,15 +1819,24 @@ private struct Gen {
         if (!encodableWindowArm(arms[0]))
             return false;
 
-        foreach (index, ref arm; arms[0 .. count]) {
-            if (index != 0)
-                patchHere(arms[index - 1].mismatch);
-            if (!emitCallWindowArm(i, op, site, arm))
-                return false;
+        size_t end;
+        foreach (ref arm; arms[0 .. count]) {
+            const previous = a.n;
+            if (!expandWindows || !emitWindowBody(i, op, site, arm)) {
+                if (inlineCaller !is null)
+                    continue;
+                if (!emitCallWindowArm(i, op, site, arm))
+                    return false;
+            }
+            if (end != 0 && op.indirect)
+                patchTo(arms[end - 1].mismatch, previous);
+            arms[end++] = arm;
         }
+        if (!end)
+            return false;
         if (op.indirect)
-            patchHere(arms[count - 1].mismatch);
-        foreach (ref const arm; arms[0 .. count]) {
+            patchHere(arms[end - 1].mismatch);
+        foreach (ref const arm; arms[0 .. end]) {
             patchHere(arm.grow);
             if (op.counted)
                 patchHere(arm.tierUp);
@@ -1824,8 +1871,8 @@ private struct Gen {
                 && fast.windowBase <= int.max));
     }
 
-    bool emitCallWindowArm(size_t i, in JitOp.CallWindow op,
-        const(CallSite)* site, ref WindowArm arm)
+    void emitWindowChecks(in JitOp.CallWindow op, const(CallSite)* site,
+        ref WindowArm arm)
     {
         const entry = arm.entry;
         if (entry !is null) {
@@ -1833,26 +1880,17 @@ private struct Gen {
             a.alu(Alu.cmp, 8, RAX, Mem(FRAME, cast(int) site.calleeSlotOffset));
             arm.mismatch = jccLocal(CC_NE);
         }
-        addressWindow(site);
+        loadWindow(site);
         guardWindow(op, arm);
-        if (!publishWindow(i, op, site, arm))
-            return false;
-        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
-        return true;
-    }
-
-    void addressWindow(const(CallSite)* site) {
-        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
-        a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
-        a.lea(R11, Mem(R10, cast(int) site.windowDisp));
     }
 
     void guardWindow(in JitOp.CallWindow op, ref WindowArm arm) {
         a.lea(RAX, Mem(R11, cast(int) arm.fast.reachBytes));
         a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.fastEndOffset));
         arm.grow = jccLocal(CC_A);
-        a.movI(PCREG, cast(size_t) arm.callee);
+
         if (op.counted) {
+            a.movI(PCREG, cast(size_t) arm.callee);
             const heat = Mem(PCREG, Function.jitHeat.offsetof);
             a.ld(4, RAX, heat);
             a.aluRI(Alu.add, 4, RAX, jitStep);
@@ -1862,14 +1900,15 @@ private struct Gen {
         }
     }
 
-    bool publishWindow(size_t i, in JitOp.CallWindow op,
-        const(CallSite)* site, in WindowArm arm)
-    {
-        const ins = snapshot[i];
-        const callee = arm.callee;
-        const fast = arm.fast;
-        a.st(8, Mem(R11, Activation.function_.offsetof), PCREG);
+    void loadWindow(const(CallSite)* site) {
+        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+        a.ld(8, R10, Mem(FRAME, cast(int) site.windowSlot));
+        a.lea(R11, Mem(R10, cast(int) site.windowDisp));
+    }
 
+    bool prepareWindow(in Instruction ins, in JitOp.CallWindow op,
+        const(CallSite)* site, in ref WindowArm arm)
+    {
         Mem place;
         if (op.destination == Destination.discard)
             place = Mem(R10, cast(int) site.windowScratch);
@@ -1878,26 +1917,6 @@ private struct Gen {
         a.lea(RAX, place);
         a.st(8, Mem(R11, Activation.returnPlace.offsetof), RAX);
         setWindowFrame(arm);
-        a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
-
-        a.ld(8, RAX, Mem(R9, FrameStack.topOffset));
-        a.alu(Alu.sub, 8, RAX, Mem(R9, FrameStack.baseOffset));
-        a.st(8, Mem(R11, Activation.frameMark.offsetof), RAX);
-        a.lea(RAX, Mem(R11, cast(int) fast.frameBytes));
-        a.st(8, Mem(R9, FrameStack.topOffset), RAX);
-        a.ld(8, RAX, Mem(R9, FrameStack.cleanupMarkOffset));
-        a.st(8, Mem(R11, Activation.cleanupMark.offsetof), RAX);
-
-        // A throw from the callee uses the call site in the parent.
-        a.movI(PCREG, cast(size_t) &instructions[i]);
-        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
-        a.lea(RAX, Mem(PCREG, Instruction.sizeof));
-        a.st(8, Mem(ACTIVE, Activation.resume.offsetof), RAX);
-        a.st(8, Mem(R11, Activation.parent.offsetof), ACTIVE);
-        a.movI(PCREG, cast(size_t) callee.instructions.ptr);
-        a.st(8, Mem(R11, Activation.pc.offsetof), PCREG);
-        a.st(8, Mem(STATE, DispatchState.current.offsetof), R11);
-        a.movRR64(ACTIVE, R11);
         return true;
     }
 
@@ -1918,6 +1937,41 @@ private struct Gen {
             a.lea(RAX, Mem(R11, cast(int) fast.windowBase));
             a.st(8, Mem(FRAME, cast(int) fast.windowStore), RAX);
         }
+    }
+
+    void activateWindow(const(Instruction)* pc, const(Function)* callee,
+        const(CallSite.FastCall)* fast)
+    {
+        a.ld(8, RAX, Mem(R9, FrameStack.topOffset));
+        a.alu(Alu.sub, 8, RAX, Mem(R9, FrameStack.baseOffset));
+        a.st(8, Mem(R11, Activation.frameMark.offsetof), RAX);
+        a.lea(RAX, Mem(R11, cast(int) fast.frameBytes));
+        a.st(8, Mem(R9, FrameStack.topOffset), RAX);
+        a.ld(8, RAX, Mem(R9, FrameStack.cleanupMarkOffset));
+        a.st(8, Mem(R11, Activation.cleanupMark.offsetof), RAX);
+
+        // A throw from the callee uses the call site in the parent.
+        a.movI(PCREG, cast(size_t) pc);
+        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
+        a.lea(RAX, Mem(PCREG, Instruction.sizeof));
+        a.st(8, Mem(ACTIVE, Activation.resume.offsetof), RAX);
+        a.st(8, Mem(R11, Activation.parent.offsetof), ACTIVE);
+        a.movI(RAX, cast(size_t) callee);
+        a.st(8, Mem(R11, Activation.function_.offsetof), RAX);
+        a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
+        a.st(8, Mem(STATE, DispatchState.current.offsetof), R11);
+        a.movRR64(ACTIVE, R11);
+    }
+
+    bool emitCallWindowArm(size_t i, in JitOp.CallWindow op,
+        const(CallSite)* site, ref WindowArm arm)
+    {
+        emitWindowChecks(op, site, arm);
+        if (!prepareWindow(snapshot[i], op, site, arm))
+            return false;
+        activateWindow(&instructions[i], arm.callee, arm.fast);
+        jumpToLive(arm.callee.instructions.ptr);
+        return true;
     }
 
     private enum transferPathValues = true;
@@ -2064,7 +2118,7 @@ private struct Gen {
                     if (arm.callee is null)
                         return false;
                     const site = &callSites[ins.source];
-                    addressWindow(site);
+                    loadWindow(site);
                     guardWindow(op.callWindow, arm);
                     exits[exitCount++] = PathExit(i, arm.grow, arm.tierUp, pending);
                     setWindowFrame(arm);
@@ -2160,9 +2214,7 @@ private struct Gen {
             a.ud2();
             return;
         }
-        a.movI(PCREG, cast(size_t) &instructions[i]);
-        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
-        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+        jumpToLive(&instructions[i]);
     }
 
     static bool pathFrameStorage(size_t raw, size_t windowSlot) pure @safe {
@@ -2187,12 +2239,209 @@ private struct Gen {
         foreach_reverse (member; chain[0 .. count]) {
             const call = &calls[member];
             const site = &callSites[snapshot[call.pc].source];
-            addressWindow(site);
-            a.movI(PCREG, cast(size_t) call.arm.callee);
-            if (!publishWindow(call.pc, ops[call.pc].callWindow, site, call.arm))
+            loadWindow(site);
+            if (!prepareWindow(snapshot[call.pc], ops[call.pc].callWindow,
+                    site, call.arm))
                 return false;
+            activateWindow(&instructions[call.pc], call.arm.callee,
+                call.arm.fast);
         }
         return true;
+    }
+
+    void jumpToLive(const(Instruction)* pc) {
+        a.movI(PCREG, cast(size_t) pc);
+        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+    }
+
+
+    private enum inlineInstructionLimit = 100;
+    private enum inlineDepthLimit = 3;
+    private enum inlineCodeLimit = 8 * 1024;
+
+    bool emitWindowBody(size_t i, in JitOp.CallWindow op,
+        const(CallSite)* site, ref WindowArm arm)
+    {
+        import snakebite.backends.bytecode.vm: readJitBody;
+
+        const callee = arm.callee;
+        const n = callee.instructions.length;
+        if (callee.jit !is function_.jit || inlineDepth >= inlineDepthLimit
+                || n == 0 || n > inlineInstructionLimit)
+            return false;
+        for (const(Gen)* ancestor = &this; ancestor !is null;
+                ancestor = ancestor.inlineCaller)
+            if (ancestor.function_ is callee)
+                return false;
+        if (codeLimit - a.n < maximumBytesPerInstruction)
+            return false;
+
+        Instruction[inlineInstructionLimit] body = void;
+        JitOp[inlineInstructionLimit] ops = void;
+        Instruction.Handler[inlineInstructionLimit] originals = void;
+        size_t[inlineInstructionLimit + 1] targets = void;
+        if (!readJitBody(callee, body[0 .. n], ops[0 .. n], originals[0 .. n]))
+            return false;
+
+        const start = a.n;
+        emitWindowChecks(op, site, arm);
+        a.st(8, Mem(R11, Activation.parent.offsetof), FRAME);
+        if (!prepareWindow(snapshot[i], op, site, arm)) {
+            a.n = start;
+            return false;
+        }
+
+        Gen child;
+        child.a = a;
+        child.codeLimit = codeLimit - maximumBytesPerInstruction;
+        if (child.codeLimit > start + inlineCodeLimit)
+            child.codeLimit = start + inlineCodeLimit;
+        child.fixupScratch = fixupScratch;
+        child.fixups = fixups;
+        child.fixupCap = fixupCap;
+        child.fixupCount = fixupCount;
+        child.literalScratch = literalScratch;
+        child.literalCount = literalCount;
+        child.bmi2 = bmi2;
+        child.function_ = callee;
+        child.instructions = callee.instructions;
+        child.snapshot = body[0 .. n];
+        child.frameSize = callee.frameSize;
+        child.constants = callee.constants;
+        child.callSites = callee.callSites;
+        child.inlineCaller = &this;
+        child.inlineSite = site;
+        child.inlineLayout = arm.fast;
+        child.inlineCall = i;
+        child.inlineDepth = inlineDepth + 1;
+        child.expandWindows = true;
+        child.inlineResultMayBeNull = op.destination == Destination.indirect;
+        child.labels = targets[0 .. n + 1];
+
+        const done = child.emitInlineInstructions(ops[0 .. n], originals[0 .. n],
+            fixupCount);
+        // A nested emitter can grow the shared scratch buffer even on refusal.
+        fixups = fixupScratch.ptr;
+        fixupCap = fixupScratch.cap;
+        if (!done) {
+            a.n = start;
+            return false;
+        }
+
+        a = child.a;
+        literalCount = child.literalCount;
+        jmpTo(i + 1);
+        return true;
+    }
+
+    bool emitInlineInstructions(const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals, size_t firstFixup)
+    {
+        import snakebite.backends.bytecode.vm: jitCountsBranch, JitTier;
+
+        bool returned;
+        foreach (i, ref const op; ops) {
+            if (a.n + literalBytes + maximumBytesPerInstruction > codeLimit)
+                return false;
+            labels[i] = a.n;
+            // Either edge of a branch can enter with different registers.
+            intSlots = IntSlots.init;
+            fpSlots = FpSlots.init;
+            const original = originals[i];
+            if (original is null) {
+                a.ud2();
+                continue;
+            }
+
+            const saved = a.n;
+            const savedFixups = fixupCount;
+            const savedLiterals = literalCount;
+            size_t tierUp;
+            const heat = Mem(PCREG, Function.jitHeat.offsetof);
+            if (function_.jitHandlers is null && jitCountsBranch(original)) {
+                a.movI(PCREG, cast(size_t) function_);
+                a.ld(4, RAX, heat);
+                a.aluRI(Alu.add, 4, RAX, jitStep);
+                tierUp = jccLocal(CC_B);
+                a.st(4, heat, RAX);
+            }
+
+            const body = a.n;
+            bool done;
+            switch (op.kind) with (JitOp.Kind) {
+                case returnValue, returnVoid:
+                    done = emitInlineReturn(i, op.kind == returnValue);
+                    returned |= done;
+                    break;
+                case temporaryTransition:
+                    // The cleanup state belongs to a real activation.
+                    break;
+                default:
+                    done = emitTemplate(i, ops, op, original);
+                    break;
+            }
+            if (outOfMemory)
+                return false;
+            if (!done) {
+                a.n = saved;
+                fixupCount = savedFixups;
+                literalCount = savedLiterals;
+                jumpToHandler(i, original);
+            } else if (tierUp) {
+                a.b(0xE9);
+                const skip = a.n;
+                a.d32(0);
+                patchHere(tierUp);
+                // A compiled handler does not count this branch. Complete
+                // the event here if another entry has published the code.
+                a.aluMI(Alu.cmp, 4, Mem(PCREG, Function.jitState.offsetof),
+                    JitTier.compiled);
+                const pending = jccLocal(CC_NE);
+                a.st(4, heat, RAX);
+                jmpLocalTo(body);
+                patchHere(pending);
+                jumpToHandler(i, original);
+                patchHere(skip);
+            }
+        }
+        if (!returned || a.n + literalBytes + maximumBytesPerInstruction > codeLimit)
+            return false;
+
+        a.ud2();
+        labels[$ - 1] = a.n;
+        a.ld(8, FRAME, inlineActivationField(Activation.parent.offsetof));
+        foreach (fixup; fixups[firstFixup .. fixupCount])
+            patchTo(fixup.position, labels[fixup.target]);
+        return true;
+    }
+
+    Mem inlineActivationField(size_t offset) const {
+        return Mem(FRAME, cast(int) (offset - inlineLayout.frameOffset));
+    }
+
+    bool emitInlineReturn(size_t i, bool hasValue) {
+        const ins = snapshot[i];
+        if (hasValue && ins.width > 64)
+            return false;
+        if (hasValue && ins.width != 0 && !emitReturnValue(ins,
+                inlineActivationField(Activation.returnPlace.offsetof),
+                inlineResultMayBeNull))
+            return false;
+        jmpTo(instructions.length);
+        return true;
+    }
+
+    void materialize(const ref Gen body) {
+        const parent = body.inlineCaller;
+        if (parent.inlineCaller is null)
+            a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
+        else
+            materialize(*parent);
+        loadWindow(body.inlineSite);
+        a.lea(FRAME, Mem(R11, cast(int) body.inlineLayout.frameOffset));
+        activateWindow(&parent.instructions[body.inlineCall], body.function_,
+            body.inlineLayout);
     }
 
     bool emitReturn(size_t i, bool hasValue, Instruction.Handler original) {
@@ -2208,20 +2457,9 @@ private struct Gen {
         a.alu(Alu.cmp, 8, R11, Mem(ACTIVE, Activation.cleanupMark.offsetof));
         const cleanup = jccLocal(CC_NE);
 
-        if (hasValue && ins.width != 0) {
-            Mem source;
-            if (!opnd(ins.source, SC2, source))
-                return false;
-            a.ld(8, R11, Mem(ACTIVE, Activation.returnPlace.offsetof));
-            a.aluRI(Alu.cmp, 8, R11, 0);
-            const discard = jccLocal(CC_E);
-            a.lea(RAX, source);
-            a.aluRR(Alu.cmp, 8, RAX, R11);
-            const aliased = jccLocal(CC_E);
-            copyChunks(source, Mem(R11, 0), ins.width);
-            patchHere(aliased);
-            patchHere(discard);
-        }
+        if (hasValue && ins.width != 0 && !emitReturnValue(ins,
+                Mem(ACTIVE, Activation.returnPlace.offsetof), true))
+            return false;
 
         a.ld(8, RAX, Mem(ACTIVE, Activation.frameMark.offsetof));
         a.alu(Alu.add, 8, RAX, Mem(R9, FrameStack.baseOffset));
@@ -2235,6 +2473,26 @@ private struct Gen {
         patchHere(root);
         patchHere(cleanup);
         jumpToHandler(i, original);
+        return true;
+    }
+
+    bool emitReturnValue(in Instruction ins, in Mem place, bool mayBeNull) {
+        Mem source;
+        if (!opnd(ins.source, SC2, source))
+            return false;
+        a.ld(8, R11, place);
+        size_t discard;
+        if (mayBeNull) {
+            a.aluRI(Alu.cmp, 8, R11, 0);
+            discard = jccLocal(CC_E);
+        }
+        a.lea(RAX, source);
+        a.aluRR(Alu.cmp, 8, RAX, R11);
+        const aliased = jccLocal(CC_E);
+        copyChunks(source, Mem(R11, 0), ins.width);
+        patchHere(aliased);
+        if (mayBeNull)
+            patchHere(discard);
         return true;
     }
 
@@ -2293,6 +2551,11 @@ private struct Gen {
     }
 
     void jumpToHandler(size_t i, Instruction.Handler handler) {
+        if (inlineCaller !is null) {
+            materialize(this);
+            jumpToLive(&instructions[i]);
+            return;
+        }
         // The unchained dispatcher gets its register arguments from the state.
         static if (!chainedDispatch) {
             a.st(8, Mem(STATE, DispatchState.r0.offsetof), REG0);
@@ -2760,7 +3023,7 @@ private struct Gen {
         }
 
         case checked:
-            if (!checkedLoop.update && !fpLoop.backedge) {
+            if (inlineCaller is null && !checkedLoop.update && !fpLoop.backedge) {
                 checkedLoop = planCheckedLoop(i, ops);
                 if (checkedLoop.update)
                     return emitCheckedLoop(i, ins, op, original);
