@@ -63,9 +63,47 @@ else
 /// Call it outside the frontend's arena, which must hold no pointer to the
 /// garbage-collected heap.
 public string[] hostImportPaths(in HostCompiler host, lazy string onPath = firstOnPath(compilerName)) {
-    import dmd.frontend: findDMDConfig, findLDCConfig;
-    import std.file: exists, isFile;
     import std.path: dirName;
+
+    const found = hostConfiguration(host, onPath);
+    const paths = importPathsOf(found.configuration, found.binary.dirName);
+    if (paths.length == 0)
+        throw new SnakebiteException("the configuration file `" ~ found.configuration ~ "` of `"
+            ~ found.binary ~ "` gives no import path");
+    return paths.dup;
+}
+
+/// The files that `hostImportPaths` reads, and the directory that holds them
+/// when the configuration is a directory. The compiler looks for its
+/// configuration in the current directory first.
+public string[] hostConfigurationFiles(in HostCompiler host) {
+    return configurationAndFiles(hostConfiguration(host, firstOnPath(compilerName)).configuration);
+}
+
+/// The configuration files that the compiler `binary` reads, and the
+/// directory that holds them when the configuration is a directory. The
+/// compiler looks for its configuration in the current directory first.
+public string[] compilerConfigurationFiles(in string binary) {
+    return configurationAndFiles(configurationOf(binary));
+}
+
+private string[] configurationAndFiles(in string configuration) {
+    import std.file: isDir;
+
+    return configuration.isDir
+        ? configuration ~ configurationFiles(configuration)
+        : [configuration.idup];
+}
+
+private struct FoundConfiguration {
+    string binary;
+    string configuration;
+}
+
+// The compiler binary that `hostImportPaths` takes, and the configuration
+// file or directory that it finds.
+private FoundConfiguration hostConfiguration(in HostCompiler host, lazy string onPath) {
+    import std.file: exists, isFile;
 
     const binary = host.binary.exists && host.binary.isFile
         ? host.binary
@@ -74,6 +112,13 @@ public string[] hostImportPaths(in HostCompiler host, lazy string onPath = first
         throw new SnakebiteException("`" ~ host.binary ~ "` built this binary and is gone, and `"
             ~ compilerName ~ "` is not on PATH: its configuration file gives the import paths of "
             ~ "druntime and Phobos");
+    return FoundConfiguration(binary, configurationOf(binary));
+}
+
+// The configuration file or directory that the compiler `binary` finds.
+private string configurationOf(in string binary) {
+    import dmd.frontend: findDMDConfig, findLDCConfig;
+    import std.file: exists;
 
     version (LDC)
         const configuration = findLDCConfig(binary);
@@ -82,12 +127,7 @@ public string[] hostImportPaths(in HostCompiler host, lazy string onPath = first
     if (configuration is null || !configuration.exists)
         throw new SnakebiteException("`" ~ binary ~ "` has no configuration file (`"
             ~ configurationFile ~ "`)");
-
-    const paths = importPathsOf(configuration, binary.dirName);
-    if (paths.length == 0)
-        throw new SnakebiteException("the configuration file `" ~ configuration ~ "` of `"
-            ~ binary ~ "` gives no import path");
-    return paths.dup;
+    return configuration;
 }
 
 // LDC reads a directory of `*.conf` files in name order as well as one file;

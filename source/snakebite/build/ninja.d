@@ -5,22 +5,20 @@ private:
 
 
 // Writes the `build.ninja` of the dub project in the absolute directory
-// `directory`, only when its text differs from the file. This is the only
-// place where the build reads the description of the dub project.
+// `directory`, only when its text differs from the file. The build reads the
+// description of the dub project only here and in the command of the
+// dependencies statement, which runs dub's build.
 public void writeBuildFile(in string directory) {
     import snakebite.build: buildFiles, writeChanged;
-    import snakebite.project.dub: dubDescribeProject, dubSources, dubWatchedPaths;
+    import snakebite.project.dub: dubBuildInputs, dubDescribeProject, dubSources;
     import std.file: mkdirRecurse, setTimes;
     import std.datetime: Clock;
 
     auto description = dubDescribeProject(directory);
     const sources = dubSources(directory, description);
-    if (sources.linkerFiles.length)
-        throw new Exception("--build=project does not yet build the "
-            ~ "dependencies of a dub project (issue #996, step 2)");
     const files = buildFiles(directory);
     const text = buildFileText(directory, sources,
-        dubWatchedPaths(directory, description));
+        dubBuildInputs(description, sources.files));
     files.directory.mkdirRecurse;
     if (writeChanged(files.ninjaFile, text))
         return;
@@ -32,26 +30,52 @@ public void writeBuildFile(in string directory) {
 }
 
 
-// The build statements: `build.ninja` itself, the compile of the root
-// package to the program and the image module, and the dependency image.
-// `watched` are the paths whose change can change `sources`.
+// `files`, the configuration files of a compiler, as a command in `directory`
+// finds them: a compiler looks in the directory of the command first.
+private string[] configurationFiles(
+    in string directory, lazy string[] files,
+) {
+    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+
+    scope entered = ProjectDirectory(directory, directory, EndsProcess.no);
+    return files;
+}
+
+
+// The build statements: `build.ninja` itself, the libraries of the dub
+// dependencies, the compile of the root package to the program and the image
+// module, and the dependency image. `buildInputs` are the inputs of
+// `build.ninja`: the paths whose change can change `sources`.
 private string buildFileText(
     in string directory,
     in imported!"snakebite.project.dub".SourceSet sources,
-    in string[] watched,
+    in string[] buildInputs,
 ) {
-    import snakebite.build: buildFiles;
+    import snakebite.build: buildFiles, dubDependenciesOption;
+    import snakebite.frontend.hostcompiler: compilerConfigurationFiles, hostCompiler,
+        hostConfigurationFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
-    import std.algorithm.iteration: map;
+    import std.algorithm.iteration: filter, map, uniq;
+    import std.algorithm.searching: canFind;
+    import std.algorithm.sorting: sort;
     import std.array: array, join;
-    import std.file: getcwd, thisExePath;
+    import std.file: exists, getcwd, thisExePath;
     import std.path: baseName;
 
     const files = buildFiles(directory);
     const sb = thisExePath;
     const start = getcwd;
+    // The frontend of the compile reads the configuration of the compiler
+    // that built `sb`. dub's build and the image run `compiler`.
     const compiler = compilerPath(defaultCompiler);
-    const generatorInputs = [sb] ~ watched;
+    const frontendConfiguration = configurationFiles(directory,
+        hostConfigurationFiles(hostCompiler));
+    const compilerConfiguration = configurationFiles(directory,
+        compilerConfigurationFiles(compiler));
+    // A configuration file changes the text: the statements name it. When it
+    // is removed, `build.ninja` is made again without it.
+    const generatorInputs = [sb] ~ buildInputs ~ frontendConfiguration
+        ~ compilerConfiguration;
     const variables = [
         "flags": sources.flags.compilerArguments
             .map!(argument => "--dflag=" ~ argument).array,
@@ -67,6 +91,10 @@ private string buildFileText(
         plain(["cd", start]) ~ shell(["&&"])
             ~ plain([sb, "--build=project", "--generate", directory]),
         ["generator = 1", "restat = 1", "pool = console"]);
+    text ~= rule("dependencies",
+        plain(["cd", start]) ~ shell(["&&"])
+            ~ plain([sb, dubDependenciesOption, directory]) ~ shell(["$out"]),
+        ["restat = 1", "pool = console"]);
     text ~= rule("compile",
         plain(["cd", directory]) ~ shell(["&&"])
             ~ plain([sb, "--compile=" ~ files.program])
@@ -80,10 +108,26 @@ private string buildFileText(
             ~ shell(commandVariables),
         ["depfile = $out.dep", "deps = gcc", "pool = console"]);
 
+    // The outputs are the libraries that dub's build makes. A linker file
+    // that exists before the build is an input of the image. `inputs` names
+    // each name that the recipe of a package can have: only the files that
+    // exist are inputs.
+    const libraries = sources.dependencies.targets;
+    const dependencyInputs = [sb, compiler] ~ compilerConfiguration
+        ~ sources.dependencies.inputs.filter!(path => path.exists).array;
+    // As reggae does for the inputs of `build.ninja`: a phony statement names
+    // each input that no statement makes, so that a removed input is not an
+    // error.
+    const sourceInputs = (generatorInputs ~ (libraries.length ? dependencyInputs : null)
+            ~ sources.files ~ frontendConfiguration ~ sources.linkerFiles)
+        .filter!(path => !libraries.canFind(path)).array.dup.sort.uniq.array;
+
     text ~= statement([files.ninjaFile], "generate", null, generatorInputs);
-    text ~= statement(generatorInputs, "phony", null, null);
+    text ~= statement(sourceInputs, "phony", null, null);
+    if (libraries.length)
+        text ~= "\n" ~ statement(libraries, "dependencies", null, dependencyInputs);
     text ~= "\n" ~ statement([files.program, files.imageSource], "compile",
-        sources.files, [sb]);
+        sources.files, [sb] ~ frontendConfiguration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
     text ~= statementVariable("options", [
@@ -92,7 +136,7 @@ private string buildFileText(
         "--image-path=" ~ files.image,
     ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null));
     text ~= "\n" ~ statement([files.image], "image",
-        [files.imageSource] ~ sources.linkerFiles, [sb, compiler]);
+        [files.imageSource] ~ sources.linkerFiles, [sb, compiler] ~ compilerConfiguration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
     text ~= statementVariable("options",

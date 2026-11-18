@@ -36,6 +36,18 @@ public struct DubDependencies {
     public string[] inputs() const {
         return _directory.length ? dubInputs(_directory, _description) : null;
     }
+
+    // The linker files that dub's build makes: the libraries of the targets.
+    // The other linker files (a `.o`, a `.a` or a `.so` that a recipe names)
+    // exist before the build.
+    public string[] targets() const {
+        import std.algorithm.iteration: filter;
+        import std.algorithm.searching: canFind;
+        import std.array: array;
+
+        const artifacts = cacheArtifacts(_description.project).values;
+        return _linkerFiles.filter!(file => artifacts.canFind(file)).array.dup;
+    }
 }
 
 
@@ -67,21 +79,47 @@ public SourceSet dubSources(
 }
 
 
-// The paths that exist and whose change can change `description`: the inputs
-// of a build of the project in `directory`. A path that does not exist is
-// no input: ninja takes a missing input with no rule as always changed.
-public string[] dubWatchedPaths(
-    in string directory,
+// The files and the directories whose change can change the build of the
+// project of `description`, as reggae names them for its `build.ninja`: the
+// recipe files and `dub.selections.json` of each package that exist, and the
+// directory of each source file that the build compiles. `rootFiles` are the
+// source files of the root package. A file that does not exist is no input.
+public string[] dubBuildInputs(
     in imported!"snakebite.project.dubcache".DubDescription description,
+    in string[] rootFiles,
 ) {
-    import snakebite.image.preparation: defaultCompiler;
-    import snakebite.project.dubcache: watchedPaths;
-    import std.algorithm.iteration: filter;
+    import dub.description: SourceFileRole;
+    import std.algorithm.iteration: filter, map, uniq;
+    import std.algorithm.sorting: sort;
     import std.array: array;
     import std.file: exists;
+    import std.path: buildNormalizedPath, buildPath, dirName;
 
-    return watchedPaths(directory, defaultCompiler, description.project)
-        .filter!(path => path.exists).array;
+    const project = description.project;
+    string[] recipes;
+    string[] sources = rootFiles.dup;
+    foreach (package_; project.packages) {
+        if (!package_.active)
+            continue;
+        foreach (name; ["dub.sdl", "dub.json", "package.json", "dub.selections.json"])
+            recipes ~= buildPath(package_.path, name);
+        if (package_.name == project.rootPackage)
+            continue;
+        foreach (file; package_.files)
+            if (file.role == SourceFileRole.source && !file.path.isLinkerFile)
+                sources ~= buildPath(package_.path, file.path);
+    }
+    return (recipes.filter!(path => path.exists).array
+            ~ sources.map!dirName.array)
+        .map!buildNormalizedPath.array.sort.uniq.array;
+}
+
+
+// A file of a recipe's `sourceFiles` that goes to the linker.
+private bool isLinkerFile(in string path) @safe pure {
+    import std.algorithm.searching: endsWith;
+
+    return path.endsWith(".a", ".o", ".so") != 0;
 }
 
 
@@ -271,22 +309,14 @@ private void runPreBuildCommands(
 }
 
 
-// Let dub decide which targets are stale, including the full dependency
-// chain of static-library roots. The shared image needs position-
-// independent archives, which both host compilers emit by default on the
-// supported platform. The build must not add a PIC flag through `DFLAGS`:
-// dub keys its build-cache artifacts by `DFLAGS` too, so a build with an
-// environment that the description did not see produces artifacts at paths
-// the description does not name. For the same reason the build gets the
-// compiler binary of the description.
+// Runs dub's build of the dependencies (`runDubBuild`) unless the record in
+// `stateDirectory` shows that their inputs and libraries did not change.
 public void buildDubDependencies(
     in string directory, in string stateDirectory,
     in imported!"snakebite.project.dubcache".DubDescription description,
     in string[] linkerFiles,
 ) {
-    import snakebite.failure.report: SnakebiteException;
     import std.algorithm: all;
-    import std.conv: text;
     import std.file: exists, mkdirRecurse, readText, write;
     import std.path: buildPath;
 
@@ -296,6 +326,30 @@ public void buildDubDependencies(
     if (linkerFiles.all!exists && statePath.exists
             && statePath.readText == fingerprint ~ before)
         return;
+
+    runDubBuild(directory, description, linkerFiles);
+    stateDirectory.mkdirRecurse;
+    statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
+}
+
+// dub's build of the dependencies of the project in `directory`, which makes
+// `linkerFiles`. Let dub decide which targets are stale, including the full
+// dependency chain of static-library roots. The shared image needs position-
+// independent archives, which both host compilers emit by default on the
+// supported platform. The build must not add a PIC flag through `DFLAGS`:
+// dub keys its build-cache artifacts by `DFLAGS` too, so a build with an
+// environment that the description did not see produces artifacts at paths
+// the description does not name. For the same reason the build gets the
+// compiler binary of the description.
+public void runDubBuild(
+    in string directory,
+    in imported!"snakebite.project.dubcache".DubDescription description,
+    in string[] linkerFiles,
+) {
+    import snakebite.failure.report: SnakebiteException;
+    import std.algorithm: all;
+    import std.conv: text;
+    import std.file: exists;
 
     const binary = compilerBinary(directory, description.versions);
     installCompilerWrapper(binary, description);
@@ -322,8 +376,6 @@ public void buildDubDependencies(
             ": ", exception.msg, "\n", failedOutput));
     if (!linkerFiles.all!exists)
         throw new SnakebiteException("Dub build did not produce all dependency libraries");
-    stateDirectory.mkdirRecurse;
-    statePath.write(fingerprint ~ fileFingerprint(linkerFiles));
 }
 
 // dub keeps the compiler binary in the build identity of every target, so the
@@ -575,9 +627,7 @@ public SourceSet dubSources(
                 if (file.role == SourceFileRole.source)
                     sourceFiles ~= buildPath(package_.path, file.path);
         }
-    import std.algorithm: endsWith;
-    const isLinkerFile = (string path) => path.endsWith(".a", ".o", ".so");
-    const files = sourceFiles.filter!(path => !isLinkerFile(path)).array;
+    const files = sourceFiles.filter!(path => !path.isLinkerFile).array;
     // dub names each dependency by the copy it leaves in the package's
     // target path, and whichever compiler built that package last owns the
     // copy (issue #401). The artifact in dub's build cache is keyed by
