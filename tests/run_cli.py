@@ -3649,6 +3649,45 @@ def test_build_project_reads_a_new_compiler_configuration_with_the_recipe(
         run_sb("--build=project", str(app), cwd=tmp_path), first)
 
 
+# The configuration of `IMAGE_COMPILER` that it reads outside the project.
+def host_image_compiler_configuration(directory: Path) -> Path:
+    write(directory / "empty.d", "module empty;\n")
+    verbose = subprocess.run(
+        [IMAGE_COMPILER, "-v", "-c", "-o-", "empty.d"],
+        capture_output=True, check=True, text=True, cwd=directory)
+    line = next(line for line in verbose.stdout.splitlines()
+                if line.startswith("config "))
+    return Path(line.split()[1])
+
+
+# A configuration of the host compiler in the project directory that exists
+# at the first run and is then removed: the next runs give the result of
+# `bin/sb DIR`, with no change of the recipe.
+def test_build_project_runs_after_a_removed_compiler_configuration(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project_with_dependency(
+        tmp_path, "build-project-removed-configuration")
+    host = host_image_compiler_configuration(tmp_path)
+    configuration = app / f"{IMAGE_COMPILER}.conf"
+    if host.is_dir():
+        shutil.copytree(host, configuration)
+    else:
+        shutil.copy(host, configuration)
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert_prints_dependency_lines(first, 42)
+
+    if configuration.is_dir():
+        shutil.rmtree(configuration)
+    else:
+        configuration.unlink()
+    for _ in range(2):
+        built = run_sb("--build=project", str(app), cwd=tmp_path)
+        direct = run_sb(str(app), cwd=tmp_path)
+        assert_runs_as_bin_sb(built, direct)
+        assert_prints_dependency_lines(built, 42)
+
+
 # A compile error ends the run with status 1 and the error text of
 # `bin/sb DIR`. The run after the correction gives the result of `bin/sb DIR`.
 def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:

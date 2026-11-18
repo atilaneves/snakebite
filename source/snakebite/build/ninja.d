@@ -55,7 +55,9 @@ private string buildFileText(
     import snakebite.frontend.hostcompiler: compilerConfigurationFiles, hostCompiler,
         hostConfigurationFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
-    import std.algorithm.iteration: filter, map;
+    import std.algorithm.iteration: filter, map, uniq;
+    import std.algorithm.searching: canFind;
+    import std.algorithm.sorting: sort;
     import std.array: array, join;
     import std.file: exists, getcwd, thisExePath;
     import std.path: baseName;
@@ -70,7 +72,10 @@ private string buildFileText(
         hostConfigurationFiles(hostCompiler));
     const compilerConfiguration = configurationFiles(directory,
         compilerConfigurationFiles(compiler));
-    const generatorInputs = [sb] ~ buildInputs;
+    // A configuration file changes the text: the statements name it. When it
+    // is removed, `build.ninja` is made again without it.
+    const generatorInputs = [sb] ~ buildInputs ~ frontendConfiguration
+        ~ compilerConfiguration;
     const variables = [
         "flags": sources.flags.compilerArguments
             .map!(argument => "--dflag=" ~ argument).array,
@@ -103,17 +108,24 @@ private string buildFileText(
             ~ shell(commandVariables),
         ["depfile = $out.dep", "deps = gcc", "pool = console"]);
 
-    text ~= statement([files.ninjaFile], "generate", null, generatorInputs);
-    text ~= statement(generatorInputs, "phony", null, null);
     // The outputs are the libraries that dub's build makes. A linker file
     // that exists before the build is an input of the image. `inputs` names
     // each name that the recipe of a package can have: only the files that
     // exist are inputs.
     const libraries = sources.dependencies.targets;
+    const dependencyInputs = [sb, compiler] ~ compilerConfiguration
+        ~ sources.dependencies.inputs.filter!(path => path.exists).array;
+    // As reggae does for the inputs of `build.ninja`: a phony statement names
+    // each input that no statement makes, so that a removed input is not an
+    // error.
+    const sourceInputs = (generatorInputs ~ (libraries.length ? dependencyInputs : null)
+            ~ sources.files ~ frontendConfiguration ~ sources.linkerFiles)
+        .filter!(path => !libraries.canFind(path)).array.dup.sort.uniq.array;
+
+    text ~= statement([files.ninjaFile], "generate", null, generatorInputs);
+    text ~= statement(sourceInputs, "phony", null, null);
     if (libraries.length)
-        text ~= "\n" ~ statement(libraries, "dependencies", null,
-            [sb, compiler] ~ compilerConfiguration
-                ~ sources.dependencies.inputs.filter!(path => path.exists).array);
+        text ~= "\n" ~ statement(libraries, "dependencies", null, dependencyInputs);
     text ~= "\n" ~ statement([files.program, files.imageSource], "compile",
         sources.files, [sb] ~ frontendConfiguration);
     foreach (name; compilerVariables)
