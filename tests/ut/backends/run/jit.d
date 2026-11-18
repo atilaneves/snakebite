@@ -826,3 +826,111 @@ static foreach (backend; Matrix!(
         }, ["loadOverlap"]);
     }
 }
+
+private enum permutationVisits = q{
+    // A mutable value with a fixed address can change between calls.
+    private __gshared int mutableIndex;
+
+    final class Walker {
+        int[8] state;
+        int[] cells;
+
+        void visit(bool useMutableIndex = false)(int depth) {
+            ++state[0];
+            if (depth == 0)
+                return;
+            const next = depth - 1;
+            visit!useMutableIndex(next);
+            for (int i = next; i >= 0; --i) {
+                exchange(useMutableIndex ? mutableIndex : next, i);
+                visit!useMutableIndex(next);
+                exchange(useMutableIndex ? mutableIndex : next, i);
+            }
+        }
+
+        private void exchange(int i, int j) {
+            const value = cells[i];
+            cells[i] = cells[j];
+            cells[j] = value;
+        }
+    }
+
+    const original = [13, 21, 34, 55, 89, 144];
+};
+
+static foreach (backend; Matrix!()) {
+    @("jit.permutationLoopUsesCurrentStorage." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, permutationVisits ~ q{
+            int main() {
+                auto walker = new Walker;
+                walker.cells = original.dup;
+                foreach (_; 0 .. 10) {
+                    walker.state[0] = 0;
+                    walker.visit(6);
+                    assert(walker.state[0] == 8660);
+                    assert(walker.cells == original);
+                }
+
+                walker.state[0 .. original.length] = original[];
+                walker.cells = walker.state[0 .. original.length];
+                walker.visit(3);
+                assert(walker.state[] == [35, 30, 44, 55, 89, 144, 0, 0]);
+
+                int[6] cells;
+                cells[] = original[];
+                walker.cells = cells[];
+                walker.state[0] = 0;
+                walker.visit(0);
+                assert(walker.state[0] == 1 && cells[] == original);
+                walker.state[0] = 0;
+                walker.visit(3);
+                assert(walker.state[0] == 41 && cells[] == original);
+                return 0;
+            }
+        }, ["visit"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot write a mutable static variable"),
+)) {
+    @("jit.permutationLoopReadsTheCurrentIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, permutationVisits ~ q{
+            import core.exception: ArrayIndexError;
+
+            int main() {
+                auto walker = new Walker;
+                walker.cells = original.dup;
+                mutableIndex = 0;
+                foreach (_; 0 .. 10) {
+                    walker.state[0] = 0;
+                    walker.visit!true(6);
+                    assert(walker.state[0] == 8660);
+                    assert(walker.cells == original);
+                }
+
+                mutableIndex = 5;
+                walker.state[0] = 0;
+                walker.visit!true(3);
+                assert(walker.state[0] == 41 && walker.cells == original);
+
+                mutableIndex = -1;
+                walker.state[0] = 0;
+                try {
+                    walker.visit!true(3);
+                    return 1;
+                } catch (ArrayIndexError error) {
+                    assert(error.index == size_t.max
+                        && error.length == original.length);
+                    assert(walker.state[0] == 4);
+                }
+                return 0;
+            }
+        }, ["visit"]);
+    }
+}

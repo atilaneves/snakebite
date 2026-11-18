@@ -336,6 +336,10 @@ public struct CallSite {
             @plain package const(Function)* callee;
             @plain package ptrdiff_t adjustment;
 
+            // Only the instance JIT lock can inspect or consume this record.
+            @unsaved package const(ubyte)* coldHit;
+            @unsaved package size_t unprofiledCall;
+
             pragma(inline, true)
             private const(void)* remember(const(void)* entry,
                 const(Function)* callee, in ptrdiff_t adjustment,
@@ -1424,8 +1428,6 @@ package struct DispatchState {
 
 }
 
-private enum observedEdgeBudget = 2048;
-
 static if (observeGuestPaths)
 private void observeGuestCall(DispatchState* state, Activation* active,
     const(Instruction)* pc, const(Function)* callee)
@@ -1456,7 +1458,7 @@ private void observeGuestCall(DispatchState* state, Activation* active,
         // A thread suspended by the GC can hold the allocator lock.
         if (GC.inFinalizer)
             return;
-        if (state.observedEdges.reserve(observedEdgeBudget) is null)
+        if (state.observedEdges.reserve(ObservedEdge.limit) is null)
             return;
         state.observedFunction = callee;
         state.observedEvents = 0;
@@ -1471,7 +1473,7 @@ private void observeGuestPath(DispatchState* state, Activation* active,
 {
     if (state.observedFunction !is active.function_
             || state.observedFunction is null
-            || state.observedEvents == observedEdgeBudget)
+            || state.observedEvents == ObservedEdge.limit)
         return;
     const first = active.function_.instructions.ptr;
     const index = pc - first;
@@ -2132,7 +2134,7 @@ public alias opCallIndirectWindowDiscard =
 // call. Any other value, and a callee that the window does not fit, take
 // `opCallSlow`, which reads the arguments from the window.
 private const(Instruction)* callIndirectWindow(Destination destination,
-    bool counted = false, bool link = false)(
+    bool counted = false, bool link = false, bool refresh = false)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2157,11 +2159,11 @@ private const(Instruction)* callIndirectWindow(Destination destination,
     }
 
     static if (jitSupported && chainedDispatch && counted) {
-        const index = site.rememberIndirectTarget!link(address, callee,
-            adjustment);
-        static if (link)
+        const index = site.rememberIndirectTarget!(link || refresh)(address,
+            callee, adjustment);
+        static if (link || refresh)
             if (index != CallSite.maxIndirectTargets)
-                linkIndirectWindow(pc, active.function_, site, index,
+                linkIndirectWindow!refresh(pc, active.function_, site, index,
                     destination);
     }
 
@@ -2171,17 +2173,18 @@ private const(Instruction)* callIndirectWindow(Destination destination,
 }
 
 static if (jitSupported && chainedDispatch) {
-    package Instruction.Handler indirectWindowFallback(bool link)(
+    package Instruction.Handler indirectWindowFallback(bool link,
+        bool refresh = false)(
         Destination destination,
     ) nothrow @nogc {
         final switch (destination) with (Destination) {
             static foreach (kind; EnumMembers!Destination)
-                case kind: return &callIndirectWindow!(kind, true, link);
+                case kind: return &callIndirectWindow!(kind, true, link, refresh);
         }
     }
 
     pragma(inline, false)
-    private void linkIndirectWindow(const(Instruction)* pc,
+    private void linkIndirectWindow(bool refresh)(const(Instruction)* pc,
         const(Function)* caller, const(CallSite)* site, size_t index,
         Destination destination,
     ) nothrow @nogc {
@@ -2189,7 +2192,7 @@ static if (jitSupported && chainedDispatch) {
             return;
         auto lock = JitLock.tryTake(*(cast(Function*) caller).jit);
         if (lock.held && lock.jitUsable)
-            lock.state.linkWindow(pc, caller, site, index, destination);
+            lock.state.linkWindow!refresh(pc, caller, site, index, destination);
     }
 }
 
@@ -3530,15 +3533,15 @@ package enum CheckedAccess {
 // `destination` is the address of the value.
 private alias opCheckedIndex(CheckedAccess access, bool fixedLength,
         size_t indexWidth, bool signed, size_t elementSize,
-        bool constantValue = false) =
+        bool constantValue, bool sharedAccess) =
     execute!(runCheckedIndex,
         constantValue ? OperandKind.immediate : OperandKind.storage,
         OperandKind.storage, access, fixedLength, indexWidth, signed,
-        elementSize);
+        elementSize, sharedAccess);
 
 private const(Instruction)* runCheckedIndex(CheckedAccess access,
     bool fixedLength, size_t indexWidth, bool signed, size_t elementSize,
-    Decoded)(
+    bool sharedAccess, Decoded)(
     ref Decoded execution,
 ) {
     import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
@@ -3604,6 +3607,7 @@ private struct CheckedInstance {
     bool signed;
     size_t elementSize;
     bool constantValue;
+    bool sharedAccess;
 }
 
 private enum checkedIndexShapes = [[4UL, 1UL], [4UL, 0UL], [8UL, 0UL]];
@@ -3622,18 +3626,20 @@ private CheckedInstance[] allCheckedInstances() {
         static foreach (fixed; [false, true])
             static foreach (shape; checkedIndexShapes)
                 static foreach (size; checkedIndexElementSizes)
-                    static if (kind != CheckedAccess.check || size == 1) {
-                        all ~= CheckedInstance(
-                            &opCheckedIndex!(kind, fixed, shape[0],
-                                shape[1] == 1, size),
-                            kind, fixed, shape[0], shape[1] == 1, size, false);
-                        static if (kind == CheckedAccess.store)
+                    static if (kind != CheckedAccess.check || size == 1)
+                        static foreach (sharedAccess; [false, true]) {
                             all ~= CheckedInstance(
                                 &opCheckedIndex!(kind, fixed, shape[0],
-                                    shape[1] == 1, size, true),
+                                    shape[1] == 1, size, false, sharedAccess),
                                 kind, fixed, shape[0], shape[1] == 1, size,
-                                true);
-                    }
+                                false, sharedAccess);
+                            static if (kind == CheckedAccess.store)
+                                all ~= CheckedInstance(
+                                    &opCheckedIndex!(kind, fixed, shape[0],
+                                        shape[1] == 1, size, true, sharedAccess),
+                                    kind, fixed, shape[0], shape[1] == 1, size,
+                                    true, sharedAccess);
+                        }
     return all;
 }
 
@@ -3677,7 +3683,8 @@ package size_t checkedLoadWidth(in Instruction.Handler handler) {
 // A `check` does not read an element, so one size stands for all.
 package Instruction.Handler checkedIndexHandler(
     in CheckedAccess access, in bool fixedLength, in size_t indexWidth,
-    in bool signed, in size_t elementSize, in bool constantValue = false,
+    in bool signed, in size_t elementSize, in bool constantValue,
+    in bool sharedAccess,
 ) {
     import std.conv: text;
 
@@ -3686,6 +3693,7 @@ package Instruction.Handler checkedIndexHandler(
         if (instance.access == access && instance.fixedLength == fixedLength
                 && instance.indexWidth == indexWidth
                 && instance.signed == signed
+                && instance.sharedAccess == sharedAccess
                 && instance.elementSize == handlerSize) {
             if (instance.constantValue == constantValue)
                 return instance.handler;
@@ -6225,7 +6233,7 @@ static if (jitSupported) {
             put(instance.handler, JitOp.make!(Kind.checked)(
                 JitOp.Checked(instance.access, instance.fixedLength,
                     cast(ubyte) instance.indexWidth, instance.signed,
-                    instance.constantValue),
+                    instance.constantValue, instance.sharedAccess),
                 cast(ubyte) instance.elementSize));
         put(&opFrameAddress, JitOp.plain(Kind.frameAddr));
         put(&opLogicalNot,

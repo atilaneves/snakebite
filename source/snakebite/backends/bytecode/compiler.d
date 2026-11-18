@@ -6925,6 +6925,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // base is the storage of the elements.
         bool fixedLength;
         size_t dimension;
+        bool sharedAccess;
     }
 
     // Whether `expression` is an element of a slice or of a static array that
@@ -6953,6 +6954,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 || (elementSize != 1 && elementSize != 2 && elementSize != 4
                     && elementSize != 8))
             return false;
+        shape.sharedAccess = expression.e1.type.isShared
+            || arrayType.isShared || arrayType.nextOf.isShared
+            || expression.type.isShared;
         if (boundsPlanOf(_bytecode.checks, _function).kind
                 == FailurePlan.Kind.ignore)
             return false;
@@ -7108,7 +7112,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         resolveIndexSlot(shape);
         const element = typeFacts(expression.type).size;
         const handler = checkedIndexHandler(access, shape.fixedLength,
-            shape.width, shape.signed, element, !constantValue.isNull);
+            shape.width, shape.signed, element, !constantValue.isNull,
+            shape.sharedAccess);
         const second = shape.fixedLength
             ? shape.dimension : cast(size_t) cast(uint) cast(int) shape.offset;
         const packed = shape.slot | (second << 32);

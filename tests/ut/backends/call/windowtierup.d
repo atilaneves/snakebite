@@ -197,34 +197,52 @@ static foreach (backend; Matrix!(
                     + 10;
             }
 
+            alias Apply = int function(Transfer, Box, Box, bool, int[], size_t);
+
+            int read(Transfer operation, Box first, Box second,
+                bool forward, int[] values, size_t index)
+            {
+                return values[index] + 10;
+            }
+
+            int invoke(Apply apply, Transfer operation, Box first, Box second,
+                bool forward, int[] values, size_t index)
+            {
+                return apply(operation, first, second, forward, values, index);
+            }
+
             void main() {
                 Transfer increment = new Increment;
                 Transfer replace = new Replace;
                 auto first = new Box;
                 auto second = new Box;
                 int[1] values = [11];
+                auto call = &invoke;
+                foreach (round; 0 .. 1024)
+                    assert(call(&read, increment, first, second, true, values[], 0)
+                        == 21);
                 foreach (round; 0 .. 1024) {
                     first.value = 3;
                     second.value = 7;
-                    assert(transfer(increment, first, second, true, values[], 0)
+                    assert(call(&transfer, increment, first, second, true, values[], 0)
                         == 21);
                     assert(first.value == 3 && second.value == 4);
-                    assert(transfer(increment, first, second, false, values[], 0)
+                    assert(call(&transfer, increment, first, second, false, values[], 0)
                         == 21);
                     assert(first.value == 6 && second.value == 4);
                 }
-                assert(transfer(replace, first, second, true, values[], 0) == 22);
+                assert(call(&transfer, replace, first, second, true, values[], 0) == 22);
                 assert(first.value == 30 && second.value == 4);
                 bool caught;
                 try {
-                    cast(void) transfer(increment, first, first, false,
+                    cast(void) call(&transfer, increment, first, first, false,
                         values[], values.length);
                 } catch (RangeError error) {
                     caught = error.line == Increment.indexLine;
                 }
                 assert(caught && first.value == 32);
             }
-        }, ["transfer"]);
+        }, ["invoke", "transfer"]);
     }
 }
 
