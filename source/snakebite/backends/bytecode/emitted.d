@@ -679,7 +679,7 @@ package struct EmittedCode {
 
     package static bool overlaps(
         in size_t a, in size_t aWidth, in size_t b, in size_t bWidth,
-    ) {
+    ) pure @safe @nogc nothrow {
         return a < b + bWidth && b < a + aWidth;
     }
 

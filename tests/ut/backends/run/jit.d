@@ -222,6 +222,57 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
+
+    @("jit.floatingPointStoresUseTheCurrentAliasedValue." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.math: sqrt;
+
+            double update(double* first, double* second, double local,
+                    bool useLocal, bool skip) {
+                assert(first !is null && second !is null);
+                if (useLocal)
+                    first = &local;
+
+                double value = 1;
+                if (skip)
+                    goto store;
+                value = *first + *second;
+                value = sqrt(value * value);
+            store:
+                value = value + *first;
+                *first = value;
+                *second = *first + 1;
+                return *first + *second + local;
+            }
+
+            int main() {
+                foreach (i; 0 .. 300) {
+                    double first = 2;
+                    double second = 3;
+                    if (update(&first, &second, 5, false, false) != 20
+                            || first != 7 || second != 8)
+                        return 1;
+                    first = 2;
+                    if (update(&first, &first, 5, false, false) != 19
+                            || first != 7)
+                        return 2;
+                    second = 3;
+                    if (update(&first, &second, 5, true, false) != 40
+                            || first != 7 || second != 14)
+                        return 3;
+                    first = 2;
+                    second = 3;
+                    if (update(&first, &second, 5, false, true) != 12
+                            || first != 3 || second != 4)
+                        return 4;
+                }
+                return 0;
+            }
+        }, ["update"]);
+    }
+
 }
 
 static foreach (backend; Matrix!()) {
