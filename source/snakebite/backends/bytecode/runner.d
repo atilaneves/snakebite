@@ -67,6 +67,9 @@ public struct Runner {
         import snakebite.stack.frames: defaultFrameCapacity;
 
         _jit = jit;
+        static if (jitSupported)
+            if (jit.enabled)
+                _jitInstance.prepareCompilerStack;
         _hasCallbackEntries = hasCallbackEntries;
         _vms = ExecutionStates!(Vm*)(() {
             return heapNew!Vm(defaultFrameCapacity, tlsSlots());

@@ -310,6 +310,7 @@ package struct JitState {
     // They are on the heap: a tier-up runs on the native stack of the guest,
     // and a guest `Fiber` of the default size has 16 KiB.
     Scratch!(InlineBody, Gen.inlineDepthLimit) inlineBodies;
+    imported!"snakebite.host.threads".Continuation compilerStack;
 
     // Gives back the memory of the region and the buffers.
     void release() {
@@ -325,6 +326,7 @@ package struct JitState {
         snapshotScratch.release;
         originalScratch.release;
         inlineBodies.release;
+        compilerStack = null;
     }
 
     static if (chainedDispatch)
@@ -674,12 +676,25 @@ package struct JitState {
 // the instance: the destructor unmaps it. Every `Function` that the instance
 // compiles points here, so that a tier-up finds the state of its owner.
 package struct JitInstance {
-    @nogc nothrow:
 
     // How far this instance's set-up got. It is read without the lock.
     private shared Setup setup;
     private shared int lockWord;
     private shared JitState state;
+
+    void prepareCompilerStack() @system {
+        import snakebite.host.threads: Continuation;
+
+        enum compilerStackBytes = 256 * 1024;
+        (cast(JitState*) &state).compilerStack =
+            new Continuation(idleCompilerStack, compilerStackBytes);
+    }
+
+    private static void delegate() idleCompilerStack() @nogc nothrow {
+        return delegate() {};
+    }
+
+    @nogc nothrow:
 
     @disable this(this);
 
@@ -944,6 +959,31 @@ private enum Setup : int { pending, ready, unavailable }
 // lock is released when the `JitLock` that holds it goes out of scope.
 package struct JitLock {
     import snakebite.backends.bytecode.vm: Function, Instruction;
+
+    package bool onCompilerStack(Work)(scope Work work) {
+        import core.thread.fiber: Fiber;
+        import snakebite.failure.report: internalFailure;
+        import snakebite.host.threads: Continuation;
+
+        auto caller = Fiber.getThis;
+        if (caller is null) {
+            work();
+            return true;
+        }
+
+        auto compiler = state.compilerStack;
+        if (compiler is null)
+            return false;
+        auto continuation = cast(Continuation) caller;
+        compiler.of = continuation is null ? caller : continuation.of;
+        compiler.reset(work);
+        const thrown = compiler.call!(Fiber.Rethrow.no);
+        compiler.reset(JitInstance.idleCompilerStack);
+        compiler.of = null;
+        if (thrown !is null)
+            internalFailure("unexpected exception during JIT compilation");
+        return true;
+    }
 
     @nogc nothrow:
 

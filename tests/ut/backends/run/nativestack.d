@@ -239,7 +239,13 @@ static foreach (backend; Matrix!(
             }
 
             extern(C) int compare(scope const void* a, scope const void* b) {
-                return *cast(const(int)*) a - *cast(const(int)*) b;
+                double first = *cast(const(int)*) a;
+                const double second = *cast(const(int)*) b;
+                first = first + second;
+                first = first * 2;
+                first = first - second;
+                first = first - second;
+                return cast(int) (first - second * 2);
             }
 
             size_t descend(size_t n) {
@@ -465,5 +471,61 @@ static foreach (backend; Matrix!(
         else
             evaluator.call(findFunction(guestModule, "count"), &result, []);
         (result > before).should == true;
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot pass a function to a native function such as qsort"),
+)) {
+    @("nativeStack.integerFieldRegionInsideFiberCallback." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.stdc.stdlib: qsort;
+            import core.thread.fiber: Fiber;
+
+            struct Record {
+                int marker;
+                int net;
+                int code;
+                int distance;
+                int adjustment;
+                int mask;
+            }
+
+            Record* current;
+
+            extern(C) int compare(scope const void* a, scope const void* b) {
+                auto record = current;
+                assert(record.marker == 23);
+                record.net = record.net - record.adjustment;
+                record.code = record.code ^ record.mask;
+                record.distance = record.distance + record.adjustment;
+                if (record.code != 7)
+                    record.marker = -3;
+                else if (record.distance > 11)
+                    record.marker = 19;
+                else if (record.code == record.distance)
+                    record.marker = 31;
+                return *cast(const(int)*) a - *cast(const(int)*) b;
+            }
+
+            int main() {
+                Record record;
+                current = &record;
+                auto fiber = new Fiber({
+                    foreach (round; 0 .. 300) {
+                        record = Record(23, 16, 5, 3, 4, 2);
+                        int[2] values = [2, 1];
+                        qsort(values.ptr, values.length, int.sizeof, &compare);
+                        assert(values == [1, 2]);
+                        assert(record == Record(31, 12, 7, 7, 4, 2));
+                    }
+                }, 16 * 1024);
+                fiber.call;
+                return 0;
+            }
+        }, ["compare"]);
     }
 }
