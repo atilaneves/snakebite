@@ -546,7 +546,8 @@ private void transfer(T)(ref Archive archive, ref T value) {
         static assert(false, "the file holds no " ~ T.stringof);
 }
 
-// A struct of the VM: each field as it says.
+// A struct of the VM: each field as it says. A field whose classification
+// writes nothing keeps the initial value of a new record on a load.
 private void transferClassified(T)(ref Archive archive, ref T value) {
     static foreach (index, name; FieldNameTuple!T) {{
         enum classification = classificationOf!(T, index);

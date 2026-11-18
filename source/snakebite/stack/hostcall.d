@@ -5,7 +5,7 @@ module snakebite.stack.hostcall;
 
 private:
 
-import snakebite.backends.bytecode.relocation: plain, unsaved;
+import snakebite.native.classification: plain, unsaved;
 import snakebite.failure.report: SnakebiteException;
 
 // Where a host caller writes the arguments of a compiled function: the
@@ -25,7 +25,7 @@ package(snakebite) struct HostCallLayout {
     @plain package(snakebite) Argument hiddenThis;
     // `size_t.max` unless the function reads that variadic slot.
     @plain package(snakebite) size_t variadicCursor = size_t.max;
-    @unsaved package(snakebite) size_t variadicTypes = size_t.max;
+    @plain package(snakebite) size_t variadicTypes = size_t.max;
 
     package(snakebite) void checkArgumentCount(
         in size_t argumentCount, in string backendName,
