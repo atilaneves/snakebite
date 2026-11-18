@@ -5,7 +5,8 @@ module snakebite.backends.bytecode.file;
 // the list of its modules. The file holds the types of the VM as they are:
 // one `transfer` template walks them, and the same body writes a file and
 // reads one. A field says where it is declared (`plain`, `relocated`, `hostCode`,
-// `setBy`) how it reaches the file, and a field that says nothing stops the build.
+// `setBy`, `unsaved`) how it reaches the file, and a field that says nothing
+// stops the build. Only `plain` and `hostCode` fields put bytes in the file.
 // Handlers are distances from one handler of `vm.d`, so a file belongs to the
 // build that wrote it.
 //

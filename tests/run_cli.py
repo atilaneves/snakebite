@@ -2764,8 +2764,8 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
     assert "another build" in loaded.stderr, output(loaded)
 
 
-# A loaded program names its JIT code in the perf map as the same program
-# compiled and run from RAM does.
+# A program saved with the perf map on names its JIT code in the perf map
+# after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
@@ -2781,7 +2781,7 @@ def test_loaded_program_names_jit_code_as_the_compiled_program(
     app = str(tmp_path / "app")
     target = tmp_path / "program.sbc"
     saved = run_sb("--backend=bytecode", "--no-optimise-image",
-                   f"--save={target}", app, cwd=tmp_path)
+                   "--jit-perf-map", f"--save={target}", app, cwd=tmp_path)
     assert saved.returncode == 0, output(saved)
 
     def mapped_names(*args: str) -> set[str]:

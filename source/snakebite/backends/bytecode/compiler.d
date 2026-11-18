@@ -768,7 +768,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-            if (_runner.jitSetting.perfMap || compiledProgram.recordsAddresses)
+            if (_runner.jitSetting.perfMap)
                 placeholder.mangledName = function_.mangledNameOf;
             // Branch targets, call site cleanup ranges and host code become
             // addresses only now: the passes of the compile read them as
@@ -1309,7 +1309,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             parameterOffsets,
             _layout.variadicTypes == size_t.max
                 ? _layout.variadicCursor : size_t.max,
-            _layout.parameters.length,
             _layout.signature,
             resultPlace,
         );

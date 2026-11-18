@@ -109,9 +109,15 @@ public SetBy setBy(in string name) @safe pure nothrow @nogc {
     return SetBy(name);
 }
 
+// The field is not in the file, and a load leaves it at its initial value. The
+// file holds only what a load needs (ADR-0017): a field that only the compile
+// reads, or that no test needs after a load, says this.
+public struct Unsaved {}
+public enum unsaved = Unsaved();
 
-// The classification of field `index` of `T`: `Plain`, `Relocated`, `HostCode`
-// or `SetBy`.
+
+// The classification of field `index` of `T`: `Plain`, `Relocated`, `HostCode`,
+// `SetBy` or `Unsaved`.
 // A field with none, or with two, stops the build.
 public template classificationOf(T, size_t index) {
     import std.meta: Filter;
@@ -121,10 +127,12 @@ public template classificationOf(T, size_t index) {
     enum isKind(alias attribute) = is(typeof(attribute) == Plain)
         || is(typeof(attribute) == Relocated)
         || is(typeof(attribute) == HostCode)
-        || is(typeof(attribute) == SetBy);
+        || is(typeof(attribute) == SetBy)
+        || is(typeof(attribute) == Unsaved);
     alias kinds = Filter!(isKind, attributes);
     static assert(kinds.length == 1, T.stringof ~ "." ~ FieldNameTuple!T[index]
-        ~ " has to say how it reaches the file: @plain, @relocated, @hostCode or @setBy");
+        ~ " has to say how it reaches the file: @plain, @relocated, @hostCode,"
+        ~ " @setBy or @unsaved");
     enum classificationOf = kinds[0];
 }
 
