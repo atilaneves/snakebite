@@ -50,9 +50,11 @@ step is the reason this project exists.
 
 ## Consequences
 
-The root-owned predicate is the one question both call dispatch and
-type metadata construction ask. A backend must not keep its own
-copy of this predicate.
+The root-owned predicate is the one question that type metadata
+construction asks. Call dispatch and static data ask one question
+more: does another object define this symbol? The answer comes from
+the declaration only, not from a loaded dependency image (issue
+#960). A backend must not keep its own copy of either predicate.
 
 The exception of decision 1 is also one predicate,
 `backendExecutes` in `source/snakebite/frontend/dmd/functions.d`,
