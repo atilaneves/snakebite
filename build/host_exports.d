@@ -33,11 +33,13 @@ import mainTests = ut.backends.run.main;
 import virtualVariadic = ut.backends.run.virtual_variadic;
 import classes = ut.backends.run.classes;
 import cost = ut.backends.interpreter.cost;
+import routing = ut.backends.call.routing;
 
+mixin Export!(routing, "snakebite_ut_variadic_instance_sum", "instanceVariadic.directAndAddressAgree");
 mixin Export!(symbols, "snakebite_symbol_dual_definition_test", "symbolAddress.loadedSharedObjectAnswersBeforeExecutable");
 mixin Export!(symbols, "snakebite_symbol_executable_only_test", "symbolAddress.fallsBackToExecutableWhenNothingElseHasIt");
 mixin Export!(concurrency, "snakebite_ut_concurrency_wide", "plan.concurrentFirstPlansOfAFreshStructTypeAgree");
-mixin Export!(plan, "snakebite_ut_plan_executable_only_target", "hasIndependentNativeSymbol.excludesExecutableOnlyAnswer");
+mixin Export!(plan, "snakebite_ut_plan_executable_only_target", "hasNativeSymbol.findsTheSymbolOfADeclaration");
 mixin Export!(plan, "snakebite_ut_bump", "called.refParameter");
 mixin Export!(plan, "snakebite_ut_cell", "called.refReturn");
 mixin Export!(plan, "snakebite_ut_three_words", "called.hiddenPointerReturn");

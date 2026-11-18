@@ -240,17 +240,20 @@ public struct CallSelection {
         return decisionOf(function_, isDefinedElsewhere).route == Route.guest;
     }
 
-    // A host variadic function pointer must keep its host address. Its
-    // call plan depends on the extra argument types at each call site.
+    // A variadic function whose route is native must keep its host
+    // address. Its call plan depends on the extra argument types at each
+    // call site. The route is the one that a direct call takes.
     public bool usesNativeVariadicAddress(
-        FuncDeclaration function_, bool hasNativeSymbol,
+        FuncDeclaration function_,
+        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
     ) {
         import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        return hasNativeSymbol
-            && typeFunctionOf(function_).parameterList.varargs
-                == VarArg.variadic;
+        return typeFunctionOf(function_).parameterList.varargs
+                == VarArg.variadic
+            && decisionOf(function_, isDefinedElsewhere).route
+                == Route.native;
     }
 
     // A guest D variadic method called without a receiver adjustment is

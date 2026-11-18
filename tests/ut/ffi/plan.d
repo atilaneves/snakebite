@@ -127,35 +127,24 @@ private extern(C) int snakebite_ut_plan_executable_only_target() {
     return 91;
 }
 
-// A function the program defines has no native copy, even when the process
-// has a symbol of the same linker name; a declaration without a body still
-// names native code.
-@("hasNativeSymbol.rootBodyIsNotNativeButRootDeclarationIs")
+// A declaration names native code that this process has; a symbol it lacks
+// is reported as missing.
+@("hasNativeSymbol.findsTheSymbolOfADeclaration")
 unittest {
-    import snakebite.frontend.dmd.functions: moduleOf;
-
     auto guestModule = parseSnippet(q{
         pragma(mangle, "snakebite_ut_plan_executable_only_target")
         extern(C) int declared();
 
-        pragma(mangle, "snakebite_ut_plan_executable_only_target")
-        extern(C) int defined() { return 1; }
+        pragma(mangle, "snakebite_ut_plan_missing_symbol")
+        extern(C) int missing();
     });
     auto declared = findFunction(guestModule, "declared");
-    auto defined = findFunction(guestModule, "defined");
-    assert(declared !is null && defined !is null);
+    auto missing = findFunction(guestModule, "missing");
+    assert(declared !is null && missing !is null);
 
-    static struct Ownership {
-        typeof(guestModule) root;
-        bool owns(imported!"snakebite.frontend.ast".Dsymbol symbol) const {
-            return moduleOf(symbol) is root;
-        }
-    }
-    const ownership = Ownership(guestModule);
-    auto planStore = CallPlanStore(null);
-    auto cache = PlanCache(&planStore, &ownership.owns);
+    mixin planCache;
     cache.hasNativeSymbol(declared).should == true;
-    cache.hasNativeSymbol(defined).should == false;
+    cache.hasNativeSymbol(missing).should == false;
 }
 
 

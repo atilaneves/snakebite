@@ -287,8 +287,8 @@ private struct Shared {
     import snakebite.native.value: BitfieldAccess;
     import snakebite.host.sharedtable: SharedTable;
 
-    // The program being run: its `isInterpreted` is the one decision for
-    // whether a callee is walked or called natively.
+    // The program being run: its `isDefinedElsewhere` is the one decision
+    // for whether a callee is walked or called natively.
     const Program program;
     // Declared before what points into it, so that it is destroyed after.
     // The interpreter keeps its own signatures, and uses this for the store
@@ -578,8 +578,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private CStack!ActiveExceptionScope _activeExceptionScopes;
     private CStack!ExceptionCandidate _candidateScratch;
     package RuntimeTypes* _runtimeTypes;
-    // The program being run: its `isInterpreted` is the one decision for
-    // whether a callee is walked here or called natively, made on every
+    // The program being run: its `isDefinedElsewhere` is the one decision
+    // for whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
     package const Program _program;
     // How to reach each already-compiled function this guest calls,

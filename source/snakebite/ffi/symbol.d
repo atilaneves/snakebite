@@ -4,6 +4,18 @@ module snakebite.ffi.symbol;
 private:
 
 
+// The failure for a symbol that this process does not have, as the link of a
+// native build reports it. `declaredBy` names the declaration, when there is
+// one.
+public Exception unresolvedSymbol(in char[] symbol, in char[] declaredBy = null) {
+    import std.conv: text;
+
+    return new Exception(text(
+        "ffi cannot resolve the symbol `", symbol, "`",
+        declaredBy.length ? text(" declared by `", declaredBy, "`") : "",
+        ": it is not in this process"));
+}
+
 // Resolves already-loaded symbols by linker name. The cache keeps both
 // addresses and missing symbols, so a missing template instance is not
 // looked up again on every call. Every thread reads the cache without a

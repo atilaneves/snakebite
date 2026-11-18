@@ -625,8 +625,8 @@ public struct NativeData {
         own,
         // The program defines it, and a dependency can define it too: a
         // static variable of a template instance, or one nested in a
-        // function. A native build keeps one copy of it, so the native copy
-        // is used when the process has one.
+        // function of one. A native build keeps one copy of it, so the
+        // native copy is used when the process has one.
         nativeIfPresent,
     }
 
@@ -638,12 +638,11 @@ public struct NativeData {
     }
 
     private static Exception unresolved(VarDeclaration variable) {
+        import snakebite.ffi.symbol: unresolvedSymbol;
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
-        import std.conv: text;
 
-        return new Exception(text("ffi cannot resolve the symbol `",
-            nativeSymbolName(variable), "` declared by `", variable.toString,
-            "`: it is not in this process"));
+        return unresolvedSymbol(
+            nativeSymbolName(variable), variable.toString);
     }
 
     private static bool isExtern(VarDeclaration variable) {

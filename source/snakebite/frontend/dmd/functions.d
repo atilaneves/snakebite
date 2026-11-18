@@ -46,7 +46,7 @@ public imported!"dmd.dstruct".StructDeclaration findStruct(
 // root-owned guest code apart from a called dependency (docs/adr/0009).
 //
 // `rootModules` is a set the caller builds once, not the root module list
-// itself: `Program.isInterpreted` asks this question again for every
+// itself: `Program.isRootOwned` asks this question again for every
 // guest call the interpreter dispatches, so an `O(1)` lookup keyed by
 // module beats a linear scan repeated that often. A one-time frontend
 // walk, such as the inline-asm load check, pays the same small cost to
@@ -64,12 +64,15 @@ public bool isRootOwned(
 // declaration of a dependency module that its archive defines (ADR-0009).
 // Such a declaration is native code or native data, and a missing symbol for
 // it is a link error, never a reason to use the body. The program defines
-// the rest: what a root module declares, a function literal and what is
-// nested in a function, and what a template instance holds, because a native
-// build emits an instance into the object that uses it. The exception is an
-// instance whose body no backend executes: the dependency image holds it
-// (ADR-0009, decision 1). The answer comes from the declaration alone, never
-// from a loaded image, so a compile with no image gives the same answer.
+// the rest: what a root module declares, a function literal, and what a
+// template instance holds, because a native build emits an instance into the
+// object that uses it. The exception is an instance whose body no backend
+// executes: the dependency image holds it (ADR-0009, decision 1). What is
+// nested in a function (its static locals and nested functions) is defined
+// where that function is: in the archive for a function of a dependency that
+// is not in a template instance. The answer comes from the declaration
+// alone, never from a loaded image, so a compile with no image gives the same
+// answer.
 public bool isDefinedElsewhere(
     imported!"dmd.dsymbol".Dsymbol declaration,
     in bool[imported!"dmd.dmodule".Module] rootModules,
@@ -85,11 +88,12 @@ public bool isDefinedElsewhere(
     if (isRootOwned(declaration, rootModules))
         return false;
 
-    const owner = function_ is null ? ownerOf(declaration)
-        : Owner(contextOf(function_).outerFunction !is null,
+    auto owner = function_ is null ? ownerOf(declaration)
+        : Owner(contextOf(function_).outerFunction,
             contextOf(function_).instantiated);
-    if (owner.nested)
-        return false;
+    // What is nested in a function is defined where that function is.
+    if (owner.outer !is null)
+        return isDefinedElsewhere(owner.outer, rootModules);
     if (function_ is null)
         return !owner.instantiated;
     if (function_.isFuncLiteralDeclaration !is null)
@@ -98,7 +102,7 @@ public bool isDefinedElsewhere(
 }
 
 private struct Owner {
-    bool nested;
+    imported!"dmd.func".FuncDeclaration outer;
     bool instantiated;
 }
 
@@ -108,7 +112,7 @@ private Owner ownerOf(imported!"dmd.dsymbol".Dsymbol declaration) {
     import snakebite.memory.gc: insideFrontend;
 
     Owner owner() {
-        return Owner(outerFunctionOf(declaration) !is null,
+        return Owner(outerFunctionOf(declaration),
             declaration.isInstantiated !is null);
     }
 

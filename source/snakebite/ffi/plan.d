@@ -31,15 +31,8 @@ public struct PlanCache {
     // storage with the original until one side grows.
     @disable this(this);
 
-    // `isRootOwned` is the owning program's own decision
-    // (`Program.isRootOwned`). Without it every function can have native
-    // code.
-    public this(
-        CallPlanStore* store,
-        bool delegate(imported!"snakebite.frontend.ast".Dsymbol) const isRootOwned = null,
-    ) {
+    public this(CallPlanStore* store) {
         _store = store;
-        _isRootOwned = isRootOwned;
     }
 
     import snakebite.frontend.ast: FuncDeclaration, Type, TypeFunction;
@@ -200,7 +193,6 @@ public struct PlanCache {
     private SharedTable!(FuncDeclaration, CallPlan*) _unboundPlans;
     private SharedTable!(string, CallPlan*) _rawPlans;
     private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
-    private bool delegate(imported!"snakebite.frontend.ast".Dsymbol) const _isRootOwned;
     private shared size_t _preparations;
     version(unittest) private size_t _nativeSymbolLookups;
 
@@ -214,17 +206,15 @@ public struct PlanCache {
         return _store.resolver.resolveThreadLocal(name);
     }
 
-    // Whether `function_` has machine code in this process. Missing symbols
-    // are cached too because a synthesized function with a body can validly
-    // have no native counterpart.
+    // Whether this process has a symbol for `function_`. Kept only for
+    // `ofSite` to bind a call; a later step of #960 removes it. Missing
+    // symbols are cached too.
     // `nativeTarget` reads only a template instance's own already-resolved
     // arguments (an AST structure walk, no forward reference to force),
-    // and `resolve` is a host symbol lookup, not a dmd one. Two calls here
+    // and `resolve` is a host symbol lookup, not a dmd one. One call here
     // can still reach into dmd's own mutable state and take the frontend
     // lock: `mangledNameOf`, only while `function_`'s type is not already
-    // complete (`snakebite.frontend.compiler.forceIfNeeded`), and
-    // `isInterpretedOnly`, which walks the body of an instance that has a
-    // root type as an argument (`backendExecutes`), once for each
+    // complete (`snakebite.frontend.compiler.forceIfNeeded`), once for each
     // function. `_nativeSymbols` is a `SharedTable` (ADR-0006).
     public bool hasNativeSymbol(
         FuncDeclaration function_,
@@ -235,93 +225,11 @@ public struct PlanCache {
         if (auto cached = function_ in _nativeSymbols)
             return *cached;
 
-        if (isInterpretedOnly(function_))
-            return *_nativeSymbols.insert(function_, false);
-
         version(unittest) ++_nativeSymbolLookups;
         auto target = nativeTarget(function_);
         const found = target.address !is null
             || resolve(mangledNameOf(function_)) !is null;
         return *_nativeSymbols.insert(function_, found);
-    }
-
-    // Whether `function_` has a body that only this program's interpreter
-    // or compiler can run: the dependency image and the prebuilt libraries
-    // are built without the root package (docs/adr/0009), so no native
-    // copy of it exists. A bodiless declaration is not one - it names
-    // native code, such as a designated test fixture. A template instance
-    // is one when an argument, or an argument of an enclosing instance,
-    // comes from a root module, unless no backend can execute its body: the
-    // image then can hold a copy compiled over stand-ins for the root types,
-    // so the lookup decides. An argument that this cannot classify leaves
-    // the answer to the lookup.
-    private bool isInterpretedOnly(
-        imported!"snakebite.frontend.ast".FuncDeclaration function_,
-    ) {
-        import snakebite.frontend.ast: Dsymbol;
-        import snakebite.frontend.dmd.functions: backendExecutes;
-
-        if (_isRootOwned is null || function_.fbody is null)
-            return false;
-        if (_isRootOwned(function_))
-            return true;
-        for (Dsymbol symbol = function_; symbol !is null && !symbol.isModule;
-                symbol = symbol.parent) {
-            if (hasRootArgument(symbol, 0))
-                return backendExecutes(function_);
-        }
-        return false;
-    }
-
-    private bool hasRootArgument(
-        imported!"snakebite.frontend.ast".Dsymbol symbol,
-        in size_t depth,
-    ) {
-        import snakebite.frontend.ast: Dsymbol, Expression, isDsymbol, isTuple,
-            isType, nextOf, RootObject, toDsymbol;
-
-        auto instance = symbol.isTemplateInstance;
-        if (instance is null || instance.tiargs is null)
-            return false;
-
-        // Bounds arguments that are themselves instances.
-        enum maxDepth = 8;
-        if (depth == maxDepth)
-            return false;
-
-        bool fromRoot(RootObject object) {
-            if (auto tuple = object.isTuple) {
-                foreach (element; tuple.objects[])
-                    if (fromRoot(element))
-                        return true;
-                return false;
-            }
-            Dsymbol argument;
-            if (auto type = object.isType) {
-                while (type.nextOf !is null)
-                    type = type.nextOf;
-                argument = type.toDsymbol(null);
-            } else if (auto expression = cast(Expression) object) {
-                if (auto literal = expression.isFuncExp)
-                    argument = literal.fd;
-            } else
-                argument = object.isDsymbol;
-            if (argument is null)
-                return false;
-            if (_isRootOwned(argument))
-                return true;
-            for (auto enclosing = argument;
-                    enclosing !is null && !enclosing.isModule;
-                    enclosing = enclosing.parent)
-                if (hasRootArgument(enclosing, depth + 1))
-                    return true;
-            return false;
-        }
-
-        foreach (argument; (*instance.tiargs)[])
-            if (fromRoot(argument))
-                return true;
-        return false;
     }
 
     version(unittest)
@@ -539,16 +447,13 @@ public struct PlanCache {
         Register returnRegister = Register(Register.Kind.none, 0),
         Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
-        import std.conv: text;
+        import snakebite.ffi.symbol: unresolvedSymbol;
 
         if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister,
                 secondReturnRegister))
             return plan;
 
-        throw new Exception(text(
-            "ffi cannot resolve the symbol `", name,
-            "`: it is not in this process",
-        ));
+        throw unresolvedSymbol(name);
     }
 
 }
@@ -658,11 +563,9 @@ private Exception unresolved(
                     "` declared by `", function_.toString, "`"),
             );
     }
-    return new Exception(
-        text("ffi cannot resolve the symbol `", symbol,
-            "` declared by `", function_.toString,
-            "`: it is not in this process"),
-    );
+    import snakebite.ffi.symbol: unresolvedSymbol;
+
+    return unresolvedSymbol(symbol, function_.toString);
 }
 
 // The signature of the guest function `function_`, from its own declared

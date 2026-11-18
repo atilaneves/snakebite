@@ -68,7 +68,7 @@ public struct StaticWorld {
     ) {
         _program = program;
         _backend = backend;
-        plans = PlanCache(planStore, &_program.isRootOwned);
+        plans = PlanCache(planStore);
         callSelection.linksFunctions = program.definesLinkableFunctions;
         data = NativeData(store, &_program.isRootOwned,
             &_program.isDefinedElsewhere,
@@ -145,7 +145,7 @@ public struct StaticWorld {
 
         const(void)* word;
         if (callSelection.usesNativeVariadicAddress(
-                method, plans.hasNativeSymbol(method)))
+                method, &isDefinedElsewhere))
             return plans.addressOf(method);
         if (callSelection.usesGuestBody(method, &isDefinedElsewhere)) {
             word = _backend.guestWord(method);

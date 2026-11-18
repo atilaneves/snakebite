@@ -390,33 +390,33 @@ public struct RuntimeTypes {
     // (`classinfo.classRuntimeInfo`) can call this without looping back
     // through that same fabrication path.
     public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
-        import std.conv: text;
+        import snakebite.ffi.symbol: unresolvedSymbol;
 
         const definedElsewhere = _isDefinedElsewhere(declaration);
         if (!definedElsewhere && isRootOwned(declaration))
             return null;
 
-        auto info = nativeClassInfo(declaration);
+        const symbol = classInfoSymbol(declaration);
+        auto info = nativeClassInfo(declaration, symbol);
         if (info is null && definedElsewhere)
-            throw new Exception(text(
-                "ffi cannot resolve the symbol `", classInfoSymbol(declaration),
-                "` declared by `", declaration.toString,
-                "`: it is not in this process"));
+            throw unresolvedSymbol(symbol, declaration.toString);
         return info;
     }
 
-    private TypeInfo_Class nativeClassInfo(ClassDeclaration declaration) {
+    // One lookup for `symbol`, the class information symbol of `declaration`.
+    // Only an interface has a second symbol, that of its `TypeInfo`.
+    private TypeInfo_Class nativeClassInfo(
+        ClassDeclaration declaration, in string symbol,
+    ) {
         import snakebite.frontend.ast: toDString;
         import snakebite.frontend.dmd.functions: prettyNameOf;
 
-        if (auto info = cast(TypeInfo_Class) _resolve(
-                classInfoSymbol(declaration)))
+        if (auto info = cast(TypeInfo_Class) _resolve(symbol))
             return info;
-        auto linked = linkedInfo(declaration.type);
-        if (auto info = cast(TypeInfo_Interface) linked)
-            return info.info;
-        if (auto info = cast(TypeInfo_Class) linked)
-            return info;
+        if (declaration.isInterfaceDeclaration !is null)
+            if (auto info = cast(TypeInfo_Interface)
+                    linkedInfo(declaration.type))
+                return info.info;
 
         return cast(TypeInfo_Class) TypeInfo_Class.find(
             prettyNameOf(declaration).toDString);
