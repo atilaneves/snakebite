@@ -336,6 +336,10 @@ public struct CallSite {
             @plain package const(Function)* callee;
             @plain package ptrdiff_t adjustment;
 
+            // Only the instance JIT lock can inspect or consume this record.
+            @unsaved package const(ubyte)* coldHit;
+            @unsaved package size_t unprofiledCall;
+
             pragma(inline, true)
             private const(void)* remember(const(void)* entry,
                 const(Function)* callee, in ptrdiff_t adjustment,
@@ -2132,7 +2136,7 @@ public alias opCallIndirectWindowDiscard =
 // call. Any other value, and a callee that the window does not fit, take
 // `opCallSlow`, which reads the arguments from the window.
 private const(Instruction)* callIndirectWindow(Destination destination,
-    bool counted = false, bool link = false)(
+    bool counted = false, bool link = false, bool refresh = false)(
     const(Instruction)* pc,
     Activation* active,
     DispatchState* state,
@@ -2157,11 +2161,11 @@ private const(Instruction)* callIndirectWindow(Destination destination,
     }
 
     static if (jitSupported && chainedDispatch && counted) {
-        const index = site.rememberIndirectTarget!link(address, callee,
-            adjustment);
-        static if (link)
+        const index = site.rememberIndirectTarget!(link || refresh)(address,
+            callee, adjustment);
+        static if (link || refresh)
             if (index != CallSite.maxIndirectTargets)
-                linkIndirectWindow(pc, active.function_, site, index,
+                linkIndirectWindow!refresh(pc, active.function_, site, index,
                     destination);
     }
 
@@ -2171,17 +2175,18 @@ private const(Instruction)* callIndirectWindow(Destination destination,
 }
 
 static if (jitSupported && chainedDispatch) {
-    package Instruction.Handler indirectWindowFallback(bool link)(
+    package Instruction.Handler indirectWindowFallback(bool link,
+        bool refresh = false)(
         Destination destination,
     ) nothrow @nogc {
         final switch (destination) with (Destination) {
             static foreach (kind; EnumMembers!Destination)
-                case kind: return &callIndirectWindow!(kind, true, link);
+                case kind: return &callIndirectWindow!(kind, true, link, refresh);
         }
     }
 
     pragma(inline, false)
-    private void linkIndirectWindow(const(Instruction)* pc,
+    private void linkIndirectWindow(bool refresh)(const(Instruction)* pc,
         const(Function)* caller, const(CallSite)* site, size_t index,
         Destination destination,
     ) nothrow @nogc {
@@ -2189,7 +2194,7 @@ static if (jitSupported && chainedDispatch) {
             return;
         auto lock = JitLock.tryTake(*(cast(Function*) caller).jit);
         if (lock.held && lock.jitUsable)
-            lock.state.linkWindow(pc, caller, site, index, destination);
+            lock.state.linkWindow!refresh(pc, caller, site, index, destination);
     }
 }
 
