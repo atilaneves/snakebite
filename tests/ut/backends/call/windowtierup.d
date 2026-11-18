@@ -300,3 +300,40 @@ static foreach (backend; Matrix!()) {
         }, ["search", "contains"]);
     }
 }
+
+
+// A guest `Fiber` of the default size (16 KiB) can run a hot function whose
+// calls the JIT can integrate. The tier-up runs on the stack of the Fiber.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot make a Fiber: its stack size reads a static variable"),
+)) {
+    @("window.hotNestedCallsOnDefaultFiber." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.thread: Fiber;
+
+            long leaf(long x) { assert(x >= 0); return x + 1; }
+            long middle(long x) { assert(x >= 0); return leaf(x) + leaf(x + 2); }
+            long top(long x) { assert(x >= 0); return middle(x) + middle(x + 3); }
+
+            long hot(long n) {
+                assert(n >= 0);
+                long sum;
+                foreach (i; 0 .. n)
+                    sum += top(i);
+                return sum;
+            }
+
+            void main() {
+                enum n = 4096;
+                long result;
+                auto fiber = new Fiber({ result = hot(n); });
+                fiber.call();
+                // top(i) == 4 * i + 14
+                assert(result == 4 * (n * (n - 1) / 2) + 14 * n);
+            }
+        }, ["hot"]);
+    }
+}
