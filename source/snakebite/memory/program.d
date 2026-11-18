@@ -8,9 +8,17 @@
 // and the objects of the start data hold the runner. It does not scan
 // `data` (`GC.BlkAttr.NO_SCAN`). A pointer in `data` points into the memory
 // of the program, to host code and data, to code outside the GC heap, or to
-// a GC object that a store of the `Program` holds; the first word of
-// `scanned` points to the `Program`. So while any part of the program can be
-// reached, the GC keeps the `Program`, its stores and both blocks.
+// a GC object that the `Program` holds (its stores, and its runner, which
+// the callback bridge holds). A loaded program does not grow
+// (`loadedProgramGrows`), so no GC array grows from a record in `data`.
+//
+// The first word of `scanned` points to the `Program`, so a pointer into
+// `scanned` keeps the `Program`, its stores and both blocks. A pointer into
+// `data` keeps `data` only. Each holder of a pointer into `data` holds the
+// `Program` too: the `Program` itself; its `Runner`, which holds the
+// `Program`, and with it each frame of a run and each `Function.jit`; a
+// start function, in `scanned`; and a slot of a callback entry, a GC root
+// that holds the runner.
 module snakebite.memory.program;
 
 
