@@ -56,13 +56,24 @@ unittest {
         ["--version=Extra", "project"],
         ["--no-optimise-image", "project"],
         ["--jit-perf-map", "project"],
+        ["--lowmem", "project"],
         ["examples/empty"],
     ];
     foreach (arguments; refused) {
         const result = parseArgs(["sb", "--build=project"] ~ arguments);
         result.status.should == 1;
-        result.diagnostic.startsWith("--build=project").should == true;
+        "--build=project".should.be in result.diagnostic;
     }
+}
+
+
+@("buildRefusesAnUnknownMode")
+unittest {
+    const result = parseArgs(["sb", "--build=bogus", "project"]);
+
+    result.status.should == 1;
+    "unknown build mode: bogus".should.be in result.diagnostic;
+    "valid build modes: off, project".should.be in result.diagnostic;
 }
 
 

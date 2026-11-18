@@ -8,7 +8,7 @@ private:
 //
 //   sb --compile=FILE [--dflag=ARGUMENT]... [-IPATH]... [-JPATH]...
 //      --program-name=NAME --working-directory=DIRECTORY --image-path=IMAGE
-//      [--c-imports-are-roots] [--lowmem] ROOT-FILE...
+//      [--c-imports-are-roots] ROOT-FILE...
 //
 // It runs in the project directory. It runs the frontend on the root files,
 // loads no dependency image, and writes the program to FILE with the save of
@@ -19,12 +19,10 @@ public int compile(string[] args) {
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.build: BuildFiles, writeChanged;
     import snakebite.build.dependencyfile: writeDependencyFile;
-    import snakebite.driver.execution: saveProgram;
-    import snakebite.frontend.compiler: FrontendFlags, Snippets, initialize;
-    import snakebite.memory.gc: selectFrontendMemory;
+    import snakebite.driver.execution: loadedProject, saveProgram;
+    import snakebite.frontend.compiler: FrontendFlags;
     import snakebite.project.dependencies: imageModule;
     import snakebite.project.dub: SourceSet;
-    import snakebite.project.loading: loadProject;
     import std.file: getcwd;
     import std.getopt: getopt;
     import std.path: dirName;
@@ -37,7 +35,6 @@ public int compile(string[] args) {
     string workingDirectory;
     string imagePath;
     bool cImportsAreRoots;
-    bool lowmem;
     getopt(
         args,
         "compile", &output,
@@ -48,11 +45,8 @@ public int compile(string[] args) {
         "working-directory", &workingDirectory,
         "image-path", &imagePath,
         "c-imports-are-roots", &cImportsAreRoots,
-        "lowmem", &lowmem,
     );
 
-    selectFrontendMemory(lowmem);
-    initialize(Snippets.no);
     SourceSet sources;
     sources.files = args[1 .. $];
     sources.importPaths = importPaths;
@@ -64,9 +58,8 @@ public int compile(string[] args) {
     // The image that the load uses exists, so the frontend accepts what only
     // the image runs.
     const buildsDependencyImage = true;
-    auto project = loadProject(directory, sources, buildsDependencyImage,
+    auto project = loadedProject(directory, sources, buildsDependencyImage,
         programName);
-    project.program.startsAsProject = true;
     saveProgram(project.program, output, workingDirectory, imagePath,
         JitSetting.init);
     writeChanged(BuildFiles(output.dirName).imageSource,

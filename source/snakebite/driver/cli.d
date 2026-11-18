@@ -76,8 +76,7 @@ public int run(string[] args) {
         if (parsed.options.build == Build.project) {
             // Mutable: the report keeps its duration.
             auto ninja = buildProject(
-                projectDirectory.absolutePath.buildNormalizedPath,
-                parsed.options.lowmem);
+                projectDirectory.absolutePath.buildNormalizedPath);
             if (ninja.status != 0)
                 return 1;
             const report = executeLoaded(
@@ -155,8 +154,13 @@ private struct Statistics {
     imported!"snakebite.driver.execution".PreparationReport preparation;
     imported!"snakebite.driver.execution".ExecutionReport report;
     // The ninja run of `--build`, or null without one.
-    imported!"std.typecons".Nullable!(imported!"core.time".Duration) ninja;
+    NinjaDuration ninja;
 }
+
+
+// The duration of a ninja run, or null.
+private alias NinjaDuration =
+    imported!"std.typecons".Nullable!(imported!"core.time".Duration);
 
 
 private __gshared Statistics _statistics;
@@ -172,7 +176,7 @@ shared static ~this() {
 private void printStatistics(
     in imported!"snakebite.driver.execution".PreparationReport preparation,
     in imported!"snakebite.driver.execution".ExecutionReport report,
-    in imported!"std.typecons".Nullable!(imported!"core.time".Duration) ninja,
+    in NinjaDuration ninja,
 ) {
     import snakebite.driver.execution: discoveryLabel;
     import std.stdio: writefln;
@@ -238,12 +242,13 @@ public struct CliResult {
 
 public CliResult parseArgs(string[] args) {
     import snakebite.backends: parseBackendName, validBackendNames;
+    import snakebite.build: parseBuildName, validBuildNames;
     import snakebite.driver.options: backendOption, parseProjectOptions;
-    import std.conv: ConvException;
     import std.getopt: GetOptException;
 
     CliResult result;
     string backendName = "bytecode";
+    string buildName = "off";
 
     typeof(parseProjectOptions(args, result.options.project)) helpInfo;
     try {
@@ -256,11 +261,9 @@ public CliResult parseArgs(string[] args) {
                 &result.options.noOptimiseImage,
             "save", saveHelp, &result.options.save,
             "load", loadHelp, &result.options.load,
-            "build", buildHelp, &result.options.build,
+            "build", buildHelp, &buildName,
         );
     } catch (GetOptException exception) {
-        return CliResult(1, exception.msg);
-    } catch (ConvException exception) {
         return CliResult(1, exception.msg);
     }
 
@@ -275,6 +278,13 @@ public CliResult parseArgs(string[] args) {
             1,
             "unknown backend: " ~ backendName ~ "\n" ~
                 "valid backends: " ~ validBackendNames,
+        );
+
+    if (!parseBuildName(buildName, result.options.build))
+        return CliResult(
+            1,
+            "unknown build mode: " ~ buildName ~ "\n" ~
+                "valid build modes: " ~ validBuildNames,
         );
 
     if (const diagnostic = optionConflict(result.options, args.length))
@@ -300,6 +310,9 @@ private string buildConflict(in Options options) {
         return null;
     if (options.save.length || options.load.length)
         return "--build=project cannot be used with --save or --load";
+    if (options.lowmem)
+        return "--build=project cannot be used with --lowmem: the values of "
+            ~ "a build are fixed when build.ninja is made";
     if (options.backend != BackendName.bytecode)
         return "--build=project works with the bytecode backend only";
     if (options.importPaths.length || options.stringImportPaths.length

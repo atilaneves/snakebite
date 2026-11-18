@@ -67,6 +67,24 @@ public SourceSet dubSources(
 }
 
 
+// The paths that exist and whose change can change `description`: the inputs
+// of a build of the project in `directory`. A path that does not exist is
+// no input: ninja takes a missing input with no rule as always changed.
+public string[] dubWatchedPaths(
+    in string directory,
+    in imported!"snakebite.project.dubcache".DubDescription description,
+) {
+    import snakebite.image.preparation: defaultCompiler;
+    import snakebite.project.dubcache: watchedPaths;
+    import std.algorithm.iteration: filter;
+    import std.array: array;
+    import std.file: exists;
+
+    return watchedPaths(directory, defaultCompiler, description.project)
+        .filter!(path => path.exists).array;
+}
+
+
 public struct DubTestProduct {
     public string path;
     public string workingDirectory;

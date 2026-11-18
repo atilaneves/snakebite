@@ -11,6 +11,23 @@ private:
 public enum Build { off, project }
 
 
+// Sets `build` to the mode that `name` spells, or returns false.
+public bool parseBuildName(in string name, out Build build) {
+    import std.traits: EnumMembers;
+    import std.conv: text;
+
+    foreach (member; EnumMembers!Build)
+        if (name == text(member)) {
+            build = member;
+            return true;
+        }
+    return false;
+}
+
+
+public enum validBuildNames = "off, project";
+
+
 // The files of the build of one project, in its project state directory.
 public struct BuildFiles {
     public string directory;
@@ -28,6 +45,11 @@ public struct BuildFiles {
     // writes beside the program.
     public string imageSource() const {
         return file("image.d");
+    }
+
+    // The lock of the build: one run at a time changes the files.
+    public string lockFile() const {
+        return file("lock");
     }
 
     public string image() const {
@@ -58,31 +80,72 @@ public struct NinjaRun {
 
     public int status;
     public Duration duration;
-    // The program that the build wrote, when `status` is 0.
-    public string program;
+    // The bytes of the program that the build wrote, when `status` is 0.
+    public immutable(ubyte)[] program;
+}
+
+
+// One run at a time changes the build files of a project. The lock file is in
+// the build directory; the lock is held while the object lives, and the
+// operating system drops it when the process ends.
+private struct BuildLock {
+    private int descriptor = -1;
+
+    @disable this(this);
+
+    public this(in string path) {
+        import core.sys.posix.fcntl:
+            F_SETLKW, F_WRLCK, O_CLOEXEC, O_CREAT, O_RDWR, fcntl,
+            flock, open;
+        import core.stdc.stdio: SEEK_SET;
+        import std.exception: errnoEnforce;
+        import std.string: toStringz;
+
+        descriptor = open(path.toStringz, O_RDWR | O_CREAT | O_CLOEXEC, 384);
+        errnoEnforce(descriptor >= 0, "cannot open the lock file " ~ path);
+        // The whole file; the call waits for the run that holds the lock.
+        flock whole;
+        whole.l_type = F_WRLCK;
+        whole.l_whence = SEEK_SET;
+        errnoEnforce(fcntl(descriptor, F_SETLKW, &whole) == 0,
+            "cannot lock the file " ~ path);
+    }
+
+    public ~this() {
+        import core.sys.posix.unistd: close;
+
+        if (descriptor >= 0)
+            close(descriptor);
+    }
 }
 
 
 // Runs ninja on the `build.ninja` of the project in the absolute directory
 // `directory`, and writes the file first when it does not exist. ninja
-// starts the commands that make the program, if they must run.
-public NinjaRun buildProject(in string directory, in bool lowmem) {
+// starts the commands that make the program, if they must run. The run holds
+// the lock of the build from before it checks `build.ninja` until it has the
+// program file in memory, so no other run changes a build file in between.
+public NinjaRun buildProject(in string directory) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import std.file: exists;
+    import std.file: exists, mkdirRecurse, read;
     import std.process: spawnProcess, wait;
     import std.stdio: stderr, stdout;
 
     const files = buildFiles(directory);
+    files.directory.mkdirRecurse;
+    scope lock = BuildLock(files.lockFile);
     if (!files.ninjaFile.exists)
-        writeBuildFile(directory, lowmem);
+        writeBuildFile(directory);
     stdout.flush;
     stderr.flush;
     auto stopWatch = StopWatch(AutoStart.yes);
     // ninja makes `build.ninja` again only when it gets its absolute path.
     const status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile])
         .wait;
-    return NinjaRun(status, stopWatch.peek, files.program);
+    const duration = stopWatch.peek;
+    return NinjaRun(status, duration,
+        status == 0 ? cast(immutable(ubyte)[]) files.program.read : null);
 }
 
 
@@ -115,7 +178,7 @@ public int runCommand(string[] args) {
 private enum generateOption = "--generate";
 
 
-// `sb --build=project --generate [--lowmem] DIR`: writes the `build.ninja`
+// `sb --build=project --generate DIR`: writes the `build.ninja`
 // of the project in the absolute directory `DIR` when its text changed.
 private int generate(string[] args) {
     import snakebite.build.ninja: writeBuildFile;
@@ -123,23 +186,24 @@ private int generate(string[] args) {
 
     Build build;
     bool generates;
-    bool lowmem;
-    getopt(args, "build", &build, "generate", &generates, "lowmem", &lowmem);
+    getopt(args, "build", &build, "generate", &generates);
     if (build != Build.project || args.length != 2)
         throw new Exception("--generate takes --build=project and one directory");
-    writeBuildFile(args[1], lowmem);
+    writeBuildFile(args[1]);
     return 0;
 }
 
 
 // Writes `text` to `path` only when the file does not hold it, so that its
 // time changes only with its content. The file is replaced whole.
-public void writeChanged(in string path, in string text) {
+// Returns whether it wrote the file.
+public bool writeChanged(in string path, in string text) {
     import std.file: exists, readText, rename, write;
 
     if (path.exists && path.readText == text)
-        return;
+        return false;
     const partial = path ~ ".partial";
     partial.write(text);
     rename(partial, path);
+    return true;
 }

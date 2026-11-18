@@ -124,14 +124,11 @@ public PreparationReport prepareSources(
     in imported!"snakebite.image.preparation".Optimise optimise
         = imported!"snakebite.image.preparation".Optimise.yes,
 ) {
-    import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project.loading: loadProject;
     import snakebite.project.dependencies: prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    initialize(Snippets.no);
-    auto project = loadProject(directory, sources, nativeDependencies);
+    auto project = loadedProject(directory, sources, nativeDependencies);
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)
@@ -141,8 +138,26 @@ public PreparationReport prepareSources(
         );
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
-    project.program.startsAsProject = true;
     return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
+}
+
+
+// The frontend result of the project that `sources` describe, ready to run as
+// a project. The program has the name `name`, or the last part of
+// `directory` when it is empty.
+public imported!"snakebite.project.loading".Project loadedProject(
+    in string directory,
+    imported!"snakebite.project.dub".SourceSet sources,
+    in bool nativeDependencies,
+    in string name = null,
+) {
+    import snakebite.frontend.compiler: Snippets, initialize;
+    import snakebite.project.loading: loadProject;
+
+    initialize(Snippets.no);
+    auto project = loadProject(directory, sources, nativeDependencies, name);
+    project.program.startsAsProject = true;
+    return project;
 }
 
 
@@ -214,6 +229,19 @@ public ExecutionReport executeLoaded(
     in string[] programArguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
+    import std.file: read;
+
+    return executeLoaded(cast(const(ubyte)[]) read(path), programArguments,
+        jit);
+}
+
+
+// As `executeLoaded` with the path, for the bytes `contents` of the file.
+public ExecutionReport executeLoaded(
+    in ubyte[] contents,
+    in string[] programArguments,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
     import core.memory: GC;
     import snakebite.backends.bytecode.file: loadProgram, readHeader;
     import snakebite.backends.bytecode.program: Program;
@@ -224,11 +252,9 @@ public ExecutionReport executeLoaded(
     import snakebite.image.preparation: generatorKey;
     import snakebite.project.loading: EndsProcess, ProjectDirectory;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import std.file: read;
     import std.stdio: stdin, stdout, stderr;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    const contents = cast(const(ubyte)[]) read(path);
     const header = readHeader(contents);
     if (header.buildKey != generatorKey)
         throw new SnakebiteException(

@@ -95,13 +95,13 @@ public DependencyImage prepareImage(
 }
 
 
-// The D module that the image compiles: `source`, the code that defers the
-// start of its modules when `deferStartup`, and a check that the image
-// compiler is the host compiler.
+// The D module that the image compiles: the line of `startupFact`, `source`,
+// the code that defers the start of its modules when `deferStartup`, and a
+// check that the image compiler is the host compiler.
 public string imageModuleText(in string source, in bool deferStartup) {
     import std.conv: text;
 
-    return source
+    return startupFact(deferStartup) ~ "\n" ~ source
         ~ (deferStartup ? DependencyImage.entryStartupSettings : "")
         ~ text("\nstatic assert(__VERSION__ == ", __VERSION__,
             ", \"Image compiler must match the host compiler version\");\n");
@@ -111,9 +111,16 @@ public string imageModuleText(in string source, in bool deferStartup) {
 // Whether the image module `text` (`imageModuleText`) defers the start of
 // its modules.
 public bool defersStartup(in string text) {
-    import std.algorithm.searching: canFind;
+    import std.algorithm.searching: startsWith;
 
-    return text.canFind(DependencyImage.entryStartupSettings);
+    return text.startsWith(startupFact(true) ~ "\n");
+}
+
+
+// The first line of an image module: the one place that says whether the
+// module defers the start of its modules.
+private string startupFact(in bool deferStartup) {
+    return "// defers startup: " ~ (deferStartup ? "yes" : "no");
 }
 
 

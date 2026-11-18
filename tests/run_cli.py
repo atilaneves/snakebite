@@ -3149,6 +3149,127 @@ def test_build_project_compiles_only_after_a_change(tmp_path: Path) -> None:
     assert compiles() == 0
 
 
+# No process reads the dub recipe on a run with no change: the recipe is
+# replaced by text that is no recipe, with its old modification time, and the
+# run gives the result of the first run. With a new time on the recipe, the
+# run reads it.
+def test_build_project_without_a_change_reads_no_recipe(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project(tmp_path, "build-project-no-recipe")
+    recipe = app / "dub.sdl"
+    valid = recipe.read_text()
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+
+    old = recipe.stat()
+    recipe.write_text("this is no recipe {{{\n")
+    os.utime(recipe, ns=(old.st_atime_ns, old.st_mtime_ns))
+    again = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(again, first)
+
+    recipe.write_text(valid.replace('versions "Flavour"\n', ""))
+    read = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert "plain 42 viewed" in guest_lines(read), output(read)
+
+
+# The generated test runner of dub is in a directory of dub's cache that the
+# recipe step makes, and that directory is an import path of the build. A run
+# after the cache lost the directory makes it again; the run after that must
+# read no recipe.
+def test_build_project_after_a_new_test_runner_reads_no_recipe(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", 'name "build-project-runner"\ntargetType "library"\n')
+    write(app / "source" / "calc.d", """
+        module calc;
+        import core.stdc.stdio: printf;
+        unittest { printf("calc ran\\n"); }
+        """)
+    dub_home = tmp_path / "dub-home"
+    env = {**os.environ, "DPATH": str(dub_home)}
+
+    def build() -> subprocess.CompletedProcess[str]:
+        return run_sb("--build=project", str(app), cwd=tmp_path, env=env)
+
+    first = build()
+    assert first.returncode == 0, output(first)
+    assert "calc ran" in guest_lines(first), output(first)
+    runners = list(dub_home.rglob("dub_test_root.d"))
+    assert runners, output(first)
+
+    for runner in runners:
+        shutil.rmtree(runner.parent)
+    touch(app / "dub.sdl")
+    assert_runs_as_bin_sb(build(), first)
+
+    recipe = app / "dub.sdl"
+    old = recipe.stat()
+    recipe.write_text("this is no recipe {{{\n")
+    os.utime(recipe, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert_runs_as_bin_sb(build(), first)
+
+
+# Runs at the same time on one project, after a touch of a root file, all give
+# the result of `bin/sb DIR`: the build files are one project state, and one
+# run changes them at a time.
+def test_build_project_runs_at_the_same_time_as_bin_sb(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project(tmp_path, "build-project-concurrent")
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+
+    def together() -> None:
+        runs = [
+            subprocess.Popen(
+                [sb_path(), "--build=project", str(app)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=tmp_path)
+            for _ in range(4)
+        ]
+        for run in runs:
+            stdout, stderr = run.communicate(timeout=240)
+            built = subprocess.CompletedProcess(
+                run.args, run.returncode, stdout, stderr)
+            assert_runs_as_bin_sb(built, direct)
+
+    together()
+    for changed in (app / "source" / "calc.d", app / "dub.sdl",
+                    app / "source" / "calc.d"):
+        touch(changed)
+        together()
+
+
+# A dub project with dependencies is refused until the mode builds them
+# (issue #996, step 2): no ninja error about a missing library.
+def test_build_project_refuses_a_project_with_dependencies(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "dep" / "dub.sdl",
+          f'name "{dub_name("build-project-dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dep" / "source" / "dep.d", """
+        module dep;
+        int answer() { return 42; }
+        """)
+    app = tmp_path / "app"
+    write(app / "dub.sdl",
+          f'name "{dub_name("build-project-with-dep")}"\ntargetType "library"\n'
+          + f'dependency "{dub_name("build-project-dep")}" path="../dep"\n')
+    write(app / "source" / "app.d", """
+        module app;
+        import dep: answer;
+        unittest { assert(answer == 42); }
+        """)
+
+    built = run_sb("--build=project", str(app), cwd=tmp_path)
+
+    assert built.returncode == 1, output(built)
+    assert "does not yet build the dependencies" in built.stderr, output(built)
+    assert "#996" in built.stderr, output(built)
+
+
 # A compile error ends the run with status 1 and the error text of
 # `bin/sb DIR`. The run after the correction gives the result of `bin/sb DIR`.
 def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:

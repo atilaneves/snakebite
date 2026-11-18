@@ -4,28 +4,41 @@ module snakebite.build.ninja;
 private:
 
 
-// Writes the `build.ninja` of the project in the absolute directory
+// Writes the `build.ninja` of the dub project in the absolute directory
 // `directory`, only when its text differs from the file. This is the only
 // place where the build reads the description of the dub project.
-public void writeBuildFile(in string directory, in bool lowmem) {
+public void writeBuildFile(in string directory) {
     import snakebite.build: buildFiles, writeChanged;
-    import snakebite.project.loading: sourceSet;
-    import std.file: mkdirRecurse;
+    import snakebite.project.dub: dubDescribeProject, dubSources, dubWatchedPaths;
+    import std.file: mkdirRecurse, setTimes;
+    import std.datetime: Clock;
 
+    auto description = dubDescribeProject(directory);
+    const sources = dubSources(directory, description);
+    if (sources.linkerFiles.length)
+        throw new Exception("--build=project does not yet build the "
+            ~ "dependencies of a dub project (issue #996, step 2)");
     const files = buildFiles(directory);
-    const text = buildFileText(directory, sourceSet(directory, null, null),
-        lowmem);
+    const text = buildFileText(directory, sources,
+        dubWatchedPaths(directory, description));
     files.directory.mkdirRecurse;
-    writeChanged(files.ninjaFile, text);
+    if (writeChanged(files.ninjaFile, text))
+        return;
+    // The run that makes the text can make an input of it, as dub makes its
+    // test runner directory. ninja takes the inputs as they were before this
+    // command ran, so the file must be newer than all of them.
+    const now = Clock.currTime;
+    setTimes(files.ninjaFile, now, now);
 }
 
 
 // The build statements: `build.ninja` itself, the compile of the root
 // package to the program and the image module, and the dependency image.
+// `watched` are the paths whose change can change `sources`.
 private string buildFileText(
     in string directory,
     in imported!"snakebite.project.dub".SourceSet sources,
-    in bool lowmem,
+    in string[] watched,
 ) {
     import snakebite.build: buildFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
@@ -38,8 +51,7 @@ private string buildFileText(
     const sb = thisExePath;
     const start = getcwd;
     const compiler = compilerPath(defaultCompiler);
-    const lowmemOption = lowmem ? ["--lowmem"] : null;
-    const generatorInputs = [sb] ~ buildFileInputs(directory, sources);
+    const generatorInputs = [sb] ~ watched;
     const variables = [
         "flags": sources.flags.compilerArguments
             .map!(argument => "--dflag=" ~ argument).array,
@@ -52,41 +64,47 @@ private string buildFileText(
 
     string text = "builddir = " ~ files.directory.ninjaValue ~ "\n";
     text ~= rule("generate",
-        ["cd", start, "&&", sb, "--build=project", "--generate"]
-            ~ lowmemOption ~ [directory],
+        plain(["cd", start]) ~ shell(["&&"])
+            ~ plain([sb, "--build=project", "--generate", directory]),
         ["generator = 1", "restat = 1", "pool = console"]);
     text ~= rule("compile",
-        ["cd", directory, "&&", sb, "--compile=" ~ files.program]
-            ~ commandVariables,
+        plain(["cd", directory]) ~ shell(["&&"])
+            ~ plain([sb, "--compile=" ~ files.program])
+            ~ shell(commandVariables),
         ["depfile = " ~ files.program.ninjaValue ~ ".dep", "deps = gcc",
             "restat = 1", "pool = console"]);
+    // ninja quotes the path of `$out` for the shell.
     text ~= rule("image",
-        ["cd", directory, "&&"] ~ environmentOfBuild
-            ~ [sb, "--image=$out"] ~ commandVariables,
+        plain(["cd", directory]) ~ shell(["&&"]) ~ plain(environmentOfBuild)
+            ~ plain([sb]) ~ shell(["--image=$out"])
+            ~ shell(commandVariables),
         ["depfile = $out.dep", "deps = gcc", "pool = console"]);
 
     text ~= statement([files.ninjaFile], "generate", null, generatorInputs);
     text ~= statement(generatorInputs, "phony", null, null);
     text ~= "\n" ~ statement([files.program, files.imageSource], "compile",
         sources.files, [sb]);
-    foreach (name; ["flags", "includes", "stringImports"])
-        text ~= variable(name, variables[name], 1);
-    text ~= variable("options", [
+    foreach (name; compilerVariables)
+        text ~= statementVariable(name, variables[name]);
+    text ~= statementVariable("options", [
         "--program-name=" ~ directory.baseName,
         "--working-directory=" ~ workingDirectory,
         "--image-path=" ~ files.image,
-    ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null)
-        ~ lowmemOption, 1);
+    ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null));
     text ~= "\n" ~ statement([files.image], "image",
         [files.imageSource] ~ sources.linkerFiles, [sb, compiler]);
-    foreach (name; ["flags", "includes", "stringImports"])
-        text ~= variable(name, variables[name], 1);
-    text ~= variable("options",
-        sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array, 1);
+    foreach (name; compilerVariables)
+        text ~= statementVariable(name, variables[name]);
+    text ~= statementVariable("options",
+        sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array);
     text ~= "\ndefault " ~ [files.program, files.image].map!ninjaPath.join(" ")
         ~ "\n";
     return text;
 }
+
+
+// The variables of a statement that hold the arguments of the compiler.
+private enum compilerVariables = ["flags", "includes", "stringImports"];
 
 
 // The variables that the compile and the image statements set.
@@ -109,70 +127,42 @@ private string[] environmentOfBuild() {
 }
 
 
-// The files and directories whose change can change the text of
-// `build.ninja`: the recipe and the freeze file of the root package, and each
-// directory where a new or removed file can change the root files.
-private string[] buildFileInputs(
-    in string directory,
-    in imported!"snakebite.project.dub".SourceSet sources,
-) {
-    import snakebite.project.state: projectStateDirectory;
-    import std.algorithm.iteration: filter, map, uniq;
-    import std.algorithm.searching: canFind;
-    import std.algorithm.sorting: sort;
+// A word of the command of a rule. The shell takes `text` as it is when it
+// is `verbatim`: an operator of the shell, or a variable of ninja, which
+// ninja expands to words. Other text is one word, quoted.
+private struct Word {
+    string text;
+    bool verbatim;
+}
+
+
+private Word[] plain(in string[] words) {
+    import std.algorithm.iteration: map;
     import std.array: array;
-    import std.file: SpanMode, dirEntries, exists, isDir, isSymlink;
-    import std.path: absolutePath, baseName, buildNormalizedPath, buildPath, dirName;
 
-    // A state directory changes on each run, and is not a source directory.
-    const state = projectStateDirectory(directory).dirName;
-    const skipped = [".git", ".dub", state.baseName];
-    string[] directories;
-    void collect(in string path) {
-        if (path == state || !path.exists || !path.isDir || path.isSymlink)
-            return;
-        directories ~= path;
-        foreach (entry; dirEntries(path, SpanMode.shallow, false))
-            if (entry.isDir && !entry.isSymlink
-                    && !skipped.canFind(entry.name.baseName))
-                collect(entry.name);
-    }
-    foreach (path; [directory] ~ sources.importPaths ~ sources.stringImportPaths)
-        collect(path.absolutePath.buildNormalizedPath);
+    return words.map!(word => Word(word, false)).array;
+}
 
-    const recipes = ["dub.json", "dub.sdl", "package.json", "dub.selections.json"]
-        .map!(name => directory.buildPath(name))
-        .filter!(path => path.exists)
-        .array;
-    return recipes ~ directories.sort.uniq.array;
+
+private Word[] shell(in string[] words) {
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    return words.map!(word => Word(word, true)).array;
 }
 
 
 private string rule(
-    in string name, in string[] command, in string[] settings,
+    in string name, in Word[] command, in string[] settings,
 ) {
     import std.algorithm.iteration: map;
     import std.array: join;
 
     return "\nrule " ~ name ~ "\n"
-        ~ "  command = " ~ command.map!commandWord.join(" ") ~ "\n"
+        ~ "  command = "
+        ~ command.map!(word => word.verbatim
+            ? word.text : word.text.shellQuoted.ninjaValue).join(" ") ~ "\n"
         ~ settings.map!(setting => "  " ~ setting ~ "\n").join;
-}
-
-
-// A word of the command of a rule: a variable of ninja (`$in`), which
-// ninja expands to words that the shell reads; an operator of the shell; or
-// a word that the shell takes as it is.
-private string commandWord(in string word) {
-    import std.algorithm.searching: all, startsWith;
-    import std.ascii: isAlphaNum;
-
-    if (word == "&&" || (word.startsWith("$") && word[1 .. $].all!isAlphaNum))
-        return word;
-    // ninja quotes the path of `$out` for the shell.
-    if (word == "--image=$out")
-        return word;
-    return word.shellQuoted.ninjaValue;
 }
 
 
@@ -205,13 +195,12 @@ private string statement(
 }
 
 
-// A variable of the file, or of a build statement with `indent`, whose value
-// is the words of a command.
-private string variable(in string name, in string[] words, in int indent = 0) {
+// A variable of a build statement whose value is the words of a command.
+private string statementVariable(in string name, in string[] words) {
     import std.algorithm.iteration: map;
-    import std.array: join, replicate;
+    import std.array: join;
 
-    return "  ".replicate(indent) ~ name ~ " = "
+    return "  " ~ name ~ " = "
         ~ words.map!shellQuoted.join(" ").ninjaValue ~ "\n";
 }
 
