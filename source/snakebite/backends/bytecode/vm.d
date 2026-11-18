@@ -231,8 +231,8 @@ public struct CallSite {
         @relocated(Place.Section.callSite, Place.Field.valueSignature,
             Target.Kind.signature)
         package const(Signature)* signature;
-        @unsaved package Arg[] surplus;
-        @unsaved package const(Shape)[] surplusShapes;
+        @plain package Arg[] surplus;
+        @plain package const(Shape)[] surplusShapes;
     }
 
     @plain package Kind kind;
@@ -248,7 +248,7 @@ public struct CallSite {
     // `size_t.max` unless the caller laid this call out in a `Window`.
     @plain package size_t windowSlot = size_t.max;
     @plain package size_t windowDisp;
-    @unsaved package size_t windowScratch;
+    @plain package size_t windowScratch;
     @unsaved package size_t windowEnd;
     @plain package uint windowAlignment;
 
@@ -476,7 +476,7 @@ public struct CallSite {
     @hostCode package BuiltinCall builtinEntry;
     @plain package size_t calleeSlotOffset;
     @plain package bool hasContext;
-    @unsaved package size_t cleanupStartIndex = size_t.max;
+    @plain package size_t cleanupStartIndex = size_t.max;
     @plain package size_t cleanupEndIndex = size_t.max;
     @setBy("bindInstructionReferences") package const(void)* cleanupStart;
     @setBy("bindInstructionReferences") package const(void)* cleanupEnd;
@@ -978,9 +978,9 @@ public struct Instruction {
 // VM never has to reach into dmd's own `Loc`. Assertions use all fields;
 // range checks only need the source location.
 package struct AssertSite {
-    @unsaved package string message;
-    @unsaved package string file;
-    @unsaved package size_t line;
+    @plain package string message;
+    @plain package string file;
+    @plain package size_t line;
     // Not null for a check that halts rather than throws.
     @hostCode package HaltAction halt;
 }
@@ -1035,12 +1035,12 @@ public struct Function {
     // The hidden context slot is copied into the first word of the closure.
     @plain package size_t contextOffset = size_t.max;
     @plain package size_t closureSize;
-    @unsaved package uint closureAlignment = 1;
+    @plain package uint closureAlignment = 1;
     @plain package ClosureSlot[] closureSlots;
     @plain package size_t[] parameterOffsets;
     // Where a C-variadic function reads its cursor; `size_t.max` for any
     // other function.
-    @unsaved package size_t cursorOffset = size_t.max;
+    @plain package size_t cursorOffset = size_t.max;
     @relocated(Place.Section.function_, Place.Field.signature,
         Target.Kind.signature)
     package const(Signature)* signature;

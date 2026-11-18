@@ -24,7 +24,7 @@ package(snakebite) struct HostCallLayout {
     @plain package(snakebite) bool hasHiddenThis;
     @plain package(snakebite) Argument hiddenThis;
     // `size_t.max` unless the function reads that variadic slot.
-    @unsaved package(snakebite) size_t variadicCursor = size_t.max;
+    @plain package(snakebite) size_t variadicCursor = size_t.max;
     @unsaved package(snakebite) size_t variadicTypes = size_t.max;
 
     package(snakebite) void checkArgumentCount(

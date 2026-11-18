@@ -2722,6 +2722,169 @@ def test_saved_program_with_a_temporary_beside_a_function_literal_in_a_callee_ru
         """})
 
 
+# A failed assert reports its message, file and line.
+def test_saved_program_with_failed_assert_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int main(string[] args) {
+            assert(args.length == 7);
+            return 0;
+        }
+        """})
+
+
+# A C-variadic function, called through a pointer of a type with fixed
+# parameters, reads the arguments that no named parameter takes.
+def test_saved_program_with_c_variadic_function_through_another_type_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+        extern(C) int sum(int count, ...) {
+            va_list arguments;
+            va_start(arguments, count);
+            int total;
+            foreach (i; 0 .. count)
+                total += va_arg!int(arguments);
+            va_end(arguments);
+            return total;
+        }
+        alias Three = extern(C) int function(int, int, int);
+        int main() {
+            auto three = cast(Three) &sum;
+            return three(2, 3, 4);
+        }
+        """})
+
+
+# A function with fixed parameters, called through a C-variadic pointer,
+# gets the arguments after the named ones.
+def test_saved_program_with_fixed_function_through_c_variadic_type_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        extern(C) int add(int a, int b) { return a * 10 + b; }
+        alias Variadic = extern(C) int function(int, ...);
+        int main() {
+            auto variadic = cast(Variadic) &add;
+            return variadic(3, 4);
+        }
+        """})
+
+
+# C code calls a C-variadic function of the program.
+def test_saved_program_with_c_variadic_function_called_by_c_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+        import core.stdc.stdio: printf;
+        import core.stdc.stdlib: qsort;
+        extern(C) int compare(const(void)* left, ...) {
+            va_list arguments;
+            va_start(arguments, left);
+            auto right = va_arg!(const(void)*)(arguments);
+            va_end(arguments);
+            return *cast(const(int)*) left - *cast(const(int)*) right;
+        }
+        alias Comparison =
+            extern(C) int function(scope const(void)*, scope const(void)*);
+        int main() {
+            int[5] numbers = [4, 1, 5, 2, 3];
+            qsort(numbers.ptr, numbers.length, int.sizeof,
+                  cast(Comparison) &compare);
+            foreach (n; numbers)
+                printf("%d ", n);
+            printf("\\n");
+            return 0;
+        }
+        """})
+
+
+# A call whose result nothing reads, made while the arguments of another
+# call evaluate, does not overwrite the arguments already in place.
+def test_saved_program_with_discarded_result_among_arguments_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Big {
+            long[64] v;
+            Big opUnary(string op: "++")() {
+                foreach (ref x; v)
+                    x += 7;
+                printf("increment\\n");
+                return this;
+            }
+        }
+        long outer(long a, long b, long c) {
+            printf("outer\\n");
+            return a * 100 + b * 10 + c;
+        }
+        int main() {
+            Big big;
+            printf("%lld\\n", outer(1, (big++).v[0], 3));
+            return 0;
+        }
+        """})
+
+
+# A closure holds a variable with its declared alignment.
+def test_saved_program_with_aligned_variable_in_closure_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Wide { align(64) long x; }
+        int delegate() make(int n) {
+            Wide w;
+            w.x = n;
+            printf("%d\\n", cast(int) ((cast(size_t) &w) % Wide.alignof));
+            return () => cast(int) w.x;
+        }
+        int delegate() small(int n) {
+            char c = cast(char) n;
+            return () => c;
+        }
+        int main() {
+            int total;
+            foreach (i; 0 .. 8) {
+                total += small(i)();
+                total += make(i)();
+            }
+            return total;
+        }
+        """})
+
+
+# An exception destroys the temporary of the expression that it leaves.
+def test_saved_program_with_temporary_destroyed_by_exception_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct S { int n; ~this() { printf("destroy %d\\n", n); } }
+        S make(int n) { return S(n); }
+        int boom() { throw new Exception("boom"); }
+        int main() {
+            try {
+                return make(1).n + boom();
+            } catch (Exception e) {
+                printf("caught\\n");
+                return 2;
+            }
+        }
+        """})
+
+
 # A save never writes a file for a program that does not compile: it fails,
 # and no file is left.
 def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
