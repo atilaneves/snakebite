@@ -156,14 +156,14 @@ static foreach (backend; Matrix!(
 
             interface Transfer {
                 int apply(Box first, Box second, bool forward,
-                    int[] values, size_t index);
+                    int[] values, size_t index) @safe;
             }
 
             class Increment : Transfer {
                 static size_t indexLine;
 
                 override int apply(Box first, Box second, bool forward,
-                    int[] values, size_t index)
+                    int[] values, size_t index) @safe
                 {
                     if (forward)
                         second.value = first.value + 1;
@@ -176,7 +176,7 @@ static foreach (backend; Matrix!(
 
             class Replace : Transfer {
                 override int apply(Box first, Box second, bool forward,
-                    int[] values, size_t index)
+                    int[] values, size_t index) @safe
                 {
                     first.value = 30;
                     return values[index] + 1;
