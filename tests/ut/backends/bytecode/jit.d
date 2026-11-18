@@ -8,7 +8,7 @@ import snakebite.backends.bytecode.jit: jitSupported;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import core.atomic: atomicLoad, atomicOp, atomicStore;
-import core.thread: Thread;
+import core.thread: Fiber, Thread;
 
 
 private enum source = q{
@@ -132,6 +132,17 @@ unittest {
     bool compiled;
     runBranchReentry(testJit.enabled, compiled).should == 1;
     compiled.should == (jitSupported && testJit.enabled);
+}
+
+
+@("jit.branchInspectionRunsOnAFiber")
+unittest {
+    auto fiber = new Fiber({
+        bool compiled;
+        runBranchReentry(testJit.enabled, compiled).should == 1;
+        compiled.should == (jitSupported && testJit.enabled);
+    });
+    fiber.call();
 }
 
 

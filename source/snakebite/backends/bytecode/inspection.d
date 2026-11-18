@@ -186,8 +186,11 @@ private ubyte runBranchFunction(Instruction[] instructions, size_t frameSize,
         static if (jitSupported)
             instance.release;
     }
-    static if (jitSupported)
+    static if (jitSupported) {
+        if (jit)
+            instance.prepareCompilerStack;
         prepareForExecution(&function_, JitSetting(jit, true), &instance, null);
+    }
 
     auto vm = Vm(defaultFrameCapacity);
     ubyte result;

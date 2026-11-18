@@ -254,7 +254,7 @@ public class Continuation: imported!"core.thread.fiber".Fiber {
 }
 
 
-private imported!"core.thread.fiber".Fiber fiberOfHostCode() {
+public imported!"core.thread.fiber".Fiber fiberOfHostCode() @nogc nothrow {
     import core.thread.fiber: Fiber;
 
     auto fiber = Fiber.getThis;

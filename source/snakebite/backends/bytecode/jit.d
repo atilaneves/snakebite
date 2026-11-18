@@ -17,6 +17,8 @@ module snakebite.backends.bytecode.jit;
 
 private:
 
+import snakebite.host.threads: Continuation;
+
 
 // The code generator exists only where the register maps below are known.
 public enum jitSupported = jitPlatform && jitCompiler;
@@ -310,7 +312,7 @@ package struct JitState {
     // They are on the heap: a tier-up runs on the native stack of the guest,
     // and a guest `Fiber` of the default size has 16 KiB.
     Scratch!(InlineBody, Gen.inlineDepthLimit) inlineBodies;
-    imported!"snakebite.host.threads".Continuation compilerStack;
+    Continuation compilerStack;
 
     // Gives back the memory of the region and the buffers.
     void release() {
@@ -672,9 +674,9 @@ package struct JitState {
     }
 }
 
-// The JIT state of one `Bytecode` instance. The code region lives as long as
-// the instance: the destructor unmaps it. Every `Function` that the instance
-// compiles points here, so that a tier-up finds the state of its owner.
+// The JIT state of a runner or an inspection. Its owner releases the code
+// region after the last use. Every `Function` that the instance compiles
+// points here, so that a tier-up finds the state of its owner.
 package struct JitInstance {
 
     // How far this instance's set-up got. It is read without the lock.
@@ -683,8 +685,6 @@ package struct JitInstance {
     private shared JitState state;
 
     void prepareCompilerStack() @system {
-        import snakebite.host.threads: Continuation;
-
         enum compilerStackBytes = 256 * 1024;
         (cast(JitState*) &state).compilerStack =
             new Continuation(idleCompilerStack, compilerStackBytes);
@@ -963,10 +963,9 @@ package struct JitLock {
     package bool onCompilerStack(Work)(scope Work work) {
         import core.thread.fiber: Fiber;
         import snakebite.failure.report: internalFailure;
-        import snakebite.host.threads: Continuation;
+        import snakebite.host.threads: fiberOfHostCode;
 
-        auto caller = Fiber.getThis;
-        if (caller is null) {
+        if (Fiber.getThis is null) {
             work();
             return true;
         }
@@ -974,8 +973,7 @@ package struct JitLock {
         auto compiler = state.compilerStack;
         if (compiler is null)
             return false;
-        auto continuation = cast(Continuation) caller;
-        compiler.of = continuation is null ? caller : continuation.of;
+        compiler.of = fiberOfHostCode;
         compiler.reset(work);
         const thrown = compiler.call!(Fiber.Rethrow.no);
         compiler.reset(JitInstance.idleCompilerStack);
