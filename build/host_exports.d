@@ -234,6 +234,11 @@ mixin Export!(classes, "hostDispatchObject", "hostCreatedObjectUsesVirtualGuestD
 mixin Export!(__traits(getMember, classes, "LinkedScopeResource"), "__ctor", "ut.backends.run.classes.linkedScopeClassRunsDestructorAtScopeExit");
 mixin Export!(__traits(getMember, classes, "LinkedScopeResource"), "__dtor", "ut.backends.run.classes.linkedScopeClassRunsDestructorAtScopeExit");
 mixin ExportClassData!(__traits(getMember, classes, "LinkedScopeResource"), "ut.backends.run.classes.linkedScopeClassRunsDestructorAtScopeExit");
+mixin Export!(__traits(getMember, classes, "LinkedCounterBase"), "bump", "ut.backends.run.classes.rootClassOfDependencyBaseReplacingOneInterfaceMethodBelowTheBase");
+mixin Export!(__traits(getMember, classes, "LinkedCounterBase"), "get", "ut.backends.run.classes.rootClassOfDependencyBaseReplacingOneInterfaceMethodBelowTheBase");
+mixin ExportClassData!(__traits(getMember, classes, "LinkedCounterBase"), "ut.backends.run.classes.rootClassOfDependencyBaseReplacingOneInterfaceMethodBelowTheBase");
+mixin Export!(__traits(getMember, classes, "LinkedCounterDerived"), "bump", "ut.backends.run.classes.rootClassOfDependencyBaseReplacingOneInterfaceMethodBelowTheBase");
+mixin ExportClassData!(__traits(getMember, classes, "LinkedCounterDerived"), "ut.backends.run.classes.rootClassOfDependencyBaseReplacingOneInterfaceMethodBelowTheBase");
 mixin Export!(cost, "fillFinalizerTestCache", "ordinaryCallbackGuest");
 mixin Export!(cost, "callFinalizerTestCallback", "ordinaryCallbackGuest");
 mixin Export!(cost, "callPreparedTestCallback", "ordinaryCallbackGuest");

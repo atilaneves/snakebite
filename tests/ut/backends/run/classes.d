@@ -325,7 +325,37 @@ private enum linkedClassesModule = q{
         this(int* value) { trace = value; }
         ~this() { ++*trace; }
     }
+    interface LinkedCounter {
+        int bump();
+        int get();
+    }
+    class LinkedCounterBase : LinkedCounter {
+        int count;
+        int bump() { return ++count; }
+        int get() { return count; }
+    }
+    class LinkedCounterDerived : LinkedCounterBase {
+        override int bump() { count += 10; return count; }
+    }
 };
+
+
+public interface LinkedCounter {
+    int bump();
+    int get();
+}
+
+
+public class LinkedCounterBase : LinkedCounter {
+    int count;
+    int bump() { return ++count; }
+    int get() { return count; }
+}
+
+
+public class LinkedCounterDerived : LinkedCounterBase {
+    override int bump() { count += 10; return count; }
+}
 
 
 static foreach (BackendType; Matrix!()) {
@@ -1665,6 +1695,42 @@ static foreach (backend; Matrix!()) {
                 assert(quiet.yields == 1);
             }
         });
+    }
+}
+
+
+// A native class B extends a native class P and replaces one method of an
+// interface that P implements; a root class D extends B and replaces
+// nothing: through the interface, the replaced and the other method both
+// give the result of native code.
+static foreach (backend; Matrix!()) {
+    @("rootClassOfDependencyBaseReplacingOneInterfaceMethodBelowTheBase."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int result;
+        static if (is(backend == Native)) {
+            class Leaf : LinkedCounterDerived { }
+            LinkedCounter counter = new Leaf;
+            result = counter.bump() * 100 + counter.get();
+        } else {
+            auto modules = parseSnippets([
+                "module linked_counter_root_" ~ backend.stringof ~ ";" ~ q{
+                    import ut.backends.run.classes:
+                        LinkedCounter, LinkedCounterDerived;
+                    class Leaf : LinkedCounterDerived { }
+                    int answer() {
+                        LinkedCounter counter = new Leaf;
+                        return counter.bump() * 100 + counter.get();
+                    }
+                },
+                linkedClassesModule,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = ownedBackend!backend(Program([modules[0]]));
+            backend_.call(function_, &result, []);
+        }
+        result.should == 1010;
     }
 }
 
