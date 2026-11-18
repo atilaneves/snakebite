@@ -2426,7 +2426,7 @@ private struct Gen {
                 if (checkedLoop.update)
                     return emitCheckedLoop(i, ins, op, original);
             }
-            return emitChecked(i, ins, op);
+            return emitChecked(i, ins, op, ops);
 
         case castFixed: {
             Mem d, s;
@@ -3192,8 +3192,93 @@ private struct Gen {
         fpSlots = FpSlots.init;
     }
 
+    // A successful load can establish the bounds of later accesses on its
+    // own edge. Their ordinary entry points still need their own checks.
+    size_t forwardedLoad(size_t target, in Instruction first, in JitOp op,
+        in Mem destination, const(JitOp)[] ops)
+    {
+        if (op.checked.access != CheckedAccess.load || destination.base != FRAME)
+            return size_t.max;
+        const indexWidth = op.checked.indexWidth;
+        const firstIndex = cast(int) cast(uint) first.width;
+
+        foreach (attempt; 0 .. 4) {
+            const next = snapshot[target];
+            const kind = ops[target];
+            if (kind.kind != JitOp.Kind.checked || next.source != first.source
+                    || next.width >> 32 != first.width >> 32
+                    || kind.checked.fixedLength != op.checked.fixedLength
+                    || kind.checked.indexWidth != indexWidth
+                    || kind.checked.signed != op.checked.signed)
+                break;
+            const index = cast(uint) next.width;
+            if (index > 0x7fff_0000
+                    || frameWriteOverlaps(destination, op.width, cast(int) index,
+                        indexWidth))
+                break;
+            if (kind.checked.access == CheckedAccess.load) {
+                Mem result;
+                if (kind.width == op.width && frameOperand(next.destination, result))
+                    return target;
+                break;
+            }
+
+            size_t success;
+            if (kind.checked.access != CheckedAccess.check || index != firstIndex
+                    || !targetIndex(next.sourceWidth, success) || success <= target)
+                break;
+            target = success;
+        }
+        return size_t.max;
+    }
+
+    static bool frameWriteOverlaps(in Mem destination, int width, int offset,
+        int size) pure @safe
+    {
+        return destination.disp < offset + size && offset < destination.disp + width;
+    }
+
+    void emitForwardedLoad(size_t firstSuccess, size_t load, in Instruction first,
+        in JitOp op, in Mem destination, in Mem source, in Mem element)
+    {
+        const next = snapshot[load];
+        const secondIndex = cast(int) cast(uint) next.width;
+        if (secondIndex != cast(uint) first.width) {
+            const indexWidth = op.checked.indexWidth;
+            const offset = op.checked.fixedLength ? 0 : cast(int) (first.width >> 32);
+            int index = RAX;
+            if (offset) {
+                a.movRR64(R9, RAX);
+                a.aluRI(Alu.sub, indexWidth, R9, offset);
+                index = R9;
+            }
+            a.alu(Alu.cmp, indexWidth, cast(ubyte) index, Mem(FRAME, secondIndex));
+            jccTo(CC_NE, firstSuccess);
+        }
+        if (!op.checked.fixedLength && source.base != FRAME)
+            guardForwardedRead(destination, op.width, source,
+                arrayPointerOffset + (ubyte*).sizeof, firstSuccess);
+        // An overlapping frame write could change bytes in the element that
+        // the next load would see, even though the two indices are equal.
+        guardForwardedRead(destination, op.width, element, op.width, firstSuccess);
+        a.st(op.width, Mem(FRAME, cast(int) next.destination), R11);
+        size_t success;
+        targetIndex(next.sourceWidth, success);
+        jmpTo(success);
+    }
+
+    void guardForwardedRead(in Mem destination, int width, Mem read, int size,
+        size_t fallback)
+    {
+        read.disp -= destination.disp - (size - 1);
+        a.lea(R9, read);
+        a.aluRR(Alu.sub, 8, R9, FRAME);
+        a.aluRI(Alu.cmp, 8, R9, width + size - 1);
+        jccTo(CC_B, fallback);
+    }
+
     bool emitChecked(bool resident = false)(
-        size_t i, in Instruction ins, in JitOp op,
+        size_t i, in Instruction ins, in JitOp op, const(JitOp)[] ops = null,
     ) {
         const p = op.checked;
         const packed = ins.width;
@@ -3261,6 +3346,23 @@ private struct Gen {
             if (access == CheckedAccess.load) {
                 a.ld(es, R11, element);
                 a.st(es, d, R11);
+                static if (!resident) {
+                    if (target > i && d.base == FRAME) {
+                        const sourceSlot = cast(int) ((ins.source >> 32) & 0x7fff_ffff);
+                        const sourceStable = s.base == FRAME
+                            ? p.fixedLength || !frameWriteOverlaps(d, es, s.disp,
+                                arrayPointerOffset + (ubyte*).sizeof)
+                            : !frameWriteOverlaps(d, es, sourceSlot, (ubyte*).sizeof);
+                        if (sourceStable) {
+                            const load = forwardedLoad(target, ins, op, d, ops);
+                            size_t success;
+                            if (load != size_t.max
+                                    && targetIndex(snapshot[load].sourceWidth, success)
+                                    && success > load)
+                                emitForwardedLoad(target, load, ins, op, d, s, element);
+                        }
+                    }
+                }
             } else if (p.constantValue) {
                 int imm;
                 const v = constantAt(ins.destination, es);
