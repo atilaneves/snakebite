@@ -210,12 +210,17 @@ package struct JitOp {
 package struct CrossCallRegion {
     import snakebite.backends.bytecode.vm: Function, Instruction;
 
-    size_t callSite;
-    const(Function)* callee;
-    const(Instruction)[] snapshot;
-    const(JitOp)[] ops;
-    const(Instruction.Handler)[] originals;
-    size_t[] labels;
+    package size_t callSite;
+    package const(Function)* callee;
+    package const(Instruction)[] snapshot;
+    package const(JitOp)[] ops;
+    package const(Instruction.Handler)[] originals;
+    package size_t[] labels;
+    package CrossCallRegion[] children;
+    package const(void)* targetEntry;
+    package uint targetCalls;
+    package uint totalCalls;
+    package size_t bodyBytes;
 }
 
 private enum : ubyte {
@@ -340,6 +345,7 @@ package struct JitState {
         g.literalScratch = &literals;
         g.reloadEntryScratch = &reloadEntries;
         g.bmi2 = bmi2;
+        g.codeCapacity = cap;
         g.instructions = instructions;
         g.snapshot = snapshot;
         g.frameSize = function_.frameSize;
@@ -750,8 +756,17 @@ package struct JitLock {
         auto result = state.emitFunction(function_, snapshot, ops, originals,
             crossCalls);
         if (result == Emitted.full) {
-            const worst = snapshot.length * maximumBytesPerInstruction
-                + 4096;
+            auto worst = snapshot.length * maximumBytesPerInstruction + 4096;
+            foreach (ref region; crossCalls) {
+                if (region.snapshot.length > (size_t.max - 4096)
+                        / maximumBytesPerInstruction)
+                    return false;
+                const regionWorst = region.snapshot.length
+                    * maximumBytesPerInstruction + 4096;
+                if (regionWorst > size_t.max - worst)
+                    return false;
+                worst += regionWorst;
+            }
             if (!state.region.newChunk(worst))
                 return false;
             result = state.emitFunction(function_, snapshot, ops, originals,
@@ -1432,6 +1447,7 @@ private struct Gen {
     bool readIntSlot;
     size_t reloadEntryCount;
     bool bmi2;
+    size_t codeCapacity;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     size_t frameSize;
@@ -1486,6 +1502,10 @@ private struct Gen {
     }
 
     void fix(size_t target) {
+        fixTo(labels.ptr, target);
+    }
+
+    void fixTo(size_t* targetLabels, size_t target) {
         if (fixupCount == fixupCap) {
             // `auto`: `fixups` takes it, and it must be mutable.
             auto grown = fixupScratch.grow(fixupCap ? fixupCap * 2 : 256);
@@ -1496,7 +1516,7 @@ private struct Gen {
             fixups = grown;
             fixupCap = fixupScratch.cap;
         }
-        fixups[fixupCount++] = Fixup(a.n, target, labels.ptr);
+        fixups[fixupCount++] = Fixup(a.n, target, targetLabels);
         a.d32(0);
     }
 
@@ -1706,7 +1726,17 @@ private struct Gen {
         foreach (index, ref arm; arms[0 .. count]) {
             if (index != 0)
                 patchHere(arms[index - 1].mismatch);
-            if (!emitCallWindowArm(i, op, site, arm))
+            CrossCallRegion* crossCall;
+            foreach (ref region; crossCalls)
+                if (region.callSite == snapshot[i].source
+                        && region.callee == arm.callee
+                        && (region.targetEntry is null
+                            || region.targetEntry is arm.entry)) {
+                    crossCall = &region;
+                    break;
+                }
+            if (!emitCallWindowArm(i, op, site, arm,
+                    crossCall))
                 return false;
         }
         if (op.indirect)
@@ -1747,13 +1777,17 @@ private struct Gen {
     }
 
     bool emitCallWindowArm(size_t i, in JitOp.CallWindow op,
-        const(CallSite)* site, ref WindowArm arm)
+        const(CallSite)* site, ref WindowArm arm,
+        CrossCallRegion* crossCall = null)
     {
         const ins = snapshot[i];
         const entry = arm.entry;
         const callee = arm.callee;
         const fast = arm.fast;
         const adjustment = arm.adjustment;
+        if (crossCall !is null && (crossCall.callee != callee
+                || i + 1 >= instructions.length))
+            return false;
         if (entry !is null) {
             a.movI(RAX, cast(size_t) entry);
             a.alu(Alu.cmp, 8, RAX, Mem(FRAME, cast(int) site.calleeSlotOffset));
@@ -1817,9 +1851,47 @@ private struct Gen {
         a.st(8, Mem(R11, Activation.pc.offsetof), PCREG);
         a.st(8, Mem(STATE, DispatchState.current.offsetof), R11);
         a.movRR64(ACTIVE, R11);
+        if (crossCall !is null)
+            return emitCrossCallRegion(i, arm, *crossCall);
         a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
 
         return true;
+    }
+
+    bool emitCrossCallRegion(size_t i, ref WindowArm arm,
+        ref CrossCallRegion region)
+    {
+        const bodyBytes = region.bodyBytes;
+        if (a.n > codeCapacity || bodyBytes > codeCapacity - a.n)
+            return false;
+
+        Gen nested = this;
+        nested.instructions = region.callee.instructions;
+        nested.snapshot = region.snapshot;
+        nested.frameSize = region.callee.frameSize;
+        nested.constants = region.callee.constants;
+        nested.callSites = region.callee.callSites;
+        nested.labels = region.labels;
+        nested.crossCalls = null;
+        nested.fpSlots = FpSlots.init;
+        nested.fpLoop = FpLoop.init;
+        nested.intSlots = IntSlots.init;
+        nested.checkedEntry = CheckedEntry.init;
+        nested.checkedLoop = CheckedLoop.init;
+        nested.readIntSlot = false;
+        nested.known = KnownConstant.init;
+        nested.usedKnown = false;
+        nested.outOfMemory = false;
+
+        const emitted = nested.emitRegion(codeCapacity, region.ops,
+            region.originals);
+        fixups = nested.fixups;
+        fixupCount = nested.fixupCount;
+        fixupCap = nested.fixupCap;
+        literalCount = nested.literalCount;
+        outOfMemory = nested.outOfMemory;
+        a = nested.a;
+        return emitted == Emitted.done;
     }
 
     bool emitReturn(size_t i, bool hasValue, Instruction.Handler original) {

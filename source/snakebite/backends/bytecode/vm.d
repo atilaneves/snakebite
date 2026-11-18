@@ -5922,6 +5922,9 @@ static if (jitSupported) {
     private bool compileUnderLock(ref JitLock lock, Function* function_)
         nothrow
     {
+        import core.atomic: atomicLoad, MemoryOrder;
+        import snakebite.backends.bytecode.jit: CrossCallRegion, JitOp;
+
         if (!lock.jitUsable)
             return false;
         ref tables = *jitTables;
@@ -5961,7 +5964,70 @@ static if (jitSupported) {
                 originals[index] = nativeCallJitEntry(
                     &function_.callSites[snapshot[index].source], handler);
         }
-        return lock.jitFunction(function_, snapshot, ops, originals);
+        CrossCallRegion[] regions;
+        foreach (index; 0 .. n) {
+            if (ops[index].kind != JitOp.Kind.callWindow
+                    || ops[index].callWindow.indirect
+                    || snapshot[index].source >= function_.callSites.length)
+                continue;
+            auto site = &function_.callSites[snapshot[index].source];
+            if (site.kind != CallSite.Kind.guest || site.callee is null
+                    || atomicLoad!(MemoryOrder.acq)(
+                        *cast(shared(uint)*) &site.fast.state)
+                        != CallSite.FastCall.State.ready)
+                continue;
+            auto callee = cast(Function*) site.fast.callee;
+            const m = callee.instructions.length;
+            enum maxCrossCallInstructions = 128;
+            if (m == 0 || m > maxCrossCallInstructions)
+                continue;
+            auto nestedSnapshotMemory = scratch.crossCallSnapshotScratch
+                .reserve(m);
+            auto nestedOpMemory = scratch.crossCallOpScratch.reserve(m);
+            auto nestedOriginalMemory = scratch.crossCallOriginalScratch
+                .reserve(m);
+            auto regionMemory = scratch.crossCallRegions.reserve(1);
+            if (nestedSnapshotMemory is null || nestedOpMemory is null
+                    || nestedOriginalMemory is null || regionMemory is null)
+                break;
+            auto nestedSnapshot = nestedSnapshotMemory[0 .. m];
+            auto nestedOps = nestedOpMemory[0 .. m];
+            auto nestedOriginals = nestedOriginalMemory[0 .. m];
+            bool valid = true;
+            foreach (nestedIndex; 0 .. m) {
+                auto handler = callee.instructions[nestedIndex].handler;
+                if (handler !is null) {
+                    if (const original = handler in _countingTwins.uncountedOf)
+                        if (!isCountedCall(*original))
+                            handler = *original;
+                }
+                nestedOriginals[nestedIndex] = handler;
+                nestedSnapshot[nestedIndex] = callee.instructions[nestedIndex];
+                nestedSnapshot[nestedIndex].handler = handler;
+                if (handler is null) {
+                    nestedOps[nestedIndex] = JitOp.init;
+                    continue;
+                }
+                if (!tables.unspecialise(nestedSnapshot[nestedIndex])) {
+                    valid = false;
+                    break;
+                }
+                nestedOps[nestedIndex] = tables.jitGet(
+                    nestedSnapshot[nestedIndex].handler);
+                if (handler is &callGeneral!true
+                        || handler is &callGeneral!false)
+                    nestedOriginals[nestedIndex] = nativeCallJitEntry(
+                        &callee.callSites[nestedSnapshot[nestedIndex].source],
+                        handler);
+            }
+            if (!valid)
+                continue;
+            regionMemory[0] = CrossCallRegion(snapshot[index].source,
+                callee, nestedSnapshot, nestedOps, nestedOriginals);
+            regions = regionMemory[0 .. 1];
+            break;
+        }
+        return lock.jitFunction(function_, snapshot, ops, originals, regions);
     }
 
     private Instruction.Handler nativeCallJitEntry(
