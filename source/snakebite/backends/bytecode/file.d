@@ -204,6 +204,14 @@ private void transferHeader(ref Archive archive, ref Header header) {
 }
 
 
+// A word of the data at `place` that refers to `target`, an interface of a
+// class information.
+private struct InterfaceWord {
+    size_t* place;
+    Target target;
+}
+
+
 // The bytes of a file as they are written or read, and the places that the
 // file refers to by number: the signatures of the program and the functions
 // of its modules.
@@ -239,6 +247,9 @@ private struct Archive {
     private string _declarations;
     private NativeSignature[] _adjustedSignatures;
     private Name[] _names;
+    // Reading: the words of the data that refer to an interface of a class
+    // information, which `transferBody` makes ready last.
+    private InterfaceWord[] _interfaceWords;
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
@@ -819,6 +830,11 @@ private void transferBody(
     foreach (m; 0 .. moduleCount)
         transferAddresses(archive, program._modules[m].blocks);
     transferAddresses(archive, *program.store.blocks);
+    // A word of an interface of a class information reads the class
+    // information, which can be the program's own copy: it is read once
+    // every other word of the data is ready.
+    foreach (word; archive._interfaceWords)
+        *word.place = archive._program.plans.wordOfName(word.target);
     foreach (m; 0 .. moduleCount)
         transferModule(archive, program, *program._modules[m]);
 }
@@ -989,9 +1005,16 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
             // A datum is ready to run once it is written, as after a compile
             // to RAM.
             const target = targetOf(archive, link.kind, reference);
+            auto place = &bytes[link.wordOffset];
+            if (link.kind == Target.Kind.interfaceTable
+                    || link.kind == Target.Kind.interfaceRecord) {
+                archive._interfaceWords ~= InterfaceWord(
+                    cast(size_t*) place, target);
+                continue;
+            }
             const address = isName(link.kind)
                 ? archive._program.plans.wordOfName(target) : target.address;
-            bytes[link.wordOffset .. link.wordOffset + size_t.sizeof] =
+            place[0 .. size_t.sizeof] =
                 (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
         }
     }

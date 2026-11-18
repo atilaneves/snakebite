@@ -514,3 +514,47 @@ private Result sharedDefinitionResult(backend, string name, Result)() {
     }
     return result;
 }
+
+
+// An instance of a dependency class template that the process does not have:
+// the program uses its own copy of the class information, and a root class
+// over it reaches the interface of that copy, from RAM and after a load.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not build class information"),
+)) {
+    @("sharedDefinition.ownInstanceClassInterface." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            interface Speaker(T) { int speak(); }
+            class Talker(T) : Speaker!T { int speak() { return 7; } }
+            class Loud : Talker!int {}
+            Speaker!int speaker = new Loud;
+            const result = speaker.speak() * 10
+                + (typeid(Loud).base is typeid(Talker!int));
+        } else {
+            auto modules = parseSnippets([
+                q{
+                    module routing_own_instance_root;
+                    import routing_own_instance_dep;
+                    class Loud : Talker!int {}
+                    int answer() {
+                        Speaker!int speaker = new Loud;
+                        return speaker.speak() * 10
+                            + (typeid(Loud).base is typeid(Talker!int));
+                    }
+                },
+                q{
+                    module routing_own_instance_dep;
+                    interface Speaker(T) { int speak(); }
+                    class Talker(T) : Speaker!T { int speak() { return 7; } }
+                },
+            ]);
+            auto backend_ = ownedBackend!backend(Program([modules[0]]));
+            int result;
+            backend_.call(findFunction(modules[0], "answer"), &result, []);
+        }
+        result.should == 71;
+    }
+}
