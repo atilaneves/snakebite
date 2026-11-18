@@ -2649,6 +2649,8 @@ private struct Gen {
     private struct PathChecked {
         bool skipBounds;
         bool skipStore;
+        bool foldIndex;
+        int displacement;
         size_t forwarded = size_t.max;
     }
 
@@ -2759,6 +2761,13 @@ private struct Gen {
         }
         if (check)
             return true;
+        if (!gatherGuards && !index.identity && (p.signed || index.bits <= long.max)) {
+            const effective = cast(long) index.bits;
+            if (effective >= int.min / op.width && effective <= int.max / op.width) {
+                action.foldIndex = true;
+                action.displacement = cast(int) (effective * op.width);
+            }
+        }
         PathPlace valuePlace;
         if (!p.constantValue
                 && !pathPlace(ins.destination, calls, pending, valuePlace, op.width))
@@ -4925,8 +4934,9 @@ private struct Gen {
         const skipBounds = specialized && path.skipBounds;
         const skipStore = specialized && path.skipStore;
         const forwarded = specialized && path.forwarded != size_t.max;
+        const foldIndex = specialized && path.foldIndex;
         const needElement = access != CheckedAccess.check && !skipStore;
-        const needIndex = (needElement && !forwarded)
+        const needIndex = (needElement && !forwarded && !foldIndex)
             || (access != CheckedAccess.storeUnchecked && !skipBounds);
         size_t target;
         Mem d, s;
@@ -4998,7 +5008,8 @@ private struct Gen {
                         s.disp + cast(int) arrayPointerOffset));
             }
             if (!forwarded)
-                element = Mem(SC2, 0, RAX, cast(ubyte) es);
+                element = foldIndex ? Mem(SC2, path.displacement)
+                    : Mem(SC2, 0, RAX, cast(ubyte) es);
             if (onPath && retainedWidth != 0 && access != CheckedAccess.load) {
                 a.lea(R11, element);
                 a.xmmToInteger(R10, pathAddress);
