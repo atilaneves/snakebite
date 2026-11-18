@@ -124,6 +124,10 @@ A constant has a place in the blocks of a `Module` only when it goes through
 
 Decided by the owner on 2026-11-18.
 
+- The form of the file is chosen by one measure. The owner: "What matters
+  is a file format such that loading is as fast as possible compared to
+  compiling from scratch. That's it. Saving would be nice too."
+
 - A function is made ready to execute only where it executes: after a
   compile to RAM and after a load, by the same code. A save does not
   execute, so a save does not make its functions ready to execute. No code
