@@ -472,10 +472,13 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.exception: RangeError;
+
+            enum storeLine = __LINE__ + 9;
             int mark(ubyte[] flags, int first, int last, int step,
                 bool aliasIndex)
             {
-                assert(step != 0);
+                assert(flags.length != 0);
                 int k = first;
                 if (aliasIndex)
                     flags = (cast(ubyte*) &k)[0 .. 1];
@@ -484,6 +487,21 @@ static foreach (backend; Matrix!(
                     k += step;
                 }
                 return k;
+            }
+
+            void verifyFailure(ubyte[] flags, int first, int last, int step,
+                string message, ubyte[] expected)
+            {
+                RangeError caught;
+                try
+                    mark(flags, first, last, step, false);
+                catch (RangeError error)
+                    caught = error;
+                assert(caught !is null);
+                assert(caught.file == __FILE__);
+                assert(caught.line == storeLine);
+                assert(caught.msg == message);
+                assert(flags == expected);
             }
 
             int main() {
@@ -497,7 +515,23 @@ static foreach (backend; Matrix!(
                 if (mark(flags, 601, 600, 1, false) != 601)
                     return 3;
                 // The write changes k from 1 to 0 before the add.
-                return mark(flags, 1, 1, 2, true) == 2 ? 0 : 4;
+                if (mark(flags, 1, 1, 2, true) != 2)
+                    return 4;
+
+                flags = [1, 1, 1];
+                verifyFailure(flags, 1, 7, 2,
+                    "index [4] is out of bounds for array of length 3", [0, 1, 0]);
+                flags[] = 1;
+                verifyFailure(flags, 4, 4, 0,
+                    "index [3] is out of bounds for array of length 3", [1, 1, 1]);
+                verifyFailure(flags, 3, 3, -2,
+                    "index [18446744073709551614] is out of bounds for array of length 3",
+                    [0, 1, 0]);
+                flags[] = 1;
+                verifyFailure(flags, 1, int.max, int.max,
+                    "index [2147483647] is out of bounds for array of length 3",
+                    [0, 1, 1]);
+                return 0;
             }
         }, ["mark"]);
     }
