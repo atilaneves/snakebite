@@ -210,12 +210,13 @@ package struct JitOp {
 package struct CrossCallRegion {
     import snakebite.backends.bytecode.vm: Function, Instruction;
 
-    size_t callSite;
-    const(Function)* callee;
-    const(Instruction)[] snapshot;
-    const(JitOp)[] ops;
-    const(Instruction.Handler)[] originals;
-    size_t[] labels;
+    package size_t callSite;
+    package const(Function)* callee;
+    package const(Instruction)[] snapshot;
+    package const(JitOp)[] ops;
+    package const(Instruction.Handler)[] originals;
+    package size_t[] labels;
+    package CrossCallRegion[] children;
 }
 
 private enum : ubyte {
@@ -339,6 +340,7 @@ package struct JitState {
         g.literalScratch = &literals;
         g.reloadEntryScratch = &reloadEntries;
         g.bmi2 = bmi2;
+        g.codeCapacity = cap;
         g.instructions = instructions;
         g.snapshot = snapshot;
         g.frameSize = function_.frameSize;
@@ -722,8 +724,17 @@ package struct JitLock {
         auto result = state.emitFunction(function_, snapshot, ops, originals,
             crossCalls);
         if (result == Emitted.full) {
-            const worst = snapshot.length * maximumBytesPerInstruction
-                + 4096;
+            auto worst = snapshot.length * maximumBytesPerInstruction + 4096;
+            foreach (ref region; crossCalls) {
+                if (region.snapshot.length > (size_t.max - 4096)
+                        / maximumBytesPerInstruction)
+                    return false;
+                const regionWorst = region.snapshot.length
+                    * maximumBytesPerInstruction + 4096;
+                if (regionWorst > size_t.max - worst)
+                    return false;
+                worst += regionWorst;
+            }
             if (!state.region.newChunk(worst))
                 return false;
             result = state.emitFunction(function_, snapshot, ops, originals,
@@ -1404,6 +1415,7 @@ private struct Gen {
     bool readIntSlot;
     size_t reloadEntryCount;
     bool bmi2;
+    size_t codeCapacity;
     const(Instruction)[] instructions;
     const(Instruction)[] snapshot;
     size_t frameSize;
@@ -1458,6 +1470,10 @@ private struct Gen {
     }
 
     void fix(size_t target) {
+        fixTo(labels.ptr, target);
+    }
+
+    void fixTo(size_t* targetLabels, size_t target) {
         if (fixupCount == fixupCap) {
             // `auto`: `fixups` takes it, and it must be mutable.
             auto grown = fixupScratch.grow(fixupCap ? fixupCap * 2 : 256);
@@ -1468,7 +1484,7 @@ private struct Gen {
             fixups = grown;
             fixupCap = fixupScratch.cap;
         }
-        fixups[fixupCount++] = Fixup(a.n, target, labels.ptr);
+        fixups[fixupCount++] = Fixup(a.n, target, targetLabels);
         a.d32(0);
     }
 
@@ -1675,10 +1691,22 @@ private struct Gen {
         if (!encodableWindowArm(arms[0]))
             return false;
 
+        CrossCallRegion* crossCall;
+        if (!op.indirect)
+            foreach (ref region; crossCalls)
+                if (region.callSite == snapshot[i].source
+                        && region.callee == arms[0].callee) {
+                    crossCall = &region;
+                    break;
+                }
+        if (virtualCall.callee !is null)
+            return false;
+
         foreach (index, ref arm; arms[0 .. count]) {
             if (index != 0)
                 patchHere(arms[index - 1].mismatch);
-            if (!emitCallWindowArm(i, op, site, arm))
+            if (!emitCallWindowArm(i, op, site, arm,
+                    index == 0 ? crossCall : null))
                 return false;
         }
         if (op.indirect)
@@ -1719,13 +1747,17 @@ private struct Gen {
     }
 
     bool emitCallWindowArm(size_t i, in JitOp.CallWindow op,
-        const(CallSite)* site, ref WindowArm arm)
+        const(CallSite)* site, ref WindowArm arm,
+        CrossCallRegion* crossCall = null)
     {
         const ins = snapshot[i];
         const entry = arm.entry;
         const callee = arm.callee;
         const fast = arm.fast;
         const adjustment = arm.adjustment;
+        if (crossCall !is null && (crossCall.callee != callee
+                || i + 1 >= instructions.length))
+            return false;
         if (entry !is null) {
             a.movI(RAX, cast(size_t) entry);
             a.alu(Alu.cmp, 8, RAX, Mem(FRAME, cast(int) site.calleeSlotOffset));
@@ -1789,15 +1821,85 @@ private struct Gen {
         a.st(8, Mem(R11, Activation.pc.offsetof), PCREG);
         a.st(8, Mem(STATE, DispatchState.current.offsetof), R11);
         a.movRR64(ACTIVE, R11);
+        if (crossCall !is null)
+            return emitCrossCallRegion(i, arm, *crossCall);
         a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
 
         return true;
+    }
+
+    bool emitCrossCallRegion(size_t i, ref WindowArm arm,
+        ref CrossCallRegion region)
+    {
+        const instructionsNeeded = region.snapshot.length;
+        if (instructionsNeeded > (size_t.max - 4096)
+                / maximumBytesPerInstruction)
+            return false;
+        const bodyBytes = instructionsNeeded * maximumBytesPerInstruction + 4096;
+        if (a.n > codeCapacity || bodyBytes > codeCapacity - a.n)
+            return false;
+
+        Gen nested = this;
+        nested.instructions = region.callee.instructions;
+        nested.snapshot = region.snapshot;
+        nested.frameSize = region.callee.frameSize;
+        nested.constants = region.callee.constants;
+        nested.callSites = region.callee.callSites;
+        nested.labels = region.labels;
+        nested.crossCalls = null;
+        nested.virtualCall = VirtualCall.init;
+        nested.fpSlots = FpSlots.init;
+        nested.fpLoop = FpLoop.init;
+        nested.intSlots = IntSlots.init;
+        nested.checkedEntry = CheckedEntry.init;
+        nested.checkedLoop = CheckedLoop.init;
+        nested.readIntSlot = false;
+        nested.known = KnownConstant.init;
+        nested.usedKnown = false;
+        nested.outOfMemory = false;
+
+        const emitted = nested.emitRegion(codeCapacity, region.ops,
+            region.originals);
+        fixups = nested.fixups;
+        fixupCount = nested.fixupCount;
+        fixupCap = nested.fixupCap;
+        literalCount = nested.literalCount;
+        outOfMemory = nested.outOfMemory;
+        a = nested.a;
+        return emitted == Emitted.done;
     }
 
     bool emitReturn(size_t i, bool hasValue, Instruction.Handler original) {
         const ins = snapshot[i];
         if (hasValue && ins.width > 64)
             return false;
+
+        if (virtualCall.callee !is null) {
+            a.movRR64(R10, FRAME);
+            a.aluRI(Alu.sub, 8, R10,
+                cast(int) virtualCall.fast.frameOffset);
+            if (hasValue && ins.width != 0) {
+                Mem source;
+                if (!opnd(ins.source, SC2, source))
+                    return false;
+                a.ld(8, R11, Mem(R10, Activation.returnPlace.offsetof));
+                a.aluRI(Alu.cmp, 8, R11, 0);
+                const discard = jccLocal(CC_E);
+                a.lea(RAX, source);
+                a.aluRR(Alu.cmp, 8, RAX, R11);
+                const aliased = jccLocal(CC_E);
+                copyChunks(source, Mem(R11, 0), ins.width);
+                patchHere(aliased);
+                patchHere(discard);
+            }
+            a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+            a.ld(8, RAX, Mem(R10, Activation.frameMark.offsetof));
+            a.alu(Alu.add, 8, RAX, Mem(R9, FrameStack.baseOffset));
+            a.st(8, Mem(R9, FrameStack.topOffset), RAX);
+            a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
+            fixTo(virtualCall.callerLabels, virtualCall.resumeIndex);
+            return true;
+        }
 
         a.ld(8, R10, Mem(ACTIVE, Activation.parent.offsetof));
         a.aluRI(Alu.cmp, 8, R10, 0);
@@ -1892,6 +1994,26 @@ private struct Gen {
     }
 
     void jumpToHandler(size_t i, Instruction.Handler handler) {
+        if (virtualCall.callee !is null) {
+            a.movRR64(R10, FRAME);
+            a.aluRI(Alu.sub, 8, R10,
+                cast(int) virtualCall.fast.frameOffset);
+            a.movI(PCREG, cast(size_t) virtualCall.callee);
+            a.st(8, Mem(R10, Activation.function_.offsetof), PCREG);
+            a.st(8, Mem(R10, Activation.frame.offsetof), FRAME);
+            a.st(8, Mem(R10, Activation.parent.offsetof), ACTIVE);
+            a.movI(PCREG, cast(size_t) &instructions[i]);
+            a.st(8, Mem(R10, Activation.pc.offsetof), PCREG);
+            a.movI(PCREG, cast(size_t) virtualCall.callerPc);
+            a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
+            a.movI(PCREG, cast(size_t) virtualCall.resumePc);
+            a.st(8, Mem(ACTIVE, Activation.resume.offsetof), PCREG);
+            a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+            a.ld(8, PCREG, Mem(R9, FrameStack.cleanupMarkOffset));
+            a.st(8, Mem(R10, Activation.cleanupMark.offsetof), PCREG);
+            a.st(8, Mem(STATE, DispatchState.current.offsetof), R10);
+            a.movRR64(ACTIVE, R10);
+        }
         // The unchained dispatcher gets its register arguments from the state.
         static if (!chainedDispatch) {
             a.st(8, Mem(STATE, DispatchState.r0.offsetof), REG0);
