@@ -6668,7 +6668,7 @@ private Node buildSlice(E)(E ev, Expression expression) {
             // `__traits(initSymbol, T)`: the image of the aggregate's
             // initializer, which stays put for the life of the program.
             if (auto symbol = expression.isVarExp.var.isSymbolDeclaration) {
-                const initial = ev.readyBytes(ev._runtimeTypes.initializer(
+                const initial = ev.ready(ev._runtimeTypes.initializer(
                     symbol.dsym.isAggregateDeclaration));
                 return new ConstantSlice(SliceValue(
                     initial.length, cast(ubyte*) initial.ptr));
@@ -7090,7 +7090,7 @@ private Node buildNewStorage(E)(
 private const(void)[] classImageOf(E)(E ev, NewExp expression) {
     import snakebite.frontend.typefacts: baseType;
 
-    return ev.readyBytes(ev._runtimeTypes.initializer(
+    return ev.ready(ev._runtimeTypes.initializer(
         expression.newtype.baseType.isTypeClass.sym));
 }
 
@@ -7571,7 +7571,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             auto addressed = expression.isAddrExp;
             if (scalar.kind != Scalar.Kind.integral
                     || isStaticStructAddress(addressed)
-                    || addressed.typeInfoAddressedBy(*ev._runtimeTypes) !is null)
+                    || !addressed.typeInfoAddressedBy(*ev._runtimeTypes).isNull)
                 return null;
             auto location = buildAddress(ev, addressed.e1);
             return location is null ? null : new AddressValue(location);

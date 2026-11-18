@@ -13,6 +13,8 @@ import snakebite.stack.tls: TlsSlots;
 import snakebite.host.threads: heapNew;
 import snakebite.language.statics.data: NativeData;
 import snakebite.ffi.callplanstore: CallPlanStore;
+import snakebite.ffi: PlanCache;
+import snakebite.ffi.names: Linked;
 import std.conv: text;
 import core.exception: AssertError;
 import core.thread: Fiber, Thread;
@@ -47,17 +49,18 @@ static foreach (rootOwned; [true, false]) {
             });
         assert(variable !is null);
         auto store = StaticStore(() => heapNew!TlsSlots);
-        auto plans = CallPlanStore(null);
+        auto planStore = CallPlanStore(null);
+        auto plans = PlanCache(&planStore);
         auto data = NativeData(
             &store,
             &plans,
             &ownership.isRootOwned,
             &ownership.isDefinedElsewhere,
             (declaration) => declaration,
-            (declaration) => cast(void*) null,
+            (declaration) => Linked!(void*).init,
             (name) => cast(void*) null,
             (declaration, place) {},
-            (type) => cast(TypeInfo) null,
+            (type) => Linked!TypeInfo.init,
         );
         const storage = data.storageOf(variable);
         available = false;

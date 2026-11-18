@@ -250,6 +250,7 @@ import snakebite.language.control.condition: IfPlan, LogicalPlan;
 import snakebite.language.control.transfer: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.language.control.unwinding: CatchPlan, catchPlanOf;
+import snakebite.ffi.names: Linked;
 import snakebite.language.storage.lifetime: AggregateInitPlan;
 import snakebite.failure.unwind:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
@@ -378,13 +379,14 @@ private struct Shared {
         this.program = program;
         this.callGuest = callGuest;
         planStore = CallPlanStore(program.dependencyImage);
-        const resolver = &planStore.resolver;
-        store = StaticStore(() => heapNew!TlsSlots(resolver));
+        const plans = &planStore;
+        store = StaticStore(() => heapNew!TlsSlots(plans));
         world = StaticWorld(program, &store, &planStore,
             StaticWorld.Backend(
                 &guestWord,
                 (method, address) {
-                    callableDeclarations.insert(address, method);
+                    callableDeclarations.insert(
+                        planStore.ready(address), method);
                 },
                 (declaration, info) {
                     declarationOf.insert(cast(const(void)*) info, declaration);
@@ -421,7 +423,7 @@ private struct Shared {
 
 private struct TryCatchPlan {
     ExceptionCandidate[] candidates;
-    CatchPlan catches;
+    CatchPlan!() catches;
 }
 
 // What a `try`/`finally` statement does whatever its body runs: the scope a
@@ -3742,7 +3744,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto declaration = symbol.dsym.isAggregateDeclaration;
             assert(declaration !is null,
                 "an initializer symbol names an aggregate");
-            const initial = readyBytes(_runtimeTypes.initializer(declaration));
+            const initial = ready(_runtimeTypes.initializer(declaration));
 
             import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
@@ -5909,7 +5911,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (isStaticStructAddress(expression))
             return _nativeData.write(_type, _facts, expression, _place);
 
-        if (auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes)) {
+        auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes);
+        if (!typeInfo.isNull) {
             checkedStoreIntegral(_place,
                 cast(size_t) cast(void*) ready(typeInfo), _facts.size);
             return;
@@ -6634,7 +6637,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            const initial = readyBytes(_runtimeTypes.initializer(declaration));
+            const initial = ready(_runtimeTypes.initializer(declaration));
             const alignment = declaration.alignsize == 0
                 ? 1 : declaration.alignsize;
             auto object = _frames.reserve(declaration.structsize, alignment);
@@ -6654,7 +6657,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             const initial =
-                readyBytes(_runtimeTypes.initializer(classType.sym));
+                ready(_runtimeTypes.initializer(classType.sym));
             memcpy(object, initial.ptr, initial.length);
         }
 
@@ -6715,21 +6718,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             _shared.world.callableAddress(method, adjustment));
     }
 
-    // `value` as the evaluator uses it when it runs: a name that the
-    // compile put in place of an address gives the address of its symbol,
-    // through the function that makes each program ready to run
-    // (`CallPlanStore.addressOf`).
-    extern(D) package T ready(T)(T value) {
-        static if (is(T == class))
-            return cast(T) cast(void*) _shared.world.resolved(
-                cast(const(void)*) value);
-        else
-            return cast(T) _shared.world.resolved(value);
-    }
-
-    // `bytes` as `ready` gives the address of their start.
-    extern(D) package const(void)[] readyBytes(const(void)[] bytes) {
-        return ready(bytes.ptr)[0 .. bytes.length];
+    // `linked` as the evaluator uses it when it runs: a name gives the
+    // address of its symbol, through the function that makes each program
+    // ready to run (`CallPlanStore.ready`).
+    extern(D) package T ready(T)(Linked!T linked) {
+        return _shared.world.ready(linked);
     }
 
     // The guest declaration `info` was generated for, or `null` for a

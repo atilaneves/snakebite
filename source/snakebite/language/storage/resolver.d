@@ -334,28 +334,34 @@ public struct SymbolAddressResolver(Result, Adapter) {
 // `AddrExp` in places such as `Object.classinfo`. The symbol of a
 // declaration is a `TypeInfo` object, so the address is that object and not
 // the address of a variable slot.
-public TypeInfo typeInfoAddressedBy(Types)(
+public imported!"snakebite.ffi.names".Linked!TypeInfo typeInfoAddressedBy(
+    Types,
+)(
     imported!"snakebite.frontend.ast".AddrExp expression, ref Types types,
 ) {
     auto variable = expression.e1.isVarExp;
     auto declaration =
         variable is null ? null : variable.var.isTypeInfoDeclaration;
-    return declaration is null ? null : typeInfoObjectOf(declaration, types);
+    return declaration is null ? typeof(return).init
+        : typeInfoObjectOf(declaration, types);
 }
 
 // The object that the symbol of `declaration` is. `typeid(I)` of an
 // interface is a `TypeInfo_Interface`, but `I.classinfo` is the symbol of
 // the class information of `I`.
-public TypeInfo typeInfoObjectOf(Types)(
+public imported!"snakebite.ffi.names".Linked!TypeInfo typeInfoObjectOf(
+    Types,
+)(
     imported!"snakebite.frontend.ast".TypeInfoDeclaration declaration,
     ref Types types,
 ) {
+    import snakebite.ffi.names: Linked;
     import snakebite.frontend.ast: TypeInfoClassDeclaration;
 
     auto classType = declaration.tinfo.isTypeClass;
     if (cast(TypeInfoClassDeclaration) declaration !is null
             && classType !is null
             && classType.sym.isInterfaceDeclaration !is null)
-        return types.classInfo(classType.sym);
+        return Linked!TypeInfo.from(types.classInfo(classType.sym));
     return types.get(declaration.tinfo);
 }

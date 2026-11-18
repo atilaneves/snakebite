@@ -3,7 +3,7 @@ module snakebite.ffi.plan;
 
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi.callback: CallbackBridge;
-import snakebite.ffi.names: Name;
+import snakebite.ffi.names: Linked, Name;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.ffi.callplan:
     CallPlan, NativeSignature, hasStoreWidth, planOf;
@@ -36,6 +36,12 @@ public struct PlanCache {
         _store = store;
     }
 
+    // The store that this cache prepares plans in: the one holder of it in
+    // a static world, which the other parts reach through this.
+    public CallPlanStore* store() @safe pure nothrow @nogc {
+        return _store;
+    }
+
     import snakebite.frontend.ast: FuncDeclaration, Type, TypeFunction;
 
     // Owns the plans that this prepares, the resolver they bind symbols
@@ -48,16 +54,16 @@ public struct PlanCache {
     // word of its guest body, or the name of its host code when `word` is
     // null (`snakebite.ffi.names`). With an `adjustment` it is the entry
     // that adjusts the receiver first.
-    public void* callableAddress(
+    public Linked!(void*) callableAddress(
         const(void)* word, FuncDeclaration declaration,
         in ptrdiff_t adjustment = 0,
     ) {
         if (word is null) {
             auto code = nameOf(declaration);
             if (adjustment == 0)
-                return cast(void*) code;
-            return cast(void*) _store.names.adjusted(code, adjustment,
-                () => signatureUnderLock(declaration));
+                return Linked!(void*).named(code);
+            return Linked!(void*).named(_store.names.adjusted(code, adjustment,
+                () => signatureUnderLock(declaration)));
         }
         // The bridge never reads the AST, so the signature is built here,
         // under the compiler lock and only when the bridge has no entry
@@ -70,8 +76,8 @@ public struct PlanCache {
         if (adjustment != 0 && _store.callbacks.reservedAdjustedEntry(
                 word, adjustment) is null)
             signature = signatureUnderLock(declaration);
-        return cast(void*) _store.callbacks.adjustedEntryOf(
-            word, signature, adjustment);
+        return Linked!(void*).held(cast(void*) _store.callbacks.adjustedEntryOf(
+            word, signature, adjustment));
     }
 
     private NativeSignature signatureUnderLock(FuncDeclaration declaration) {
@@ -119,12 +125,12 @@ public struct PlanCache {
     }
 
     // The name of the host code of `function_` (`snakebite.ffi.names`),
-    // made once for each function.
-    public const(Name)* nameOf(FuncDeclaration function_) {
+    // made once for each function, with its declaration.
+    public Name* nameOf(FuncDeclaration function_) {
         if (auto found = function_ in _names)
             return *found;
-        return *_names.insert(function_,
-            _store.names.named(hostSymbolOf(function_)));
+        return *_names.insert(function_, _store.names.named(
+            hostSymbolOf(function_), 0, function_.toString));
     }
 
     // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
@@ -211,15 +217,9 @@ public struct PlanCache {
     // (ADR-0006); a plan is prepared once, on its first use.
     private SharedTable!(FuncDeclaration, CallPlan*) _plans;
     private SharedTable!(FuncDeclaration, CallPlan*) _namedPlans;
-    private SharedTable!(FuncDeclaration, const(Name)*) _names;
+    private SharedTable!(FuncDeclaration, Name*) _names;
     private SharedTable!(string, CallPlan*) _rawPlans;
     private shared size_t _preparations;
-
-    // Resolves a linker name through the cache shared by this backend's
-    // plan preparation and its other FFI operations.
-    public void* resolve(in char[] name) {
-        return _store.resolver.resolve(name);
-    }
 
     public void* resolveThreadLocal(in char[] name) const {
         return _store.resolver.resolveThreadLocal(name);
@@ -328,18 +328,15 @@ public struct PlanCache {
         scope Type[] extraArgumentTypes,
         in bool isVariadicCall,
     ) {
-        string symbol;
+        auto name = nameOf(function_);
         NativeSignature signature;
         try
             signature = calleeOf(function_, extraArgumentTypes,
-                isVariadicCall, symbol);
+                isVariadicCall);
         catch (Exception laidOutBadly)
             return _store.plan(NativeSignature.init, null, laidOutBadly.msg);
-        // No copy: dmd interns the name of an identifier in a table that
-        // lives until the process ends.
-        const declaredBy = cast(string) function_.toString;
-        return _store.plan(signature, symbol,
-            intrinsicFailure(function_, symbol), declaredBy);
+        return _store.plan(signature, name,
+            intrinsicFailure(function_, name.symbol));
     }
 
     private CallPlan* keptPlanOf(
@@ -347,16 +344,13 @@ public struct PlanCache {
         scope Type[] extraArgumentTypes,
         in bool isVariadicCall,
     ) {
-        string symbol;
+        auto name = nameOf(function_);
         auto signature = calleeOf(function_, extraArgumentTypes,
-            isVariadicCall, symbol);
-        void* address;
-        if (symbol.length != 0) {
-            address = resolve(symbol);
-            if (address is null)
-                throw unresolved(function_, symbol);
-        }
-        return _store.planAt(signature, symbol, address);
+            isVariadicCall);
+        if (const failure = intrinsicFailure(function_, name.symbol))
+            if (_store.addressIfPresent(name) is null)
+                throw new Exception(failure);
+        return _store.planAt(signature, name, _store.addressOf(name));
     }
 
     // The plan of one execution of a variadic call through an address. A caller that
@@ -399,12 +393,13 @@ public struct PlanCache {
             return *cached;
         }
 
-        auto address = resolve(name);
+        auto symbol = _store.names.named(name);
+        auto address = _store.addressIfPresent(symbol);
         if (address is null)
             return null;
         auto plan = _store.planAt(CallPlan.rawSignatureOf(
             parameterRegisters, returnRegister, secondReturnRegister),
-            name, address);
+            symbol, address);
 
         countPreparation;
         return *_rawPlans.insert(name, plan);
@@ -418,13 +413,11 @@ public struct PlanCache {
         Register returnRegister = Register(Register.Kind.none, 0),
         Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
-        import snakebite.ffi.symbol: unresolvedSymbol;
-
         if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister,
                 secondReturnRegister))
             return plan;
 
-        throw unresolvedSymbol(name);
+        throw CallPlanStore.missing(name, null);
     }
 
 }
@@ -450,8 +443,8 @@ private bool hasResultStore(
     return true;
 }
 
-// Works out how to call `function_` at one call site: the signature, and
-// `symbol`, the linker name of its code.
+// Works out how to call `function_` at one call site: the signature. The
+// name of its code is `hostSymbolOf`.
 //
 // The linkage decides only the symbol's name, which dmd's own mangler
 // supplies, so nothing here is specific to C. A signature the implemented
@@ -477,15 +470,14 @@ private NativeSignature calleeOf(
     imported!"snakebite.frontend.ast".FuncDeclaration function_,
     scope imported!"snakebite.frontend.ast".Type[] extraArgumentTypes,
     in bool isVariadicCall,
-    out string symbol,
 ) {
     import snakebite.druntime.constructoratomic: nativeTarget;
 
-    // Mangling forces `function_`'s type complete first (`mangledNameOf`'s
-    // own doc) - done before `shapeOf` reads `function_.type.nextOf` to
-    // classify the return value below, an inferred return type dmd has
-    // not resolved yet would otherwise be read as `null`.
-    symbol = hostSymbolOf(function_);
+    // The caller names `function_` first (`nameOf`): mangling forces its
+    // type complete (`mangledNameOf`'s own doc) before `shapeOf` reads
+    // `function_.type.nextOf` to classify the return value below; an
+    // inferred return type dmd has not resolved yet would otherwise be read
+    // as `null`.
 
     auto target = nativeTarget(function_);
 
@@ -512,18 +504,6 @@ private string hostSymbolOf(imported!"snakebite.frontend.ast".FuncDeclaration fu
 
     const symbol = mangledNameOf(function_).idup;
     return nativeTarget(function_).address !is null ? atomicAddSymbol : symbol;
-}
-
-// The failure for a `function_` whose code `symbol` is not in this process.
-private Exception unresolved(
-    imported!"snakebite.frontend.ast".FuncDeclaration function_, in string symbol,
-) {
-    if (const failure = intrinsicFailure(function_, symbol))
-        return new Exception(failure);
-
-    import snakebite.ffi.symbol: unresolvedSymbol;
-
-    return unresolvedSymbol(symbol, function_.toString);
 }
 
 // The failure of a call of `function_` when it is an intrinsic that LDC

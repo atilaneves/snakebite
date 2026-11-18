@@ -36,8 +36,8 @@ public struct Program {
     // address has a record, so that a file can hold the program.
     public this(const(DependencyImage)* image, bool recordsAddresses = false) {
         plans = CallPlanStore(image);
-        const resolver = &plans.resolver;
-        store = StaticStore(() => heapNew!TlsSlots(resolver), recordsAddresses);
+        const planStore = &plans;
+        store = StaticStore(() => heapNew!TlsSlots(planStore), recordsAddresses);
     }
 
     public bool recordsAddresses() const @safe pure nothrow @nogc {
@@ -101,18 +101,15 @@ public struct Program {
     ) {
         import snakebite.backends.bytecode.vm: wordAt;
 
+        // Each record that a compile or a load leaves is of a name.
         foreach (reloc; function_.relocs) {
-            if (!plans.isNamed(reloc.target))
-                return "a word that is not a name is left to make ready";
             auto word = wordAt(*function_, reloc.place);
             if (word is null)
                 return "a relocation has no place";
-            *word = plans.wordOf(reloc.target);
+            *word = plans.wordOfName(reloc.target);
         }
         function_.relocs = null;
-        foreach (ref site; function_.callSites)
-            if (site.nativePlan !is null)
-                CallPlanStore.bindIfPresent(site.nativePlan);
+        plans.bindNewPlans;
         function_.fixWindowFacts;
         if (const reason = bindInstructionReferences(*function_))
             return reason;

@@ -5,7 +5,7 @@ private:
 
 
 import snakebite.failure.report: internalFailure;
-import snakebite.ffi.symbol: Resolver;
+import snakebite.ffi.callplanstore: CallPlanStore;
 
 
 // A thread-local guest variable's compile-time-constant description
@@ -31,10 +31,13 @@ public struct TlsDescriptor {
     public size_t size;
     // Set when the variable's storage is native (a dependency image's
     // own thread-local, or an `extern` one): the linker name that
-    // `Resolver.resolveThreadLocal` answers, on each thread, with that
+    // `CallPlanStore.threadLocalAddressOf` answers, on each thread, with that
     // thread's copy in the image's TLS block. No copy is made from a template then,
     // so native code and guest code on one thread reach the same bytes.
     public string nativeName;
+    // The declaration of the variable, for the failure of a symbol that no
+    // object defines.
+    public string declaredBy;
 }
 
 
@@ -58,15 +61,15 @@ public struct TlsSlots {
 
     private Entry[] _table;
     private size_t _count;
-    // What a descriptor with a `nativeName` resolves its symbol with, on this
-    // thread. The resolver of the program that the table belongs to, which
+    // What a descriptor with a `nativeName` finds its symbol with, on this
+    // thread. The store of the program that the table belongs to, which
     // must outlive the table.
-    private const(Resolver)* _resolver;
+    private const(CallPlanStore)* _store;
 
     @disable this(this);
 
-    public this(const(Resolver)* resolver) {
-        _resolver = resolver;
+    public this(const(CallPlanStore)* store) {
+        _store = store;
     }
 
     ~this() {
@@ -102,12 +105,8 @@ public struct TlsSlots {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
             // would be that thread's copy.
-            entry.bytes = _resolver.resolveThreadLocal(descriptor.nativeName);
-            if (entry.bytes is null) {
-                import snakebite.ffi.symbol: unresolvedSymbol;
-
-                throw unresolvedSymbol(descriptor.nativeName);
-            }
+            entry.bytes = _store.threadLocalAddressOf(
+                descriptor.nativeName, descriptor.declaredBy);
         } else {
             import core.memory: GC;
             import core.stdc.stdlib: calloc;

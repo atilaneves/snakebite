@@ -7,6 +7,7 @@ private:
 import snakebite.frontend.ast: AggregateDeclaration, ClassDeclaration,
     Expression, FuncDeclaration;
 import object: Interface, TypeInfo_Class;
+import snakebite.ffi.names: Linked;
 import snakebite.language.statics.data: NativeData;
 import snakebite.native.value: TypeFacts;
 
@@ -14,16 +15,18 @@ import snakebite.native.value: TypeFacts;
 // Callable addresses and field initializers differ between backends.
 // Object layout and DMD's resolved vtables do not.
 public struct Hooks {
-    public void* delegate(FuncDeclaration method, ptrdiff_t adjustment)
+    public Linked!(void*) delegate(FuncDeclaration method, ptrdiff_t adjustment)
         methodAddress;
-    public TypeInfo_Class delegate(ClassDeclaration declaration)
+    public Linked!TypeInfo_Class delegate(ClassDeclaration declaration)
         linkedClassInfo;
     // Whether another object holds the class information, the vtable and
     // the initial image of a class (`RuntimeTypes.isNativeClass`).
     public bool delegate(ClassDeclaration declaration) isNativeClass;
-    // The address of the vtable of a native class.
-    public const(void)* delegate(ClassDeclaration declaration) nativeVtable;
-    public immutable(void)* delegate(AggregateDeclaration declaration) rtInfo;
+    // The name of the vtable of a native class.
+    public Linked!(const(void)*) delegate(ClassDeclaration declaration)
+        nativeVtable;
+    public Linked!(immutable(void)*) delegate(AggregateDeclaration declaration)
+        rtInfo;
     public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
         registerGenerated;
     // The type data are data of the program: this reserves them and writes
@@ -59,13 +62,13 @@ public struct ClassRuntimeCache {
 
     import snakebite.host.sharedtable: SharedTable;
 
-    private SharedTable!(ClassDeclaration, TypeInfo_Class) _published;
+    private SharedTable!(ClassDeclaration, Linked!TypeInfo_Class) _published;
     // Guarded by the compiler lock (`build`).
-    private TypeInfo_Class[ClassDeclaration] _pending;
+    private Linked!TypeInfo_Class[ClassDeclaration] _pending;
     private size_t _depth;
 
     // A complete entry, or null.
-    public TypeInfo_Class* find(ClassDeclaration declaration) {
+    public Linked!TypeInfo_Class* find(ClassDeclaration declaration) {
         return declaration in _published;
     }
 
@@ -78,10 +81,10 @@ public struct ClassRuntimeCache {
     // in each, would wait for each other forever. The compiler lock is
     // recursive: `classRuntimeInfo` reaches `build` again, on the same
     // thread, for a base class or an interface.
-    public TypeInfo_Class build(
-        scope TypeInfo_Class delegate() make,
+    public Linked!TypeInfo_Class build(
+        scope Linked!TypeInfo_Class delegate() make,
     ) {
-        TypeInfo_Class info;
+        Linked!TypeInfo_Class info;
         run({ info = make(); });
         return info;
     }
@@ -109,7 +112,7 @@ public struct ClassRuntimeCache {
         });
     }
 
-    public TypeInfo_Class* opBinaryRight(string op: "in")(
+    public Linked!TypeInfo_Class* opBinaryRight(string op: "in")(
         ClassDeclaration declaration,
     ) {
         if (auto pending = declaration in _pending)
@@ -118,7 +121,7 @@ public struct ClassRuntimeCache {
     }
 
     public void opIndexAssign(
-        TypeInfo_Class info, ClassDeclaration declaration,
+        Linked!TypeInfo_Class info, ClassDeclaration declaration,
     ) {
         _pending[declaration] = info;
     }
@@ -130,7 +133,7 @@ public struct ClassRuntimeCache {
     }
 }
 
-public TypeInfo_Class classRuntimeInfo(
+public Linked!TypeInfo_Class classRuntimeInfo(
     imported!"snakebite.frontend.ast".ClassDeclaration declaration,
     ref ClassRuntimeCache cache,
     Hooks hooks,
@@ -141,7 +144,8 @@ public TypeInfo_Class classRuntimeInfo(
 
     if (auto cached = declaration in cache)
         return *cached;
-    if (auto linked = hooks.linkedClassInfo(declaration)) {
+    auto linked = hooks.linkedClassInfo(declaration);
+    if (!linked.isNull) {
         cache[declaration] = linked;
         return linked;
     }
@@ -199,13 +203,14 @@ public TypeInfo_Class classRuntimeInfo(
     }
     // Register before resolving methods: their bodies can refer to this
     // same class while its metadata is being built.
-    cache[declaration] = info;
+    auto result = Linked!TypeInfo_Class.held(info);
+    cache[declaration] = result;
     if (hooks.registerGenerated !is null)
         hooks.registerGenerated(declaration, info);
 
     if (!isInterface && declaration.baseClass !is null)
         data.storeReference(cast(void*) &info.base,
-            cast(void*) classRuntimeInfo(declaration.baseClass, cache, hooks));
+            classRuntimeInfo(declaration.baseClass, cache, hooks));
 
     // An interface's methods live in the `Interface` tables of the classes
     // that implement it, not in its own `TypeInfo_Class`. The vtable has the
@@ -265,15 +270,15 @@ public TypeInfo_Class classRuntimeInfo(
     foreach (i; 0 .. interfaceCount) {
         auto base = (*declaration.vtblInterfaces)[i];
         data.storeReference(cast(void*) &info.interfaces[i].classinfo,
-            cast(void*) classRuntimeInfo(base.sym, cache, hooks));
+            classRuntimeInfo(base.sym, cache, hooks));
         info.interfaces[i].offset = base.offset;
     }
 
     // An opaque class has no size, so its initialiser has no slots.
     if (!isInterface && info.m_init.length != 0)
         writeImage(declaration, cast(ubyte*) info.m_init.ptr,
-            info.vtbl.ptr, cache, hooks);
-    return info;
+            Linked!(const(void)*).held(info.vtbl.ptr), cache, hooks);
+    return result;
 }
 
 // Writes at `place` the initial image of an object of the class
@@ -287,7 +292,7 @@ public void initialImage(
 ) {
     if (!hooks.isNativeClass(declaration))
         return hooks.data.copyBytes(place,
-            classRuntimeInfo(declaration, cache, hooks).m_init);
+            classRuntimeInfo(declaration, cache, hooks).held.m_init);
 
     import core.stdc.string: memset;
 
@@ -305,7 +310,7 @@ public void initialImage(
 // interfaces of a class of the program, and for an interface of a base of
 // which a class below that base replaces a method.
 private void writeImage(
-    ClassDeclaration declaration, ubyte* place, in void* vtable,
+    ClassDeclaration declaration, ubyte* place, Linked!(const(void)*) vtable,
     ref ClassRuntimeCache cache, Hooks hooks,
 ) {
     import snakebite.native.address: Target;
@@ -316,7 +321,7 @@ private void writeImage(
     const copiesBase = base !is null && !isNative
         && !hooks.isNativeClass(base);
     if (copiesBase)
-        data.copyBytes(place, classRuntimeInfo(base, cache, hooks).m_init);
+        data.copyBytes(place, classRuntimeInfo(base, cache, hooks).held.m_init);
     data.storeReference(place, vtable);
 
     for (auto parent = declaration; parent !is null;
@@ -342,10 +347,10 @@ private void writeImage(
                         Target.Kind.interfaceRecord, parentInfo, i);
                 else
                     data.storeReference(&table[0],
-                        &parentInfo.interfaces[i]);
+                        &parentInfo.held.interfaces[i]);
             }
             if (own)
-                data.storeSlice(&parentInfo.interfaces[i].vtbl, table,
+                data.storeSlice(&parentInfo.held.interfaces[i].vtbl, table,
                     (void*).sizeof);
             data.storeReference(slot, table.ptr);
         }

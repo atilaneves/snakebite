@@ -4,32 +4,15 @@ module snakebite.ffi.symbol;
 private:
 
 
-// The failure for a symbol that this process does not have, as the link of a
-// native build reports it. `declaredBy` names the declaration, when there is
-// one.
-public Exception unresolvedSymbol(in char[] symbol, in char[] declaredBy = null) {
-    import std.conv: text;
-
-    return new Exception(text(
-        "ffi cannot resolve the symbol `", symbol, "`",
-        declaredBy.length ? text(" declared by `", declaredBy, "`") : "",
-        ": it is not in this process"));
-}
-
-// Resolves already-loaded symbols by linker name. The cache keeps both
-// addresses and missing symbols, so a missing template instance is not
-// looked up again on every call. Every thread reads the cache without a
-// lock (ADR-0006); a symbol is looked up once, on its first use.
+// Resolves already-loaded symbols by linker name: in the dependency image
+// first, then in the process. It keeps no answer: the name of a symbol keeps
+// it (`CallPlanStore.addressOf`), so a symbol is looked up once, on its first
+// use, also when it is missing.
 public struct Resolver {
     import snakebite.image.dependency: DependencyImage;
     import snakebite.host.runtimeentry: RuntimeEntry;
-    import snakebite.host.sharedtable: SharedTable;
 
     private const(DependencyImage)* _image;
-    // Read without a lock the same way as every other ADR-0006 cache:
-    // several guest threads can each resolve a symbol for the first time
-    // at once.
-    private SharedTable!(string, void*) _addresses;
 
     // The owner must outlive this resolver and every address it returns.
     public this(const(DependencyImage)* image) {
@@ -39,14 +22,11 @@ public struct Resolver {
     version(unittest) private size_t _lookups;
 
     public void* resolve(in char[] name) {
-        if (auto cached = _addresses.find(cast(string) name))
-            return *cached;
-
         version(unittest) ++_lookups;
         auto address = _image is null ? null : _image.resolve(name);
         if (address is null)
             address = symbolAddress(name);
-        return *_addresses.insert(name.idup, RuntimeEntry.route(address));
+        return RuntimeEntry.route(address);
     }
 
     // This thread's address of a thread-local symbol. Never cached: the

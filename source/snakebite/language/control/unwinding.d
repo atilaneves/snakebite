@@ -10,27 +10,30 @@ import snakebite.failure.unwind:
     ExceptionCandidate;
 
 
-public struct CatchPlan {
+// `Type` is how a backend holds the class that a clause catches: a
+// `TypeInfo_Class`, or a `Linked!TypeInfo_Class` for a compile that can hold
+// its name (`snakebite.ffi.names`).
+public struct CatchPlan(Type = TypeInfo_Class) {
     public struct Clause {
         import snakebite.frontend.ast: Catch;
 
         public Catch syntax;
-        // `null` for a clause that no D throwable can match.
-        public TypeInfo_Class type;
+        // `Type.init` for a clause that no D throwable can match.
+        public Type type;
     }
 
     public Clause[] clauses;
 
 }
 
-public CatchPlan catchPlanOf(
+public CatchPlan!Type catchPlanOf(Type)(
     imported!"snakebite.frontend.ast".TryCatchStatement statement,
-    scope TypeInfo_Class delegate(imported!"snakebite.frontend.ast".Catch) typeOf,
+    scope Type delegate(imported!"snakebite.frontend.ast".Catch) typeOf,
 ) {
-    CatchPlan plan;
+    CatchPlan!Type plan;
     foreach (catch_; *statement.catches)
-        plan.clauses ~= CatchPlan.Clause(
-            catch_, catchesCppClass(catch_) ? null : typeOf(catch_));
+        plan.clauses ~= CatchPlan!Type.Clause(
+            catch_, catchesCppClass(catch_) ? Type.init : typeOf(catch_));
     return plan;
 }
 

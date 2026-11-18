@@ -17,6 +17,7 @@ public struct StaticWorld {
         FuncDeclaration, Module;
     import snakebite.ffi: PlanCache;
     import snakebite.ffi.callplanstore: CallPlanStore;
+    import snakebite.ffi.names: Linked;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.statics.classinfo: ClassRuntimeCache;
     import snakebite.language.statics.data: NativeData;
@@ -33,7 +34,7 @@ public struct StaticWorld {
         public const(void)* delegate(FuncDeclaration function_) guestWord;
         // Optional. Called with each address, with no adjustment, that host
         // code gets for a function.
-        public void delegate(FuncDeclaration function_, void* address)
+        public void delegate(FuncDeclaration function_, Linked!(void*) address)
             addressGiven;
         // Optional. Called with the class information that this built for a
         // guest class.
@@ -57,7 +58,6 @@ public struct StaticWorld {
     private ClassRuntimeCache _classRuntime;
     private const Program _program;
     private Backend _backend;
-    private CallPlanStore* _planStore;
 
     // `store` and `planStore` are the storage of the owner, which outlives
     // this.
@@ -69,10 +69,9 @@ public struct StaticWorld {
     ) {
         _program = program;
         _backend = backend;
-        _planStore = planStore;
         plans = PlanCache(planStore);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        data = NativeData(store, planStore, &_program.isRootOwned,
+        data = NativeData(store, &plans, &_program.isRootOwned,
             &_program.isDefinedElsewhere,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
@@ -81,7 +80,6 @@ public struct StaticWorld {
             backend.blocksOf, &callableKind);
         types = RuntimeTypes(&_program.isRootOwned,
             &_program.isDefinedElsewhere,
-            planStore,
             &callableAddress,
             &classRuntimeInfo, &data);
     }
@@ -94,19 +92,22 @@ public struct StaticWorld {
 
     // The address of `symbol` that a constant holds: the name of its symbol
     // when the program does not define it (`snakebite.ffi.names`).
-    private void* constantSymbolAddress(Declaration symbol) {
+    private Linked!(void*) constantSymbolAddress(Declaration symbol) {
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
         if (auto function_ = symbol.isFuncDeclaration)
             return callableAddress(function_, 0);
 
-        return cast(void*) data.named(nativeSymbolName(symbol));
+        return Linked!(void*).named(
+            data.named(nativeSymbolName(symbol), symbol.toString));
     }
 
     // The native metadata of a guest class. The vtable is native layout that
     // host code with a guest object calls through, so each slot is a
     // callable address.
-    public TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
+    public Linked!TypeInfo_Class classRuntimeInfo(
+        ClassDeclaration declaration,
+    ) {
         if (auto found = _classRuntime.find(declaration))
             return *found;
 
@@ -116,7 +117,9 @@ public struct StaticWorld {
     // Apart from `classRuntimeInfo`: the delegates below capture `this`, so
     // a function that holds them allocates a closure when it starts, and
     // the lookup of a class that exists must not allocate.
-    private TypeInfo_Class buildClassRuntimeInfo(ClassDeclaration declaration) {
+    private Linked!TypeInfo_Class buildClassRuntimeInfo(
+        ClassDeclaration declaration,
+    ) {
         import snakebite.language.statics.classinfo:
             classRuntimeInfo_ = classRuntimeInfo;
 
@@ -156,23 +159,25 @@ public struct StaticWorld {
     // (`adjustment` 0). Function pointers can reach host code inside
     // aggregates or through pointers to guest data, where the barrier cannot
     // replace them. Null for an abstract function.
-    public void* callableAddress(FuncDeclaration method, ptrdiff_t adjustment) {
+    public Linked!(void*) callableAddress(
+        FuncDeclaration method, ptrdiff_t adjustment,
+    ) {
         import snakebite.frontend.ast: isAbstract;
 
         // getOverloads can leave an alias in a function-pointer constant.
         method = definitionOf(method.toAliasFunc);
         if (method.isAbstract)
-            return null;
+            return Linked!(void*).init;
 
         const(void)* word;
         if (callSelection.usesNativeVariadicAddress(
                 method, &isDefinedElsewhere))
-            return cast(void*) plans.nameOf(method);
+            return Linked!(void*).named(plans.nameOf(method));
         if (callSelection.usesGuestBody(method, &isDefinedElsewhere)) {
             word = _backend.guestWord(method);
             if (callSelection.storesGuestWord(
                     method, &isDefinedElsewhere, adjustment))
-                return cast(void*) word;
+                return Linked!(void*).held(cast(void*) word);
         }
         auto address = plans.callableAddress(word, method, adjustment);
         // An adjusted address is the entry of a vtable slot. Only a virtual
@@ -186,18 +191,16 @@ public struct StaticWorld {
         return _program.isDefinedElsewhere(function_);
     }
 
-    // `address`, or the address of the symbol when `address` is a name
-    // (`CallPlanStore.resolved`): for a backend that reads a value as it runs
-    // and does not save.
-    public const(void)* resolved(const(void)* address) {
-        return _planStore.resolved(address);
+    // `linked` as a backend that reads it as it runs, and does not save,
+    // uses it: a name gives the address of its symbol
+    // (`CallPlanStore.ready`).
+    public T ready(T)(Linked!T linked) {
+        return plans.store.ready(linked);
     }
 
-    // What `callableAddress` returned: a guest function, the callback entry
-    // that host code calls for one, or the name of code of the host.
+    // What `callableAddress` held: a guest function, or the callback entry
+    // that host code calls for one.
     public Target.Kind callableKind(in void* address) {
-        if (_planStore.names.nameAt(address) !is null)
-            return Target.Kind.hostSymbol;
         if (address is null || plans.isGuestWord(address))
             return Target.Kind.functionWord;
         if (plans.guestTarget(address).word !is null)

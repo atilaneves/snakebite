@@ -96,15 +96,16 @@ public struct Address {
     }
 
     // The table or the record `interfaces[index]` of the class information
-    // `classInfo`, which another object holds.
+    // that another object holds, of which `classInfo` is the name
+    // (`snakebite.ffi.names`).
     public static Address ofInterface(
-        in Target.Kind kind, in TypeInfo_Class classInfo, in size_t index,
+        in Target.Kind kind, in size_t classInfo, in size_t index,
     ) @safe pure nothrow @nogc {
         assert(kind == Target.Kind.interfaceTable
             || kind == Target.Kind.interfaceRecord);
         Address result;
-        result._target = Target(kind, cast(size_t) cast(const(void)*) classInfo,
-            DatumRef.init, cast(uint) index);
+        result._target = Target(kind, classInfo, DatumRef.init,
+            cast(uint) index);
         return result;
     }
 
@@ -126,12 +127,11 @@ public struct Address {
 
 // The word that refers to the table (`interfaceTable`) or the record
 // (`interfaceRecord`) `interfaces[index]` of the class information `info`,
-// through the public druntime API.
+// through the public druntime API. The caller checks that `info` has
+// `interfaces[index]`.
 public size_t interfaceWordOf(
     in Target.Kind kind, in TypeInfo_Class info, in size_t index,
 ) pure nothrow @nogc {
-    assert(index < info.interfaces.length,
-        "a class information has the interface that a word names");
     const interface_ = &info.interfaces[index];
     return kind == Target.Kind.interfaceTable
         ? cast(size_t) interface_.vtbl.ptr : cast(size_t) interface_;

@@ -58,25 +58,29 @@ unittest {
 
 @("resolved.once")
 unittest {
-    Resolver resolver;
+    import snakebite.ffi.callplanstore: CallPlanStore;
+
+    auto store = CallPlanStore(null);
 
     foreach (_; 0 .. 100)
-        resolver.resolve("abs").should.not == null;
+        store.addressIfPresent(store.names.named("abs")).should.not == null;
 
-    resolver.lookups.should == 1;
+    store.resolver.lookups.should == 1;
 }
 
 
 @("missing.resolved.once")
 unittest {
-    Resolver resolver;
+    import snakebite.ffi.callplanstore: CallPlanStore;
+
+    auto store = CallPlanStore(null);
 
     foreach (_; 0 .. 100)
-        resolver.resolve(
+        store.addressIfPresent(store.names.named(
             "snakebite_symbol_that_does_not_exist",
-        ).should == null;
+        )).should == null;
 
-    resolver.lookups.should == 1;
+    store.resolver.lookups.should == 1;
 }
 
 
