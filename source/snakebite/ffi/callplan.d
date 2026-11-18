@@ -235,16 +235,35 @@ public struct CallPlan {
         void* returnPlace,
         scope const(void*)[] arguments,
     ) const {
-        if (arguments.length != _parameterCount)
-            throwArgumentCountMismatch(_parameterCount, arguments.length);
-        if (_hiddenReturnPointer && returnPlace is null)
-            throwMissingReturnPlace;
+        checkCall(returnPlace, arguments);
         if (_callbackArguments.length) {
             callWithCallbacks(address, returnPlace, arguments);
             return;
         }
 
         callDirect(address, returnPlace, arguments);
+    }
+
+    // As `callAt`, with arguments that host code passed: each value is
+    // already one that host code can call, a function or a delegate too.
+    public void forwardAt(
+        const(void)* address,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
+        checkCall(returnPlace, arguments);
+        callDirect(address, returnPlace, arguments);
+    }
+
+    // The checks of `callAt` and `forwardAt`.
+    pragma(inline, true)
+    private void checkCall(
+        void* returnPlace, scope const(void*)[] arguments,
+    ) const {
+        if (arguments.length != _parameterCount)
+            throwArgumentCountMismatch(_parameterCount, arguments.length);
+        if (_hiddenReturnPointer && returnPlace is null)
+            throwMissingReturnPlace;
     }
 
     // The second half of `callAt`, once every argument slot holds bytes the

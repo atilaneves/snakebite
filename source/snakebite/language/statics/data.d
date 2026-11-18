@@ -6,7 +6,7 @@ private:
 
 import snakebite.frontend.ast: Module;
 import snakebite.failure.report: internalFailure;
-import snakebite.native.address: Address, DatumRef, Target;
+import snakebite.native.address: Address, DatumRef, Target, wordOf;
 import snakebite.frontend.typefacts;
 import snakebite.native.staticstore: Placed, StaticBlocks, StaticStore;
 import snakebite.native.value:
@@ -42,7 +42,8 @@ public struct NativeData {
     private SymbolAddress _symbolAddress;
     private FunctionKind _functionKind;
     private ThreadLocalAddress _threadLocalAddress;
-    private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
+    // Writes the initial image of an object of a class.
+    private void delegate(ClassDeclaration, void*) _classImage;
     private TypeInfoOf _typeInfo;
     // Read and written only under the compiler lock. Class objects and
     // struct values are keyed by their own literal, not by a reference
@@ -88,7 +89,7 @@ public struct NativeData {
         VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
         ThreadLocalAddress threadLocalAddress,
-        TypeInfo_Class delegate(ClassDeclaration) classInfo,
+        void delegate(ClassDeclaration, void*) classImage,
         TypeInfoOf typeInfo,
         StaticBlocks* delegate(Module) blocksOf = null,
         FunctionKind functionKind = null,
@@ -98,7 +99,7 @@ public struct NativeData {
         _linkedVariable = linkedVariable;
         _symbolAddress = symbolAddress;
         _threadLocalAddress = threadLocalAddress;
-        _classInfo = classInfo;
+        _classImage = classImage;
         _typeInfo = typeInfo;
         _store = store;
         _blocksOf = blocksOf;
@@ -127,13 +128,12 @@ public struct NativeData {
                 return;
             }
             version(unittest) assertCacheFillAllowed!"class constants";
-            const info = _classInfo(value.originalClass);
             const alignment = value.originalClass.alignsize;
             // Must remain writable.
-            placed = reserve(TypeFacts(info.m_init.length,
+            placed = reserve(TypeFacts(value.originalClass.structsize,
                 alignment == 0 ? 1 : alignment), value.originalClass);
             auto address = placed.ptr;
-            copyClassImage(address, info);
+            _classImage(value.originalClass, address);
             // Register before fields: compile-time objects can form cycles.
             _compileTimeValues[value.value] = placed;
             scope (failure) _compileTimeValues.remove(value.value);
@@ -311,8 +311,10 @@ public struct NativeData {
             link.set = cast(const(StaticBlocks)*) target.datum.set;
             link.block = target.datum.block;
             link.offset = target.datum.offset + offset;
-        } else
+        } else {
             link.address = target.address + offset;
+            link.index = target.index;
+        }
         recordLink(place, link);
     }
 
@@ -332,46 +334,6 @@ public struct NativeData {
         foreach (blocks; _knownBlocks)
             foreach (link; blocks.linksIn(source.ptr, source.length))
                 recordLink(cast(ubyte*) place + link.wordOffset, link);
-    }
-
-    // Whether the initial image of `info` is bytes of the host, whose address
-    // words are not recorded. Without `recordRelocs` no word needs a record.
-    public bool isHostClass(in TypeInfo_Class info) {
-        return recordRelocs && info.m_init.length != 0
-            && addressOfData(info.m_init.ptr).target.kind
-                == Target.Kind.hostSymbol;
-    }
-
-    // `place` becomes the initial image of the class `info`, but for the
-    // values of the fields of a class of the host: the caller writes those.
-    // The image of a class of the host is written from its structure, so that
-    // each address word has a record: the word of the vtable, the word of the
-    // monitor (null in an initial image), and a word for each interface, at
-    // the offset and with the table that the class information gives. The
-    // other words are the fields.
-    public void copyClassImage(void* place, in TypeInfo_Class info) {
-        import core.stdc.string: memset;
-
-        if (!isHostClass(info)) {
-            copyBytes(place, info.m_init);
-            return;
-        }
-        const image = info.m_init;
-        memset(place, 0, image.length);
-        storeAddress(&this, place,
-            Address(Target.Kind.hostSymbol, *cast(void**) image.ptr));
-        const hasMonitor = !(info.m_flags & TypeInfo_Class.ClassFlags.isCPPclass);
-        assert(!hasMonitor || (cast(const(void*)*) image.ptr)[1] is null,
-            "the monitor of an initial image is null");
-        for (auto parent = cast() info; parent !is null;
-                parent = parent.base)
-            foreach (interface_; parent.interfaces) {
-                assert(*cast(const(void)**) (image.ptr + interface_.offset)
-                    is interface_.vtbl.ptr,
-                    "an interface slot holds the table of the interface");
-                storeAddress(&this, cast(ubyte*) place + interface_.offset,
-                    Address(Target.Kind.hostSymbol, interface_.vtbl.ptr));
-            }
     }
 
     // Type data are real druntime objects in datums of the blocks, so that a
@@ -451,6 +413,16 @@ public struct NativeData {
     private Address functionAddress(in void* address) {
         return Address(_functionKind is null
             ? Target.Kind.hostSymbol : _functionKind(address), address);
+    }
+
+    // The word at `place` becomes the table (`interfaceTable`) or the record
+    // (`interfaceRecord`) `interfaces[index]` of the class information
+    // `info` of another object.
+    public void storeInterface(
+        void* place, in Target.Kind kind, in TypeInfo_Class info,
+        in size_t index,
+    ) {
+        storeAddress(&this, place, Address.ofInterface(kind, info, index));
     }
 
     // The slice at `place` becomes `data`, which is bytes of a datum, of
@@ -876,7 +848,7 @@ private void storeAddress(
     in size_t offset = 0, in size_t size = size_t.sizeof,
 ) {
     const where = target.target;
-    checkedStoreIntegral(place, where.address + offset, size);
+    checkedStoreIntegral(place, wordOf(where) + offset, size);
     if (nativeData !is null)
         nativeData.recordAddress(place, where, offset);
 }

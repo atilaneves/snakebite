@@ -7090,8 +7090,8 @@ private Node buildNewStorage(E)(
 private const(void)[] classImageOf(E)(E ev, NewExp expression) {
     import snakebite.frontend.typefacts: baseType;
 
-    return ev._shared.world.classRuntimeInfo(
-        expression.newtype.baseType.isTypeClass.sym).m_init;
+    return ev._runtimeTypes.initializer(
+        expression.newtype.baseType.isTypeClass.sym);
 }
 
 // The hidden context of a nested aggregate. A nested class made with an

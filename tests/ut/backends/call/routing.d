@@ -322,3 +322,73 @@ unittest {
     backend.symbolLookups.should == lookups;
     assert(lookups >= 1);
 }
+
+
+// Data of a dependency that this process holds. Guest code and native code
+// read and write one copy of each variable.
+public __gshared int routingSharedCount = 10;
+public int routingThreadCount = 20;
+
+public void routingBump() {
+    routingSharedCount += 1;
+    routingThreadCount += 2;
+}
+
+private enum dependencyDataModule = q{
+    module ut.backends.call.routing;
+    __gshared int routingSharedCount;
+    int routingThreadCount;
+    void routingBump();
+};
+
+private enum dependencyDataCode = q{
+    int answer() {
+        routingSharedCount = 100;
+        routingThreadCount = 200;
+        routingBump();
+        routingSharedCount += 10;
+        routingThreadCount += 20;
+        routingBump();
+        return routingSharedCount + routingThreadCount;
+    }
+};
+
+// The arms of the test below run in parallel and share one variable.
+private __gshared Object routingDataLock = new Object;
+
+// A shared and a thread-local variable of a dependency, written and read by
+// guest code and by native code.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native code"),
+)) {
+    @("dependencyData.sharedAndThreadLocal.bothSides." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        synchronized (routingDataLock) {
+            const sharedBefore = routingSharedCount;
+            const threadBefore = routingThreadCount;
+            scope(exit) {
+                routingSharedCount = sharedBefore;
+                routingThreadCount = threadBefore;
+            }
+
+            int result;
+            static if (is(backend == Native)) {
+                mixin(dependencyDataCode);
+                result = answer();
+            } else {
+                auto modules = parseSnippets([
+                    "module routing_data_both_root;\n"
+                        ~ "import ut.backends.call.routing;\n"
+                        ~ dependencyDataCode,
+                    dependencyDataModule,
+                ]);
+                auto backend_ = ownedBackend!backend(Program([modules[0]]));
+                backend_.call(findFunction(modules[0], "answer"), &result, []);
+            }
+            result.should == 112 + 224;
+            routingSharedCount.should == 112;
+            routingThreadCount.should == 224;
+        }
+    }
+}

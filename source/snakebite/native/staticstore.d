@@ -50,6 +50,8 @@ public struct StaticBlocks {
         // The offset in the datum of the word that holds the address.
         public size_t wordOffset;
         public Target.Kind kind;
+        // For `interfaceTable` and `interfaceRecord`: `Target.index`.
+        public uint index;
         public const(StaticBlocks)* set;
         public size_t block;
         public size_t offset;

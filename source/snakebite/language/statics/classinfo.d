@@ -18,6 +18,11 @@ public struct Hooks {
         methodAddress;
     public TypeInfo_Class delegate(ClassDeclaration declaration)
         linkedClassInfo;
+    // Whether another object holds the class information, the vtable and
+    // the initial image of a class (`RuntimeTypes.isNativeClass`).
+    public bool delegate(ClassDeclaration declaration) isNativeClass;
+    // The address of the vtable of a native class.
+    public const(void)* delegate(ClassDeclaration declaration) nativeVtable;
     public immutable(void)* delegate(AggregateDeclaration declaration) rtInfo;
     public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
         registerGenerated;
@@ -76,13 +81,20 @@ public struct ClassRuntimeCache {
     public TypeInfo_Class build(
         scope TypeInfo_Class delegate() make,
     ) {
+        TypeInfo_Class info;
+        run({ info = make(); });
+        return info;
+    }
+
+    // Runs `work`, which can build class information (an initial image
+    // does), as `build` runs `make`.
+    public void run(scope void delegate() work) {
         import snakebite.frontend.compiler: withCompilerLock;
 
-        TypeInfo_Class info;
         withCompilerLock({
             ++_depth;
             scope(exit) --_depth;
-            // A partial entry `make` registered (`classRuntimeInfo`
+            // A partial entry `work` registered (`classRuntimeInfo`
             // registers before it resolves methods and fields, so a
             // class that reaches itself finds it) must not survive a
             // throw out of the outermost construction: a later `in`
@@ -91,11 +103,10 @@ public struct ClassRuntimeCache {
             scope (failure)
                 if (_depth == 1)
                     _pending = null;
-            info = make();
+            work();
             if (_depth == 1)
                 publish;
         });
-        return info;
     }
 
     public TypeInfo_Class* opBinaryRight(string op: "in")(
@@ -197,11 +208,9 @@ public TypeInfo_Class classRuntimeInfo(
             cast(void*) classRuntimeInfo(declaration.baseClass, cache, hooks));
 
     // An interface's methods live in the `Interface` tables of the classes
-    // that implement it, not in its own `TypeInfo_Class`.
-    const baseLength = info.base is null ? 0 : info.base.vtbl.length;
-    const length = isInterface ? 0
-        : declaration.vtbl.length > baseLength
-            ? declaration.vtbl.length : baseLength;
+    // that implement it, not in its own `TypeInfo_Class`. The vtable has the
+    // slots of the bases, so each slot comes from the declaration.
+    const length = isInterface ? 0 : declaration.vtbl.length;
     if (length != 0)
         data.storeSlice(&info.vtbl, data.reserve(
             TypeFacts(length * (void*).sizeof, (void*).alignof),
@@ -209,8 +218,6 @@ public TypeInfo_Class classRuntimeInfo(
     // An `extern(C++)` class has no classinfo slot: its first virtual
     // method is at index 0.
     const firstMethod = declaration.vtblOffset;
-    foreach (i; firstMethod .. baseLength)
-        data.storeFunction(&info.vtbl[i], info.base.vtbl[i]);
     if (firstMethod && !isInterface)
         data.storeReference(&info.vtbl[0], cast(void*) info);
 
@@ -248,20 +255,6 @@ public TypeInfo_Class classRuntimeInfo(
                 data.storeFunction(&info.vtbl[i],
                     hooks.methodAddress(method, 0));
         }
-        // An opaque class has no size, so its initialiser has no slots.
-        if (info.m_init.length != 0) {
-            if (info.base !is null) {
-                data.copyClassImage(info.m_init.ptr, info.base);
-                // The fields of a base of the host take their values from the
-                // declarations, as the fields of this class do.
-                if (data.isHostClass(info.base))
-                    for (auto parent = declaration.baseClass;
-                            parent !is null; parent = parent.baseClass)
-                        data.fillFields(parent, cast(ubyte*) info.m_init.ptr);
-            }
-            data.storeReference(info.m_init.ptr, info.vtbl.ptr);
-            data.fillFields(declaration, cast(ubyte*) info.m_init.ptr);
-        }
     }
 
     const interfaceCount = declaration.vtblInterfaces.length;
@@ -274,37 +267,117 @@ public TypeInfo_Class classRuntimeInfo(
         data.storeReference(cast(void*) &info.interfaces[i].classinfo,
             cast(void*) classRuntimeInfo(base.sym, cache, hooks));
         info.interfaces[i].offset = base.offset;
-        if (!isInterface) {
-            auto table = _interfaceVtable(
-                declaration, base, &info.interfaces[i], hooks);
-            data.storeSlice(&info.interfaces[i].vtbl, table, (void*).sizeof);
-            data.storeReference(info.m_init.ptr + base.offset, table.ptr);
-        }
     }
 
-    // An inherited interface keeps its object offset and its Interface
-    // descriptor. A derived override gets a new table at that same offset.
-    if (!isInterface)
-        for (auto parent = declaration.baseClass;
-                parent !is null; parent = parent.baseClass) {
-            auto parentInfo = classRuntimeInfo(parent, cache, hooks);
-            foreach (i; 0 .. parent.vtblInterfaces.length) {
-                import snakebite.frontend.ast: fillVtbl;
-                auto base = (*parent.vtblInterfaces)[i];
-                if (!base.fillVtbl(declaration, null, 0))
-                    continue;
-                auto table = _interfaceVtable(
-                    declaration, base, &parentInfo.interfaces[i], hooks);
-                data.storeReference(info.m_init.ptr + base.offset, table.ptr);
-            }
-        }
+    // An opaque class has no size, so its initialiser has no slots.
+    if (!isInterface && info.m_init.length != 0)
+        writeImage(declaration, cast(ubyte*) info.m_init.ptr,
+            info.vtbl.ptr, cache, hooks);
     return info;
+}
+
+// Writes at `place` the initial image of an object of the class
+// `declaration`, of `declaration.structsize` bytes. A class of the program
+// has it in its class information. For a native class it comes from the
+// declarations, as for a class of the program with a native base: nothing
+// reads the memory of a native class.
+public void initialImage(
+    ClassDeclaration declaration, void* place,
+    ref ClassRuntimeCache cache, Hooks hooks,
+) {
+    if (!hooks.isNativeClass(declaration))
+        return hooks.data.copyBytes(place,
+            classRuntimeInfo(declaration, cache, hooks).m_init);
+
+    import core.stdc.string: memset;
+
+    memset(place, 0, declaration.structsize);
+    writeImage(declaration, cast(ubyte*) place,
+        hooks.nativeVtable(declaration), cache, hooks);
+}
+
+// The words of the image of `declaration` at `place`, with the vtable
+// `vtable`. When `declaration` and its base are classes of the program, the
+// part of the bases is a copy of the image of the base. Otherwise each field
+// comes from the declarations, and an interface slot of a native class names
+// the table of that class (`Target.Kind.interfaceTable`): nothing reads the
+// image or the tables of a native class here. A table is made here for the
+// interfaces of a class of the program, and for an interface of a base of
+// which a class below that base replaces a method.
+private void writeImage(
+    ClassDeclaration declaration, ubyte* place, in void* vtable,
+    ref ClassRuntimeCache cache, Hooks hooks,
+) {
+    import snakebite.native.address: Target;
+
+    auto data = hooks.data;
+    auto base = declaration.baseClass;
+    const isNative = hooks.isNativeClass(declaration);
+    const copiesBase = base !is null && !isNative
+        && !hooks.isNativeClass(base);
+    if (copiesBase)
+        data.copyBytes(place, classRuntimeInfo(base, cache, hooks).m_init);
+    data.storeReference(place, vtable);
+
+    for (auto parent = declaration; parent !is null;
+            parent = parent.baseClass) {
+        const own = parent is declaration && !isNative;
+        if (parent is declaration || !copiesBase)
+            data.fillFields(parent, place);
+        auto parentInfo = classRuntimeInfo(parent, cache, hooks);
+        const parentIsNative = hooks.isNativeClass(parent);
+        foreach (i; 0 .. parent.vtblInterfaces.length) {
+            auto interface_ = (*parent.vtblInterfaces)[i];
+            auto slot = place + interface_.offset;
+            if (!own && !replaces(declaration, parent, interface_, copiesBase)) {
+                if (!copiesBase)
+                    data.storeInterface(slot, Target.Kind.interfaceTable,
+                        parentInfo, i);
+                continue;
+            }
+            auto table = _interfaceVtable(declaration, interface_, hooks);
+            if (table.length != 0 && interface_.sym.vtblOffset) {
+                if (parentIsNative)
+                    data.storeInterface(&table[0],
+                        Target.Kind.interfaceRecord, parentInfo, i);
+                else
+                    data.storeReference(&table[0],
+                        &parentInfo.interfaces[i]);
+            }
+            if (own)
+                data.storeSlice(&parentInfo.interfaces[i].vtbl, table,
+                    (void*).sizeof);
+            data.storeReference(slot, table.ptr);
+        }
+    }
+}
+
+// Whether a class from `declaration` down to the class below `parent`
+// replaces a method of the interface `interface_` of `parent`, so that the
+// object has a table that `parent` does not have. When the image of the base
+// is a copy, only `declaration` is asked: the copy holds the tables of the
+// bases.
+private bool replaces(
+    ClassDeclaration declaration, ClassDeclaration parent,
+    imported!"snakebite.frontend.ast".BaseClass* interface_,
+    in bool copiesBase,
+) {
+    import snakebite.frontend.ast: fillVtbl;
+
+    for (auto below = declaration; below !is parent;
+            below = below.baseClass) {
+        if (interface_.fillVtbl(below, null, 0))
+            return true;
+        if (copiesBase)
+            return false;
+    }
+    return false;
 }
 
 private void*[] _interfaceVtable(
     imported!"snakebite.frontend.ast".ClassDeclaration declaration,
     imported!"snakebite.frontend.ast".BaseClass* base,
-    Interface* descriptor, Hooks hooks,
+    Hooks hooks,
 ) {
     import snakebite.frontend.ast: fillVtbl, FuncDeclarations;
 
@@ -316,10 +389,9 @@ private void*[] _interfaceVtable(
     auto table = cast(void*[]) data.reserve(
         TypeFacts(methods.length * (void*).sizeof, (void*).alignof),
         declaration).bytes;
-    const first = base.sym.vtblOffset;
-    if (first)
-        data.storeReference(&table[0], descriptor);
-    foreach (i; first .. methods.length) {
+    // The first word of the table is the `Interface` record: the caller
+    // writes it.
+    foreach (i; base.sym.vtblOffset .. methods.length) {
         auto method = methods[i];
         if (method is null)
             continue;

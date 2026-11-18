@@ -34,6 +34,11 @@ public struct RuntimeTypes {
     // (ADR-0006); an entry is built once, under the compiler lock.
     private SharedTable!(Type, TypeInfo) _types;
     private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
+    // The answer of `linkedClassInfo` for each class, null included.
+    private SharedTable!(ClassDeclaration, TypeInfo_Class) _linkedClasses;
+    // The `__init` and the `__vtbl` symbol of each native class that asked.
+    private SharedTable!(ClassDeclaration, const(void)*) _nativeImages;
+    private SharedTable!(ClassDeclaration, const(void)*) _nativeVtables;
     // The structs that `buildStructInfo` is filling. Read and written under
     // the compiler lock only.
     private TypeInfo_Struct[StructDeclaration] _building;
@@ -65,9 +70,63 @@ public struct RuntimeTypes {
         // A class variable defaults to null; its instance initializer
         // instead includes the header and the default field values.
         if (auto classDeclaration = declaration.isClassDeclaration)
-            return _classInfo(classDeclaration).m_init;
+            return classInitializer(classDeclaration);
         // One image per struct, shared with `typeid(S).initializer`.
         return structInfo(declaration.isStructDeclaration).m_init;
+    }
+
+    // The initial image of an object of `declaration`. The object that holds
+    // the class information of a class holds its image too: for a native
+    // class it is its `__init` symbol, with the size from the declaration.
+    private const(void)[] classInitializer(ClassDeclaration declaration) {
+        if (!isNativeClass(declaration))
+            return _classInfo(declaration).m_init;
+        return nativeClassSymbol(_nativeImages, declaration, "6__initZ")
+            [0 .. declaration.structsize];
+    }
+
+    // The class information of `declaration`: native, or built by the
+    // program.
+    public TypeInfo_Class classInfo(ClassDeclaration declaration) {
+        return _classInfo(declaration);
+    }
+
+    // Whether another object holds the class information of `declaration`,
+    // and with it its vtable and its initial image.
+    public bool isNativeClass(ClassDeclaration declaration) {
+        return linkedClassInfo(declaration) !is null;
+    }
+
+    // The address of the vtable of the native class `declaration`.
+    public const(void)* nativeVtable(ClassDeclaration declaration) {
+        return nativeClassSymbol(_nativeVtables, declaration, "6__vtblZ");
+    }
+
+    // The address of the datum `suffix` of the native class `declaration`,
+    // found once for each class and kept in `table`.
+    private const(void)* nativeClassSymbol(
+        ref SharedTable!(ClassDeclaration, const(void)*) table,
+        ClassDeclaration declaration, in string suffix,
+    ) {
+        import snakebite.ffi.symbol: unresolvedSymbol;
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        if (auto found = declaration in table)
+            return *found;
+
+        const(void)* address;
+        withCompilerLock({
+            if (auto found = declaration in table) {
+                address = *found;
+                return;
+            }
+            const symbol = classSymbol(declaration, suffix);
+            address = _resolve(symbol);
+            if (address is null)
+                throw unresolvedSymbol(symbol, declaration.toString);
+            table.insert(declaration, address);
+        });
+        return address;
     }
 
     public immutable(void)* rtInfo(AggregateDeclaration declaration) {
@@ -160,27 +219,15 @@ public struct RuntimeTypes {
     // spellings of the class name stand for the same class, whereas `get`
     // answers a qualified type with a qualifier wrapper around it.
     public TypeInfo_Class unqualifiedClassInfo(Type declared) {
-        import snakebite.frontend.ast: Tclass;
-        import snakebite.frontend.compiler: inFrontend, withCompilerLock;
         import snakebite.frontend.typefacts: baseType;
 
-        // One entry into the frontend for the three steps.
-        Type type;
-        TypeInfo found;
-        withCompilerLock({
-            type = inFrontend!"unSharedOf"(
-                inFrontend!"mutableOf"(baseType(declared)));
-            if (type.ty == Tclass)
-                found = get(type);
-        });
-        if (type.ty != Tclass)
+        auto classType = baseType(declared).isTypeClass;
+        if (classType is null)
             internalFailure("a class type has a class type once its qualifiers go");
-
-        auto info = cast(TypeInfo_Class) found;
-        if (info is null)
+        if (classType.sym.isInterfaceDeclaration !is null)
             internalFailure("the runtime type of a class is a `TypeInfo_Class`");
 
-        return info;
+        return _classInfo(classType.sym);
     }
 
     private TypeInfo build(Type type) {
@@ -348,6 +395,16 @@ public struct RuntimeTypes {
 
     // The symbol of the class information of `declaration`.
     private static string classInfoSymbol(ClassDeclaration declaration) {
+        return classSymbol(declaration,
+            declaration.isInterfaceDeclaration is null
+                ? "7__ClassZ" : "11__InterfaceZ");
+    }
+
+    // The symbol of the datum `suffix` of the class `declaration`, as the
+    // code generator of dmd names it.
+    private static string classSymbol(
+        ClassDeclaration declaration, in string suffix,
+    ) {
         import snakebite.frontend.ast: OutBuffer;
         import snakebite.frontend.dmd.mangle: completeMangleTargets;
         import snakebite.frontend.compiler: inFrontend;
@@ -359,9 +416,7 @@ public struct RuntimeTypes {
         completeMangleTargets(declaration);
         OutBuffer mangled;
         inFrontend!"mangleToBuffer"(declaration, mangled);
-        return text("_D", mangled[],
-            declaration.isInterfaceDeclaration is null
-                ? "7__ClassZ" : "11__InterfaceZ");
+        return text("_D", mangled[], suffix);
     }
 
     private TypeInfo qualified(Type type, TypeInfo base) {
@@ -388,8 +443,26 @@ public struct RuntimeTypes {
     // the native copy is used when the process has one. Never falls back to
     // fabrication itself, so a caller that fabricates its own metadata
     // (`classinfo.classRuntimeInfo`) can call this without looping back
-    // through that same fabrication path.
+    // through that same fabrication path. The answer is the address of the
+    // symbol of the class information: nothing reads the memory there.
     public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        if (auto found = declaration in _linkedClasses)
+            return *found;
+
+        TypeInfo_Class info;
+        withCompilerLock({
+            if (auto found = declaration in _linkedClasses)
+                info = *found;
+            else
+                info = *_linkedClasses.insert(
+                    declaration, findLinkedClassInfo(declaration));
+        });
+        return info;
+    }
+
+    private TypeInfo_Class findLinkedClassInfo(ClassDeclaration declaration) {
         import snakebite.ffi.symbol: unresolvedSymbol;
 
         const definedElsewhere = _isDefinedElsewhere(declaration);
@@ -397,29 +470,10 @@ public struct RuntimeTypes {
             return null;
 
         const symbol = classInfoSymbol(declaration);
-        auto info = nativeClassInfo(declaration, symbol);
+        auto info = cast(TypeInfo_Class) _resolve(symbol);
         if (info is null && definedElsewhere)
             throw unresolvedSymbol(symbol, declaration.toString);
         return info;
-    }
-
-    // One lookup for `symbol`, the class information symbol of `declaration`.
-    // Only an interface has a second symbol, that of its `TypeInfo`.
-    private TypeInfo_Class nativeClassInfo(
-        ClassDeclaration declaration, in string symbol,
-    ) {
-        import snakebite.frontend.ast: toDString;
-        import snakebite.frontend.dmd.functions: prettyNameOf;
-
-        if (auto info = cast(TypeInfo_Class) _resolve(symbol))
-            return info;
-        if (declaration.isInterfaceDeclaration !is null)
-            if (auto info = cast(TypeInfo_Interface)
-                    linkedInfo(declaration.type))
-                return info.info;
-
-        return cast(TypeInfo_Class) TypeInfo_Class.find(
-            prettyNameOf(declaration).toDString);
     }
 
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {

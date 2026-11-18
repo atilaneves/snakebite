@@ -75,7 +75,7 @@ public struct StaticWorld {
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             (name) => plans.resolveThreadLocal(name),
-            &classRuntimeInfo, (type) => types.get(type),
+            &writeClassImage, (type) => types.get(type),
             backend.blocksOf, &callableKind);
         types = RuntimeTypes(&_program.isRootOwned,
             &_program.isDefinedElsewhere,
@@ -114,19 +114,36 @@ public struct StaticWorld {
     // the lookup of a class that exists must not allocate.
     private TypeInfo_Class buildClassRuntimeInfo(ClassDeclaration declaration) {
         import snakebite.language.statics.classinfo:
-            classRuntimeInfo_ = classRuntimeInfo, Hooks;
+            classRuntimeInfo_ = classRuntimeInfo;
 
         return _classRuntime.build(() => classRuntimeInfo_(
             declaration,
             _classRuntime,
-            Hooks(
-                &callableAddress,
-                &types.linkedClassInfo,
-                (decl) => types.rtInfo(decl),
-                _backend.classBuilt,
-                &data,
-            ),
+            hooks,
         ));
+    }
+
+    // The initial image of an object of `declaration`, written at `place`.
+    private void writeClassImage(ClassDeclaration declaration, void* place) {
+        import snakebite.language.statics.classinfo: initialImage;
+
+        _classRuntime.run({
+            initialImage(declaration, place, _classRuntime, hooks);
+        });
+    }
+
+    private imported!"snakebite.language.statics.classinfo".Hooks hooks() {
+        import snakebite.language.statics.classinfo: Hooks;
+
+        return Hooks(
+            &callableAddress,
+            &types.linkedClassInfo,
+            &types.isNativeClass,
+            &types.nativeVtable,
+            (decl) => types.rtInfo(decl),
+            _backend.classBuilt,
+            &data,
+        );
     }
 
     // The callable address of a function: the entry of a vtable slot

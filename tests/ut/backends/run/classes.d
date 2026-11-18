@@ -325,7 +325,37 @@ private enum linkedClassesModule = q{
         this(int* value) { trace = value; }
         ~this() { ++*trace; }
     }
+    interface LinkedCounter {
+        int bump();
+        int get();
+    }
+    class LinkedCounterBase : LinkedCounter {
+        int count;
+        int bump() { return ++count; }
+        int get() { return count; }
+    }
+    class LinkedCounterDerived : LinkedCounterBase {
+        override int bump() { count += 10; return count; }
+    }
 };
+
+
+public interface LinkedCounter {
+    int bump();
+    int get();
+}
+
+
+public class LinkedCounterBase : LinkedCounter {
+    int count;
+    int bump() { return ++count; }
+    int get() { return count; }
+}
+
+
+public class LinkedCounterDerived : LinkedCounterBase {
+    override int bump() { count += 10; return count; }
+}
 
 
 static foreach (BackendType; Matrix!()) {
@@ -1575,6 +1605,165 @@ static foreach (backend; Matrix!(
         });
     }
 }
+
+// A root class over a dependency class with an interface: the vtable, the
+// initial image and each interface slot of the object come from the
+// declarations, as native code gives them. `Guarded` replaces no method of
+// `Object.Monitor`, `Counted` replaces one, and `Twice` extends a root class
+// whose base is the dependency class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot construct a native class, which calls `pthread_mutexattr_init`"),
+)) {
+    @("rootClassOfDependencyBaseWithInterface." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.sync.mutex: Mutex;
+
+            class Guarded : Mutex {
+                int value = 7;
+            }
+            class Counted : Mutex {
+                int locks;
+                override void lock() { ++locks; super.lock(); }
+            }
+            class Twice : Counted {
+                int unlocks;
+                override void unlock() { ++unlocks; super.unlock(); }
+            }
+
+            void use(Object.Monitor monitor) {
+                monitor.lock();
+                monitor.unlock();
+            }
+
+            void main() {
+                auto guarded = new Guarded;
+                Object.Monitor monitor = guarded;
+                use(monitor);
+                assert(cast(Object) monitor is guarded);
+                assert(guarded.value == 7);
+                assert(typeid(guarded).base is typeid(Mutex));
+
+                auto counted = new Counted;
+                use(counted);
+                assert(counted.locks == 1);
+                assert(cast(Object) cast(Object.Monitor) counted is counted);
+
+                auto twice = new Twice;
+                use(twice);
+                auto unlock = &(cast(Object.Monitor) twice).unlock;
+                twice.lock();
+                unlock();
+                assert(twice.locks == 2 && twice.unlocks == 2);
+
+                scope Guarded local = new Guarded;
+                use(local);
+                assert(local.value == 7);
+                assert(__traits(initSymbol, Mutex).length
+                    == __traits(classInstanceSize, Mutex));
+            }
+        });
+    }
+}
+
+
+// A root class that replaces one method of the interface of a dependency
+// base: a call through the interface of a method that it does not replace
+// gives a delegate to the native method.
+static foreach (backend; Matrix!()) {
+    @("rootClassOfDependencyBaseReplacingOneInterfaceMethod."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.concurrency: Scheduler, ThreadScheduler;
+
+            class Quiet : ThreadScheduler {
+                int yields;
+                override void yield() nothrow { ++yields; }
+            }
+
+            void main() {
+                auto quiet = new Quiet;
+                Scheduler scheduler = quiet;
+                bool ran;
+                scheduler.start({ ran = true; });
+                scheduler.yield();
+                assert(ran);
+                assert(quiet.yields == 1);
+            }
+        });
+    }
+}
+
+
+// A native class B extends a native class P and replaces one method of an
+// interface that P implements; a root class D extends B and replaces
+// nothing: through the interface, the replaced and the other method both
+// give the result of native code.
+static foreach (backend; Matrix!()) {
+    @("rootClassOfDependencyBaseReplacingOneInterfaceMethodBelowTheBase."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        int result;
+        static if (is(backend == Native)) {
+            class Leaf : LinkedCounterDerived { }
+            LinkedCounter counter = new Leaf;
+            result = counter.bump() * 100 + counter.get();
+        } else {
+            auto modules = parseSnippets([
+                "module linked_counter_root_" ~ backend.stringof ~ ";" ~ q{
+                    import ut.backends.run.classes:
+                        LinkedCounter, LinkedCounterDerived;
+                    class Leaf : LinkedCounterDerived { }
+                    int answer() {
+                        LinkedCounter counter = new Leaf;
+                        return counter.bump() * 100 + counter.get();
+                    }
+                },
+                linkedClassesModule,
+            ]);
+            auto function_ = findFunction(modules[0], "answer");
+            auto backend_ = ownedBackend!backend(Program([modules[0]]));
+            backend_.call(function_, &result, []);
+        }
+        result.should == 1010;
+    }
+}
+
+
+// An object of a dependency class with an interface in a static initialiser
+// of the root package: its vtable and its interface slot are those of the
+// dependency class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable"),
+)) {
+    @("dependencyClassObjectWithInterfaceInStaticInitialiser."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.concurrency: Scheduler, ThreadScheduler;
+
+            __gshared ThreadScheduler global = new ThreadScheduler;
+
+            void main() {
+                Scheduler scheduler = global;
+                bool ran;
+                scheduler.start({ ran = true; });
+                assert(ran);
+                scheduler.yield();
+                assert(cast(Object) scheduler is global);
+                assert(typeid(global) is typeid(ThreadScheduler));
+            }
+        });
+    }
+}
+
 
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,

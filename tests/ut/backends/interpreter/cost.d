@@ -51,7 +51,7 @@ static foreach (rootOwned; [true, false]) {
             (declaration) => declaration,
             (declaration) => cast(void*) &nativeValue,
             (name) => cast(void*) null,
-            (declaration) => cast(TypeInfo_Class) null,
+            (declaration, place) {},
             (type) => cast(TypeInfo) null,
         );
         const storage = data.storageOf(variable);
