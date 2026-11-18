@@ -32,6 +32,7 @@ public struct RuntimeTypes {
     // `TypeInfo` or a class information that another object holds is the
     // name of its symbol: the compile reads no memory there.
     private CallPlanStore* _plans;
+    private TypeInfo_Class _throwableInfo;
     private void* delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     private NativeData* _data;
@@ -64,6 +65,9 @@ public struct RuntimeTypes {
         _isRootOwned = isRootOwned;
         _isDefinedElsewhere = isDefinedElsewhere;
         _plans = plans;
+        enum throwable = "_D" ~ Throwable.mangleof[1 .. $] ~ "7__ClassZ";
+        _throwableInfo =
+            cast(TypeInfo_Class) cast(void*) plans.names.named(throwable);
         _methodAddress = methodAddress;
         _classInfo = classInfo;
         _data = data;
@@ -221,8 +225,7 @@ public struct RuntimeTypes {
     // The class information of `Throwable`, which druntime defines, as the
     // name of its symbol.
     public TypeInfo_Class throwableInfo() {
-        enum symbol = "_D" ~ Throwable.mangleof[1 .. $] ~ "7__ClassZ";
-        return cast(TypeInfo_Class) cast(void*) _plans.names.named(symbol);
+        return _throwableInfo;
     }
 
     // The `TypeInfo_Class` a `catch` clause matches by. A clause matches on

@@ -3,6 +3,7 @@ module snakebite.ffi.plan;
 
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi.callback: CallbackBridge;
+import snakebite.ffi.names: Name;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.ffi.callplan:
     CallPlan, NativeSignature, hasStoreWidth, planOf;
@@ -117,11 +118,13 @@ public struct PlanCache {
         return type !is null && hasResultStore(type);
     }
 
-    // The name of the host code of `function_` (`snakebite.ffi.names`).
-    public const(imported!"snakebite.ffi.names".Name)* nameOf(
-        FuncDeclaration function_,
-    ) {
-        return _store.names.named(hostSymbolOf(function_));
+    // The name of the host code of `function_` (`snakebite.ffi.names`),
+    // made once for each function.
+    public const(Name)* nameOf(FuncDeclaration function_) {
+        if (auto found = function_ in _names)
+            return *found;
+        return *_names.insert(function_,
+            _store.names.named(hostSymbolOf(function_)));
     }
 
     // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
@@ -208,6 +211,7 @@ public struct PlanCache {
     // (ADR-0006); a plan is prepared once, on its first use.
     private SharedTable!(FuncDeclaration, CallPlan*) _plans;
     private SharedTable!(FuncDeclaration, CallPlan*) _namedPlans;
+    private SharedTable!(FuncDeclaration, const(Name)*) _names;
     private SharedTable!(string, CallPlan*) _rawPlans;
     private shared size_t _preparations;
 
@@ -331,8 +335,11 @@ public struct PlanCache {
                 isVariadicCall, symbol);
         catch (Exception laidOutBadly)
             return _store.plan(NativeSignature.init, null, laidOutBadly.msg);
+        // No copy: dmd interns the name of an identifier in a table that
+        // lives until the process ends.
+        const declaredBy = cast(string) function_.toString;
         return _store.plan(signature, symbol,
-            unresolved(function_, symbol).msg);
+            intrinsicFailure(function_, symbol), declaredBy);
     }
 
     private CallPlan* keptPlanOf(
@@ -511,25 +518,34 @@ private string hostSymbolOf(imported!"snakebite.frontend.ast".FuncDeclaration fu
 private Exception unresolved(
     imported!"snakebite.frontend.ast".FuncDeclaration function_, in string symbol,
 ) {
-    import std.conv: text;
+    if (const failure = intrinsicFailure(function_, symbol))
+        return new Exception(failure);
 
+    import snakebite.ffi.symbol: unresolvedSymbol;
+
+    return unresolvedSymbol(symbol, function_.toString);
+}
+
+// The failure of a call of `function_` when it is an intrinsic that LDC
+// compiles inline, or null.
+private string intrinsicFailure(
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
+    in string symbol,
+) {
     version (LDC) {
         import gen.dpragma: LDCPragma;
+        import std.conv: text;
 
         // LDC compiles this declaration inline, so the host has no symbol
         // for it; a wrapper in `snakebite.builtin.ldc` is the
         // way to a result, and this one has none.
         if (function_.llvmInternal != LDCPragma.LLVMnone)
-            return new Exception(
-                text("no host wrapper serves the LDC intrinsic `",
-                    function_.mangleOverride.length
-                        ? function_.mangleOverride : symbol,
-                    "` declared by `", function_.toString, "`"),
-            );
+            return text("no host wrapper serves the LDC intrinsic `",
+                function_.mangleOverride.length
+                    ? function_.mangleOverride : symbol,
+                "` declared by `", function_.toString, "`");
     }
-    import snakebite.ffi.symbol: unresolvedSymbol;
-
-    return unresolvedSymbol(symbol, function_.toString);
+    return null;
 }
 
 // The signature of the guest function `function_`, from its own declared

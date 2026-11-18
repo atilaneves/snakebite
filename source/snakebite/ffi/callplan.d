@@ -29,6 +29,9 @@ import snakebite.failure.report: internalFailure;
 package struct Pending {
     string symbol;
     string failure;
+    // The declaration of the code, for the failure of a symbol that no
+    // object defines, when `failure` is empty.
+    string declaredBy;
     void* delegate(in char[]) resolve;
 }
 

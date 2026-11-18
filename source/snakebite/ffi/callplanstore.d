@@ -70,18 +70,21 @@ public struct CallPlanStore {
         return address;
     }
 
-    // The word that refers to `target` in a program made ready to run.
+    // The word that refers to `target` in a program made ready to run. Only
+    // a target of another object can be a name.
     public size_t wordOf(in Target target) {
         import snakebite.native.address: interfaceWordOf;
 
-        const address = resolved(cast(const(void)*) target.address);
+        const address = cast(const(void)*) target.address;
         final switch (target.kind) with (Target.Kind) {
             case interfaceTable:
             case interfaceRecord:
                 return interfaceWordOf(target.kind,
-                    cast(const(TypeInfo_Class)) address, target.index);
-            case staticData:
+                    cast(const(TypeInfo_Class)) resolved(address),
+                    target.index);
             case hostSymbol:
+                return cast(size_t) resolved(address);
+            case staticData:
             case functionWord:
             case adoptedString:
             case constantPool:
@@ -94,8 +97,15 @@ public struct CallPlanStore {
 
     // Whether the word that refers to `target` is found only when the
     // program is made ready to run.
-    public bool isNamed(in Target target) const @safe nothrow @nogc {
-        return names.nameAt(cast(const(void)*) target.address) !is null;
+    public bool isNamed(in Target target) const @trusted nothrow @nogc {
+        with (Target.Kind) switch (target.kind) {
+            case hostSymbol:
+            case interfaceTable:
+            case interfaceRecord:
+                return names.nameAt(cast(const(void)*) target.address) !is null;
+            default:
+                return false;
+        }
     }
 
     // The registry of the guest function words, and the owner of their
@@ -137,27 +147,29 @@ public struct CallPlanStore {
     //
     // The plan holds the name of the code, not its address: `bound` binds it
     // at the first call, as the dynamic linker binds a PLT entry, or throws
-    // `failure`, or the failure of a symbol that no object defines when
-    // `failure` is empty. With an empty `symbol` the plan is not laid out, and
-    // `bound` always throws `failure`. Every plan of this store is made here,
-    // so the plans of a load are the plans of a compile.
+    // `failure`, or, when `failure` is empty, the failure of a symbol that no
+    // object defines, which names `declaredBy`. With an empty `symbol` the
+    // plan is not laid out, and `bound` always throws `failure`. Every plan of
+    // this store is made here, so the plans of a load are the plans of a
+    // compile.
     public CallPlan* plan(
         NativeSignature signature, string symbol = null, string failure = null,
+        string declaredBy = null,
     ) {
-        return planAt(signature, symbol, null, failure);
+        return planAt(signature, symbol, null, failure, declaredBy);
     }
 
     // As `plan`, for a caller that resolved `symbol` itself: `address` is
     // what the resolver answered.
     public CallPlan* planAt(
         NativeSignature signature, string symbol, void* address,
-        string failure = null,
+        string failure = null, string declaredBy = null,
     ) {
         import core.atomic: atomicLoad, cas;
 
         auto entry = new PlanEntry;
         entry.signature = signature;
-        entry.pending = Pending(symbol, failure, &resolver.resolve);
+        entry.pending = Pending(symbol, failure, declaredBy, &resolver.resolve);
         if (symbol.length != 0 || failure.length == 0)
             entry.plan = planOf(signature, address, callbacks);
         if (address is null && (symbol.length != 0 || failure.length != 0))
@@ -172,11 +184,11 @@ public struct CallPlanStore {
         return &entry.plan;
     }
 
-    // The plans, oldest first, with the symbol and the failure text of `plan`
-    // that made each.
+    // The plans, oldest first, with the symbol, the failure text and the
+    // declaration of `plan` that made each.
     public void eachPlan(
-        scope void delegate(
-            const(CallPlan)*, in NativeSignature, in string, in string) visit,
+        scope void delegate(const(CallPlan)*, in NativeSignature, in string,
+            in string, in string) visit,
     ) const {
         import core.atomic: atomicLoad;
         import std.algorithm: reverse;
@@ -187,7 +199,7 @@ public struct CallPlanStore {
             entries ~= entry;
         foreach (entry; entries.reverse)
             visit(&entry.plan, entry.signature, entry.pending.symbol,
-                entry.pending.failure);
+                entry.pending.failure, entry.pending.declaredBy);
     }
 
     // `plan` with its code address set, which is `plan` itself when it has
@@ -224,7 +236,7 @@ public struct CallPlanStore {
             import snakebite.ffi.symbol: unresolvedSymbol;
 
             if (pending.failure.length == 0)
-                throw unresolvedSymbol(pending.symbol);
+                throw unresolvedSymbol(pending.symbol, pending.declaredBy);
             throw new Exception(pending.failure);
         }
         plan.bindAddress(address);

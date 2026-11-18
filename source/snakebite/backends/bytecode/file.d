@@ -216,7 +216,7 @@ private struct Archive {
         Archive archive;
         archive._direction = Direction.writing;
         archive._program = &program;
-        program.plans.eachPlan((plan, signature, symbol, failure) {
+        program.plans.eachPlan((plan, signature, symbol, failure, declaredBy) {
             archive._planIndex[plan] = archive._planIndex.length;
         });
         foreach (m, module_; program._modules) {
@@ -794,24 +794,29 @@ private void transferPlans(ref Archive archive, ref Program program) {
     // The index of the name of each plan in the table of host symbols.
     size_t[] symbols;
     string[] failures;
+    string[] declarations;
     if (archive.isWriting)
-        program.plans.eachPlan((plan, signature, symbol, failure) {
+        program.plans.eachPlan((plan, signature, symbol, failure, declaredBy) {
             signatures ~= cast() signature;
             symbols ~= archive.symbolIndexOfName(symbol);
             failures ~= failure;
+            declarations ~= declaredBy;
         });
     archive.transfer(signatures);
     archive.transfer(symbols);
     archive.transfer(failures);
+    archive.transfer(declarations);
     if (archive.isWriting)
         return;
     if (symbols.length != signatures.length
-            || failures.length != signatures.length)
+            || failures.length != signatures.length
+            || declarations.length != signatures.length)
         throw new SnakebiteException(
             "the program file holds call plans that do not match");
     foreach (index, signature; signatures)
         archive._plans ~= program.plans.plan(signature,
-            archive.symbolNameAt(symbols[index]), failures[index]);
+            archive.symbolNameAt(symbols[index]), failures[index],
+            declarations[index]);
 }
 
 
