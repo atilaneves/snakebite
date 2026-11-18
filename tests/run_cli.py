@@ -2722,6 +2722,293 @@ def test_saved_program_with_a_temporary_beside_a_function_literal_in_a_callee_ru
         """})
 
 
+# A failed assert reports its message, file and line.
+def test_saved_program_with_failed_assert_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        int main(string[] args) {
+            assert(args.length == 7);
+            return 0;
+        }
+        """})
+
+
+# A C-variadic function, called through a pointer of a type with fixed
+# parameters, reads the arguments that no named parameter takes.
+def test_saved_program_with_c_variadic_function_through_another_type_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+        extern(C) int sum(int count, ...) {
+            va_list arguments;
+            va_start(arguments, count);
+            int total;
+            foreach (i; 0 .. count)
+                total += va_arg!int(arguments);
+            va_end(arguments);
+            return total;
+        }
+        alias Three = extern(C) int function(int, int, int);
+        int main() {
+            auto three = cast(Three) &sum;
+            return three(2, 3, 4);
+        }
+        """})
+
+
+# A function with fixed parameters, called through a C-variadic pointer,
+# gets the arguments after the named ones.
+def test_saved_program_with_fixed_function_through_c_variadic_type_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        extern(C) int add(int a, int b) { return a * 10 + b; }
+        alias Variadic = extern(C) int function(int, ...);
+        int main() {
+            auto variadic = cast(Variadic) &add;
+            return variadic(3, 4);
+        }
+        """})
+
+
+# C code calls a C-variadic function of the program.
+def test_saved_program_with_c_variadic_function_called_by_c_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdarg: va_arg, va_end, va_list, va_start;
+        import core.stdc.stdio: printf;
+        import core.stdc.stdlib: qsort;
+        extern(C) int compare(const(void)* left, ...) {
+            va_list arguments;
+            va_start(arguments, left);
+            auto right = va_arg!(const(void)*)(arguments);
+            va_end(arguments);
+            return *cast(const(int)*) left - *cast(const(int)*) right;
+        }
+        alias Comparison =
+            extern(C) int function(scope const(void)*, scope const(void)*);
+        int main() {
+            int[5] numbers = [4, 1, 5, 2, 3];
+            qsort(numbers.ptr, numbers.length, int.sizeof,
+                  cast(Comparison) &compare);
+            foreach (n; numbers)
+                printf("%d ", n);
+            printf("\\n");
+            return 0;
+        }
+        """})
+
+
+# Compiled code of a dependency calls a D-variadic function of the program:
+# the host hands the callee its `_arguments`.
+D_VARIADIC_CALLED_BY_DEPENDENCY = {
+    "function_pointer": ("""
+        module dep;
+        void callIt(void function(...) f) { f(1, "two", 3.0); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) {
+            writeln(_arguments.length);
+            foreach (type; _arguments) writeln(type);
+        }
+        unittest { callIt(&show); }
+        """),
+    "nested_delegate": ("""
+        module dep;
+        void callIt(void delegate(...) d) { d(1, "two"); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        unittest {
+            int base = 40;
+            void show(...) {
+                writeln(base + _arguments.length);
+                foreach (type; _arguments) writeln(type);
+            }
+            callIt(&show);
+        }
+        """),
+    "method_delegate": ("""
+        module dep;
+        void callIt(void delegate(...) d) { d(1, "two"); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        class C {
+            int base = 10;
+            void show(...) {
+                writeln(base + _arguments.length);
+                foreach (type; _arguments) writeln(type);
+            }
+        }
+        unittest { auto c = new C; callIt(&c.show); }
+        """),
+    "pointer_in_static_data": ("""
+        module dep;
+        void callIt(void function(...) f) { f(5); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) {
+            writeln(_arguments.length);
+            foreach (type; _arguments) writeln(type);
+        }
+        __gshared void function(...) stored = &show;
+        struct Holder { void function(...) f = &show; }
+        unittest { callIt(stored); Holder holder; callIt(holder.f); }
+        """),
+    "other_thread": ("""
+        module dep;
+        import core.thread: Thread;
+        void inThread(void function(...) f) {
+            auto thread = new Thread({ f(1, 2.0, "three"); });
+            thread.start;
+            thread.join;
+        }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) {
+            writeln(_arguments.length);
+            foreach (type; _arguments) writeln(type);
+        }
+        unittest { inThread(&show); }
+        """),
+    "arguments_unread": ("""
+        module dep;
+        void callIt(void function(...) f) { f(1, "two"); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) { writeln("called"); }
+        unittest { callIt(&show); }
+        """),
+    "only_argptr_read": ("""
+        module dep;
+        void callIt(void function(...) f) { f(1, 2); }
+        """, """
+        module logic;
+        import dep;
+        import core.stdc.stdarg: va_arg;
+        import std.stdio: writeln;
+        void show(...) {
+            const a = va_arg!int(_argptr);
+            const b = va_arg!int(_argptr);
+            writeln(a + b);
+        }
+        unittest { callIt(&show); }
+        """),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(D_VARIADIC_CALLED_BY_DEPENDENCY))
+def test_saved_program_with_d_variadic_function_called_by_dependency_runs_as_the_compiled_program(
+    tmp_path: Path, scenario: str,
+) -> None:
+    dependency, program = D_VARIADIC_CALLED_BY_DEPENDENCY[scenario]
+    write(tmp_path / "dep" / "dub.sdl",
+          f'name "{dub_name("dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dep" / "source" / "dep.d", dependency)
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": f'name "{dub_name("app")}"\ntargetType "library"\n'
+                   f'dependency "{dub_name("dep")}" path="../dep"\n',
+        "source/logic.d": program,
+    })
+
+
+# A call whose result nothing reads, made while the arguments of another
+# call evaluate, does not overwrite the arguments already in place.
+def test_saved_program_with_discarded_result_among_arguments_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Big {
+            long[64] v;
+            Big opUnary(string op: "++")() {
+                foreach (ref x; v)
+                    x += 7;
+                printf("increment\\n");
+                return this;
+            }
+        }
+        long outer(long a, long b, long c) {
+            printf("outer\\n");
+            return a * 100 + b * 10 + c;
+        }
+        int main() {
+            Big big;
+            printf("%lld\\n", outer(1, (big++).v[0], 3));
+            return 0;
+        }
+        """})
+
+
+# A closure holds a variable with its declared alignment.
+def test_saved_program_with_aligned_variable_in_closure_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct Wide { align(64) long x; }
+        int delegate() make(int n) {
+            Wide w;
+            w.x = n;
+            printf("%d\\n", cast(int) ((cast(size_t) &w) % Wide.alignof));
+            return () => cast(int) w.x;
+        }
+        int delegate() small(int n) {
+            char c = cast(char) n;
+            return () => c;
+        }
+        int main() {
+            int total;
+            foreach (i; 0 .. 8) {
+                total += small(i)();
+                total += make(i)();
+            }
+            return total;
+        }
+        """})
+
+
+# An exception destroys the temporary of the expression that it leaves.
+def test_saved_program_with_temporary_destroyed_by_exception_runs_as_the_compiled_program(
+    tmp_path: Path,
+) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {"main.d": """
+        module main;
+        import core.stdc.stdio: printf;
+        struct S { int n; ~this() { printf("destroy %d\\n", n); } }
+        S make(int n) { return S(n); }
+        int boom() { throw new Exception("boom"); }
+        int main() {
+            try {
+                return make(1).n + boom();
+            } catch (Exception e) {
+                printf("caught\\n");
+                return 2;
+            }
+        }
+        """})
+
+
 # A save never writes a file for a program that does not compile: it fails,
 # and no file is left.
 def test_save_of_program_that_does_not_compile_fails_and_writes_no_file(
@@ -2764,8 +3051,8 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
     assert "another build" in loaded.stderr, output(loaded)
 
 
-# A loaded program names its JIT code in the perf map as the same program
-# compiled and run from RAM does.
+# A program saved with the perf map on names its JIT code in the perf map
+# after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:
@@ -2781,7 +3068,7 @@ def test_loaded_program_names_jit_code_as_the_compiled_program(
     app = str(tmp_path / "app")
     target = tmp_path / "program.sbc"
     saved = run_sb("--backend=bytecode", "--no-optimise-image",
-                   f"--save={target}", app, cwd=tmp_path)
+                   "--jit-perf-map", f"--save={target}", app, cwd=tmp_path)
     assert saved.returncode == 0, output(saved)
 
     def mapped_names(*args: str) -> set[str]:

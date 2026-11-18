@@ -14,7 +14,7 @@ import snakebite.ffi.callplan:
     executeIndirectCallPlan, guestWordOf;
 import snakebite.native.signature: ArgumentFlow, Shape, Signature;
 import snakebite.backends.bytecode.relocation:
-    hostCode, Place, plain, Reloc, relocated, setBy;
+    hostCode, Place, plain, Reloc, relocated, setBy, unsaved;
 import snakebite.native.address: Address, Target;
 import snakebite.builtin.call: BuiltinCall;
 import snakebite.stack.hostcall: HostCallLayout;
@@ -249,7 +249,7 @@ public struct CallSite {
     @plain package size_t windowSlot = size_t.max;
     @plain package size_t windowDisp;
     @plain package size_t windowScratch;
-    @plain package size_t windowEnd;
+    @unsaved package size_t windowEnd;
     @plain package uint windowAlignment;
 
     // What `opCall` needs of a `guest` site whose callee is compiled, in
@@ -319,7 +319,7 @@ public struct CallSite {
         }
     }
 
-    @plain package FastCall fast;
+    @setBy("prepareFast") package FastCall fast;
 
     package enum maxIndirectTargets = 4;
 
@@ -351,7 +351,7 @@ public struct CallSite {
             }
         }
 
-        @plain package IndirectTarget indirectTarget;
+        @setBy("rememberIndirectTarget") package IndirectTarget indirectTarget;
         @setBy("rememberIndirectTarget")
         package IndirectTarget[maxIndirectTargets - 1] moreIndirectTargets;
 
@@ -468,11 +468,11 @@ public struct CallSite {
         twoWordsIndirectPairResult,
     }
 
-    @plain package uint directState;
-    @plain package const(void)* directTarget;
-    @plain package bool directSwapped;
-    @plain package ubyte[3] directOrder;
-    @plain package Load[3] directLoads;
+    @setBy("opCallNative") package uint directState;
+    @setBy("opCallNative") package const(void)* directTarget;
+    @setBy("opCallNative") package bool directSwapped;
+    @setBy("opCallNative") package ubyte[3] directOrder;
+    @setBy("opCallNative") package Load[3] directLoads;
     @hostCode package BuiltinCall builtinEntry;
     @plain package size_t calleeSlotOffset;
     @plain package bool hasContext;
@@ -1038,19 +1038,18 @@ public struct Function {
     @plain package uint closureAlignment = 1;
     @plain package ClosureSlot[] closureSlots;
     @plain package size_t[] parameterOffsets;
-    // Where a C-variadic function reads its cursor, and how many parameters
-    // it declares before it; `size_t.max` for any other function.
+    // Where a C-variadic function reads its cursor; `size_t.max` for any
+    // other function.
     @plain package size_t cursorOffset = size_t.max;
-    @plain package size_t declaredParameters;
     @relocated(Place.Section.function_, Place.Field.signature,
         Target.Kind.signature)
     package const(Signature)* signature;
     @plain package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
     @plain package HostCallLayout hostCall;
-    // The mangled name of the function, or empty. The compiler fills it when
-    // the perf map is on and when it records for a save; the JIT names its
-    // code by it.
+    // The mangled name of the function, or empty. The compiler fills it only
+    // when the perf map is on, for a compile to RAM and for a save; the JIT
+    // names its code by it.
     @plain package const(char)[] mangledName;
     // Every word of this function that holds a process address, except the
     // handler of each instruction. The compiler records them only when
