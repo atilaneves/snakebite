@@ -8,6 +8,9 @@
 # Environment: SB (bin/sb), CORE (cpu to pin to, default 0),
 # PROJECT_TIMEOUT (seconds per command, default 1200), WORK (output
 # directory; the saved file of a project that is the same is removed).
+# With --project as the first argument the script checks the project mode
+# (bin/sb --build=project) instead: see project_check. The default projects
+# are then the five short ones of the corpus.
 set -uo pipefail
 export LC_ALL=C
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
@@ -17,13 +20,27 @@ core=${CORE:-0}
 limit=${PROJECT_TIMEOUT:-1200}
 work=${WORK:-$(mktemp -d /tmp/saved-corpus.XXXXXX)}
 mkdir -p "$work"
+work=$(realpath -- "$work")
+[[ $sb == */* ]] && sb=$(realpath -- "$sb")
+
+mode=ram
+if [[ ${1:-} == --project ]]; then mode=project; shift; fi
 
 if (($#)); then
     projects=("$@")
 else
     source build/bench-corpus.sh # the list; sets -e
     set +e
-    projects=("${benchmarks[@]}")
+    projects=()
+    for b in "${benchmarks[@]}"; do
+        if [[ $mode == project ]]; then
+            case ${b%@*} in
+                cerealed|automem|msgpack-d|sumtype|tardy) ;;
+                *) continue ;;
+            esac
+        fi
+        projects+=("$b")
+    done
 fi
 
 # run NAME ARGS...: stdout to NAME.out without the timing report lines of
@@ -34,7 +51,7 @@ duration='[0-9]+ (weeks?|days?|hours?|minutes?|secs?|ms|μs|hnsecs?)'
 taken="^Time taken: $duration((, | and |, and )$duration)*\$"
 run() {
     local name=$1; shift
-    timeout "$limit" taskset -c "$core" "$sb" "$@" \
+    (cd -- "${rundir:-.}" && timeout "$limit" taskset -c "$core" "$sb" "$@") \
         >"$name.raw" 2>"$name.err"
     echo $? >"$name.status"
     grep -aEv -e '^[A-Za-z ]+:[[:space:]]+[0-9.]+ ms$' -e "$taken" \
@@ -90,6 +107,64 @@ report() { # PROJECT RESULT
     printf '%-28s %s\n' "$1" "$2"
     [[ $2 == same ]] || failed=1
 }
+
+# project_check PROJECT: three runs of bin/sb --build=project on a copy of the
+# project, each the same as bin/sb on the copy: the first run, a run with no
+# change (ninja has no work, so no compile runs) and a run after a touch of the
+# first root source file in lexical order. The project state directory is
+# under the directory that bin/sb starts in, so that is a directory of
+# $work and the package cache of dub is not written by the build.
+project_check() {
+    local project=$1 p=$work/${1//[@\/]/_} src name version root
+    rm -rf "$p"; mkdir -p "$p/start"
+    if [[ -d $project ]]; then
+        src=$project
+    else
+        name=${project%@*} version=${project#*@}
+        src=$HOME/.dub/packages/$name/$version/$name
+        [[ -d $src ]] || "$sb" "$project" >/dev/null 2>&1 # fetches it
+    fi
+    [[ -d $src ]] || { report "$project" "no project directory"; return; }
+    cp -a -- "$src" "$p/copy"
+    rundir=. run "$p/ref" --backend=bytecode "$p/copy"
+    if [[ $(<"$p/ref.status") == 124 ]]; then
+        report "$project" "timeout (bin/sb)"; return
+    fi
+    root=$(find "$p/copy/source" "$p/copy/src" -name '*.d' 2>/dev/null \
+        | sort | head -n1)
+    [[ -n $root ]] || { report "$project" "no root source file"; return; }
+    local ninjafile results=() step
+    for step in first nochange touched; do
+        case $step in
+            nochange) # ninja's own dry run: the build has no work
+                ninjafile=$(ls "$p"/start/.snakebite/*/build/build.ninja)
+                [[ $(ninja -n -f "$ninjafile" 2>&1) == *"no work to do"* ]] \
+                    || results+=("compile planned (nochange)") ;;
+            touched)
+                touch -- "$root"
+                [[ $(ninja -n -f "$ninjafile" 2>&1) == *"no work to do"* ]] \
+                    && results+=("touch planned no compile (touched)") ;;
+        esac
+        rundir=$p/start run "$p/$step" --build=project "$p/copy"
+        if [[ $(<"$p/$step.status") == 124 ]]; then
+            results+=("timeout ($step)")
+        elif ! same "$p/ref" "$p/$step"; then
+            results+=("different ($step): $(firstdiff "$p/ref" "$p/$step")")
+        fi
+    done
+    if ((${#results[@]} == 0)); then
+        rm -rf "$p"
+        report "$project" same
+    else
+        for r in "${results[@]}"; do report "$project" "$r"; done
+    fi
+}
+
+if [[ $mode == project ]]; then
+    for project in "${projects[@]}"; do project_check "$project"; done
+    echo "outputs: $work"
+    exit "$failed"
+fi
 
 for project in "${projects[@]}"; do
     p=$work/${project//[@\/]/_}
