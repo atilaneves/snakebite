@@ -140,7 +140,8 @@ public template classificationOf(T, size_t index) {
 // file.
 public enum isClassified(T) = is(T == struct)
     && (moduleName!T == "snakebite.backends.bytecode.vm"
-        || moduleName!T == "snakebite.backends.bytecode.program");
+        || moduleName!T == "snakebite.backends.bytecode.program"
+        || moduleName!T == "snakebite.stack.hostcall");
 
 private template moduleName(T) {
     import std.traits: moduleName_ = moduleName;
