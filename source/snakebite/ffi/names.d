@@ -142,6 +142,20 @@ private string owned(Text)(Text text) {
 }
 
 
+// What a program file says of one name (`Names.fromFile`): `symbol`,
+// `distance` and `declaredBy`, or, for an entry that forwards to host code
+// with an adjustment (`isAdjusted`), the index `code` of the name of that
+// code, the adjustment in `distance` and `signature`.
+public struct FileName {
+    public string symbol;
+    public ptrdiff_t distance;
+    public string declaredBy;
+    public bool isAdjusted;
+    public size_t code;
+    public NativeSignature signature;
+}
+
+
 // The names of one program. A `Name` never moves, so that its address can
 // stand for the symbol in the program. Names are made under a lock and read
 // without one (ADR-0006).
@@ -175,6 +189,8 @@ public struct Names {
     // Names are made rarely and never on a path whose time matters, so the
     // tables of names share one lock. Made at the first new name.
     private shared Mutex _lock;
+    // Whether a program file made the names (`fromFile`).
+    private bool _fromFile;
 
     // The name of the symbol `symbol`, `distance` bytes after its start.
     // `declaredBy` is the declaration of the symbol, kept with a new name. A
@@ -183,6 +199,7 @@ public struct Names {
     public Name* named(
         Symbol: const(char)[], Declaration: const(char)[] = string,
     )(Symbol symbol, in size_t distance = 0, Declaration declaredBy = null) {
+        refuseAfterFile;
         if (auto found = Key(cast(string) symbol, distance) in _plain)
             return *found;
 
@@ -204,6 +221,7 @@ public struct Names {
         Name* code, in ptrdiff_t adjustment,
         scope NativeSignature delegate() signature,
     ) {
+        refuseAfterFile;
         const key = AdjustedKey(code, adjustment);
         if (auto found = key in _adjusted)
             return *found;
@@ -217,6 +235,55 @@ public struct Names {
         auto name = reserve;
         name._adjusted = new Adjusted(code, adjustment, cast() made);
         return *_adjusted.insert(key, name);
+    }
+
+    // The names of a program file, for a load, which `make` fills: the
+    // symbol, the distance and the declaration of name `index`, or, for the
+    // entry that reaches the code of an earlier name with an adjustment, that
+    // name, the adjustment and the signature. A file holds each name once, so
+    // a name is made with no lookup and no entry in a table: the names are
+    // one chunk of the length of the file's table. Nothing names a symbol
+    // after a load, because the load has no frontend (ADR-0017), and `named`
+    // and `adjusted` refuse it.
+    public Name[] fromFile(
+        in size_t count,
+        scope void delegate(in size_t index, ref FileName made) make,
+    ) {
+        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import snakebite.failure.report: internalFailure, SnakebiteException;
+
+        if (atomicLoad!(MemoryOrder.raw)(_chunkCount) != 0)
+            internalFailure("a program file names symbols of a program that "
+                ~ "has names");
+        _fromFile = true;
+        auto chunk = new Name[count];
+        foreach (index, ref name; chunk) {
+            FileName made;
+            make(index, made);
+            if (made.isAdjusted) {
+                if (made.code >= index)
+                    throw new SnakebiteException("the program file names "
+                        ~ "the code of an entry before the code itself");
+                name._adjusted = new Adjusted(&chunk[made.code],
+                    made.distance, made.signature);
+            }
+            else {
+                name._symbol = made.symbol;
+                name._distance = cast(size_t) made.distance;
+                name._declaredBy = made.declaredBy;
+            }
+        }
+        _chunks[0] = chunk;
+        _used = count;
+        atomicStore!(MemoryOrder.rel)(_chunkCount, 1);
+        return chunk;
+    }
+
+    private void refuseAfterFile() const {
+        import snakebite.failure.report: internalFailure;
+
+        if (_fromFile)
+            internalFailure("a loaded program names a symbol");
     }
 
     // The name that `address` is, or null when it is no name of this.

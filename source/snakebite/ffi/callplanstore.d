@@ -245,13 +245,23 @@ public struct CallPlanStore {
     // finalizer. A plan whose symbol no object defines stays unbound, and
     // its call throws the failure. A plan is bound once; threads that bind
     // the same plan write the same word.
+    pragma(inline, true)
     public void bindNewPlans() {
-        import core.atomic: atomicLoad, cas;
+        import core.atomic: atomicLoad, MemoryOrder;
 
-        auto head = atomicLoad(_plans);
-        auto bound = atomicLoad(_boundPlans);
-        if (head is bound)
-            return;
+        // Inline: each function that is made ready to run asks, and most
+        // find no new plan.
+        auto head = atomicLoad!(MemoryOrder.acq)(_plans);
+        auto bound = atomicLoad!(MemoryOrder.acq)(_boundPlans);
+        if (head !is bound)
+            bindPlans(head, bound);
+    }
+
+    private void bindPlans(
+        shared(PlanEntry)* head, shared(PlanEntry)* bound,
+    ) {
+        import core.atomic: cas;
+
         for (auto entry = cast(PlanEntry*) head;
                 entry !is null && entry !is cast(PlanEntry*) bound;
                 entry = entry.next)

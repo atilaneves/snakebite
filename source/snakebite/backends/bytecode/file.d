@@ -172,29 +172,28 @@ private void transferNames(ref Archive archive, ref Archive source) {
             || declarationEnds.length != count)
         throw new SnakebiteException(
             "the program file holds names that do not match");
-    auto names = &archive._program.plans.names;
-    archive._names = new Name*[count];
     size_t declarationStart, signature;
-    foreach (index; 0 .. count) {
-        const end = declarationEnds[index];
-        if (end < declarationStart || end > declarations.length)
-            throw new SnakebiteException(
-                "the program file holds names that do not match");
-        if (!adjusted[index]) {
-            archive._names[index] = names.named(
-                archive.symbolNameAt(targets[index]), distances[index],
-                declarations[declarationStart .. end]);
-        } else {
-            if (targets[index] >= index || signature >= signatures.length)
+    archive._names = archive._program.plans.names.fromFile(count,
+        (index, ref made) {
+            const end = declarationEnds[index];
+            if (end < declarationStart || end > declarations.length)
                 throw new SnakebiteException(
                     "the program file holds names that do not match");
-            const code = signature++;
-            archive._names[index] = names.adjusted(
-                archive._names[targets[index]],
-                cast(ptrdiff_t) distances[index], () => signatures[code]);
-        }
-        declarationStart = end;
-    }
+            if (!adjusted[index]) {
+                made.symbol = archive.symbolNameAt(targets[index]);
+                made.distance = cast(ptrdiff_t) distances[index];
+                made.declaredBy = declarations[declarationStart .. end];
+            } else {
+                if (signature >= signatures.length)
+                    throw new SnakebiteException(
+                        "the program file holds names that do not match");
+                made.isAdjusted = true;
+                made.code = targets[index];
+                made.distance = cast(ptrdiff_t) distances[index];
+                made.signature = signatures[signature++];
+            }
+            declarationStart = end;
+        });
 }
 
 
@@ -239,7 +238,7 @@ private struct Archive {
     private size_t[] _declarationEnds;
     private string _declarations;
     private NativeSignature[] _adjustedSignatures;
-    private Name*[] _names;
+    private Name[] _names;
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
@@ -431,7 +430,7 @@ private struct Archive {
         if (index >= _names.length)
             throw new SnakebiteException(
                 "the program file names a symbol that it does not hold");
-        return _names[index];
+        return &_names[index];
     }
 
     // The index of `name` in the table of the symbols of the names.
@@ -991,14 +990,17 @@ private void transferModule(
             archive.transfer(*function_);
             // A name stays for `Program.complete`, which makes it ready to
             // run as after a compile to RAM. Each word of a file that names
-            // a symbol is a name. The names stay at the front of the array.
+            // a symbol is a name. The names stay at the front of the array,
+            // and a function with no name keeps no array, as a compile to
+            // RAM leaves it.
             size_t named;
-            foreach (reloc; function_.relocs)
+            foreach (ref reloc; function_.relocs)
                 if (isName(reloc.target.kind))
                     function_.relocs[named++] = reloc;
                 else
                     applyReloc(*function_, reloc);
-            function_.relocs = function_.relocs[0 .. named];
+            function_.relocs = named == 0 ? null
+                : function_.relocs[0 .. named];
         }
     }
 }
