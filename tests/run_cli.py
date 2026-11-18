@@ -2806,6 +2806,130 @@ def test_saved_program_with_c_variadic_function_called_by_c_runs_as_the_compiled
         """})
 
 
+# Compiled code of a dependency calls a D-variadic function of the program:
+# the host hands the callee its `_arguments`.
+D_VARIADIC_CALLED_BY_DEPENDENCY = {
+    "function_pointer": ("""
+        module dep;
+        void callIt(void function(...) f) { f(1, "two", 3.0); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) {
+            writeln(_arguments.length);
+            foreach (type; _arguments) writeln(type);
+        }
+        unittest { callIt(&show); }
+        """),
+    "nested_delegate": ("""
+        module dep;
+        void callIt(void delegate(...) d) { d(1, "two"); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        unittest {
+            int base = 40;
+            void show(...) {
+                writeln(base + _arguments.length);
+                foreach (type; _arguments) writeln(type);
+            }
+            callIt(&show);
+        }
+        """),
+    "method_delegate": ("""
+        module dep;
+        void callIt(void delegate(...) d) { d(1, "two"); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        class C {
+            int base = 10;
+            void show(...) {
+                writeln(base + _arguments.length);
+                foreach (type; _arguments) writeln(type);
+            }
+        }
+        unittest { auto c = new C; callIt(&c.show); }
+        """),
+    "pointer_in_static_data": ("""
+        module dep;
+        void callIt(void function(...) f) { f(5); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) {
+            writeln(_arguments.length);
+            foreach (type; _arguments) writeln(type);
+        }
+        __gshared void function(...) stored = &show;
+        struct Holder { void function(...) f = &show; }
+        unittest { callIt(stored); Holder holder; callIt(holder.f); }
+        """),
+    "other_thread": ("""
+        module dep;
+        import core.thread: Thread;
+        void inThread(void function(...) f) {
+            auto thread = new Thread({ f(1, 2.0, "three"); });
+            thread.start;
+            thread.join;
+        }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) {
+            writeln(_arguments.length);
+            foreach (type; _arguments) writeln(type);
+        }
+        unittest { inThread(&show); }
+        """),
+    "arguments_unread": ("""
+        module dep;
+        void callIt(void function(...) f) { f(1, "two"); }
+        """, """
+        module logic;
+        import dep;
+        import std.stdio: writeln;
+        void show(...) { writeln("called"); }
+        unittest { callIt(&show); }
+        """),
+    "only_argptr_read": ("""
+        module dep;
+        void callIt(void function(...) f) { f(1, 2); }
+        """, """
+        module logic;
+        import dep;
+        import core.stdc.stdarg: va_arg;
+        import std.stdio: writeln;
+        void show(...) {
+            const a = va_arg!int(_argptr);
+            const b = va_arg!int(_argptr);
+            writeln(a + b);
+        }
+        unittest { callIt(&show); }
+        """),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(D_VARIADIC_CALLED_BY_DEPENDENCY))
+def test_saved_program_with_d_variadic_function_called_by_dependency_runs_as_the_compiled_program(
+    tmp_path: Path, scenario: str,
+) -> None:
+    dependency, program = D_VARIADIC_CALLED_BY_DEPENDENCY[scenario]
+    write(tmp_path / "dep" / "dub.sdl",
+          f'name "{dub_name("dep")}"\ntargetType "library"\n')
+    write(tmp_path / "dep" / "source" / "dep.d", dependency)
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "dub.sdl": f'name "{dub_name("app")}"\ntargetType "library"\n'
+                   f'dependency "{dub_name("dep")}" path="../dep"\n',
+        "source/logic.d": program,
+    })
+
+
 # A call whose result nothing reads, made while the arguments of another
 # call evaluate, does not overwrite the arguments already in place.
 def test_saved_program_with_discarded_result_among_arguments_runs_as_the_compiled_program(
