@@ -5887,103 +5887,6 @@ private struct Gen {
         jccTo(CC_B, fallback);
     }
 
-    static struct ByteOutcome {
-        size_t next;
-        size_t count;
-        size_t[BranchOnly.limit] stores;
-
-        bool knows(size_t slot, size_t source, size_t pendingStores)
-        const pure nothrow @nogc @safe
-        {
-            if (slot == source)
-                return true;
-            foreach (destination; stores[0 .. pendingStores])
-                if (slot == destination)
-                    return true;
-            return false;
-        }
-    }
-
-    ByteOutcome planByteOutcome(size_t first, size_t source, bool nonzero,
-        const(JitOp)[] ops, ref size_t budget)
-    {
-        ByteOutcome plan;
-        plan.next = first;
-        size_t stores;
-        for (auto pc = first; pc < ops.length && budget != 0;) {
-            --budget;
-            const ins = snapshot[pc];
-            const op = ops[pc];
-            if (opWidth(ins, op) != 1)
-                break;
-            if (op.kind == JitOp.Kind.branch
-                    && plan.knows(ins.destination, source, stores)) {
-                const next = branchSuccessor(pc, op.branch, nonzero);
-                if (next <= pc || next == size_t.max)
-                    break;
-                // Keep copies after the last bypassed branch at their own entry.
-                plan.next = next;
-                plan.count = stores;
-                pc = next;
-                continue;
-            }
-            Mem destination;
-            if (op.kind != JitOp.Kind.copy || op.copy.staticSource
-                    || !plan.knows(ins.source, source, stores)
-                    || ins.destination >= frameSize
-                    || !frameOperand(ins.destination, destination))
-                break;
-            plan.stores[stores++] = ins.destination;
-            ++pc;
-        }
-        return plan;
-    }
-
-    bool emitByteOutcomes(size_t first, size_t source, const(JitOp)[] ops) {
-        if (first >= ops.length || source >= frameSize)
-            return false;
-        const op = ops[first];
-        const ins = snapshot[first];
-        if (op.kind != JitOp.Kind.branch || opWidth(ins, op) != 1
-                || ins.destination != source)
-            return false;
-        const zero = branchSuccessor(first, op.branch, false);
-        const nonzero = branchSuccessor(first, op.branch, true);
-        if (zero <= first || nonzero <= first
-                || zero == size_t.max || nonzero == size_t.max)
-            return false;
-
-        size_t budget = BranchOnly.limit - 1;
-        const whenZero = planByteOutcome(zero, source, false, ops, budget);
-        const whenNonzero = planByteOutcome(nonzero, source, true, ops, budget);
-        if (whenZero.next == zero && whenNonzero.next == nonzero)
-            return false;
-
-        // Both edges carry the byte from the checked load. A test of the
-        // byte establishes its truth value but does not normalize it.
-        enum ubyte testByteOpcode = 0x84;
-        a.rrOp(1, byteReg: true, R11, R11, testByteOpcode);
-        if (whenNonzero.count == 0) {
-            jccTo(CC_NE, whenNonzero.next);
-            emitByteOutcome(whenZero);
-        } else if (whenZero.count == 0) {
-            jccTo(CC_E, whenZero.next);
-            emitByteOutcome(whenNonzero);
-        } else {
-            const nonzeroJump = jccLocal(CC_NE);
-            emitByteOutcome(whenZero);
-            patchHere(nonzeroJump);
-            emitByteOutcome(whenNonzero);
-        }
-        return true;
-    }
-
-    void emitByteOutcome(in ByteOutcome plan) {
-        foreach (destination; plan.stores[0 .. plan.count])
-            a.st(1, Mem(FRAME, cast(int) destination), R11);
-        jmpTo(plan.next);
-    }
-
     bool emitChecked(bool resident = false)(
         size_t i, in Instruction ins, in JitOp op,
         size_t pathNext = size_t.max, size_t* pathJump = null,
@@ -6136,6 +6039,103 @@ private struct Gen {
             }
         }
         return true;
+    }
+
+    bool emitByteOutcomes(size_t first, size_t source, const(JitOp)[] ops) {
+        if (first >= ops.length || source >= frameSize)
+            return false;
+        const op = ops[first];
+        const ins = snapshot[first];
+        if (op.kind != JitOp.Kind.branch || opWidth(ins, op) != 1
+                || ins.destination != source)
+            return false;
+        const zero = branchSuccessor(first, op.branch, false);
+        const nonzero = branchSuccessor(first, op.branch, true);
+        if (zero <= first || nonzero <= first
+                || zero == size_t.max || nonzero == size_t.max)
+            return false;
+
+        size_t budget = BranchOnly.limit - 1;
+        const whenZero = planByteOutcome(zero, source, false, ops, budget);
+        const whenNonzero = planByteOutcome(nonzero, source, true, ops, budget);
+        if (whenZero.next == zero && whenNonzero.next == nonzero)
+            return false;
+
+        // Both edges carry the byte from the checked load. A test of the
+        // byte establishes its truth value but does not normalize it.
+        enum ubyte testByteOpcode = 0x84;
+        a.rrOp(1, byteReg: true, R11, R11, testByteOpcode);
+        if (whenNonzero.count == 0) {
+            jccTo(CC_NE, whenNonzero.next);
+            emitByteOutcome(whenZero);
+        } else if (whenZero.count == 0) {
+            jccTo(CC_E, whenZero.next);
+            emitByteOutcome(whenNonzero);
+        } else {
+            const nonzeroJump = jccLocal(CC_NE);
+            emitByteOutcome(whenZero);
+            patchHere(nonzeroJump);
+            emitByteOutcome(whenNonzero);
+        }
+        return true;
+    }
+
+    static struct ByteOutcome {
+        size_t next;
+        size_t count;
+        size_t[BranchOnly.limit] stores;
+
+        bool knows(size_t slot, size_t source, size_t pendingStores)
+        const pure nothrow @nogc @safe
+        {
+            if (slot == source)
+                return true;
+            foreach (destination; stores[0 .. pendingStores])
+                if (slot == destination)
+                    return true;
+            return false;
+        }
+    }
+
+    ByteOutcome planByteOutcome(size_t first, size_t source, bool nonzero,
+        const(JitOp)[] ops, ref size_t budget)
+    {
+        ByteOutcome plan;
+        plan.next = first;
+        size_t stores;
+        for (auto pc = first; pc < ops.length && budget != 0;) {
+            --budget;
+            const ins = snapshot[pc];
+            const op = ops[pc];
+            if (opWidth(ins, op) != 1)
+                break;
+            if (op.kind == JitOp.Kind.branch
+                    && plan.knows(ins.destination, source, stores)) {
+                const next = branchSuccessor(pc, op.branch, nonzero);
+                if (next <= pc || next == size_t.max)
+                    break;
+                // Keep copies after the last bypassed branch at their own entry.
+                plan.next = next;
+                plan.count = stores;
+                pc = next;
+                continue;
+            }
+            Mem destination;
+            if (op.kind != JitOp.Kind.copy || op.copy.staticSource
+                    || !plan.knows(ins.source, source, stores)
+                    || ins.destination >= frameSize
+                    || !frameOperand(ins.destination, destination))
+                break;
+            plan.stores[stores++] = ins.destination;
+            ++pc;
+        }
+        return plan;
+    }
+
+    void emitByteOutcome(in ByteOutcome plan) {
+        foreach (destination; plan.stores[0 .. plan.count])
+            a.st(1, Mem(FRAME, cast(int) destination), R11);
+        jmpTo(plan.next);
     }
 
     bool emitShift(in Instruction ins, in JitOp op) {
