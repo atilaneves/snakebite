@@ -480,6 +480,7 @@ package struct JitState {
         size_t handlerEntryCount;
         size_t branchOnlyEnd;
         size_t fpRegionEnd;
+        size_t intRegionEnd;
         const branchOnly = g.proveBranchOnly(ops, branchOnlyCandidates, branchOnlyEntries);
         foreach (i; 0 .. instructions.length) {
             if (i < branchOnlyEnd)
@@ -536,6 +537,9 @@ package struct JitState {
                     g.fixupCount = g.fpLoop.joinFixups;
                 }
             }
+            if (!g.fpLoop.backedge && !g.checkedLoop.update && !g.intLoop.backedge
+                    && i >= intRegionEnd)
+                intRegionEnd = g.emitIntRegion(i, ops, originals);
             const saved = g.a.n;
             const savedFixups = g.fixupCount;
             const savedLiterals = g.literalCount;
@@ -1634,9 +1638,10 @@ private struct IntSlots {
 
     IntSlot newest;
     IntSlot older;
+    ubyte base = FRAME;
 
     int find(in Mem m, int width) const pure @safe {
-        if (m.base != FRAME)
+        if (m.base != base)
             return -1;
         if (newest.width == width && newest.offset == m.disp)
             return newest.reg;
@@ -1651,8 +1656,8 @@ private struct IntSlots {
     }
 
     void forget(in Mem dest, int width, int overwrittenReg = -1) pure @safe {
-        if (dest.base != FRAME) {
-            this = IntSlots.init;
+        if (dest.base != base) {
+            newest = older = IntSlot.init;
             return;
         }
         if (overwritten(newest, dest.disp, width, overwrittenReg))
@@ -1731,6 +1736,42 @@ private struct CheckedLoop {
     size_t updateFixup;
 }
 
+private struct ReceiverRange {
+    Mem slot;
+    int first = int.max;
+    int end;
+
+    void include(int offset, int width) pure @safe @nogc nothrow {
+        import std.algorithm.comparison: min, max;
+        first = min(first, offset);
+        end = max(end, offset + width);
+    }
+}
+
+private struct IntRegion {
+    enum limit = 32;
+    enum width = int.sizeof;
+    enum pointer = R9;
+
+    static struct Step {
+        size_t pc;
+        size_t target = size_t.max;
+        size_t next;
+        Mem dest;
+        Mem left;
+        Mem right;
+        bool literal;
+        int result = -1;
+        int leftReg = -1;
+        int rightReg = -1;
+        int pointerLoads;
+    }
+
+    Step[limit] steps;
+    size_t length;
+    ReceiverRange writes;
+}
+
 private struct FpRegion {
     enum instructionLimit = 64;
     enum ubyte[3] pointerRegisters = [R9, R10, R11];
@@ -1747,14 +1788,8 @@ private struct FpRegion {
         Mem right;
     }
 
-    static struct Range {
-        Mem slot;
-        int first;
-        int end;
-    }
-
     static struct Ranges {
-        Range[pointerRegisters.length] entries;
+        ReceiverRange[pointerRegisters.length] entries;
         size_t count;
     }
 
@@ -4862,11 +4897,24 @@ private struct Gen {
         const acc = p.resultInR0 ? REG0
             : left >= 0 && left != REG0 ? left : intScratch(rightReg);
         const scratch = acc == SC2 ? RAX : SC2;
+        emitIntegerArithmetic(w, p.operation, l, left, rhs, rightReg, acc, scratch);
+        if (p.resultInR0)
+            intSlots = IntSlots.init;
+        else
+            storeInt(d, w, acc);
+        if (emittingPath && sameCell)
+            a.movRR64(REG0, acc);
+        return true;
+    }
+
+    void emitIntegerArithmetic(int w, JitOp.IntOperation operation,
+        in Mem l, int left, in IntegerRight rhs, int rightReg, int acc, int scratch)
+    {
         int imm = 0;
         bool haveImm;
         if (rhs.constant)
             haveImm = immOf(w, rhs.bits, imm);
-        const mul = p.operation == JitOp.IntOperation.multiply;
+        const mul = operation == JitOp.IntOperation.multiply;
         const narrowMul = mul && w < 4;
         if (left >= 0) {
             if (narrowMul)
@@ -4899,22 +4947,15 @@ private struct Gen {
                 a.imulM(mw, acc, rhs.memory);
         } else if (rhs.constant) {
             if (haveImm)
-                a.aluRI(aluOf(p.operation), w, acc, imm);
+                a.aluRI(aluOf(operation), w, acc, imm);
             else {
                 a.movI(scratch, rhs.bits);
-                a.aluRR(aluOf(p.operation), w, acc, scratch);
+                a.aluRR(aluOf(operation), w, acc, scratch);
             }
         } else if (rightReg >= 0)
-            a.aluRR(aluOf(p.operation), w, acc, rightReg);
+            a.aluRR(aluOf(operation), w, acc, rightReg);
         else
-            a.alu(aluOf(p.operation), w, acc, rhs.memory);
-        if (p.resultInR0)
-            intSlots = IntSlots.init;
-        else
-            storeInt(d, w, acc);
-        if (emittingPath && sameCell)
-            a.movRR64(REG0, acc);
-        return true;
+            a.alu(aluOf(operation), w, acc, rhs.memory);
     }
 
     int pathScalarLeft(in Mem left, int width) {
@@ -5089,13 +5130,20 @@ private struct Gen {
                 ? R9 : intScratch(rightReg);
             a.ld(w, left, l);
         }
+        emitIntegerCompare(w, left, right, rightReg, intScratch(left));
+        if (!intLoop.contains(intLoopInstruction))
+            intSlots = IntSlots.init;
+    }
+
+    void emitIntegerCompare(int w, int left, in IntegerRight right, int rightReg,
+        int scratch)
+    {
         if (right.constant) {
             const value = right.bits;
             int imm;
             if (immOf(w, value, imm))
                 a.aluRI(Alu.cmp, w, left, imm);
             else {
-                const scratch = intScratch(left);
                 a.movI(scratch, value);
                 a.aluRR(Alu.cmp, w, left, scratch);
             }
@@ -5103,8 +5151,6 @@ private struct Gen {
             a.aluRR(Alu.cmp, w, left, rightReg);
         else
             a.alu(Alu.cmp, w, left, right.memory);
-        if (!intLoop.contains(intLoopInstruction))
-            intSlots = IntSlots.init;
     }
 
     static int integerBranchCc(in JitOp.Fused op) {
@@ -5204,6 +5250,209 @@ private struct Gen {
         return true;
     }
 
+    size_t emitIntRegion(size_t first, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals)
+    {
+        if ((ops[first].kind != JitOp.Kind.int3 && ops[first].kind != JitOp.Kind.copy)
+                || !(snapshot[first].destination & indirectBit))
+            return first;
+        IntRegion region;
+        if (!planIntRegion(first, ops, originals, region)
+                || codeLimit - a.n - literalBytes
+                    < 64 * (region.length + 1) + maximumBytesPerInstruction)
+            return first;
+
+        // Both paths start with canonical frame state. The fallback can
+        // enter after the guard has changed scratch registers.
+        fpSlots = FpSlots.init;
+        intSlots = IntSlots.init;
+        known = KnownConstant.init;
+        const width = IntRegion.width;
+        const pointer = IntRegion.pointer;
+        const writes = region.writes;
+        a.ld(size_t.sizeof, pointer, writes.slot);
+        const overlap = receiverOverlap(pointer, writes,
+            writes.slot.disp, size_t.sizeof);
+        foreach (ref const step; region.steps[0 .. region.length]) {
+            ref const op = ops[step.pc];
+            ref const ins = snapshot[step.pc];
+            IntegerRight right;
+            right.memory = step.right;
+            right.constant = step.literal;
+            if (step.literal) {
+                const raw = step.target == size_t.max
+                    ? integerRightOperand(ins, op.int3.twoAddress) : ins.source;
+                right.bits = constantAt(raw, width);
+            }
+
+            switch (op.kind) with (JitOp.Kind) {
+                case int3:
+                    emitIntegerArithmetic(width, op.int3.operation, step.left,
+                        step.leftReg, right, step.rightReg, step.result, RAX);
+                    a.st(width, step.dest, step.result);
+                    break;
+                case copy:
+                    if (step.leftReg < 0)
+                        a.ld(width, step.result, step.left);
+                    a.st(width, step.dest, step.result);
+                    break;
+                case fused:
+                    const left = step.leftReg >= 0 ? step.leftReg : RAX;
+                    if (step.leftReg < 0)
+                        a.ld(width, left, step.left);
+                    emitIntegerCompare(width, left, right, step.rightReg, RAX);
+                    if (step.target != step.pc + 1) {
+                        const cc = integerBranchCc(op.fused);
+                        const taken = step.next == step.target;
+                        jccTo(taken ? cc ^ 1 : cc,
+                            taken ? step.pc + 1 : step.target);
+                    }
+                    break;
+                default:
+                    assert(0);
+            }
+        }
+        const last = region.steps[region.length - 1];
+        jmpTo(last.next);
+        patchHere(overlap);
+        return last.pc + 1;
+    }
+
+    bool planIntRegion(size_t first, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals, ref IntRegion region)
+    {
+        const width = IntRegion.width;
+        Mem firstDest, pointerSlot;
+        if (!storageOperand(snapshot[first].destination, IntRegion.pointer,
+                firstDest, pointerSlot) || pointerSlot.disp + size_t.sizeof > frameSize)
+            return false;
+        region.writes.slot = pointerSlot;
+        IntSlots slots;
+        slots.base = IntRegion.pointer;
+        int pointerLoads, fieldLoads, moves;
+        size_t pc = first;
+        while (region.length < region.steps.length) {
+            IntRegion.Step step;
+            if (!intRegionStep(pc, ops, originals, pointerSlot, slots, step))
+                break;
+            pointerLoads += step.pointerLoads;
+            fieldLoads += (step.leftReg >= 0) + (step.rightReg >= 0);
+            if (step.target == size_t.max) {
+                region.writes.include(step.dest.disp, width);
+                step.result = step.leftReg >= 0
+                        && (ops[pc].kind == JitOp.Kind.copy || step.left == step.dest)
+                    ? step.leftReg : slots.copyRegister;
+                if (step.result == step.rightReg && step.result != step.leftReg)
+                    step.result = step.result == R11 ? SC2 : R11;
+                moves += step.leftReg >= 0 && step.leftReg != step.result;
+                slots.rememberCopy(step.dest, width, step.result);
+            } else if (step.target != step.next) {
+                // Prefer a successor that can use a retained value now.
+                // A tie leaves both successors to their ordinary entries.
+                const taken = intRegionUse(step.target, ops, originals, pointerSlot, slots);
+                const fall = intRegionUse(step.next, ops, originals, pointerSlot, slots);
+                if (taken >= fall)
+                    step.next = step.target;
+                if (taken == fall) {
+                    region.steps[region.length++] = step;
+                    break;
+                }
+            }
+            region.steps[region.length++] = step;
+            pc = step.next;
+        }
+        // The receiver load, overlap test and final transfer have a fixed cost.
+        enum overhead = 6;
+        return fieldLoads > 0 && pointerLoads + fieldLoads > overhead + moves;
+    }
+
+    int intRegionUse(size_t pc, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals, in Mem pointerSlot, in IntSlots slots)
+    {
+        IntRegion.Step step;
+        return intRegionStep(pc, ops, originals, pointerSlot, slots, step)
+            ? (step.leftReg >= 0) + (step.rightReg >= 0) : 0;
+    }
+
+    bool intRegionStep(size_t pc, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals, in Mem pointerSlot,
+        in IntSlots slots, out IntRegion.Step step)
+    {
+        if (pc >= ops.length || originals[pc] is null)
+            return false;
+        ref const op = ops[pc];
+        ref const ins = snapshot[pc];
+        const width = IntRegion.width;
+        if ((op.width ? op.width : ins.width) != width)
+            return false;
+        step.pc = pc;
+        step.next = pc + 1;
+        size_t left, right;
+        bool sameAddress;
+        // These storage operations have no atomic or volatile effects.
+        // Any handler or template that can synchronize ends the region.
+        switch (op.kind) with (JitOp.Kind) {
+            case int3:
+                if (op.int3.leftInR0 || op.int3.resultInR0)
+                    return false;
+                sameAddress = op.int3.twoAddress;
+                left = sameAddress ? ins.destination : ins.source;
+                right = integerRightOperand(ins, sameAddress);
+                step.literal = op.int3.constantRight;
+                break;
+            case copy:
+                if (op.copy.staticSource)
+                    return false;
+                left = ins.source;
+                break;
+            case fused:
+                if (op.fused.leftInR0 || op.fused.kind == CompareKind.floating
+                        || !targetIndex(ins.sourceWidth, step.target)
+                        || step.target <= pc)
+                    return false;
+                left = ins.destination;
+                right = ins.source;
+                step.literal = op.fused.constantRight;
+                break;
+            default:
+                return false;
+        }
+
+        if (step.target == size_t.max && !intRegionOperand(ins.destination,
+                pointerSlot, step.dest))
+            return false;
+        if (!intRegionOperand(left, pointerSlot, step.left))
+            return false;
+        step.leftReg = slots.find(step.left, width);
+        step.pointerLoads = (step.target == size_t.max) + !sameAddress;
+        if (op.kind != JitOp.Kind.copy && !step.literal) {
+            if (!intRegionOperand(right, pointerSlot, step.right))
+                return false;
+            step.rightReg = slots.find(step.right, width);
+            ++step.pointerLoads;
+        }
+        return true;
+    }
+
+    static bool intRegionOperand(size_t raw, in Mem pointerSlot, out Mem value) {
+        Mem address;
+        return (raw & indirectBit)
+            && storageOperand(raw, IntRegion.pointer, value, address)
+            && address == pointerSlot;
+    }
+
+    size_t receiverOverlap(int pointer, in ReceiverRange range,
+        int protectedFirst, size_t protectedWidth)
+    {
+        // Compare the last written byte with the start of the protected slot.
+        // Unsigned subtraction detects overlap at either end of the slot.
+        a.lea(RAX, Mem(cast(ubyte) pointer, range.end - 1 - protectedFirst));
+        a.aluRR(Alu.sub, size_t.sizeof, RAX, FRAME);
+        const span = protectedWidth + range.end - range.first - 1;
+        a.aluRI(Alu.cmp, size_t.sizeof, RAX, cast(int) span);
+        return jccLocal(CC_B);
+    }
+
     size_t emitFpRegion(size_t first, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals)
     {
@@ -5228,13 +5477,8 @@ private struct Gen {
         size_t[FpRegion.pointerRegisters.length] misses;
         foreach (i, ref const range; ranges) {
             const pointer = FpRegion.pointerRegisters[i];
-            const span = frameSize + range.end - range.first - 1;
             a.ld(size_t.sizeof, pointer, range.slot);
-            // A displacement range can overlap at either end of the frame.
-            a.lea(RAX, Mem(pointer, range.end - 1));
-            a.aluRR(Alu.sub, size_t.sizeof, RAX, FRAME);
-            a.aluRI(Alu.cmp, size_t.sizeof, RAX, cast(int) span);
-            misses[i] = jccLocal(CC_B);
+            misses[i] = receiverOverlap(pointer, range, 0, frameSize);
         }
 
         ScalarFpSlots!(2, 14) slots;
@@ -5339,14 +5583,9 @@ private struct Gen {
             if (i == ranges.entries.length)
                 return false;
             ++ranges.count;
-            ranges.entries[i] = FpRegion.Range(slot, memory.disp,
-                memory.disp + FpRegion.width);
-        } else {
-            import std.algorithm.comparison: min, max;
-            ranges.entries[i].first = min(ranges.entries[i].first, memory.disp);
-            ranges.entries[i].end = max(ranges.entries[i].end,
-                memory.disp + FpRegion.width);
+            ranges.entries[i] = ReceiverRange(slot);
         }
+        ranges.entries[i].include(memory.disp, FpRegion.width);
         memory.base = FpRegion.pointerRegisters[i];
         return true;
     }
