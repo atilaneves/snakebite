@@ -3,6 +3,7 @@ module snakebite.ffi.plan;
 
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.ffi.callback: CallbackBridge;
+import snakebite.ffi.names: Linked, Name;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.ffi.callplan:
     CallPlan, NativeSignature, hasStoreWidth, planOf;
@@ -35,6 +36,12 @@ public struct PlanCache {
         _store = store;
     }
 
+    // The store that this cache prepares plans in: the one holder of it in
+    // a static world, which the other parts reach through this.
+    public CallPlanStore* store() @safe pure nothrow @nogc {
+        return _store;
+    }
+
     import snakebite.frontend.ast: FuncDeclaration, Type, TypeFunction;
 
     // Owns the plans that this prepares, the resolver they bind symbols
@@ -43,12 +50,21 @@ public struct PlanCache {
     // alive longer.
     private CallPlanStore* _store;
 
-    public void* callableAddress(
+    // The address that host code calls to reach `declaration`: `word`, the
+    // word of its guest body, or the name of its host code when `word` is
+    // null (`snakebite.ffi.names`). With an `adjustment` it is the entry
+    // that adjusts the receiver first.
+    public Linked!(void*) callableAddress(
         const(void)* word, FuncDeclaration declaration,
         in ptrdiff_t adjustment = 0,
     ) {
-        if (word is null)
-            word = of(declaration).address;
+        if (word is null) {
+            auto code = nameOf(declaration);
+            if (adjustment == 0)
+                return Linked!(void*).named(code);
+            return Linked!(void*).named(_store.names.adjusted(code, adjustment,
+                () => signatureUnderLock(declaration)));
+        }
         // The bridge never reads the AST, so the signature is built here,
         // under the compiler lock and only when the bridge has no entry
         // yet. Lock order, outermost first: the compiler lock, then the
@@ -58,13 +74,18 @@ public struct PlanCache {
         // never takes the compiler lock.
         NativeSignature signature;
         if (adjustment != 0 && _store.callbacks.reservedAdjustedEntry(
-                word, adjustment) is null) {
-            import snakebite.frontend.compiler: withCompilerLock;
+                word, adjustment) is null)
+            signature = signatureUnderLock(declaration);
+        return Linked!(void*).held(cast(void*) _store.callbacks.adjustedEntryOf(
+            word, signature, adjustment));
+    }
 
-            withCompilerLock({ signature = nativeSignatureOf(declaration); });
-        }
-        return cast(void*) _store.callbacks.adjustedEntryOf(
-            word, signature, adjustment);
+    private NativeSignature signatureUnderLock(FuncDeclaration declaration) {
+        import snakebite.frontend.compiler: withCompilerLock;
+
+        NativeSignature signature;
+        withCompilerLock({ signature = nativeSignatureOf(declaration); });
+        return signature;
     }
 
     public CallbackBridge.GuestTarget guestTarget(const(void)* address) const {
@@ -103,8 +124,13 @@ public struct PlanCache {
         return type !is null && hasResultStore(type);
     }
 
-    public void* addressOf(FuncDeclaration function_) {
-        return _store.resolver.resolve(hostSymbolOf(function_));
+    // The name of the host code of `function_` (`snakebite.ffi.names`),
+    // made once for each function, with its declaration.
+    public Name* nameOf(FuncDeclaration function_) {
+        if (auto found = function_ in _names)
+            return *found;
+        return *_names.insert(function_, _store.names.named(
+            hostSymbolOf(function_), 0, function_.toString));
     }
 
     // `TypeFunction`, not `const(TypeFunction)`: a `SharedTable` entry
@@ -190,53 +216,13 @@ public struct PlanCache {
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); a plan is prepared once, on its first use.
     private SharedTable!(FuncDeclaration, CallPlan*) _plans;
-    private SharedTable!(FuncDeclaration, CallPlan*) _unboundPlans;
+    private SharedTable!(FuncDeclaration, CallPlan*) _namedPlans;
+    private SharedTable!(FuncDeclaration, Name*) _names;
     private SharedTable!(string, CallPlan*) _rawPlans;
-    private SharedTable!(FuncDeclaration, bool) _nativeSymbols;
     private shared size_t _preparations;
-    version(unittest) private size_t _nativeSymbolLookups;
-
-    // Resolves a linker name through the cache shared by this backend's
-    // plan preparation and its other FFI operations.
-    public void* resolve(in char[] name) {
-        return _store.resolver.resolve(name);
-    }
 
     public void* resolveThreadLocal(in char[] name) const {
         return _store.resolver.resolveThreadLocal(name);
-    }
-
-    // Whether this process has a symbol for `function_`. Kept only for
-    // `ofSite` to bind a call; a later step of #960 removes it. Missing
-    // symbols are cached too.
-    // `nativeTarget` reads only a template instance's own already-resolved
-    // arguments (an AST structure walk, no forward reference to force),
-    // and `resolve` is a host symbol lookup, not a dmd one. One call here
-    // can still reach into dmd's own mutable state and take the frontend
-    // lock: `mangledNameOf`, only while `function_`'s type is not already
-    // complete (`snakebite.frontend.compiler.forceIfNeeded`), once for each
-    // function. `_nativeSymbols` is a `SharedTable` (ADR-0006).
-    public bool hasNativeSymbol(
-        FuncDeclaration function_,
-    ) {
-        import snakebite.druntime.constructoratomic: nativeTarget;
-        import snakebite.frontend.dmd.mangle: mangledNameOf;
-
-        if (auto cached = function_ in _nativeSymbols)
-            return *cached;
-
-        version(unittest) ++_nativeSymbolLookups;
-        auto target = nativeTarget(function_);
-        const found = target.address !is null
-            || resolve(mangledNameOf(function_)) !is null;
-        return *_nativeSymbols.insert(function_, found);
-    }
-
-    version(unittest)
-    public size_t nativeSymbolLookups()
-        @safe @nogc nothrow pure const scope
-    {
-        return _nativeSymbolLookups;
     }
 
     version(unittest)
@@ -265,7 +251,7 @@ public struct PlanCache {
 
     // `function_`'s plan, prepared on its first call and reused after.
     //
-    // Returned by pointer, the same kind `variadicOf`/`rawPlanOf` return:
+    // Returned by pointer, the same kind `rawPlanOf` returns:
     // the plan stays in the cache, and a caller only ever calls through
     // it.
     // No frontend lock: `prepare` (through `shapeOf`/`_shapeOf`) forces
@@ -286,40 +272,23 @@ public struct PlanCache {
     // which the caller keeps with the site. This is the one question for
     // such a call. With `isVariadicCall` the callee is variadic and the
     // plan depends on `extraArgumentTypes`, the types of the extra arguments
-    // of the site. A callee that this process cannot call (its symbol is
-    // absent, or `ffi` cannot lay out its signature) gets a plan too,
-    // because an unused branch can refer to one: the plan holds the
-    // failure, and `CallPlanStore.bound` throws it when execution reaches
-    // the call.
+    // of the site. The plan holds the name of the code, and binds it at its
+    // first call (`CallPlanStore.bound`): the compile needs no address. A
+    // callee that `ffi` cannot lay out gets a plan too, because an unused
+    // branch can refer to one: the plan holds the failure, and `bound`
+    // throws it when execution reaches the call.
     public const(CallPlan)* ofSite(
         FuncDeclaration function_,
         in bool isVariadicCall,
         scope Type[] extraArgumentTypes,
     ) {
-        if (hasNativeSymbol(function_))
-            return isVariadicCall
-                ? variadicOf(function_, extraArgumentTypes)
-                : of(function_);
         return isVariadicCall
-            ? unboundVariadicOf(function_, extraArgumentTypes)
-            : unboundOf(function_);
+            ? namedVariadicOf(function_, extraArgumentTypes)
+            : namedOf(function_);
     }
 
-    // The plan of one call site of an `extern(C)` C-style or `extern(D)`
-    // untyped variadic callee (`calleeOf`'s own doc), kept like `of` keeps
-    // one. The plan depends on the extra argument types of that call, not on
-    // `function_` alone, so it is not cached by declaration: each call of
-    // this makes a plan, and the caller keeps the plan with its call site.
-    private const(CallPlan)* variadicOf(
-        FuncDeclaration function_,
-        scope Type[] extraArgumentTypes,
-    ) {
-        countPreparation;
-        return keptPlanOf(function_, extraArgumentTypes, true);
-    }
-
-    // As `variadicOf`, for a call through a value of `type`, whose code
-    // is not known: the plan has no code to call.
+    // The plan of one call site of a variadic callee, for a call through a
+    // value of `type`, whose code is not known: the plan has no code to call.
     public const(CallPlan)* variadicKeptWithoutCode(
         TypeFunction type, bool hasContext,
         scope Type[] extraArgumentTypes,
@@ -329,46 +298,45 @@ public struct PlanCache {
             extraArgumentTypes, true));
     }
 
-    // The plan of a callee that the compile may not be able to call: its
-    // symbol is not in this process, or `ffi` cannot lay out its signature.
-    // The plan holds the failure text that `of` throws for the callee, and
-    // `callplanstore.bound` throws it at the call if the symbol is still
-    // absent then.
-    private const(CallPlan)* unboundOf(FuncDeclaration function_) {
-        if (auto cached = function_ in _unboundPlans)
+    // The plan of a call site of `function_` (`ofSite`), one for each
+    // function.
+    private const(CallPlan)* namedOf(FuncDeclaration function_) {
+        if (auto cached = function_ in _namedPlans)
             return *cached;
 
         countPreparation;
-        return *_unboundPlans.insert(function_,
-            unboundPlanOf(function_, null, false));
+        return *_namedPlans.insert(function_,
+            namedPlanOf(function_, null, false));
     }
 
-    // As `unboundOf`, for one call site of a variadic callee (`variadicOf`).
-    private const(CallPlan)* unboundVariadicOf(
+    // As `namedOf`, for one call site of a variadic callee. The plan depends
+    // on the extra argument types of that call, not on `function_` alone, so
+    // it is not cached by declaration: the caller keeps the plan with its
+    // call site.
+    private const(CallPlan)* namedVariadicOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
     ) {
         countPreparation;
-        return unboundPlanOf(function_, extraArgumentTypes, true);
+        return namedPlanOf(function_, extraArgumentTypes, true);
     }
 
-    private CallPlan* unboundPlanOf(
+    // The failure text is the one that `of` throws for a symbol that no
+    // object defines.
+    private CallPlan* namedPlanOf(
         FuncDeclaration function_,
         scope Type[] extraArgumentTypes,
         in bool isVariadicCall,
     ) {
-        string symbol;
+        auto name = nameOf(function_);
         NativeSignature signature;
         try
             signature = calleeOf(function_, extraArgumentTypes,
-                isVariadicCall, symbol);
+                isVariadicCall);
         catch (Exception laidOutBadly)
             return _store.plan(NativeSignature.init, null, laidOutBadly.msg);
-        auto address = resolve(symbol);
-        if (address is null)
-            return _store.plan(signature, symbol,
-                unresolved(function_, symbol).msg);
-        return _store.planAt(signature, symbol, address);
+        return _store.plan(signature, name,
+            intrinsicFailure(function_, name.symbol));
     }
 
     private CallPlan* keptPlanOf(
@@ -376,16 +344,13 @@ public struct PlanCache {
         scope Type[] extraArgumentTypes,
         in bool isVariadicCall,
     ) {
-        string symbol;
+        auto name = nameOf(function_);
         auto signature = calleeOf(function_, extraArgumentTypes,
-            isVariadicCall, symbol);
-        void* address;
-        if (symbol.length != 0) {
-            address = resolve(symbol);
-            if (address is null)
-                throw unresolved(function_, symbol);
-        }
-        return _store.planAt(signature, symbol, address);
+            isVariadicCall);
+        if (const failure = intrinsicFailure(function_, name.symbol))
+            if (_store.addressIfPresent(name) is null)
+                throw new Exception(failure);
+        return _store.planAt(signature, name, _store.addressOf(name));
     }
 
     // The plan of one execution of a variadic call through an address. A caller that
@@ -428,12 +393,13 @@ public struct PlanCache {
             return *cached;
         }
 
-        auto address = resolve(name);
+        auto symbol = _store.names.named(name);
+        auto address = _store.addressIfPresent(symbol);
         if (address is null)
             return null;
         auto plan = _store.planAt(CallPlan.rawSignatureOf(
             parameterRegisters, returnRegister, secondReturnRegister),
-            name, address);
+            symbol, address);
 
         countPreparation;
         return *_rawPlans.insert(name, plan);
@@ -447,13 +413,11 @@ public struct PlanCache {
         Register returnRegister = Register(Register.Kind.none, 0),
         Register secondReturnRegister = Register(Register.Kind.none, 0),
     ) {
-        import snakebite.ffi.symbol: unresolvedSymbol;
-
         if (auto plan = rawPlanOf(name, parameterRegisters, returnRegister,
                 secondReturnRegister))
             return plan;
 
-        throw unresolvedSymbol(name);
+        throw CallPlanStore.missing(name, null);
     }
 
 }
@@ -479,8 +443,8 @@ private bool hasResultStore(
     return true;
 }
 
-// Works out how to call `function_` at one call site: the signature, and
-// `symbol`, the linker name of its code.
+// Works out how to call `function_` at one call site: the signature. The
+// name of its code is `hostSymbolOf`.
 //
 // The linkage decides only the symbol's name, which dmd's own mangler
 // supplies, so nothing here is specific to C. A signature the implemented
@@ -506,15 +470,14 @@ private NativeSignature calleeOf(
     imported!"snakebite.frontend.ast".FuncDeclaration function_,
     scope imported!"snakebite.frontend.ast".Type[] extraArgumentTypes,
     in bool isVariadicCall,
-    out string symbol,
 ) {
     import snakebite.druntime.constructoratomic: nativeTarget;
 
-    // Mangling forces `function_`'s type complete first (`mangledNameOf`'s
-    // own doc) - done before `shapeOf` reads `function_.type.nextOf` to
-    // classify the return value below, an inferred return type dmd has
-    // not resolved yet would otherwise be read as `null`.
-    symbol = hostSymbolOf(function_);
+    // The caller names `function_` first (`nameOf`): mangling forces its
+    // type complete (`mangledNameOf`'s own doc) before `shapeOf` reads
+    // `function_.type.nextOf` to classify the return value below; an
+    // inferred return type dmd has not resolved yet would otherwise be read
+    // as `null`.
 
     auto target = nativeTarget(function_);
 
@@ -543,29 +506,26 @@ private string hostSymbolOf(imported!"snakebite.frontend.ast".FuncDeclaration fu
     return nativeTarget(function_).address !is null ? atomicAddSymbol : symbol;
 }
 
-// The failure for a `function_` whose code `symbol` is not in this process.
-private Exception unresolved(
-    imported!"snakebite.frontend.ast".FuncDeclaration function_, in string symbol,
+// The failure of a call of `function_` when it is an intrinsic that LDC
+// compiles inline, or null.
+private string intrinsicFailure(
+    imported!"snakebite.frontend.ast".FuncDeclaration function_,
+    in string symbol,
 ) {
-    import std.conv: text;
-
     version (LDC) {
         import gen.dpragma: LDCPragma;
+        import std.conv: text;
 
         // LDC compiles this declaration inline, so the host has no symbol
         // for it; a wrapper in `snakebite.builtin.ldc` is the
         // way to a result, and this one has none.
         if (function_.llvmInternal != LDCPragma.LLVMnone)
-            return new Exception(
-                text("no host wrapper serves the LDC intrinsic `",
-                    function_.mangleOverride.length
-                        ? function_.mangleOverride : symbol,
-                    "` declared by `", function_.toString, "`"),
-            );
+            return text("no host wrapper serves the LDC intrinsic `",
+                function_.mangleOverride.length
+                    ? function_.mangleOverride : symbol,
+                "` declared by `", function_.toString, "`");
     }
-    import snakebite.ffi.symbol: unresolvedSymbol;
-
-    return unresolvedSymbol(symbol, function_.toString);
+    return null;
 }
 
 // The signature of the guest function `function_`, from its own declared

@@ -127,27 +127,6 @@ private extern(C) int snakebite_ut_plan_executable_only_target() {
     return 91;
 }
 
-// A declaration names native code that this process has; a symbol it lacks
-// is reported as missing.
-@("hasNativeSymbol.findsTheSymbolOfADeclaration")
-unittest {
-    auto guestModule = parseSnippet(q{
-        pragma(mangle, "snakebite_ut_plan_executable_only_target")
-        extern(C) int declared();
-
-        pragma(mangle, "snakebite_ut_plan_missing_symbol")
-        extern(C) int missing();
-    });
-    auto declared = findFunction(guestModule, "declared");
-    auto missing = findFunction(guestModule, "missing");
-    assert(declared !is null && missing !is null);
-
-    mixin planCache;
-    cache.hasNativeSymbol(declared).should == true;
-    cache.hasNativeSymbol(missing).should == false;
-}
-
-
 // The native side of the `ref` tests below: compiled functions in this
 // very test binary, reachable through the dynamic linker because the
 // binary exports its own symbols.
@@ -2574,7 +2553,8 @@ unittest {
         arguments[i] = &value;
 
     int result;
-    cache.ofSite(site.function_, true, site.extraArgumentTypes)
+    CallPlanStore.bound(cache.ofSite(
+        site.function_, true, site.extraArgumentTypes))
         .call(&result, arguments[]);
 
     // 1 (`first`, unweighted) + sum((i + 1) * (i + 2)) for i in 0 .. 9,
@@ -2602,7 +2582,8 @@ unittest {
         arguments[i] = &value;
 
     double result;
-    cache.ofSite(site.function_, true, site.extraArgumentTypes)
+    CallPlanStore.bound(cache.ofSite(
+        site.function_, true, site.extraArgumentTypes))
         .call(&result, arguments[]);
 
     // 1.0 (`first`, unweighted) + sum((i + 1) * (i + 2)) for i in 0 .. 8,
@@ -2640,7 +2621,8 @@ unittest {
         arguments[i] = &value;
 
     double result;
-    cache.ofSite(site.function_, true, site.extraArgumentTypes)
+    CallPlanStore.bound(cache.ofSite(
+        site.function_, true, site.extraArgumentTypes))
         .call(&result, arguments[]);
 
     // Same weighted total as `called.variadic.nineDoublesOneSpills`: the
@@ -2675,7 +2657,8 @@ unittest {
     int tag = 3;
     VariadicMixedPair value = VariadicMixedPair(7, 2.5);
     long result;
-    cache.ofSite(site.function_, true, site.extraArgumentTypes).call(&result, [
+    CallPlanStore.bound(cache.ofSite(
+        site.function_, true, site.extraArgumentTypes)).call(&result, [
         cast(const void*) &tag, cast(const void*) &value,
     ]);
 
@@ -2725,7 +2708,8 @@ unittest {
     int countOne = 1;
     int valueOne = 41;
     int resultOne;
-    cache.ofSite(siteOne.function_, true, siteOne.extraArgumentTypes).call(
+    CallPlanStore.bound(cache.ofSite(
+        siteOne.function_, true, siteOne.extraArgumentTypes)).call(
         &resultOne,
         [cast(const void*) &countOne, cast(const void*) &valueOne],
     );
@@ -2733,7 +2717,8 @@ unittest {
     int countThree = 3;
     int[3] valuesThree = [1, 2, 3];
     int resultThree;
-    cache.ofSite(siteThree.function_, true, siteThree.extraArgumentTypes).call(
+    CallPlanStore.bound(cache.ofSite(
+        siteThree.function_, true, siteThree.extraArgumentTypes)).call(
         &resultThree,
         [
             cast(const void*) &countThree,
@@ -2773,7 +2758,8 @@ unittest {
     int value = 7;
     double scale = 3.5;
     int result;
-    cache.ofSite(site.function_, true, site.extraArgumentTypes).call(&result, [
+    CallPlanStore.bound(cache.ofSite(
+        site.function_, true, site.extraArgumentTypes)).call(&result, [
         cast(const void*) &bufferPtr,
         cast(const void*) &n,
         cast(const void*) &formatPtr,
@@ -2866,7 +2852,8 @@ unittest {
         arguments[2 + i] = &value;
 
     int result;
-    cache.ofSite(site.function_, true, site.extraArgumentTypes)
+    CallPlanStore.bound(cache.ofSite(
+        site.function_, true, site.extraArgumentTypes))
         .call(&result, arguments[]);
 
     result.should == 28;
@@ -2907,7 +2894,8 @@ unittest {
     int countOne = 1;
     int valueOne = 41;
     int resultOne;
-    cache.ofSite(siteOne.function_, true, siteOne.extraArgumentTypes).call(
+    CallPlanStore.bound(cache.ofSite(
+        siteOne.function_, true, siteOne.extraArgumentTypes)).call(
         &resultOne,
         [
             cast(const void*) &vArgumentsOne,
@@ -2921,7 +2909,8 @@ unittest {
     int countThree = 3;
     int[3] valuesThree = [1, 2, 3];
     int resultThree;
-    cache.ofSite(siteThree.function_, true, siteThree.extraArgumentTypes).call(
+    CallPlanStore.bound(cache.ofSite(
+        siteThree.function_, true, siteThree.extraArgumentTypes)).call(
         &resultThree,
         [
             cast(const void*) &vArgumentsThree,
@@ -3039,7 +3028,8 @@ unittest {
     PlanPoint point = PlanPoint(3, 4);
 
     int result;
-    cache.ofSite(site.function_, true, site.extraArgumentTypes).call(&result, [
+    CallPlanStore.bound(cache.ofSite(
+        site.function_, true, site.extraArgumentTypes)).call(&result, [
         cast(const void*) &vArguments,
         cast(const void*) &destPtr,
         cast(const void*) &point,

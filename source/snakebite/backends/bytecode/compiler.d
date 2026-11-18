@@ -9,6 +9,7 @@ import snakebite.frontend.typefacts: typeFacts, truthFacts;
 
 
 import snakebite.failure.report: internalFailure;
+import snakebite.ffi.names: Linked;
 
 import snakebite.frontend.ast: Type;
 import object: TypeInfo_Class;
@@ -305,7 +306,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"snakebite.frontend.ast".VarDeclaration variable,
     ) {
-        return _world.data.storageOf(variable);
+        return _world.data.startStorage(variable);
     }
 
     // The handle is a `StartFunction`. Until its function is compiled it
@@ -401,7 +402,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return plan;
     }
 
-    package TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
+    package Linked!TypeInfo_Class classRuntimeInfo(
+        ClassDeclaration declaration,
+    ) {
         return _world.classRuntimeInfo(declaration);
     }
 
@@ -430,12 +433,15 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // through `callableAddress` itself, never sees it.
     private imported!"snakebite.native.address".Address
     operandAddress(FuncDeclaration method, ptrdiff_t adjustment) {
-        import snakebite.native.address: Address;
+        import snakebite.native.address: Address, Target;
 
         if (_speculating != 0)
             throw new SpeculationRejected;
-        const address = _world.callableAddress(method, adjustment);
-        return Address(_world.callableKind(address), address);
+        auto address = _world.callableAddress(method, adjustment);
+        if (auto name = address.name)
+            return Address(Target.Kind.hostSymbol, name);
+        const word = cast(const(void)*) address.word;
+        return Address(_world.callableKind(word), word);
     }
 
     // The address of a copy of the C string `text` that the process store owns.
@@ -810,8 +816,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // indices, and a file holds them as indices and distances. A
             // save executes nothing, so its functions stay in that form.
             const reason = compiledProgram.recordsAddresses ? null
-                : Program.complete(
-                    placeholder, _runner.jitSetting, _runner.jitInstance);
+                : Program.complete(placeholder, compiledProgram.plans,
+                    _runner.jitSetting, _runner.jitInstance);
             if (reason !is null) {
                 import std.conv: text;
 
@@ -1299,7 +1305,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ExceptionHandler[] exceptionHandlers;
         foreach (pending; _code.exceptionHandlers) {
             ExceptionHandler handler;
-            handler.type = pending._type;
+            // The word of the class information, or of its name, which the
+            // record of the handler names (below).
+            handler.type = cast(TypeInfo_Class) cast(void*) pending._type.word;
             handler.catchOffset = pending._catchOffset;
             handler.bodyStartIndex = pending._bodyStart;
             handler.bodyEndIndex = pending._bodyEnd;
@@ -1314,13 +1322,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _code.assignRegisters;
         specialiseHandlers(_code.instructions);
 
-        if (_bytecode.compiledProgram.recordsAddresses) {
+        if (_bytecode.compiledProgram.recordsAddresses)
             foreach (index, ref site; _code.callSites)
                 recordRelocs(_code.relocs, index, site);
-            foreach (index, ref handler; exceptionHandlers)
-                recordRelocs(_code.relocs, index, handler,
-                    _bytecode._world.data.addressOfData(
-                        cast(const(void)*) handler.type).target);
+        foreach (index, ref handler; exceptionHandlers) {
+            const type = _bytecode._world.data.addressOfData(
+                _code.exceptionHandlers[index]._type).target;
+            if (recordsAddress(type))
+                recordRelocs(_code.relocs, index, handler, type);
         }
 
         ClosureSlot[] closureSlots;
@@ -2028,7 +2037,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (!_bytecode.compiledProgram.recordsAddresses)
+        if (!recordsAddress(address.target))
             return;
         Roles roles;
         const known = rolesOf(handler, roles);
@@ -2049,8 +2058,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return _code.constants.length - 1;
     }
 
+    // Whether the word of `target` has a record: in a save each word does,
+    // and in a compile to RAM a name does, which `Program.complete` turns
+    // into the address of its symbol.
+    private bool recordsAddress(in Target target) {
+        return _bytecode.compiledProgram.recordsAddresses
+            || _bytecode.compiledProgram.plans.isNamed(target);
+    }
+
     private size_t addConstant(in Address address) {
-        if (_bytecode.compiledProgram.recordsAddresses && !address.isNull)
+        if (!address.isNull && recordsAddress(address.target))
             _code.relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _code.constants.length),
@@ -2536,7 +2553,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opRangeEnd, 0, 0, 0);
         foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepth))
             _code.exceptionHandlers ~= PendingExceptionHandler(
-                typeid(Throwable), range.start, range.end, handler,
+                _bytecode._world.types.throwableInfo,
+                range.start, range.end,
+                handler,
                 size_t.max, cleanupEnd,
             );
         _finished = bodyFinished || cleanupFinished;
@@ -5115,7 +5134,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) initial.length), size_t.sizeof);
             emit(&opConstant, _destination + arrayPointerOffset,
-                addConstant(_bytecode._world.data.addressOfData(initial.ptr)),
+                addConstant(_bytecode._world.data.addressOfData(initial)),
                 size_t.sizeof);
             return;
         }
@@ -5342,8 +5361,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        if (auto typeInfo =
-                expression.typeInfoAddressedBy(_bytecode._world.types)) {
+        auto typeInfo = expression.typeInfoAddressedBy(_bytecode._world.types);
+        if (!typeInfo.isNull) {
             emitTypeInfoConstant(typeInfo);
             return;
         }
@@ -5980,7 +5999,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             const object = reserveTemp(
                 TypeFacts(declaration.structsize, alignment));
             emit(&opStaticLoad, object,
-                _bytecode._world.data.addressOfData(initial.ptr),
+                _bytecode._world.data.addressOfData(initial),
                 initial.length);
             emit(&opFrameAddress, _destination, object, size_t.sizeof);
         }
@@ -5995,7 +6014,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 initial.length, declaration.alignsize == 0
                     ? 1 : declaration.alignsize));
             emit(&opStaticLoad, image,
-                _bytecode._world.data.addressOfData(initial.ptr),
+                _bytecode._world.data.addressOfData(initial),
                 initial.length);
             emit(&opStoreIndirect, _destination, image,
                 initial.length);
@@ -6125,15 +6144,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             _bytecode._world.types.get(type), destination, width);
     }
 
-    private void emitTypeInfoConstant(
-        TypeInfo info,
+    private void emitTypeInfoConstant(T)(
+        const Linked!T info,
         in size_t destination = size_t.max,
         in size_t width = size_t.max,
     ) {
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
-            addConstant(_bytecode._world.data.addressOfData(
-                cast(const(void)*) info)),
+            addConstant(_bytecode._world.data.addressOfData(info)),
             width == size_t.max ? _width : width);
     }
 

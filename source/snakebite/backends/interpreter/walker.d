@@ -250,6 +250,7 @@ import snakebite.language.control.condition: IfPlan, LogicalPlan;
 import snakebite.language.control.transfer: ControlFlowState,
     ScopeFrame, ScopePaths, scopePathsOf;
 import snakebite.language.control.unwinding: CatchPlan, catchPlanOf;
+import snakebite.ffi.names: Linked;
 import snakebite.language.storage.lifetime: AggregateInitPlan;
 import snakebite.failure.unwind:
     ExceptionCandidate, ExceptionUnwindPlan = UnwindPlan;
@@ -378,13 +379,14 @@ private struct Shared {
         this.program = program;
         this.callGuest = callGuest;
         planStore = CallPlanStore(program.dependencyImage);
-        const resolver = &planStore.resolver;
-        store = StaticStore(() => heapNew!TlsSlots(resolver));
+        const plans = &planStore;
+        store = StaticStore(() => heapNew!TlsSlots(plans));
         world = StaticWorld(program, &store, &planStore,
             StaticWorld.Backend(
                 &guestWord,
                 (method, address) {
-                    callableDeclarations.insert(address, method);
+                    callableDeclarations.insert(
+                        planStore.ready(address), method);
                 },
                 (declaration, info) {
                     declarationOf.insert(cast(const(void)*) info, declaration);
@@ -421,7 +423,7 @@ private struct Shared {
 
 private struct TryCatchPlan {
     ExceptionCandidate[] candidates;
-    CatchPlan catches;
+    CatchPlan!() catches;
 }
 
 // What a `try`/`finally` statement does whatever its body runs: the scope a
@@ -957,7 +959,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
         return _foreignNameLookups + _layouts.lookups + _staticLookups
-            + _staticChains.lookups + _plans.nativeSymbolLookups;
+            + _staticChains.lookups;
     }
 
     // Every hash lookup this evaluator has made to find out what a `Type`
@@ -2887,7 +2889,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return *cached;
 
         return *_catchTypes.build(catch_,
-            () => _runtimeTypes.unqualifiedClassInfo(catch_.type));
+            () => ready(_runtimeTypes.unqualifiedClassInfo(catch_.type)));
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
@@ -3742,7 +3744,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto declaration = symbol.dsym.isAggregateDeclaration;
             assert(declaration !is null,
                 "an initializer symbol names an aggregate");
-            const initial = _runtimeTypes.initializer(declaration);
+            const initial = ready(_runtimeTypes.initializer(declaration));
 
             import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
@@ -4577,8 +4579,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return evaluator.callableAddress(function_, 0);
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration)
-                return cast(void*) typeInfoObjectOf(
-                    typeInfo, *evaluator._runtimeTypes);
+                return cast(void*) evaluator.ready(typeInfoObjectOf(
+                    typeInfo, *evaluator._runtimeTypes));
 
             auto variable = expression.var.isVarDeclaration;
             assert(variable !is null,
@@ -5909,9 +5911,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (isStaticStructAddress(expression))
             return _nativeData.write(_type, _facts, expression, _place);
 
-        if (auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes)) {
-            checkedStoreIntegral(_place, cast(size_t) cast(void*) typeInfo,
-                _facts.size);
+        auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes);
+        if (!typeInfo.isNull) {
+            checkedStoreIntegral(_place,
+                cast(size_t) cast(void*) ready(typeInfo), _facts.size);
             return;
         }
 
@@ -6048,7 +6051,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         assert(type !is null && type.vtinfo !is null,
             "dmd's `typeid` semantic leaves a type with its `vtinfo` set");
 
-        auto info = _runtimeTypes.get(type);
+        auto info = ready(_runtimeTypes.get(type));
         checkedStoreIntegral(_place, cast(size_t) cast(void*) info, _facts.size);
     }
 
@@ -6634,7 +6637,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            const initial = _runtimeTypes.initializer(declaration);
+            const initial = ready(_runtimeTypes.initializer(declaration));
             const alignment = declaration.alignsize == 0
                 ? 1 : declaration.alignsize;
             auto object = _frames.reserve(declaration.structsize, alignment);
@@ -6653,7 +6656,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (plan.objectKind == NewPlan.ObjectKind.class_) {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
-            const initial = _runtimeTypes.initializer(classType.sym);
+            const initial =
+                ready(_runtimeTypes.initializer(classType.sym));
             memcpy(object, initial.ptr, initial.length);
         }
 
@@ -6696,7 +6700,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // builds the native TypeInfo_Class metadata druntime needs for
     // allocation and classinfo, once per program.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        return _shared.world.classRuntimeInfo(declaration);
+        return ready(_shared.world.classRuntimeInfo(declaration));
     }
 
     // `Shared.callableAddress` needs no per-thread state (the vtable slot
@@ -6710,7 +6714,15 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private void* callableAddress(
         FuncDeclaration method, ptrdiff_t adjustment,
     ) {
-        return _shared.world.callableAddress(method, adjustment);
+        return cast(void*) ready(
+            _shared.world.callableAddress(method, adjustment));
+    }
+
+    // `linked` as the evaluator uses it when it runs: a name gives the
+    // address of its symbol, through the function that makes each program
+    // ready to run (`CallPlanStore.ready`).
+    extern(D) package T ready(T)(Linked!T linked) {
+        return _shared.world.ready(linked);
     }
 
     // The guest declaration `info` was generated for, or `null` for a

@@ -4,82 +4,29 @@ module snakebite.ffi.symbol;
 private:
 
 
-// The failure for a symbol that this process does not have, as the link of a
-// native build reports it. `declaredBy` names the declaration, when there is
-// one.
-public Exception unresolvedSymbol(in char[] symbol, in char[] declaredBy = null) {
-    import std.conv: text;
-
-    return new Exception(text(
-        "ffi cannot resolve the symbol `", symbol, "`",
-        declaredBy.length ? text(" declared by `", declaredBy, "`") : "",
-        ": it is not in this process"));
-}
-
-// Resolves already-loaded symbols by linker name. The cache keeps both
-// addresses and missing symbols, so a missing template instance is not
-// looked up again on every call. Every thread reads the cache without a
-// lock (ADR-0006); a symbol is looked up once, on its first use.
+// Resolves already-loaded symbols by linker name: in the dependency image
+// first, then in the process. It keeps no answer: the name of a symbol keeps
+// it (`CallPlanStore.addressOf`), so a symbol is looked up once, on its first
+// use, also when it is missing.
 public struct Resolver {
     import snakebite.image.dependency: DependencyImage;
     import snakebite.host.runtimeentry: RuntimeEntry;
-    import snakebite.host.sharedtable: SharedTable;
 
     private const(DependencyImage)* _image;
-    // Read without a lock the same way as every other ADR-0006 cache:
-    // several guest threads can each resolve a symbol for the first time
-    // at once.
-    private SharedTable!(string, void*) _addresses;
 
     // The owner must outlive this resolver and every address it returns.
     public this(const(DependencyImage)* image) {
         _image = image;
     }
 
-    // The first name that answered each address, so that a stored program can
-    // name the code it calls and ask for it again by name.
-    private SharedTable!(const(void)*, string) _names;
-
     version(unittest) private size_t _lookups;
 
     public void* resolve(in char[] name) {
-        if (auto cached = _addresses.find(cast(string) name))
-            return *cached;
-
         version(unittest) ++_lookups;
         auto address = _image is null ? null : _image.resolve(name);
         if (address is null)
             address = symbolAddress(name);
-        auto routed = RuntimeEntry.route(address);
-        if (routed !is null)
-            _names.insert(routed, name.idup);
-        return *_addresses.insert(name.idup, routed);
-    }
-
-    // The name of the symbol that `address` is in or `distance` bytes after,
-    // or null. An address that `resolve` answered has the name that it
-    // answered for. Any other address is asked of the loader, and the name of
-    // the symbol that holds it is answered only when `resolve` gives that
-    // name back as the start of the symbol, so that a later process can ask
-    // `resolve` for the address again.
-    public string nameOf(const(void)* address, out size_t distance) {
-        if (auto found = address in _names)
-            return *found;
-        version (Posix) {
-            import core.sys.posix.dlfcn: Dl_info, dladdr;
-            import std.string: fromStringz;
-
-            Dl_info info;
-            if (dladdr(address, &info) == 0 || info.dli_sname is null
-                    || info.dli_saddr is null || info.dli_saddr > address)
-                return null;
-            const name = info.dli_sname.fromStringz.idup;
-            if (resolve(name) !is info.dli_saddr)
-                return null;
-            distance = address - info.dli_saddr;
-            return name;
-        } else
-            return null;
+        return RuntimeEntry.route(address);
     }
 
     // This thread's address of a thread-local symbol. Never cached: the

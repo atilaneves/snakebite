@@ -68,13 +68,6 @@ public struct Omit(B, Because why, string note = "") {
     public enum note_ = note;
 }
 
-// A save of the program meets a word that holds the address of host code or
-// data that has no symbol name, and the save ends the process.
-public alias SaveMeetsUnnamedHostAddress = Omit!(LoadedBytecode,
-    Because.unconfirmed,
-    "the save meets an address of host code or data that has no symbol "
-    ~ "name and ends the process; from RAM the test passes");
-
 // A test whose program runs in a child process, `bin/sb`, which compiles it.
 // No save and no load happens in the process of the test.
 public alias ChildProcessRun = Omit!(LoadedBytecode,

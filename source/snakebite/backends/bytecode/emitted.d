@@ -34,7 +34,8 @@ package static struct CompileBuffer(T) {
 }
 
 package struct PendingExceptionHandler {
-    package TypeInfo_Class _type;
+    // The class information that the handler catches, or its name.
+    package imported!"snakebite.ffi.names".Linked!TypeInfo_Class _type;
     package size_t _bodyStart;
     package size_t _bodyEnd;
     package size_t _handler;

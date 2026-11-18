@@ -20,28 +20,35 @@ public struct RuntimeTypes {
         StructDeclaration, Type;
     import object:
         TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
+    import snakebite.ffi.callplanstore: CallPlanStore;
+    import snakebite.ffi.names: Linked, Name;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.language.statics.data: NativeData;
     import snakebite.native.value: TypeFacts;
 
     private bool delegate(Dsymbol) const _isRootOwned;
     private bool delegate(Dsymbol) const _isDefinedElsewhere;
-    private void* delegate(const(char)[]) _resolve;
-    private void* delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
-    private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
+    private Linked!TypeInfo_Class _throwableInfo;
+    private Linked!(void*) delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
+    private Linked!TypeInfo_Class delegate(ClassDeclaration) _classInfo;
     private NativeData* _data;
     // Read without a lock by every thread that runs guest code
     // (ADR-0006); an entry is built once, under the compiler lock.
-    private SharedTable!(Type, TypeInfo) _types;
+    private SharedTable!(Type, Linked!TypeInfo) _types;
     private SharedTable!(StructDeclaration, TypeInfo_Struct) _structs;
     // The answer of `linkedClassInfo` for each class, null included.
-    private SharedTable!(ClassDeclaration, TypeInfo_Class) _linkedClasses;
+    private SharedTable!(ClassDeclaration, Linked!TypeInfo_Class)
+        _linkedClasses;
     // The `__init` and the `__vtbl` symbol of each native class that asked.
-    private SharedTable!(ClassDeclaration, const(void)*) _nativeImages;
-    private SharedTable!(ClassDeclaration, const(void)*) _nativeVtables;
+    private SharedTable!(ClassDeclaration, Name*) _nativeImages;
+    private SharedTable!(ClassDeclaration, Name*) _nativeVtables;
     // The structs that `buildStructInfo` is filling. Read and written under
     // the compiler lock only.
     private TypeInfo_Struct[StructDeclaration] _building;
+
+    private CallPlanStore* plans() {
+        return _data.planStore;
+    }
 
     // `isRootOwned` is the owning `Program`'s own decision
     // (`Program.isRootOwned`), not a copy of its root module list: a
@@ -51,20 +58,24 @@ public struct RuntimeTypes {
     public this(
         bool delegate(Dsymbol) const isRootOwned,
         bool delegate(Dsymbol) const isDefinedElsewhere,
-        void* delegate(const(char)[]) resolve,
-        void* delegate(FuncDeclaration, ptrdiff_t) methodAddress,
-        TypeInfo_Class delegate(ClassDeclaration) classInfo,
+        Linked!(void*) delegate(FuncDeclaration, ptrdiff_t) methodAddress,
+        Linked!TypeInfo_Class delegate(ClassDeclaration) classInfo,
         NativeData* data,
     ) {
         _isRootOwned = isRootOwned;
         _isDefinedElsewhere = isDefinedElsewhere;
-        _resolve = resolve;
+        enum throwable = "_D" ~ Throwable.mangleof[1 .. $] ~ "7__ClassZ";
         _methodAddress = methodAddress;
         _classInfo = classInfo;
         _data = data;
+        // A `TypeInfo` or a class information that another object holds is
+        // the name of its symbol (`snakebite.ffi.names`): the compile reads
+        // no memory there.
+        _throwableInfo = Linked!TypeInfo_Class.named(
+            plans.names.named(throwable));
     }
 
-    public const(void)[] initializer(
+    public Linked!(const(void)[]) initializer(
         AggregateDeclaration declaration,
     ) {
         // A class variable defaults to null; its instance initializer
@@ -72,64 +83,68 @@ public struct RuntimeTypes {
         if (auto classDeclaration = declaration.isClassDeclaration)
             return classInitializer(classDeclaration);
         // One image per struct, shared with `typeid(S).initializer`.
-        return structInfo(declaration.isStructDeclaration).m_init;
+        return Linked!(const(void)[]).held(
+            structInfo(declaration.isStructDeclaration).m_init);
     }
 
     // The initial image of an object of `declaration`. The object that holds
     // the class information of a class holds its image too: for a native
-    // class it is its `__init` symbol, with the size from the declaration.
-    private const(void)[] classInitializer(ClassDeclaration declaration) {
+    // class it is the name of its `__init` symbol, with the size from the
+    // declaration. A word of the program that refers to it is made ready to
+    // run like any other; code that reads the bytes as it runs asks
+    // `CallPlanStore.ready` for them.
+    private Linked!(const(void)[]) classInitializer(
+        ClassDeclaration declaration,
+    ) {
         if (!isNativeClass(declaration))
-            return _classInfo(declaration).m_init;
-        return nativeClassSymbol(_nativeImages, declaration, "6__initZ")
-            [0 .. declaration.structsize];
+            return Linked!(const(void)[]).held(
+                _classInfo(declaration).held.m_init);
+        return Linked!(const(void)[]).named(nativeClassSymbol(
+            _nativeImages, declaration, "6__initZ"), declaration.structsize);
     }
 
     // The class information of `declaration`: native, or built by the
     // program.
-    public TypeInfo_Class classInfo(ClassDeclaration declaration) {
+    public Linked!TypeInfo_Class classInfo(ClassDeclaration declaration) {
         return _classInfo(declaration);
     }
 
     // Whether another object holds the class information of `declaration`,
     // and with it its vtable and its initial image.
     public bool isNativeClass(ClassDeclaration declaration) {
-        return linkedClassInfo(declaration) !is null;
+        return !linkedClassInfo(declaration).isNull;
     }
 
-    // The address of the vtable of the native class `declaration`.
-    public const(void)* nativeVtable(ClassDeclaration declaration) {
-        return nativeClassSymbol(_nativeVtables, declaration, "6__vtblZ");
+    // The name of the vtable of the native class `declaration`.
+    public Linked!(const(void)*) nativeVtable(ClassDeclaration declaration) {
+        return Linked!(const(void)*).named(nativeClassSymbol(
+            _nativeVtables, declaration, "6__vtblZ"));
     }
 
-    // The address of the datum `suffix` of the native class `declaration`,
-    // found once for each class and kept in `table`.
-    private const(void)* nativeClassSymbol(
-        ref SharedTable!(ClassDeclaration, const(void)*) table,
+    // The name of the datum `suffix` of the native class `declaration`, made
+    // once for each class and kept in `table`.
+    private Name* nativeClassSymbol(
+        ref SharedTable!(ClassDeclaration, Name*) table,
         ClassDeclaration declaration, in string suffix,
     ) {
-        import snakebite.ffi.symbol: unresolvedSymbol;
         import snakebite.frontend.compiler: withCompilerLock;
 
         if (auto found = declaration in table)
             return *found;
 
-        const(void)* address;
+        Name* name;
         withCompilerLock({
-            if (auto found = declaration in table) {
-                address = *found;
-                return;
-            }
-            const symbol = classSymbol(declaration, suffix);
-            address = _resolve(symbol);
-            if (address is null)
-                throw unresolvedSymbol(symbol, declaration.toString);
-            table.insert(declaration, address);
+            name = *table.insert(declaration, plans.names.named(
+                classSymbol(declaration, suffix), 0, declaration.toString));
         });
-        return address;
+        return name;
     }
 
-    public immutable(void)* rtInfo(AggregateDeclaration declaration) {
+    // What the `m_RTInfo` of `declaration` holds: a flag below a page, or
+    // the type information that dmd makes for it.
+    public Linked!(immutable(void)*) rtInfo(AggregateDeclaration declaration) {
+        alias Info = Linked!(immutable(void)*);
+
         import snakebite.frontend.ast: OutBuffer;
         import snakebite.frontend.compiler: inFrontend;
 
@@ -145,39 +160,46 @@ public struct RuntimeTypes {
             return inFrontend!"hasPointers"(declaration.type);
         }
 
-        immutable(void)* resolve(Declaration symbol, ptrdiff_t offset) {
-            OutBuffer name;
-            inFrontend!"mangleToBuffer"(symbol, name);
-            auto address = _resolve(name[]);
-            return address is null ? null
-                : cast(immutable(void)*)(cast(ubyte*) address + offset);
+        // The type information that dmd makes for a type is in a template
+        // instance, which the program and another object can both define:
+        // the copy of the process is used when there is one.
+        Info resolve(Declaration symbol, ptrdiff_t offset) {
+            OutBuffer mangled;
+            inFrontend!"mangleToBuffer"(symbol, mangled);
+            auto name = plans.names.named(mangled[], offset);
+            return plans.addressIfPresent(name) is null
+                ? Info.init : Info.named(name);
+        }
+
+        Info flag(in size_t value) {
+            return Info.held(cast(immutable(void)*) value);
         }
 
         auto expression = declaration.getRTInfo;
         if (expression is null)
-            return cast(immutable(void)*)
-                (hasPointerData ? 1 : 0);
+            return flag(hasPointerData ? 1 : 0);
         if (auto symbol = expression.isSymOffExp) {
-            if (auto info = resolve(
-                    symbol.var, cast(ptrdiff_t) symbol.offset))
+            auto info = resolve(symbol.var, cast(ptrdiff_t) symbol.offset);
+            if (!info.isNull)
                 return info;
         }
         if (auto address = expression.isAddrExp) {
             if (auto variable = address.e1.isVarExp) {
-                if (auto info = resolve(variable.var, 0))
+                auto info = resolve(variable.var, 0);
+                if (!info.isNull)
                     return info;
             }
             if (auto symbol = address.e1.isSymOffExp) {
-                if (auto info = resolve(
-                        symbol.var, cast(ptrdiff_t) symbol.offset))
+                auto info = resolve(symbol.var, cast(ptrdiff_t) symbol.offset);
+                if (!info.isNull)
                     return info;
             }
         }
         if (auto integer = expression.isIntegerExp)
-            return cast(immutable(void)*) integer.getInteger;
+            return flag(integer.getInteger);
         if (expression.isNullExp)
-            return null;
-        return cast(immutable(void)*) (hasPointerData ? 1 : 0);
+            return Info.init;
+        return flag(hasPointerData ? 1 : 0);
     }
 
     // `_types` caches by `Type` identity, not only for a struct, class or
@@ -195,13 +217,13 @@ public struct RuntimeTypes {
     // allocatedInCurrentThread` is flat across 100 repeat calls of the
     // same `extern(D)` untyped variadic call site, both an all-`int`
     // tuple and a `string`-element one).
-    public TypeInfo get(Type type) {
+    public Linked!TypeInfo get(Type type) {
         if (auto cached = type in _types)
             return *cached;
 
         import snakebite.frontend.compiler: inFrontend, withCompilerLock;
 
-        TypeInfo info;
+        Linked!TypeInfo info;
         withCompilerLock({
             // The frontend's argument classifier can return unmerged types.
             // TypeInfo identity follows genTypeInfo's canonical type.
@@ -214,11 +236,17 @@ public struct RuntimeTypes {
         return info;
     }
 
+    // The class information of `Throwable`, which druntime defines, as the
+    // name of its symbol.
+    public Linked!TypeInfo_Class throwableInfo() {
+        return _throwableInfo;
+    }
+
     // The `TypeInfo_Class` a `catch` clause matches by. A clause matches on
     // the class alone, so `const`, `immutable`, `shared` and `inout`
     // spellings of the class name stand for the same class, whereas `get`
     // answers a qualified type with a qualifier wrapper around it.
-    public TypeInfo_Class unqualifiedClassInfo(Type declared) {
+    public Linked!TypeInfo_Class unqualifiedClassInfo(Type declared) {
         import snakebite.frontend.typefacts: baseType;
 
         auto classType = baseType(declared).isTypeClass;
@@ -230,7 +258,7 @@ public struct RuntimeTypes {
         return _classInfo(classType.sym);
     }
 
-    private TypeInfo build(Type type) {
+    private Linked!TypeInfo build(Type type) {
         import snakebite.frontend.ast: nextOf, Taarray, Tarray, Tbool, Tchar,
             Tclass, Tcomplex32, Tcomplex64, Tcomplex80, Tdchar, Tdelegate,
             Tenum, Terror, Tfloat32, Tfloat64, Tfloat80, Tfunction, Tident,
@@ -252,7 +280,7 @@ public struct RuntimeTypes {
             || structType !is null && isRootOwned(structType.sym);
         if (!rootOwned) {
             auto info = linkedInfo(type);
-            if (info !is null)
+            if (!info.isNull)
                 return info;
         }
         if (type.mod != 0) {
@@ -265,14 +293,12 @@ public struct RuntimeTypes {
         TypeInfo info;
         if (classType !is null) {
             auto classInfo = _classInfo(classType.sym);
-            if (classType.sym.isInterfaceDeclaration !is null) {
-                auto interfaceInfo =
-                    _data.newObject!TypeInfo_Interface(classType.sym);
-                _data.storeReference(cast(void*) &interfaceInfo.info,
-                    cast(void*) classInfo);
-                info = interfaceInfo;
-            } else
-                info = classInfo;
+            if (classType.sym.isInterfaceDeclaration is null)
+                return Linked!TypeInfo.from(classInfo);
+            auto interfaceInfo =
+                _data.newObject!TypeInfo_Interface(classType.sym);
+            _data.storeReference(cast(void*) &interfaceInfo.info, classInfo);
+            info = interfaceInfo;
         }
         else if (structType !is null)
             info = structInfo(structType.sym);
@@ -335,30 +361,35 @@ public struct RuntimeTypes {
 
         if (info is null) {
             final switch (type.ty) {
-                case Tvoid: info = typeid(void); break;
-                case Tbool: info = typeid(bool); break;
-                case Tchar: info = typeid(char); break;
-                case Twchar: info = typeid(wchar); break;
-                case Tdchar: info = typeid(dchar); break;
-                case Tint8: info = typeid(byte); break;
-                case Tint16: info = typeid(short); break;
-                case Tint32: info = typeid(int); break;
-                case Tint64: info = typeid(long); break;
-                case Tuns8: info = typeid(ubyte); break;
-                case Tuns16: info = typeid(ushort); break;
-                case Tuns32: info = typeid(uint); break;
-                case Tuns64: info = typeid(ulong); break;
-                case Tfloat32: info = typeid(float); break;
-                case Tfloat64: info = typeid(double); break;
-                case Tfloat80: info = typeid(real); break;
-                case Timaginary32: info = typeid(ifloat); break;
-                case Timaginary64: info = typeid(idouble); break;
-                case Timaginary80: info = typeid(ireal); break;
-                case Tcomplex32: info = typeid(cfloat); break;
-                case Tcomplex64: info = typeid(cdouble); break;
-                case Tcomplex80: info = typeid(creal); break;
-                case Tnull: info = typeid(typeof(null)); break;
-                case Tnoreturn: info = typeid(noreturn); break;
+                case Tvoid: return hostTypeInfo!(void.mangleof);
+                case Tbool: return hostTypeInfo!(bool.mangleof);
+                case Tchar: return hostTypeInfo!(char.mangleof);
+                case Twchar: return hostTypeInfo!(wchar.mangleof);
+                case Tdchar: return hostTypeInfo!(dchar.mangleof);
+                case Tint8: return hostTypeInfo!(byte.mangleof);
+                case Tint16: return hostTypeInfo!(short.mangleof);
+                case Tint32: return hostTypeInfo!(int.mangleof);
+                case Tint64: return hostTypeInfo!(long.mangleof);
+                case Tuns8: return hostTypeInfo!(ubyte.mangleof);
+                case Tuns16: return hostTypeInfo!(ushort.mangleof);
+                case Tuns32: return hostTypeInfo!(uint.mangleof);
+                case Tuns64: return hostTypeInfo!(ulong.mangleof);
+                case Tfloat32: return hostTypeInfo!(float.mangleof);
+                case Tfloat64: return hostTypeInfo!(double.mangleof);
+                case Tfloat80: return hostTypeInfo!(real.mangleof);
+                // The mangled names of `ifloat`, `idouble`, `ireal`,
+                // `cfloat`, `cdouble` and `creal`, which are deprecated.
+                case Timaginary32: return hostTypeInfo!"o";
+                case Timaginary64: return hostTypeInfo!"p";
+                case Timaginary80: return hostTypeInfo!"j";
+                case Tcomplex32: return hostTypeInfo!"q";
+                case Tcomplex64: return hostTypeInfo!"r";
+                case Tcomplex80: return hostTypeInfo!"c";
+                case Tnull: return hostTypeInfo!(typeof(null).mangleof);
+                // druntime has none: dmd puts a `TypeInfo` object in each
+                // object that needs it (`builtinTypeInfo`), and the program
+                // makes its own.
+                case Tnoreturn: info = _data.newObject!TypeInfo; break;
 
                 // Semantic rejects `cent`/`ucent`; no other kind here outlives it.
                 case Tint128, Tuns128, Treference, Tident, Tnone, Terror,
@@ -371,26 +402,41 @@ public struct RuntimeTypes {
                     internalFailure();
             }
         }
-        return info;
+        return Linked!TypeInfo.held(info);
     }
 
     public bool isRootOwned(Dsymbol declaration) const {
         return _isRootOwned(declaration);
     }
 
-    private TypeInfo linkedInfo(Type type) {
-        if (type.vtinfo is null)
-            return null;
-
-        auto name = type.vtinfo.ident.toString;
+    // The type information of `type` that another object holds, as the
+    // name of its symbol, or null. Codegen aliases an unqualified class's
+    // TypeInfo declaration to its __Class symbol: `linkedClassInfo` decides
+    // for it. Any other type information that dmd emits can be in the
+    // program and in another object: the copy of the process is used when
+    // there is one.
+    private Linked!TypeInfo linkedInfo(Type type) {
         auto classType = type.isTypeClass;
         if (classType !is null && type.mod == 0
                 && classType.sym.isInterfaceDeclaration is null)
-            // Codegen aliases an unqualified class's TypeInfo declaration
-            // to its __Class symbol. The frontend alone leaves the alias
-            // unresolved.
-            name = classInfoSymbol(classType.sym);
-        return cast(TypeInfo) _resolve(name);
+            return Linked!TypeInfo.from(linkedClassInfo(classType.sym));
+        if (type.vtinfo is null)
+            return Linked!TypeInfo.init;
+
+        auto name = plans.names.named(type.vtinfo.ident.toString);
+        return plans.addressIfPresent(name) is null
+            ? Linked!TypeInfo.init : Linked!TypeInfo.named(name);
+    }
+
+    // The type information that druntime defines for the type whose mangled
+    // name is `mangled`, as the name of its symbol, which dmd gives it
+    // (`TypeInfoDeclaration`).
+    private Linked!TypeInfo hostTypeInfo(string mangled)() {
+        import std.conv: text;
+
+        enum symbol = text("_D", 9 + mangled.length, "TypeInfo_", mangled,
+            "6__initZ");
+        return Linked!TypeInfo.named(plans.names.named(symbol));
     }
 
     // The symbol of the class information of `declaration`.
@@ -419,7 +465,7 @@ public struct RuntimeTypes {
         return text("_D", mangled[], suffix);
     }
 
-    private TypeInfo qualified(Type type, TypeInfo base) {
+    private Linked!TypeInfo qualified(Type type, Linked!TypeInfo base) {
         if (type.mod == 0)
             return base;
         TypeInfo_Const wrapper;
@@ -432,7 +478,7 @@ public struct RuntimeTypes {
         else
             wrapper = _data.newObject!TypeInfo_Const;
         reference(&wrapper.base, base);
-        return wrapper;
+        return Linked!TypeInfo.held(wrapper);
     }
 
     // The native `TypeInfo_Class` for `declaration`, or `null` when the
@@ -443,15 +489,17 @@ public struct RuntimeTypes {
     // the native copy is used when the process has one. Never falls back to
     // fabrication itself, so a caller that fabricates its own metadata
     // (`classinfo.classRuntimeInfo`) can call this without looping back
-    // through that same fabrication path. The answer is the address of the
-    // symbol of the class information: nothing reads the memory there.
-    public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
+    // through that same fabrication path. The answer is the name of the
+    // symbol of the class information (`snakebite.ffi.names`).
+    public Linked!TypeInfo_Class linkedClassInfo(
+        ClassDeclaration declaration,
+    ) {
         import snakebite.frontend.compiler: withCompilerLock;
 
         if (auto found = declaration in _linkedClasses)
             return *found;
 
-        TypeInfo_Class info;
+        Linked!TypeInfo_Class info;
         withCompilerLock({
             if (auto found = declaration in _linkedClasses)
                 info = *found;
@@ -462,18 +510,18 @@ public struct RuntimeTypes {
         return info;
     }
 
-    private TypeInfo_Class findLinkedClassInfo(ClassDeclaration declaration) {
-        import snakebite.ffi.symbol: unresolvedSymbol;
-
+    private Linked!TypeInfo_Class findLinkedClassInfo(
+        ClassDeclaration declaration,
+    ) {
         const definedElsewhere = _isDefinedElsewhere(declaration);
         if (!definedElsewhere && isRootOwned(declaration))
-            return null;
+            return Linked!TypeInfo_Class.init;
 
-        const symbol = classInfoSymbol(declaration);
-        auto info = cast(TypeInfo_Class) _resolve(symbol);
-        if (info is null && definedElsewhere)
-            throw unresolvedSymbol(symbol, declaration.toString);
-        return info;
+        auto name = plans.names.named(
+            classInfoSymbol(declaration), 0, declaration.toString);
+        if (!definedElsewhere && plans.addressIfPresent(name) is null)
+            return Linked!TypeInfo_Class.init;
+        return Linked!TypeInfo_Class.named(name);
     }
 
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {
@@ -502,8 +550,8 @@ public struct RuntimeTypes {
     }
 
     // The word at `place` becomes a reference to `info`.
-    private void reference(void* place, in Object info) {
-        _data.storeReference(place, cast(const(void)*) info);
+    private void reference(T)(void* place, Linked!T info) {
+        _data.storeReference(place, info);
     }
 
     // The word at `place` becomes the address of a method of the program.

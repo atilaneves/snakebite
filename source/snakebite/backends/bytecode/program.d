@@ -36,8 +36,8 @@ public struct Program {
     // address has a record, so that a file can hold the program.
     public this(const(DependencyImage)* image, bool recordsAddresses = false) {
         plans = CallPlanStore(image);
-        const resolver = &plans.resolver;
-        store = StaticStore(() => heapNew!TlsSlots(resolver), recordsAddresses);
+        const planStore = &plans;
+        store = StaticStore(() => heapNew!TlsSlots(planStore), recordsAddresses);
     }
 
     public bool recordsAddresses() const @safe pure nothrow @nogc {
@@ -92,10 +92,24 @@ public struct Program {
     // Makes a function in the form that the compiler builds and a file holds
     // ready to run on the runner that has `jit` and `jitInstance`: a compile
     // to RAM and a load both end with this, and a save does not call it.
-    // Returns null, or the reason why the function is not valid.
+    // Each word that names a symbol (`snakebite.ffi.names`) gets the address
+    // that `plans` finds for it. Returns null, or the reason why the function
+    // is not valid.
     public static string complete(JitInstance)(
-        Function* function_, in JitSetting jit, JitInstance jitInstance,
+        Function* function_, ref CallPlanStore plans, in JitSetting jit,
+        JitInstance jitInstance,
     ) {
+        import snakebite.backends.bytecode.vm: wordAt;
+
+        // Each record that a compile or a load leaves is of a name.
+        foreach (reloc; function_.relocs) {
+            auto word = wordAt(*function_, reloc.place);
+            if (word is null)
+                return "a relocation has no place";
+            *word = plans.wordOfName(reloc.target);
+        }
+        function_.relocs = null;
+        plans.bindNewPlans;
         function_.fixWindowFacts;
         if (const reason = bindInstructionReferences(*function_))
             return reason;

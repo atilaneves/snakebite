@@ -22,14 +22,18 @@ import snakebite.failure.report: internalFailure;
 // registers and jumping.
 //
 // What binds a plan that the process had no code for when it was made. A
-// plan with a laid-out `symbol` binds when `resolve` has the symbol, and
-// otherwise a call fails with `failure`. A plan that could not be laid out
-// has no `symbol`, and a call of it always fails with `failure`. The text
-// is made at compile time, so a loaded program fails with the same text.
+// plan with a laid-out code binds to the address of the name `name`, which
+// `store` finds (`CallPlanStore.addressOf`), and otherwise a call fails with
+// `failure`, or with the failure of a symbol that no object defines when
+// `failure` is empty. A plan that could not be laid out has no `name`, and
+// a call of it always fails with `failure`. The text is made at compile
+// time, so a loaded program fails with the same text.
 package struct Pending {
-    string symbol;
+    import snakebite.ffi.names: Name;
+
+    Name* name;
     string failure;
-    void* delegate(in char[]) resolve;
+    imported!"snakebite.ffi.callplanstore".CallPlanStore* store;
 }
 
 
