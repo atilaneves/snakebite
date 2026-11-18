@@ -309,9 +309,9 @@ package struct JitState {
     Scratch!Instruction snapshotScratch;
     Scratch!(Instruction.Handler) originalScratch;
     // The bodies that `Gen.emitWindowBody` integrates, one for each depth.
-    // They are on the heap: a tier-up runs on the native stack of the guest,
-    // and a guest `Fiber` of the default size has 16 KiB.
     Scratch!(InlineBody, Gen.inlineDepthLimit) inlineBodies;
+
+    // The JIT lock guards this stack. Compilation uses it from a Fiber.
     Continuation compilerStack;
 
     // Gives back the memory of the region and the buffers.
