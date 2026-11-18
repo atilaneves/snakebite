@@ -957,7 +957,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     version(unittest)
     extern(D) final size_t nameLookups() @safe @nogc nothrow pure const scope {
         return _foreignNameLookups + _layouts.lookups + _staticLookups
-            + _staticChains.lookups + _plans.nativeSymbolLookups;
+            + _staticChains.lookups;
     }
 
     // Every hash lookup this evaluator has made to find out what a `Type`
@@ -2887,7 +2887,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return *cached;
 
         return *_catchTypes.build(catch_,
-            () => _runtimeTypes.unqualifiedClassInfo(catch_.type));
+            () => ready(_runtimeTypes.unqualifiedClassInfo(catch_.type)));
     }
 
     private void bindCatchVariable(Catch catch_, Throwable guest) {
@@ -3742,7 +3742,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto declaration = symbol.dsym.isAggregateDeclaration;
             assert(declaration !is null,
                 "an initializer symbol names an aggregate");
-            const initial = _runtimeTypes.initializer(declaration);
+            const initial = readyBytes(_runtimeTypes.initializer(declaration));
 
             import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
@@ -4577,8 +4577,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 return evaluator.callableAddress(function_, 0);
 
             if (auto typeInfo = expression.var.isTypeInfoDeclaration)
-                return cast(void*) typeInfoObjectOf(
-                    typeInfo, *evaluator._runtimeTypes);
+                return cast(void*) evaluator.ready(typeInfoObjectOf(
+                    typeInfo, *evaluator._runtimeTypes));
 
             auto variable = expression.var.isVarDeclaration;
             assert(variable !is null,
@@ -5910,7 +5910,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return _nativeData.write(_type, _facts, expression, _place);
 
         if (auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes)) {
-            checkedStoreIntegral(_place, cast(size_t) cast(void*) typeInfo,
+            checkedStoreIntegral(_place, cast(size_t) cast(void*) ready(typeInfo),
                 _facts.size);
             return;
         }
@@ -6048,7 +6048,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         assert(type !is null && type.vtinfo !is null,
             "dmd's `typeid` semantic leaves a type with its `vtinfo` set");
 
-        auto info = _runtimeTypes.get(type);
+        auto info = ready(_runtimeTypes.get(type));
         checkedStoreIntegral(_place, cast(size_t) cast(void*) info, _facts.size);
     }
 
@@ -6634,7 +6634,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            const initial = _runtimeTypes.initializer(declaration);
+            const initial = readyBytes(_runtimeTypes.initializer(declaration));
             const alignment = declaration.alignsize == 0
                 ? 1 : declaration.alignsize;
             auto object = _frames.reserve(declaration.structsize, alignment);
@@ -6653,7 +6653,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (plan.objectKind == NewPlan.ObjectKind.class_) {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
-            const initial = _runtimeTypes.initializer(classType.sym);
+            const initial = readyBytes(_runtimeTypes.initializer(classType.sym));
             memcpy(object, initial.ptr, initial.length);
         }
 
@@ -6696,7 +6696,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     // builds the native TypeInfo_Class metadata druntime needs for
     // allocation and classinfo, once per program.
     private TypeInfo_Class classRuntimeInfo(ClassDeclaration declaration) {
-        return _shared.world.classRuntimeInfo(declaration);
+        return ready(_shared.world.classRuntimeInfo(declaration));
     }
 
     // `Shared.callableAddress` needs no per-thread state (the vtable slot
@@ -6710,7 +6710,24 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private void* callableAddress(
         FuncDeclaration method, ptrdiff_t adjustment,
     ) {
-        return _shared.world.callableAddress(method, adjustment);
+        return cast(void*) ready(_shared.world.callableAddress(method, adjustment));
+    }
+
+    // `value` as the evaluator uses it when it runs: a name that the
+    // compile put in place of an address gives the address of its symbol,
+    // through the function that makes each program ready to run
+    // (`CallPlanStore.addressOf`).
+    extern(D) package T ready(T)(T value) {
+        static if (is(T == class))
+            return cast(T) cast(void*) _shared.world.resolved(
+                cast(const(void)*) value);
+        else
+            return cast(T) _shared.world.resolved(value);
+    }
+
+    // `bytes` as `ready` gives the address of their start.
+    extern(D) package const(void)[] readyBytes(const(void)[] bytes) {
+        return ready(bytes.ptr)[0 .. bytes.length];
     }
 
     // The guest declaration `info` was generated for, or `null` for a

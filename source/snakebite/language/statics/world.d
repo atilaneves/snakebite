@@ -57,6 +57,7 @@ public struct StaticWorld {
     private ClassRuntimeCache _classRuntime;
     private const Program _program;
     private Backend _backend;
+    private CallPlanStore* _planStore;
 
     // `store` and `planStore` are the storage of the owner, which outlives
     // this.
@@ -68,9 +69,10 @@ public struct StaticWorld {
     ) {
         _program = program;
         _backend = backend;
+        _planStore = planStore;
         plans = PlanCache(planStore);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        data = NativeData(store, &_program.isRootOwned,
+        data = NativeData(store, planStore, &_program.isRootOwned,
             &_program.isDefinedElsewhere,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
@@ -79,7 +81,7 @@ public struct StaticWorld {
             backend.blocksOf, &callableKind);
         types = RuntimeTypes(&_program.isRootOwned,
             &_program.isDefinedElsewhere,
-            (name) => plans.resolve(name),
+            planStore,
             &callableAddress,
             &classRuntimeInfo, &data);
     }
@@ -90,13 +92,15 @@ public struct StaticWorld {
             function_, (declaration) => _program.linkedFunctionOf(declaration));
     }
 
+    // The address of `symbol` that a constant holds: the name of its symbol
+    // when the program does not define it (`snakebite.ffi.names`).
     private void* constantSymbolAddress(Declaration symbol) {
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
         if (auto function_ = symbol.isFuncDeclaration)
             return callableAddress(function_, 0);
 
-        return plans.resolve(nativeSymbolName(symbol));
+        return cast(void*) data.named(nativeSymbolName(symbol));
     }
 
     // The native metadata of a guest class. The vtable is native layout that
@@ -163,7 +167,7 @@ public struct StaticWorld {
         const(void)* word;
         if (callSelection.usesNativeVariadicAddress(
                 method, &isDefinedElsewhere))
-            return plans.addressOf(method);
+            return cast(void*) plans.nameOf(method);
         if (callSelection.usesGuestBody(method, &isDefinedElsewhere)) {
             word = _backend.guestWord(method);
             if (callSelection.storesGuestWord(
@@ -182,9 +186,18 @@ public struct StaticWorld {
         return _program.isDefinedElsewhere(function_);
     }
 
+    // `address`, or the address of the symbol when `address` is a name
+    // (`CallPlanStore.resolved`): for a backend that reads a value as it runs
+    // and does not save.
+    public const(void)* resolved(const(void)* address) {
+        return _planStore.resolved(address);
+    }
+
     // What `callableAddress` returned: a guest function, the callback entry
-    // that host code calls for one, or code of the host.
+    // that host code calls for one, or the name of code of the host.
     public Target.Kind callableKind(in void* address) {
+        if (_planStore.names.nameAt(address) !is null)
+            return Target.Kind.hostSymbol;
         if (address is null || plans.isGuestWord(address))
             return Target.Kind.functionWord;
         if (plans.guestTarget(address).word !is null)

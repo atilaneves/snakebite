@@ -92,10 +92,27 @@ public struct Program {
     // Makes a function in the form that the compiler builds and a file holds
     // ready to run on the runner that has `jit` and `jitInstance`: a compile
     // to RAM and a load both end with this, and a save does not call it.
-    // Returns null, or the reason why the function is not valid.
+    // Each word that names a symbol (`snakebite.ffi.names`) gets the address
+    // that `plans` finds for it. Returns null, or the reason why the function
+    // is not valid.
     public static string complete(JitInstance)(
-        Function* function_, in JitSetting jit, JitInstance jitInstance,
+        Function* function_, ref CallPlanStore plans, in JitSetting jit,
+        JitInstance jitInstance,
     ) {
+        import snakebite.backends.bytecode.vm: wordAt;
+
+        foreach (reloc; function_.relocs) {
+            if (!plans.isNamed(reloc.target))
+                return "a word that is not a name is left to make ready";
+            auto word = wordAt(*function_, reloc.place);
+            if (word is null)
+                return "a relocation has no place";
+            *word = plans.wordOf(reloc.target);
+        }
+        function_.relocs = null;
+        foreach (ref site; function_.callSites)
+            if (site.nativePlan !is null)
+                CallPlanStore.bindIfPresent(site.nativePlan);
         function_.fixWindowFacts;
         if (const reason = bindInstructionReferences(*function_))
             return reason;

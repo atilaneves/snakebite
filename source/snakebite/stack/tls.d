@@ -103,7 +103,11 @@ public struct TlsSlots {
             // is the calling thread's own, so another thread's answer
             // would be that thread's copy.
             entry.bytes = _resolver.resolveThreadLocal(descriptor.nativeName);
-            assert(entry.bytes !is null, descriptor.nativeName);
+            if (entry.bytes is null) {
+                import snakebite.ffi.symbol: unresolvedSymbol;
+
+                throw unresolvedSymbol(descriptor.nativeName);
+            }
         } else {
             import core.memory: GC;
             import core.stdc.stdlib: calloc;

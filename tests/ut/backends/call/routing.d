@@ -173,7 +173,7 @@ static foreach (backend; Matrix!(
         static foreach (entry; [
             ["readShared", "sharedValue"],
             ["readThread", "threadValue"],
-            ["makeClass", "7Missing7__ClassZ"],
+            ["makeClass", "7Missing6__initZ"],
         ]) {{
             int result;
             const thrown = backend_

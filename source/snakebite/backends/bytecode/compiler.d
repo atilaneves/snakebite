@@ -785,8 +785,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // indices, and a file holds them as indices and distances. A
             // save executes nothing, so its functions stay in that form.
             const reason = compiledProgram.recordsAddresses ? null
-                : Program.complete(
-                    placeholder, _runner.jitSetting, _runner.jitInstance);
+                : Program.complete(placeholder, compiledProgram.plans,
+                    _runner.jitSetting, _runner.jitInstance);
             if (reason !is null) {
                 import std.conv: text;
 
@@ -1289,13 +1289,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         _code.assignRegisters;
         specialiseHandlers(_code.instructions);
 
-        if (_bytecode.compiledProgram.recordsAddresses) {
+        if (_bytecode.compiledProgram.recordsAddresses)
             foreach (index, ref site; _code.callSites)
                 recordRelocs(_code.relocs, index, site);
-            foreach (index, ref handler; exceptionHandlers)
-                recordRelocs(_code.relocs, index, handler,
-                    _bytecode._world.data.addressOfData(
-                        cast(const(void)*) handler.type).target);
+        foreach (index, ref handler; exceptionHandlers) {
+            const type = _bytecode._world.data.addressOfData(
+                cast(const(void)*) handler.type).target;
+            if (recordsAddress(type))
+                recordRelocs(_code.relocs, index, handler, type);
         }
 
         ClosureSlot[] closureSlots;
@@ -2003,7 +2004,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         import std.conv: text;
 
-        if (!_bytecode.compiledProgram.recordsAddresses)
+        if (!recordsAddress(address.target))
             return;
         Roles roles;
         const known = rolesOf(handler, roles);
@@ -2024,8 +2025,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         return _code.constants.length - 1;
     }
 
+    // Whether the word of `target` has a record: in a save each word does,
+    // and in a compile to RAM a name does, which `Program.complete` turns
+    // into the address of its symbol.
+    private bool recordsAddress(in Target target) {
+        return _bytecode.compiledProgram.recordsAddresses
+            || _bytecode.compiledProgram.plans.isNamed(target);
+    }
+
     private size_t addConstant(in Address address) {
-        if (_bytecode.compiledProgram.recordsAddresses && !address.isNull)
+        if (!address.isNull && recordsAddress(address.target))
             _code.relocs ~= Reloc(
             Place(Place.Section.constant, Place.Field.word,
                 _code.constants.length),
@@ -2511,7 +2520,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opRangeEnd, 0, 0, 0);
         foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepth))
             _code.exceptionHandlers ~= PendingExceptionHandler(
-                typeid(Throwable), range.start, range.end, handler,
+                _bytecode._world.types.throwableInfo, range.start, range.end,
+                handler,
                 size_t.max, cleanupEnd,
             );
         _finished = bodyFinished || cleanupFinished;

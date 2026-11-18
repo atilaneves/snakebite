@@ -12,6 +12,7 @@ import snakebite.native.staticstore: StaticStore;
 import snakebite.stack.tls: TlsSlots;
 import snakebite.host.threads: heapNew;
 import snakebite.language.statics.data: NativeData;
+import snakebite.ffi.callplanstore: CallPlanStore;
 import std.conv: text;
 import core.exception: AssertError;
 import core.thread: Fiber, Thread;
@@ -35,21 +36,25 @@ static foreach (rootOwned; [true, false]) {
         }
         bool available = true;
         auto ownership = Ownership(&available);
-        auto module_ = parseSnippet("__gshared int value = 7;");
+        // Another object defines the native variable: the C library.
+        auto module_ = parseSnippet(rootOwned
+            ? "__gshared int value = 7;"
+            : "extern(C) __gshared int opterr;");
         VarDeclaration variable;
         foreach (declaration; *module_.members)
             forEachRuntimeVariable(declaration, (member) {
                 variable = member;
             });
         assert(variable !is null);
-        int nativeValue = 7;
         auto store = StaticStore(() => heapNew!TlsSlots);
+        auto plans = CallPlanStore(null);
         auto data = NativeData(
             &store,
+            &plans,
             &ownership.isRootOwned,
             &ownership.isDefinedElsewhere,
             (declaration) => declaration,
-            (declaration) => cast(void*) &nativeValue,
+            (declaration) => cast(void*) null,
             (name) => cast(void*) null,
             (declaration, place) {},
             (type) => cast(TypeInfo) null,
@@ -58,7 +63,13 @@ static foreach (rootOwned; [true, false]) {
         available = false;
         auto execution = PreparedExecution(true);
         data.storageOf(variable).ptr.should == storage.ptr;
-        (*cast(int*) storage.ptr).should == 7;
+        if (rootOwned)
+            (*cast(int*) storage.ptr).should == 7;
+        else {
+            import core.sys.posix.unistd: opterr;
+
+            storage.ptr.should == cast(void*) &opterr;
+        }
     }
 }
 

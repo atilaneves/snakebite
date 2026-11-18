@@ -4,7 +4,7 @@ module snakebite.native.address;
 private:
 
 
-import object: Interface, TypeInfo_Class;
+import object: TypeInfo_Class;
 
 
 // The types that say what an address of this process points at, so that a
@@ -41,8 +41,9 @@ public struct Target {
     public Kind kind;
     // For `interfaceTable` and `interfaceRecord`: the index in `interfaces`.
     public uint index;
-    // The address in this process. For `interfaceTable` and
-    // `interfaceRecord`, the class information: `wordOf` gives the word.
+    // The address in this process, or the name that stands for it
+    // (`snakebite.ffi.names`). For `interfaceTable` and `interfaceRecord`,
+    // the class information: `interfaceWordOf` gives the word.
     public size_t address;
     // For `staticData` and `constantPool`: the datum that the address is the
     // start of. The compiler knows it where it makes the address, so a save
@@ -107,9 +108,14 @@ public struct Address {
         return result;
     }
 
-    // The word that goes into the instruction or constant.
-    package(snakebite) size_t word() const @trusted pure nothrow @nogc {
-        return wordOf(_target);
+    // The word that goes into the instruction or constant. It is the address
+    // itself, or the name that stands for it until the program is made ready
+    // to run (`snakebite.ffi.names`).
+    package(snakebite) size_t word() const @safe pure nothrow @nogc {
+        assert(_target.kind != Target.Kind.interfaceTable
+            && _target.kind != Target.Kind.interfaceRecord,
+            "an interface word is only in data");
+        return _target.address;
     }
 
     public bool isNull() const @safe pure nothrow @nogc {
@@ -118,24 +124,15 @@ public struct Address {
 }
 
 
-// The address that a word that names `target` holds in this process: the
-// one resolution of a target, for a compile to RAM and for a load. The table
-// and the record of an interface come from the class information through the
-// public druntime API, when the word is made ready to run.
-public size_t wordOf(in Target target) pure nothrow @nogc {
-    switch (target.kind) with (Target.Kind) {
-        case interfaceTable:
-            return cast(size_t) interfaceOf(target).vtbl.ptr;
-        case interfaceRecord:
-            return cast(size_t) interfaceOf(target);
-        default:
-            return target.address;
-    }
-}
-
-private const(Interface)* interfaceOf(in Target target) pure nothrow @nogc {
-    auto info = cast(const(TypeInfo_Class)) cast(const(void)*) target.address;
-    assert(target.index < info.interfaces.length,
+// The word that refers to the table (`interfaceTable`) or the record
+// (`interfaceRecord`) `interfaces[index]` of the class information `info`,
+// through the public druntime API.
+public size_t interfaceWordOf(
+    in Target.Kind kind, in TypeInfo_Class info, in size_t index,
+) pure nothrow @nogc {
+    assert(index < info.interfaces.length,
         "a class information has the interface that a word names");
-    return &info.interfaces[target.index];
+    const interface_ = &info.interfaces[index];
+    return kind == Target.Kind.interfaceTable
+        ? cast(size_t) interface_.vtbl.ptr : cast(size_t) interface_;
 }

@@ -6,7 +6,7 @@ private:
 
 import snakebite.frontend.ast: Module;
 import snakebite.failure.report: internalFailure;
-import snakebite.native.address: Address, DatumRef, Target, wordOf;
+import snakebite.native.address: Address, DatumRef, Target;
 import snakebite.frontend.typefacts;
 import snakebite.native.staticstore: Placed, StaticBlocks, StaticStore;
 import snakebite.native.value:
@@ -31,6 +31,8 @@ public struct NativeData {
         ClassReferenceExp, Declaration, Dsymbol, Expression, Loc, StringExp,
         StructLiteralExp, Type, VarDeclaration;
 
+    import snakebite.ffi.callplanstore: CallPlanStore;
+    import snakebite.ffi.names: Name;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
@@ -40,6 +42,12 @@ public struct NativeData {
     // An `extern` variable's definition, found once for each variable.
     private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
     private SymbolAddress _symbolAddress;
+    // The names of the symbols of the program, and where their addresses
+    // are found (`snakebite.ffi.names`).
+    private CallPlanStore* _plans;
+    // The name of the storage of each variable that is not thread-local:
+    // null when the program holds the storage.
+    private SharedTable!(VarDeclaration, const(Name)*) _storageNames;
     private FunctionKind _functionKind;
     private ThreadLocalAddress _threadLocalAddress;
     // Writes the initial image of an object of a class.
@@ -84,6 +92,7 @@ public struct NativeData {
 
     public this(
         StaticStore* store,
+        CallPlanStore* plans,
         bool delegate(Dsymbol) const isRootOwned,
         bool delegate(Dsymbol) const isDefinedElsewhere,
         VarDeclaration delegate(VarDeclaration) linkedVariable,
@@ -102,6 +111,7 @@ public struct NativeData {
         _classImage = classImage;
         _typeInfo = typeInfo;
         _store = store;
+        _plans = plans;
         _blocksOf = blocksOf;
         _functionKind = functionKind;
     }
@@ -324,6 +334,35 @@ public struct NativeData {
                 return;
     }
 
+    // The word that refers to `target` in a datum. A datum of a compile to
+    // RAM is ready to run once it is written, so a name gives the address
+    // of its symbol (`CallPlanStore.wordOf`). A save makes nothing ready to
+    // run: the word of a name stays empty, and its record names it.
+    private size_t wordOf(in Target target) {
+        if (recordRelocs && _plans.isNamed(target))
+            return 0;
+        return _plans.wordOf(target);
+    }
+
+    // A name takes `distance` into itself, so that the word names the
+    // symbol and the distance from it.
+    private void foldDistance(ref Target target, ref size_t distance) {
+        if (distance == 0)
+            return;
+        if (auto name = _plans.names.nameAt(cast(const(void)*) target.address)) {
+            if (name.adjusted !is null)
+                internalFailure("a word points into an entry of host code");
+            target.address = cast(size_t) _plans.names.named(
+                name.symbol, name.distance + distance);
+            distance = 0;
+        }
+    }
+
+    // The name of the symbol `symbol`.
+    public const(Name)* named(string symbol) {
+        return _plans.names.named(symbol);
+    }
+
     // Copies `source` to `place`, with the records of the addresses in it.
     public void copyBytes(void* place, in void[] source) {
         import core.stdc.string: memcpy;
@@ -349,22 +388,26 @@ public struct NativeData {
         static assert(InterfacesTuple!T.length == 0,
             T.stringof ~ " implements an interface");
 
+        // The vtable of a class of druntime, as the code generator names it.
+        enum vtable = "_D" ~ T.mangleof[1 .. $] ~ "6__vtblZ";
         const initial = T.classinfo.m_init;
         auto placed = reserve(
             TypeFacts(initial.length, (void*).alignof), owner);
         memcpy(placed.ptr, initial.ptr, initial.length);
         storeAddress(&this, placed.ptr,
-            Address(Target.Kind.hostSymbol, *cast(void**) initial.ptr));
+            Address(Target.Kind.hostSymbol, named(vtable)));
         return cast(T) placed.ptr;
     }
 
     // What `object` is for a word that holds it: a datum of the blocks, with
-    // the distance into the datum, or code or data of the host. Without
-    // `recordRelocs` nothing reads the answer.
+    // the distance into the datum, the name of a symbol, or code or data of
+    // the host. Without `recordRelocs` only a name is asked for.
     public Address addressOfData(
         in void* object, out size_t distance,
     ) {
         distance = 0;
+        if (_plans.names.nameAt(object) !is null)
+            return Address(Target.Kind.hostSymbol, object);
         if (!recordRelocs)
             return Address(Target.Kind.staticData, object);
         foreach (blocks; _knownBlocks) {
@@ -472,16 +515,9 @@ public struct NativeData {
             return Placed(_store.tlsSlots.slotFor(
                 cast(const(TlsDescriptor)*) tlsDescriptorOf(variable).ptr));
 
-        const kind = storageKindOf(variable);
-        if (kind != StorageKind.own) {
-            // const would also make the referenced storage read-only here.
-            auto address = _symbolAddress(variable);
-            if (address !is null)
-                return *_statics.insert(
-                    variable, Placed(address[0 .. facts.size]));
-            if (kind == StorageKind.native)
-                throw unresolved(variable);
-        }
+        if (auto name = storageName(variable))
+            return *_statics.insert(variable, Placed(
+                (cast(void*) _plans.addressOf(name))[0 .. facts.size]));
 
         import snakebite.frontend.compiler: withCompilerLock;
 
@@ -498,13 +534,35 @@ public struct NativeData {
     }
 
     // The address of the storage of a variable that is not thread-local, with
-    // what it points at: a datum of the blocks, or, for native storage, a
-    // symbol of the host.
-    public Address addressOfStorage(VarDeclaration variable) {
+    // what it points at: a datum of the blocks, or, for native storage, the
+    // name of its symbol.
+    public Address addressOfStorage(VarDeclaration declaration) {
+        auto variable = definitionOf(declaration);
+        if (auto name = storageName(variable))
+            return Address(Target.Kind.hostSymbol, name);
         auto placed = storageOf(variable);
-        return Address(placed.where.set is null
-            ? Target.Kind.hostSymbol : Target.Kind.staticData,
-            placed.ptr, placed.where);
+        return Address(Target.Kind.staticData, placed.ptr, placed.where);
+    }
+
+    // The name of the native storage of `variable`, which is not
+    // thread-local, or null when the program holds the storage. The
+    // declaration decides that another object defines the variable. A
+    // variable that the program and another object can both define uses the
+    // copy of the process when there is one.
+    private const(Name)* storageName(VarDeclaration variable) {
+        if (auto found = variable in _storageNames)
+            return *found;
+
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
+
+        const(Name)* name;
+        const kind = storageKindOf(variable);
+        if (kind != StorageKind.own) {
+            name = named(nativeSymbolName(variable));
+            if (kind == StorageKind.nativeIfPresent && !_plans.isPresent(name))
+                name = null;
+        }
+        return *_storageNames.insert(variable, name);
     }
 
     // The descriptor of a thread-local variable: the bytes every thread's
@@ -535,11 +593,12 @@ public struct NativeData {
 
                 const name = nativeSymbolName(variable);
                 // Only to learn that the symbol is there: this thread's
-                // address is not the descriptor's to keep.
-                if (_threadLocalAddress(name) !is null)
+                // address is not the descriptor's to keep. Another object
+                // defines a native variable: its symbol is found on each
+                // thread (`TlsSlots.slotFor`).
+                if (kind == StorageKind.native
+                        || _threadLocalAddress(name) !is null)
                     nativeName = name;
-                else if (kind == StorageKind.native)
-                    throw unresolved(variable);
             }
             Placed template_;
             if (nativeName.length == 0)
@@ -609,14 +668,6 @@ public struct NativeData {
             ? StorageKind.own : StorageKind.nativeIfPresent;
     }
 
-    private static Exception unresolved(VarDeclaration variable) {
-        import snakebite.ffi.symbol: unresolvedSymbol;
-        import snakebite.frontend.dmd.mangle: nativeSymbolName;
-
-        return unresolvedSymbol(
-            nativeSymbolName(variable), variable.toString);
-    }
-
     private static bool isExtern(VarDeclaration variable) {
         import snakebite.frontend.ast: STC;
 
@@ -678,7 +729,7 @@ public struct NativeData {
         // code calls for one, or a function of the host.
         if (symbol.isFuncDeclaration !is null)
             return functionAddress(address);
-        return Address(Target.Kind.staticData, address);
+        return Address(Target.Kind.hostSymbol, address);
     }
 
     public void fillFields(
@@ -847,10 +898,15 @@ private void storeAddress(
     NativeData* nativeData, void* place, in Address target,
     in size_t offset = 0, in size_t size = size_t.sizeof,
 ) {
-    const where = target.target;
-    checkedStoreIntegral(place, wordOf(where) + offset, size);
-    if (nativeData !is null)
-        nativeData.recordAddress(place, where, offset);
+    if (nativeData is null) {
+        checkedStoreIntegral(place, target.word + offset, size);
+        return;
+    }
+    Target where = target.target;
+    size_t distance = offset;
+    nativeData.foldDistance(where, distance);
+    checkedStoreIntegral(place, nativeData.wordOf(where) + distance, size);
+    nativeData.recordAddress(place, where, distance);
 }
 
 private const(void)* stringPointer(

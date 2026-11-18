@@ -18,7 +18,7 @@ import snakebite.backends.bytecode.relocation:
     classificationOf, eachRelocated, HostCode, isClassified, Place, Plain,
     Reloc, Relocated, SetBy;
 import snakebite.backends.bytecode.runner: Runner, StartFunction;
-import snakebite.native.address: DatumRef, Target, wordOf;
+import snakebite.native.address: DatumRef, Target;
 import snakebite.backends.bytecode.vm:
     AssertSite, CallSite, ExceptionHandler,
     Function, hostCodeAt, Instruction, JitSetting,
@@ -26,6 +26,7 @@ import snakebite.backends.bytecode.vm:
 import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
+import snakebite.ffi.names: Name;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
@@ -128,18 +129,18 @@ public void loadProgram(
 
     program.eachFunction((function_) {
         if (const reason = Program.complete(
-                function_, runner.jitSetting, runner.jitInstance))
+                function_, program.plans, runner.jitSetting, runner.jitInstance))
             throw new SnakebiteException(
                 "the program file is not valid: " ~ reason);
     });
 }
 
 
-// The entries of the callback bridge that forward to host code with a receiver
-// adjustment, in the order of the first reference: the host code (a symbol and
-// a distance), the adjustment and the signature that made each. A load makes
-// each one again with `adjustedEntryOf`, as a compile does. `source` is the
-// archive that the body was written to; a read archive is its own source.
+// The names of the entries of the callback bridge that forward to host code
+// with a receiver adjustment (`Names.adjusted`), in the order of the first
+// reference: the host code (a symbol and a distance), the adjustment and the
+// signature of each. A load makes each name again. `source` is the archive
+// that the body was written to; a read archive is its own source.
 private void transferHostEntries(ref Archive archive, ref Archive source) {
     // `auto`: `transfer` assigns to the array when the archive reads.
     auto symbols = source._hostEntrySymbols;
@@ -157,11 +158,12 @@ private void transferHostEntries(ref Archive archive, ref Archive source) {
             || signatures.length != symbols.length)
         throw new SnakebiteException(
             "the program file holds callback entries that do not match");
-    auto callbacks = archive._program.plans.callbacks;
+    auto names = &archive._program.plans.names;
     foreach (index; 0 .. symbols.length)
-        archive._hostEntries ~= callbacks.adjustedEntryOf(
-            archive.symbolAt(symbols[index]) + distances[index],
-            signatures[index], adjustments[index]);
+        archive._hostEntries ~= names.adjusted(
+            names.named(archive.symbolNameAt(symbols[index]),
+                distances[index]),
+            adjustments[index], () => signatures[index]);
 }
 
 
@@ -197,15 +199,15 @@ private struct Archive {
     private string[] _symbols;
     private size_t[string] _symbolIndex;
     private CallPlan*[] _plans;
-    // Entries that forward to host code with an adjustment. Writing: the
-    // index of each entry, and what made it, in the order of the first
-    // reference. Reading: the entry that each record made.
-    private size_t[const(void)*] _hostEntryIndex;
+    // The names of entries that forward to host code with an adjustment.
+    // Writing: the index of each name, and what made it, in the order of the
+    // first reference. Reading: the name that each record made.
+    private size_t[const(Name)*] _hostEntryIndex;
     private size_t[] _hostEntrySymbols;
     private size_t[] _hostEntryDistances;
     private ptrdiff_t[] _hostEntryAdjustments;
     private NativeSignature[] _hostEntrySignatures;
-    private const(void)*[] _hostEntries;
+    private const(Name)*[] _hostEntries;
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
@@ -331,9 +333,10 @@ private struct Archive {
                 gate.where.set, gate.where.block, gate.where.offset);
             return Target.Kind.staticData;
         }
-        const position = symbolPosition(gate.ptr);
-        reference = [position[0], position[1], 0];
-        return Target.Kind.hostSymbol;
+        // The gate of a static destructor of a template instance that the
+        // program and another object can both define, of which the process
+        // has a copy: the storage has no name yet (name step 4 of #960).
+        internalFailure("the gate of a static destructor is storage of another object");
     }
 
     void* dataAt(in size_t[3] position) {
@@ -360,14 +363,42 @@ private struct Archive {
             "the program file names a string that it does not hold");
     }
 
-    // The index of the symbol that `address` is in, and the distance of the
-    // address from its start.
-    size_t[2] symbolPosition(const(void)* address) {
-        size_t distance;
-        const name = _program.plans.resolver.nameOf(address, distance);
-        if (name is null)
-            internalFailure("a word points at host code or data that has no symbol name");
-        return [symbolIndexOfName(name), distance];
+    // The name that `address` stands for (`snakebite.ffi.names`).
+    const(Name)* nameAt(const(void)* address) {
+        if (auto name = _program.plans.names.nameAt(address))
+            return name;
+        internalFailure("a word points at host code or data that has no name");
+    }
+
+    // The reference to the name `address`: the index of its symbol and the
+    // distance from it, or, for an entry that forwards to host code with an
+    // adjustment, its index in the table of such entries with a third word
+    // of 1.
+    size_t[3] nameReference(const(void)* address) {
+        const name = nameAt(address);
+        if (name.adjusted is null)
+            return [symbolIndexOfName(name.symbol), name.distance, 0];
+        if (auto found = name in _hostEntryIndex)
+            return [*found, 0, 1];
+        const code = name.adjusted.code;
+        const index = _hostEntrySymbols.length;
+        _hostEntrySymbols ~= symbolIndexOfName(code.symbol);
+        _hostEntryDistances ~= code.distance;
+        _hostEntryAdjustments ~= name.adjusted.adjustment;
+        _hostEntrySignatures ~= cast() name.adjusted.signature;
+        _hostEntryIndex[name] = index;
+        return [index, 0, 1];
+    }
+
+    // The name of a reference that `nameReference` made.
+    const(Name)* nameOfReference(in size_t[3] reference) {
+        if (reference[2] == 0)
+            return _program.plans.names.named(
+                symbolNameAt(reference[0]), reference[1]);
+        if (reference[0] >= _hostEntries.length)
+            throw new SnakebiteException(
+                "the program file names a callback entry that it does not hold");
+        return _hostEntries[reference[0]];
     }
 
     // The index of `name` in the table of names of host code, which the
@@ -386,14 +417,6 @@ private struct Archive {
         return _symbols[index];
     }
 
-    void* symbolAt(in size_t index) {
-        const name = symbolNameAt(index);
-        if (auto address = _program.plans.resolver.resolve(name))
-            return address;
-        throw new SnakebiteException(.text("the program calls `",
-            name, "`, which this process does not have"));
-    }
-
     size_t planIndexOf(const(CallPlan)* plan) {
         if (auto found = plan in _planIndex)
             return *found;
@@ -410,41 +433,10 @@ private struct Archive {
     // The entry that host code calls to reach a guest function, as a compile
     // makes it: with the function and the signature it registered.
     const(void)* entryAt(in size_t[3] reference) {
-        if (reference[0] == _program._modules.length) {
-            if (reference[1] >= _hostEntries.length)
-                throw new SnakebiteException(
-                    "the program file names a callback entry that it does not hold");
-            return _hostEntries[reference[1]];
-        }
         const word = functionAt(reference[0], reference[1]);
         auto callbacks = _program.plans.callbacks;
         return callbacks.adjustedEntryOf(
             word, *callbacks.signatureOf(word), cast(ptrdiff_t) reference[2]);
-    }
-
-    // The reference to an entry of the bridge that forwards to host code with
-    // an adjustment: the index that follows the last module, then the index of
-    // the entry. False when `entry` is not such an entry.
-    bool hostEntryReference(const(void)* entry, out size_t[3] reference) {
-        if (auto found = entry in _hostEntryIndex) {
-            reference = [_program._modules.length, *found, 0];
-            return true;
-        }
-        const(void)* word;
-        ptrdiff_t adjustment;
-        const(NativeSignature)* signature;
-        if (!_program.plans.callbacks.adjustedHostTarget(
-                entry, word, adjustment, signature))
-            return false;
-        const position = symbolPosition(word);
-        const index = _hostEntrySymbols.length;
-        _hostEntrySymbols ~= position[0];
-        _hostEntryDistances ~= position[1];
-        _hostEntryAdjustments ~= adjustment;
-        _hostEntrySignatures ~= cast() *signature;
-        _hostEntryIndex[entry] = index;
-        reference = [_program._modules.length, index, 0];
-        return true;
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
@@ -596,7 +588,7 @@ private void transferReloc(ref Archive archive, ref Reloc reloc) {
         reference = referenceOf(archive, reloc.target);
     archive.scalar(reference);
     if (!archive.isWriting)
-        reloc.target.address = addressOf(archive, reloc.target.kind, reference);
+        reloc.target = targetOf(archive, reloc.target.kind, reference);
 }
 
 private size_t[3] referenceOf(ref Archive archive, in Target target) {
@@ -610,14 +602,11 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             return [position[0], position[1], 0];
         case callbackEntry:
             // The entry of a guest function, with the receiver adjustment of
-            // an interface method, or an entry that forwards to host code
-            // with an adjustment.
+            // an interface method.
             const guest = archive._program.plans.callbacks.guestTarget(
                 cast(const(void)*) target.address);
-            size_t[3] hostEntry;
-            if (guest.word is null && archive.hostEntryReference(
-                    cast(const(void)*) target.address, hostEntry))
-                return hostEntry;
+            if (guest.word is null)
+                internalFailure("a word points at a callback entry of no guest function");
             const position =
                 archive.positionOf(cast(const(Function)*) guest.word);
             return [position[0], position[1], cast(size_t) guest.adjustment];
@@ -631,19 +620,19 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
         case adoptedString:
             return archive.stringPosition(cast(const(void)*) target.address);
         case hostSymbol:
-            const position = archive.symbolPosition(
-                cast(const(void)*) target.address);
-            return [position[0], position[1], 0];
+            return archive.nameReference(cast(const(void)*) target.address);
         case interfaceTable:
         case interfaceRecord:
-            const position = archive.symbolPosition(
-                cast(const(void)*) target.address);
-            if (position[1] != 0)
+            const name = archive.nameAt(cast(const(void)*) target.address);
+            if (name.adjusted !is null || name.distance != 0)
                 internalFailure("a word names an interface of an address that is not a class information");
-            return [position[0], target.index, 0];
+            return [archive.symbolIndexOfName(name.symbol), target.index, 0];
     }
 }
 
+// The address of the target that `reference` names. A name stays a name
+// (`snakebite.ffi.names`): the program finds the address of its symbol when
+// it is made ready to run (`targetOf`).
 private size_t addressOf(
     ref Archive archive, in Target.Kind kind, in size_t[3] reference,
 ) {
@@ -655,7 +644,7 @@ private size_t addressOf(
         case callbackEntry:
             return cast(size_t) archive.entryAt(reference);
         case hostSymbol:
-            return cast(size_t) archive.symbolAt(reference[0]) + reference[1];
+            return cast(size_t) archive.nameOfReference(reference);
         case nativePlan:
             return cast(size_t) archive.planAt(reference[0]);
         case staticData:
@@ -665,13 +654,19 @@ private size_t addressOf(
             return cast(size_t) archive.stringAt(reference);
         case interfaceTable:
         case interfaceRecord:
-            auto info = cast(TypeInfo_Class) archive.symbolAt(reference[0]);
-            if (reference[1] >= info.interfaces.length)
-                throw new SnakebiteException(
-                    "the program file names an interface that a class does not have");
-            return wordOf(Target(kind, cast(size_t) cast(void*) info,
-                DatumRef.init, cast(uint) reference[1]));
+            return cast(size_t) archive._program.plans.names.named(
+                archive.symbolNameAt(reference[0]));
     }
+}
+
+// The target that `reference` names, as `referenceOf` took it.
+private Target targetOf(
+    ref Archive archive, in Target.Kind kind, in size_t[3] reference,
+) {
+    const isInterface = kind == Target.Kind.interfaceTable
+        || kind == Target.Kind.interfaceRecord;
+    return Target(kind, addressOf(archive, kind, reference), DatumRef.init,
+        isInterface ? cast(uint) reference[1] : 0);
 }
 
 
@@ -812,16 +807,9 @@ private void transferPlans(ref Archive archive, ref Program program) {
             || failures.length != signatures.length)
         throw new SnakebiteException(
             "the program file holds call plans that do not match");
-    foreach (index, signature; signatures) {
-        const name = archive.symbolNameAt(symbols[index]);
-        auto plan = program.plans.plan(signature, name, failures[index]);
-        // A plan that the compile bound must bind in this process.
-        if (name.length != 0 && plan.address is null
-                && failures[index].length == 0)
-            throw new SnakebiteException(text("the program calls `",
-                name, "`, which this process does not have"));
-        archive._plans ~= plan;
-    }
+    foreach (index, signature; signatures)
+        archive._plans ~= program.plans.plan(signature,
+            archive.symbolNameAt(symbols[index]), failures[index]);
 }
 
 
@@ -926,7 +914,10 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
                     || bytes.length - link.wordOffset < size_t.sizeof)
                 throw new SnakebiteException(
                     "the program file holds a relocation with no place");
-            const address = addressOf(archive, link.kind, reference);
+            // A datum is ready to run once it is written, as after a compile
+            // to RAM.
+            const address = archive._program.plans.wordOf(
+                targetOf(archive, link.kind, reference));
             bytes[link.wordOffset .. link.wordOffset + size_t.sizeof] =
                 (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
         }
@@ -954,9 +945,15 @@ private void transferModule(
             archive.transfer(prepared);
         } else {
             archive.transfer(*function_);
+            // A name stays for `Program.complete`, which makes it ready to
+            // run as after a compile to RAM.
+            Reloc[] named;
             foreach (reloc; function_.relocs)
-                applyReloc(*function_, reloc);
-            function_.relocs = null;
+                if (program.plans.isNamed(reloc.target))
+                    named ~= reloc;
+                else
+                    applyReloc(*function_, reloc);
+            function_.relocs = named;
         }
     }
 }

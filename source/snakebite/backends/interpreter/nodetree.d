@@ -6668,8 +6668,8 @@ private Node buildSlice(E)(E ev, Expression expression) {
             // `__traits(initSymbol, T)`: the image of the aggregate's
             // initializer, which stays put for the life of the program.
             if (auto symbol = expression.isVarExp.var.isSymbolDeclaration) {
-                const initial = ev._runtimeTypes.initializer(
-                    symbol.dsym.isAggregateDeclaration);
+                const initial = ev.readyBytes(ev._runtimeTypes.initializer(
+                    symbol.dsym.isAggregateDeclaration));
                 return new ConstantSlice(SliceValue(
                     initial.length, cast(ubyte*) initial.ptr));
             }
@@ -7090,8 +7090,8 @@ private Node buildNewStorage(E)(
 private const(void)[] classImageOf(E)(E ev, NewExp expression) {
     import snakebite.frontend.typefacts: baseType;
 
-    return ev._runtimeTypes.initializer(
-        expression.newtype.baseType.isTypeClass.sym);
+    return ev.readyBytes(ev._runtimeTypes.initializer(
+        expression.newtype.baseType.isTypeClass.sym));
 }
 
 // The hidden context of a nested aggregate. A nested class made with an
@@ -7557,7 +7557,7 @@ private Node buildValue(E)(E ev, Expression expression) {
                     ev.functionAddressOf(function_) + symbol.offset));
             if (auto typeInfo = symbol.var.isTypeInfoDeclaration)
                 return new Constant!long(cast(long) (cast(size_t) cast(void*)
-                    typeInfoObjectOf(typeInfo, *ev._runtimeTypes)
+                    ev.ready(typeInfoObjectOf(typeInfo, *ev._runtimeTypes))
                     + symbol.offset));
             auto place = buildVariableAddress(ev, symbol.var.isVarDeclaration);
             if (place is null)
@@ -7585,7 +7585,7 @@ private Node buildValue(E)(E ev, Expression expression) {
             if (type is null || scalar.kind != Scalar.Kind.integral)
                 return null;
             return new Constant!long(cast(long) cast(size_t) cast(void*)
-                ev._runtimeTypes.get(type));
+                ev.ready(ev._runtimeTypes.get(type)));
         }
         case comma:
             return buildComma(ev, expression.isCommaExp, &buildValue!E);
