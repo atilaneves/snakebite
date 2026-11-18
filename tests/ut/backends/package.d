@@ -592,6 +592,8 @@ private const(SavedFile)* savedFileOf(
     }
     if (auto saved = stored)
         return saved;
+    if (auto saved = unregisteredSaved(cast(Module) program.rootModules[0], jit))
+        return saved;
 
     auto saved = savedOnHeap(program, jit);
     _mutex.lock;
@@ -604,8 +606,29 @@ private const(SavedFile)* savedFileOf(
             parsed.saved = saved;
         return parsed.saved;
     }
-    return saved;
+    // A module that no registration parsed: a test that parses its own
+    // source. Arena memory is never freed, so the module is never replaced
+    // by another at its address.
+    auto own = cast(Module) program.rootModules[0] in _savedOfUnregistered;
+    if (own is null || (*own).jit != jit) {
+        _savedOfUnregistered[cast(Module) program.rootModules[0]] = saved;
+        return saved;
+    }
+    return *own;
 }
+
+// The file of a module that no registration parsed, or null.
+private const(SavedFile)* unregisteredSaved(
+    Module module_, in JitSetting jit,
+) {
+    _mutex.lock;
+    scope(exit) _mutex.unlock;
+
+    auto saved = module_ in _savedOfUnregistered;
+    return saved is null || (*saved).jit != jit ? null : *saved;
+}
+
+private __gshared SavedFile*[Module] _savedOfUnregistered;
 
 private SavedFile* savedOnHeap(const Program program, in JitSetting jit) {
     auto saved = new SavedFile;
