@@ -124,14 +124,11 @@ public PreparationReport prepareSources(
     in imported!"snakebite.image.preparation".Optimise optimise
         = imported!"snakebite.image.preparation".Optimise.yes,
 ) {
-    import snakebite.frontend.compiler: Snippets, initialize;
-    import snakebite.project.loading: loadProject;
     import snakebite.project.dependencies: prepareDependencies;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    initialize(Snippets.no);
-    auto project = loadProject(directory, sources, nativeDependencies);
+    auto project = loadedProject(directory, sources, nativeDependencies);
     const frontendDuration = stopWatch.peek;
     stopWatch.reset;
     if (nativeDependencies)
@@ -141,8 +138,26 @@ public PreparationReport prepareSources(
         );
     if (project.program.dependencyImage !is null)
         project.program.testHooks = project.program.dependencyImage.testHooks;
-    project.program.startsAsProject = true;
     return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
+}
+
+
+// The frontend result of the project that `sources` describe, ready to run as
+// a project. The program has the name `name`, or the last part of
+// `directory` when it is empty.
+public imported!"snakebite.project.loading".Project loadedProject(
+    in string directory,
+    imported!"snakebite.project.dub".SourceSet sources,
+    in bool nativeDependencies,
+    in string name = null,
+) {
+    import snakebite.frontend.compiler: Snippets, initialize;
+    import snakebite.project.loading: loadProject;
+
+    initialize(Snippets.no);
+    auto project = loadProject(directory, sources, nativeDependencies, name);
+    project.program.startsAsProject = true;
+    return project;
 }
 
 
@@ -183,18 +198,26 @@ public ExecutionReport executeBackend(
 }
 
 // Compiles all of `program` and writes it to `path`; it runs nothing.
-// `workingDirectory` is where a load runs the program.
+// `workingDirectory` is where a load runs the program, and `imagePath` the
+// dependency image that it loads, or empty for none.
 public void saveProgram(
     imported!"snakebite.backends".Program program,
     in string path,
     in string workingDirectory,
+    in string imagePath,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode: Bytecode;
 
     auto backend = Owned!Bytecode(new Bytecode(program, jit, true));
-    backend.save(path, workingDirectory);
+    backend.save(path, workingDirectory, imagePath);
+}
+
+
+// The path of the dependency image of `program`, or empty when it has none.
+public string imagePathOf(imported!"snakebite.backends".Program program) {
+    return program.dependencyImage is null ? "" : program.dependencyImage.path;
 }
 
 
@@ -203,6 +226,19 @@ public void saveProgram(
 // `Program` and a `Runner` that the file fills instead of a compiler.
 public ExecutionReport executeLoaded(
     in string path,
+    in string[] programArguments,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
+    import std.file: read;
+
+    return executeLoaded(cast(const(ubyte)[]) read(path), programArguments,
+        jit);
+}
+
+
+// As `executeLoaded` with the path, for the bytes `contents` of the file.
+public ExecutionReport executeLoaded(
+    in ubyte[] contents,
     in string[] programArguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
@@ -216,11 +252,9 @@ public ExecutionReport executeLoaded(
     import snakebite.image.preparation: generatorKey;
     import snakebite.project.loading: EndsProcess, ProjectDirectory;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import std.file: read;
     import std.stdio: stdin, stdout, stderr;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    const contents = cast(const(ubyte)[]) read(path);
     const header = readHeader(contents);
     if (header.buildKey != generatorKey)
         throw new SnakebiteException(

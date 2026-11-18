@@ -18,11 +18,14 @@ public struct Project {
 
 // Finding the sources (`sourceSet`: `dub describe` for a dub project) and
 // running the frontend over them are separate steps so a caller can time
-// the second alone; see `snakebite.driver.execution.prepareProject`.
+// the second alone; see `snakebite.driver.execution.prepareProject`. The
+// program has the name `name`, or the last part of `directory` when it is
+// empty.
 public Project loadProject(
     in string directory,
     SourceSet sources,
     in bool dependencyImage,
+    in string name = null,
 ) {
     import snakebite.program: Program;
     import snakebite.frontend.compiler:
@@ -33,7 +36,7 @@ public Project loadProject(
 
     Project project;
     project.directory = directory.absolutePath.buildNormalizedPath;
-    project.name = project.directory.baseName;
+    project.name = name.length ? name : project.directory.baseName;
     project.sources = sources;
 
     const flags = FrontendFlags(

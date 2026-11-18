@@ -33,6 +33,50 @@ unittest {
 }
 
 
+@("buildProjectOfDubProject")
+unittest {
+    const result = parseArgs(["sb", "--build=project", "examples/rt-simple"]);
+
+    result.status.should == 0;
+    result.options.projectDirectory.should == "examples/rt-simple";
+}
+
+
+// The values of a compile come from the dub recipe: `--build=project` takes
+// no option that changes the compile, no directory without a dub recipe,
+// and neither `--save` nor `--load`. Only the bytecode backend has it.
+@("buildProjectRefusals")
+unittest {
+    const string[][] refused = [
+        ["--save=program.sbc", "project"],
+        ["--load=program.sbc"],
+        ["-b", "interpreter", "project"],
+        ["-I", "imports", "project"],
+        ["-J", "strings", "project"],
+        ["--version=Extra", "project"],
+        ["--no-optimise-image", "project"],
+        ["--jit-perf-map", "project"],
+        ["--lowmem", "project"],
+        ["examples/empty"],
+    ];
+    foreach (arguments; refused) {
+        const result = parseArgs(["sb", "--build=project"] ~ arguments);
+        result.status.should == 1;
+        "--build=project".should.be in result.diagnostic;
+    }
+}
+
+
+@("buildRefusesAnUnknownMode")
+unittest {
+    const result = parseArgs(["sb", "--build=bogus", "project"]);
+
+    result.status.should == 1;
+    "unknown build mode: bogus".should.be in result.diagnostic;
+    "valid build modes: off, project".should.be in result.diagnostic;
+}
+
+
 @("programArgumentsAfterSeparator")
 unittest {
     const result = parseArgs([
