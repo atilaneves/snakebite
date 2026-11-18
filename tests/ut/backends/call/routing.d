@@ -97,6 +97,9 @@ static foreach (backend; Matrix!(
         "a missing symbol fails the native link before a test can run"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE runs each body from source and calls no native code"),
+    Omit!(LoadedBytecode, Because.inexpressible,
+        "a save compiles every function, so the missing symbol ends the "
+        ~ "save, before the call that the test expects to fail"),
 )) {
     @("nonRootOwned.missingNativeIsAnError." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -148,6 +151,9 @@ static foreach (backend; Matrix!(
         "a missing symbol fails the native link before a test can run"),
     Omit!(Ctfe, Because.inexpressible,
         "CTFE runs each body from source and reads no native data"),
+    Omit!(LoadedBytecode, Because.inexpressible,
+        "a save compiles every function, so the missing symbol ends the "
+        ~ "save, before the call that the test expects to fail"),
 )) {
     @("nonRootOwned.missingNativeDataIsAnError." ~ backend.stringof)
     @Tags(backend.stringof)

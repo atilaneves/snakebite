@@ -49,7 +49,7 @@ static foreach (backend; Matrix!(
     }
 }
 
-static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
+static foreach (backend; AliasSeq!(Interpreter, Bytecode, LoadedBytecode)) {
     @("ret.int.hostArguments." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

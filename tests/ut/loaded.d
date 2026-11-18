@@ -2,27 +2,74 @@ module ut.loaded;
 
 
 import snakebite.backends.bytecode: Bytecode;
-import snakebite.backends.bytecode.inspection: eachNamedFunction;
+import snakebite.backends.bytecode.inspection: functionAt;
 import snakebite.backends.bytecode.vm: Function, JitSetting;
 import snakebite.backends.statistics: CompilationStatistics;
 import snakebite.driver.execution: LoadedProgram, loadProgramFile;
 import snakebite.frontend.ast: FuncDeclaration;
-import snakebite.frontend.dmd.mangle: mangledNameOf;
 import snakebite.program: Program;
 import snakebite.start.data: StartData;
 import std.conv: text;
 
 
+// The saved form of a program: the bytes of the file that a save writes, and
+// where in the saved program each function that the compile made is. A save
+// and a load keep the modules of a program and the functions of each module
+// in their order, so a position in the compiled program is the position in
+// every program that a load makes from the bytes. The file has no name of a
+// function unless the perf map is on, so the position is how a test finds the
+// loaded form of a `FuncDeclaration`.
+public struct SavedFile {
+    public const(ubyte)[] bytes;
+    // The JIT setting that the file was saved for.
+    public JitSetting jit;
+    // The module of the program and the function in the module.
+    public alias Position = size_t[2];
+    public Position[FuncDeclaration] positions;
+}
+
+
+// The saved form of `program`. The compiler is destroyed before this returns.
+public SavedFile saveProgram(const Program program, in JitSetting jit) {
+    import snakebite.backends.api: Owned;
+    import snakebite.backends.bytecode.inspection: eachCompiledPosition;
+    import std.file: getcwd, read, remove;
+
+    const path = temporaryPath;
+    scope(exit) {
+        import std.file: exists;
+
+        if (path.exists)
+            path.remove;
+    }
+    SavedFile saved;
+    saved.jit = jit;
+    const recordsAddresses = true;
+    auto compiler = new Bytecode(program, jit, recordsAddresses);
+    {
+        auto owned = Owned!Bytecode(compiler);
+        owned.save(path, getcwd);
+        eachCompiledPosition(compiler, (declaration, module_, index) {
+            saved.positions[declaration] = [module_, index];
+        });
+    }
+    destroy(compiler);
+    saved.bytes = cast(const(ubyte)[]) read(path);
+    return saved;
+}
+
+
 // The owner of a `LoadedBytecode`, as `Owned` is of a backend: it makes the
-// handle, and ends its runner when it ends.
+// handle, and ends its runner when it ends. Each owner loads the bytes of
+// `saved` into a program of its own.
 public struct LoadedOwner {
     @disable this(this);
 
     private LoadedBytecode _backend;
 
-    public this(const Program program, in JitSetting jit) {
+    public this(const(SavedFile)* saved) {
         _backend = LoadedBytecode(
-            loadProgramFile(savedFile(program, jit), jit));
+            loadProgramFile(saved.bytes, saved.jit), saved);
     }
 
     ~this() {
@@ -46,11 +93,13 @@ public struct LoadedOwner {
 // equivalent to a compile to RAM. A copy refers to the same program.
 public struct LoadedBytecode {
     private LoadedProgram _loaded;
+    private const(SavedFile)* _saved;
     // A load compiles nothing.
     private CompilationStatistics _compilation;
 
-    private this(LoadedProgram loaded) {
+    private this(LoadedProgram loaded, const(SavedFile)* saved) {
         _loaded = loaded;
+        _saved = saved;
     }
 
     // Calls the saved form of `function_`, as `Backend.call` does.
@@ -89,83 +138,22 @@ public struct LoadedBytecode {
     // The function of the loaded program that is the saved form of
     // `function_`.
     public const(Function)* loadedFunction(FuncDeclaration function_) {
-        const name = function_.mangledNameOf;
-        const(Function)* found;
-        eachNamedFunction(*_loaded.program, (mangledName, loaded) {
-            if (found is null && mangledName == name)
-                found = loaded;
-        });
-        if (found is null)
-            throw new Exception(
-                text("`", name, "` is not in the saved program"));
-        return found;
+        const position = function_ in _saved.positions;
+        if (position is null)
+            throw new Exception(text("`", function_.ident.toString,
+                "` is not in the saved program"));
+        return functionAt(*_loaded.program, (*position)[0], (*position)[1]);
     }
 
-    // Each function of the loaded program whose own name, the last part of
-    // its qualified name, is `identifier`.
+    // Each function of the loaded program whose own name is `identifier`.
     public void eachLoaded(
         in string identifier, scope void delegate(const(Function)*) visit,
     ) {
-        eachNamedFunction(*_loaded.program, (mangledName, loaded) {
-            if (identifierOf(mangledName) == identifier)
-                visit(loaded);
-        });
+        foreach (declaration, position; _saved.positions)
+            if (declaration.ident.toString == identifier)
+                visit(functionAt(
+                    *_loaded.program, position[0], position[1]));
     }
-}
-
-
-// The own name of the function whose mangled name is `mangledName`: in
-// `long m.C.add(long) pure`, `add`. The D `main` has the mangled name
-// `_Dmain`.
-private const(char)[] identifierOf(const(char)[] mangledName) {
-    import core.demangle: demangle;
-    import std.string: lastIndexOf;
-
-    if (mangledName == "_Dmain")
-        return "main";
-    const demangled = demangle(mangledName);
-    const close = demangled.lastIndexOf(')');
-    if (close < 0)
-        return null;
-    size_t depth;
-    ptrdiff_t open = close;
-    for (; open >= 0; --open) {
-        if (demangled[open] == ')')
-            ++depth;
-        else if (demangled[open] == '(' && --depth == 0)
-            break;
-    }
-    if (open <= 0)
-        return null;
-    ptrdiff_t start = open;
-    while (start > 0 && demangled[start - 1] != '.'
-            && demangled[start - 1] != ' ')
-        --start;
-    return demangled[start .. open];
-}
-
-
-// The bytes of the file that a save of `program` writes. The compiler is
-// destroyed before this returns.
-private const(ubyte)[] savedFile(const Program program, in JitSetting jit) {
-    import snakebite.backends.api: Owned;
-    import std.file: getcwd, read, remove;
-
-    const path = temporaryPath;
-    scope(exit) {
-        import std.file: exists;
-
-        if (path.exists)
-            path.remove;
-    }
-    const recordsAddresses = true;
-    auto compiler = new Bytecode(program, jit, recordsAddresses);
-    {
-        auto owned = Owned!Bytecode(compiler);
-        owned.save(path, getcwd);
-    }
-    destroy(compiler);
-    return cast(const(ubyte)[]) read(path);
 }
 
 

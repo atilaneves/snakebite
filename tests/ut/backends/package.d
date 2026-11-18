@@ -16,6 +16,7 @@ import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
 import std.meta: Filter, staticIndexOf;
 import std.traits: isInstanceOf;
+import ut.loaded: LoadedOwner, SavedFile, saveProgram;
 
 
 // The native oracle, as a matrix entry. Not a snakebite backend: `code` is
@@ -543,9 +544,74 @@ public Module[] registeredSnippets(string[] sources, string module_ = __MODULE__
 
 // Every program each test module will run or call, filled in before `main`.
 private __gshared GuestProgram[][string] _registeredPrograms;
+// A parsed guest program, and the saved form of it once a test on
+// `LoadedBytecode` needs it. The file lives as long as the parsed program.
+private struct Parsed {
+    Module module_;
+    SavedFile* saved;
+}
+
 // Filled in one module at a time by `parsedProgram`.
-private __gshared Module[GuestProgram] _parsedPrograms;
+private __gshared Parsed[GuestProgram] _parsedPrograms;
 private __gshared bool[string] _parsedProgramModules;
+
+// A handle on a new backend of type `B` for `program`. A `Bytecode` backend
+// and a `LoadedBytecode` get the JIT setting of this run of `bin/ut`. Each
+// `LoadedBytecode` loads the file that one save of the program wrote.
+public auto ownedBackend(B)(const Program program) {
+    static if (is(B == Bytecode))
+        return Owned!B(new Bytecode(program, testJit));
+    else static if (is(B == LoadedBytecode))
+        return LoadedOwner(savedFileOf(program, testJit));
+    else
+        return Owned!B(program);
+}
+
+// The saved form of `program` for `jit`. A program that is one parsed guest
+// program keeps its file with it, so a save happens once for each program and
+// JIT setting. Any other program saves each time.
+private const(SavedFile)* savedFileOf(
+    const Program program, in JitSetting jit,
+) {
+    if (program.rootModules.length != 1)
+        return savedOnHeap(program, jit);
+
+    // The save runs outside the lock: it takes the frontend lock, and a
+    // thread that holds that lock can wait for this one. Two threads that
+    // save the same program at the same time both save; the first to store
+    // wins.
+    const(SavedFile)* stored() {
+        _mutex.lock;
+        scope(exit) _mutex.unlock;
+
+        foreach (ref parsed; _parsedPrograms)
+            if (parsed.module_ is program.rootModules[0])
+                return parsed.saved is null || parsed.saved.jit != jit
+                    ? null : parsed.saved;
+        return null;
+    }
+    if (auto saved = stored)
+        return saved;
+
+    auto saved = savedOnHeap(program, jit);
+    _mutex.lock;
+    scope(exit) _mutex.unlock;
+
+    foreach (ref parsed; _parsedPrograms) {
+        if (parsed.module_ !is program.rootModules[0])
+            continue;
+        if (parsed.saved is null || parsed.saved.jit != jit)
+            parsed.saved = saved;
+        return parsed.saved;
+    }
+    return saved;
+}
+
+private SavedFile* savedOnHeap(const Program program, in JitSetting jit) {
+    auto saved = new SavedFile;
+    *saved = saveProgram(program, jit);
+    return saved;
+}
 
 private Module parsedProgram(in GuestProgram program) {
     _mutex.lock;
@@ -557,7 +623,7 @@ private Module parsedProgram(in GuestProgram program) {
     // The map keys by value, and `in` makes the lookup key const.
     auto found = cast(GuestProgram) program in _parsedPrograms;
     assert(found !is null, text("Program was not registered: ", program));
-    return *found;
+    return found.module_;
 }
 
 private void parseModulePrograms(in string module_) {
@@ -568,7 +634,7 @@ private void parseModulePrograms(in string module_) {
     const sources = programs.map!(program => program.code).array;
     auto guestModules = parseSnippets(sources);
     foreach (index, program; programs)
-        _parsedPrograms[cast(GuestProgram) program] = guestModules[index];
+        _parsedPrograms[cast(GuestProgram) program] = Parsed(guestModules[index]);
     _parsedProgramModules[module_] = true;
 }
 

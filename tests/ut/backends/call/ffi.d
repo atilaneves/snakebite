@@ -3173,7 +3173,7 @@ static foreach (backend; Matrix!(
 // _arguments`/`_moves` are dynamic arrays, `Frame`'s stack area falls
 // back to the heap past its own sixteen inline words), so a call this
 // wide just works, on every backend that reaches a plan.
-static foreach (Backend; AliasSeq!(Interpreter, Bytecode)) {
+static foreach (Backend; AliasSeq!(Interpreter, Bytecode, LoadedBytecode)) {
     @("variadic.moreThanSixteenArgumentWords." ~ Backend.stringof)
     @Tags(Backend.stringof)
     unittest {
