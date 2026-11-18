@@ -298,6 +298,8 @@ package struct JitState {
     Scratch!size_t labels;
     PerfMap perfMap;
     Scratch!ReloadEntry reloadEntries;
+    Scratch!(Gen.BranchOnlyCandidate) branchOnlyCandidates;
+    Scratch!(Gen.BranchOnlyEntry) branchOnlyEntries;
     Scratch!(Gen.PathScratch, 1) paths;
     // The buffers of one compile in `vm.d`: the template of each instruction,
     // a snapshot of the instructions, and their handlers.
@@ -316,6 +318,8 @@ package struct JitState {
         labels.release;
         literals.release;
         reloadEntries.release;
+        branchOnlyCandidates.release;
+        branchOnlyEntries.release;
         paths.release;
         opScratch.release;
         snapshotScratch.release;
@@ -471,6 +475,7 @@ package struct JitState {
         enum needsHandlerEntry = size_t.max;
         size_t handlerEntryCount;
         size_t branchOnlyEnd;
+        const branchOnly = g.proveBranchOnly(ops, branchOnlyCandidates, branchOnlyEntries);
         foreach (i; 0 .. instructions.length) {
             if (i < branchOnlyEnd)
                 continue;
@@ -514,10 +519,11 @@ package struct JitState {
             const saved = g.a.n;
             const savedFixups = g.fixupCount;
             const savedLiterals = g.literalCount;
-            if (!g.fpLoop.backedge && !g.checkedLoop.update) {
+            if (branchOnly.length && branchOnly[i].approved
+                    && !g.fpLoop.backedge && !g.checkedLoop.update) {
                 const plan = g.planBranchOnly(i, ops);
-                if (plan.end && (!path.length || path[0].pc <= i
-                        || path[0].pc >= plan.end)) {
+                if (!path.length || path[0].pc <= i
+                        || path[0].pc >= plan.end) {
                     branchOnlyEnd = plan.end;
                     foreach (ref label; g.labels[i + 1 .. plan.end])
                         label = needsHandlerEntry;
@@ -1856,23 +1862,34 @@ private struct Gen {
     // A template can reuse a pointer if its register stays live until the access.
     bool opnd(bool reusePointer = false)(size_t raw, ubyte scratch, out Mem m) {
         if (raw & indirectBit) {
-            const slot = (raw >> 32) & 0x7fff_ffff;
-            const disp = cast(uint) raw;
-            if (slot > 0x7fff_0000 || disp > 0x7fff_0000)
+            Mem addressSlot;
+            if (!storageOperand(raw, scratch, m, addressSlot))
                 return false;
-            const addressSlot = Mem(FRAME, cast(int) slot);
             static if (reusePointer) {
                 const cached = cachedInt(addressSlot, 8);
                 if (cached >= 0) {
-                    m = Mem(cast(ubyte) cached, cast(int) disp);
+                    m.base = cast(ubyte) cached;
                     return true;
                 }
             }
             a.ld(8, scratch, addressSlot);
-            m = Mem(scratch, cast(int) disp);
             return true;
         }
         return frameOperand(raw, m);
+    }
+
+    static bool storageOperand(size_t raw, ubyte scratch, out Mem value,
+        out Mem addressSlot)
+    {
+        import snakebite.backends.bytecode.vm: addressSlotOf;
+
+        if (!(raw & indirectBit))
+            return frameOperand(raw, value);
+        if (!frameOperand(addressSlotOf(raw), addressSlot)
+                || !frameOperand(cast(uint) raw, value))
+            return false;
+        value.base = scratch;
+        return true;
     }
 
     static bool frameOperand(size_t raw, out Mem m) pure @safe {
@@ -3715,8 +3732,7 @@ private struct Gen {
             plan.end = pc + 1;
         }
         if (plan.count < 2 || branches < 2
-                || ops[plan.end - 1].kind != JitOp.Kind.branch
-                || !branchOnlySlot(slot, first, plan.end, ops))
+                || ops[plan.end - 1].kind != JitOp.Kind.branch)
             return BranchOnly.init;
 
         foreach (ref copy; plan.copies[0 .. plan.count]) {
@@ -3736,12 +3752,13 @@ private struct Gen {
         if (op.kind != JitOp.Kind.copy || op.copy.staticSource
                 || opWidth(ins, op) != 1)
             return false;
+        Mem value, address;
+        if (!storageOperand(ins.source, R9, value, address))
+            return false;
         if (!(ins.source & indirectBit))
-            return ins.source <= 0x7fff_0000 && ins.source != ins.destination;
-        return addressSlotOf(ins.source) <= 0x7fff_0000
-            && cast(uint) ins.source <= 0x7fff_0000
-            && (ins.destination < addressSlotOf(ins.source)
-                || ins.destination - addressSlotOf(ins.source) >= size_t.sizeof);
+            return ins.source != ins.destination;
+        const slot = addressSlotOf(ins.source);
+        return ins.destination < slot || ins.destination - slot >= size_t.sizeof;
     }
 
     size_t branchOnlyTarget(size_t pc, bool nonzero, size_t end,
@@ -3762,76 +3779,150 @@ private struct Gen {
         return pc;
     }
 
-    bool branchOnlySlot(size_t slot, size_t first, size_t end,
-        const(JitOp)[] ops)
+    static struct BranchOnlyCandidate {
+        size_t slot;
+        size_t first;
+        size_t end;
+        ptrdiff_t changes;
+    }
+
+    static struct BranchOnlyEntry {
+        size_t earliest = size_t.max;
+        size_t latest;
+        bool approved;
+    }
+
+    const(BranchOnlyEntry)[] proveBranchOnly(const(JitOp)[] ops,
+        ref Scratch!BranchOnlyCandidate candidates,
+        ref Scratch!BranchOnlyEntry entries)
     {
         import snakebite.backends.bytecode.emitted: EmittedCode;
-        import snakebite.backends.bytecode.vm: addressSlotOf, discardResult;
+        import snakebite.backends.bytecode.vm:
+            addressSlotOf, branchTargetField, discardResult;
+        import std.algorithm.sorting: sort;
 
         if (function_.exceptionHandlers.length || function_.closureSize
                 || function_.cursorOffset != size_t.max)
-            return false;
+            return null;
 
-        bool touches(size_t operand, size_t width) {
+        size_t count;
+        foreach (pc; 0 .. ops.length) {
+            const plan = planBranchOnly(pc, ops);
+            if (!plan.end)
+                continue;
+            auto storage = candidates.grow(count + 1);
+            if (storage is null)
+                return null;
+            storage[count++] = BranchOnlyCandidate(snapshot[pc].destination,
+                pc, plan.end);
+        }
+        if (!count)
+            return null;
+        auto ranges = candidates.ptr[0 .. count];
+        ranges.sort!((a, b) => a.slot < b.slot);
+        auto storage = entries.reserve(ops.length);
+        if (storage is null)
+            return null;
+        auto targets = storage[0 .. ops.length];
+        targets[] = BranchOnlyEntry.init;
+
+        size_t firstSlotAtOrAfter(size_t offset) {
+            size_t low;
+            size_t high = ranges.length;
+            while (low < high) {
+                const mid = low + (high - low) / 2;
+                if (ranges[mid].slot < offset)
+                    low = mid + 1;
+                else
+                    high = mid;
+            }
+            return low;
+        }
+
+        // Each access adds one to the count of each candidate byte it
+        // overlaps. A prefix sum applies the changes without visiting each
+        // candidate for a wide access.
+        void countAccess(size_t operand, size_t width) {
             if (operand & indirectBit) {
                 operand = addressSlotOf(operand);
                 width = size_t.sizeof;
             }
-            return slot >= operand && slot - operand < width;
+            if (!width || operand >= frameSize)
+                return;
+            const first = firstSlotAtOrAfter(operand);
+            if (first < ranges.length)
+                ++ranges[first].changes;
+            const end = operand + (width < frameSize - operand
+                ? width : frameSize - operand);
+            const past = firstSlotAtOrAfter(end);
+            if (past < ranges.length)
+                --ranges[past].changes;
         }
 
-        if ((function_.windowSlot != size_t.max
-                && touches(function_.windowSlot, size_t.sizeof))
-                || (function_.returnPlace.offset != size_t.max
-                    && touches(function_.returnPlace.offset, size_t.sizeof)))
-            return false;
-        foreach (pc, ins; snapshot) {
-            if (pc >= first && pc < end)
-                continue;
+        if (function_.windowSlot != size_t.max)
+            countAccess(function_.windowSlot, size_t.sizeof);
+        if (function_.returnPlace.offset != size_t.max)
+            countAccess(function_.returnPlace.offset, size_t.sizeof);
+
+        foreach (pc, ref const ins; snapshot) {
+            Instruction instruction = ins;
+            if (const field = branchTargetField(instruction)) {
+                size_t target;
+                if (!targetIndex(*field, target))
+                    return null;
+                auto entry = &targets[target];
+                if (entry.earliest == size_t.max)
+                    entry.earliest = pc;
+                entry.latest = pc;
+            }
+
             const op = ops[pc];
             switch (op.kind) with (JitOp.Kind) {
                 case callWindow:
                     const site = &callSites[ins.source];
-                    if (site.cleanupStartIndex != size_t.max
-                            || (op.callWindow.indirect
-                                && touches(site.calleeSlotOffset, size_t.sizeof))
-                            || (ins.destination != discardResult
-                                && touches(ins.destination, site.returnWidth)))
-                        return false;
-                    foreach (arg; site.args)
-                        if (touches(arg.callerOffset, arg.width))
-                            return false;
-                    foreach (arg; site.nativeArgs)
-                        if (touches(arg.callerOffset, arg.width))
-                            return false;
-                    foreach (arg; site.value.surplus)
-                        if (touches(arg.callerOffset, arg.width))
-                            return false;
+                    if (site.cleanupStartIndex != size_t.max)
+                        return null;
+                    if (op.callWindow.indirect)
+                        countAccess(site.calleeSlotOffset, size_t.sizeof);
+                    if (ins.destination != discardResult)
+                        countAccess(ins.destination, site.returnWidth);
+                    EmittedCode.eachCallArgument(*site, &countAccess);
                     continue;
                 case copy:
                     if (op.copy.staticSource) {
-                        if (touches(ins.destination, opWidth(ins, op)))
-                            return false;
+                        countAccess(ins.destination, opWidth(ins, op));
                         continue;
                     }
                     break;
                 case zero, jump, branch, fused, boolOp, returnVoid, returnValue:
                     break;
                 default:
-                    // Without an operand and address-escape proof, a handler
-                    // can read the byte even if no field names its offset.
-                    return false;
+                    // An unclassified operation can expose the frame.
+                    return null;
             }
             const access = EmittedCode.accessOf(ins.handler);
             if (!access.known || access.takesAddress || access.widthIsSlot)
-                return false;
+                return null;
             foreach (field; EmittedCode.allFields)
-                if (access.namesStorage(field)
-                        && touches(EmittedCode.operandOf(ins, field),
-                            EmittedCode.extentOf(ins, access, field)))
-                    return false;
+                if (access.namesStorage(field))
+                    countAccess(EmittedCode.operandOf(ins, field),
+                        EmittedCode.extentOf(ins, access, field));
         }
-        return true;
+
+        ptrdiff_t mentions;
+        foreach (ref const range; ranges) {
+            mentions += range.changes;
+            // Each chain instruction names the byte once. An outside edge
+            // into its interior could reach a handler with a stale value.
+            if (mentions != range.end - range.first)
+                continue;
+            bool outsideEntry;
+            foreach (ref const target; targets[range.first + 1 .. range.end])
+                outsideEntry |= target.earliest < range.first
+                    || target.latest >= range.end;
+            targets[range.first].approved = !outsideEntry;
+        }
+        return targets;
     }
 
     void emitBranchOnly(size_t first, in BranchOnly plan) {

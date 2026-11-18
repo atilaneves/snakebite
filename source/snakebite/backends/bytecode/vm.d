@@ -5141,7 +5141,7 @@ package void recordLocalReferences(ref Function function_) {
 
 // The field of `instruction` that holds the instruction of the same function
 // where control continues, or null.
-package size_t* branchTargetField(ref Instruction instruction) {
+package size_t* branchTargetField(ref Instruction instruction) @nogc nothrow {
     Roles roles;
     if (!rolesOf(instruction.handler, roles))
         return null;

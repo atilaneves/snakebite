@@ -3,7 +3,8 @@ module ut.backends.bytecode.jit;
 
 import ut.backends;
 import snakebite.program: Program;
-import snakebite.backends.bytecode.inspection: isJitCompiled;
+import snakebite.backends.bytecode.inspection: isJitCompiled, runBranchReentry;
+import snakebite.backends.bytecode.jit: jitSupported;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
 import core.atomic: atomicLoad, atomicOp, atomicStore;
@@ -123,4 +124,12 @@ unittest {
             compiled = isJitCompiled(function_);
     });
     compiled.should == true;
+}
+
+
+@("jit.branchReentryReadsTheValueFromTheFirstVisit")
+unittest {
+    bool compiled;
+    runBranchReentry(testJit.enabled, compiled).should == 1;
+    compiled.should == (jitSupported && testJit.enabled);
 }

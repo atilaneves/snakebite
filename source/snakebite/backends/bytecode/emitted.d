@@ -378,6 +378,17 @@ package struct EmittedCode {
 
 
 
+    package static void eachCallArgument(Visit)(in CallSite site,
+        scope Visit visit)
+    {
+        foreach (arg; site.args)
+            visit(arg.callerOffset, arg.width);
+        foreach (arg; site.nativeArgs)
+            visit(arg.callerOffset, arg.width);
+        foreach (arg; site.value.surplus)
+            visit(arg.callerOffset, arg.width);
+    }
+
     // Copy forwarding. A temporary that one instruction fills and one copy
     // empties makes the producer write the copy's destination instead; a
     // copy into a temporary that one instruction reads makes that
@@ -398,12 +409,8 @@ package struct EmittedCode {
         auto state = CopyForwarding(
             instructions, tempStarts, tempSizes, isTarget);
         foreach (ref site; callSites) {
-            foreach (arg; site.args)
-                state.count(arg.callerOffset, arg.width, 1);
-            foreach (arg; site.nativeArgs)
-                state.count(arg.callerOffset, arg.width, 1);
-            foreach (arg; site.value.surplus)
-                state.count(arg.callerOffset, arg.width, 1);
+            eachCallArgument(site, (size_t offset, size_t width)
+                => state.count(offset, width, 1));
             if (site.kind == CallSite.Kind.indirect
                     || site.kind == CallSite.Kind.value)
                 state.count(site.calleeSlotOffset, size_t.sizeof, 1);

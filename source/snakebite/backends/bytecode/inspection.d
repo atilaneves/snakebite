@@ -97,3 +97,52 @@ public string bindWithRecords(Instruction[] instructions,
             instructions[0].handler);
     return bindInstructionReferences(function_);
 }
+
+// The jump after a short-circuit chain returns to the chain's last test.
+public ubyte runBranchReentry(bool jit, out bool compiled) {
+    import snakebite.backends.bytecode.jit: jitSupported;
+    import snakebite.backends.bytecode.vm: JitSetting, Vm, opBranchFalse,
+        opBranchTrue, opCopyFixed, opJump, opReturn, opZero,
+        prepareForExecution, recordLocalReferences;
+
+    enum temporary = 0, first = 1, second = 2, repeat = 3, falseValue = 4;
+    enum lastTest = 4, succeeded = 8, failed = 9;
+    enum byteWidth = ubyte.sizeof;
+    ubyte[5] seed = [0, 1, 1, 1, 0];
+    auto function_ = Function(
+        [
+            Instruction(&opCopyFixed!byteWidth, temporary, first, byteWidth),
+            Instruction(&opBranchTrue, temporary, lastTest, byteWidth),
+            Instruction(&opCopyFixed!byteWidth, temporary, second, byteWidth),
+            Instruction(&opBranchFalse, temporary, failed, byteWidth),
+            Instruction(&opBranchFalse, temporary, failed, byteWidth),
+            Instruction(&opBranchFalse, repeat, succeeded, byteWidth),
+            Instruction(&opZero, repeat, 0, byteWidth),
+            Instruction(&opJump, lastTest, 0, 0),
+            Instruction(&opReturn, 0, first, byteWidth),
+            Instruction(&opReturn, 0, falseValue, byteWidth),
+        ],
+        [], [], [], [], seed.sizeof, ubyte.alignof,
+    );
+    function_.recordLocalReferences;
+    const error = function_.bindInstructionReferences;
+    assert(error is null, error);
+    static if (jitSupported) {
+        import snakebite.backends.bytecode.jit: JitInstance;
+        JitInstance instance;
+    }
+    scope(exit) {
+        static if (jitSupported)
+            instance.release;
+    }
+    static if (jitSupported)
+        prepareForExecution(&function_, JitSetting(jit, true), &instance, null);
+
+    import snakebite.stack.frames: defaultFrameCapacity;
+
+    auto vm = Vm(defaultFrameCapacity);
+    ubyte result;
+    vm.call(function_, &result, [Vm.HostArgument(0, &seed, seed.sizeof)]);
+    compiled = isJitCompiled(&function_);
+    return result;
+}
