@@ -259,6 +259,13 @@ public struct RuntimeTypes {
     }
 
     private Linked!TypeInfo build(Type type) {
+        import snakebite.frontend.ast: toDString;
+        import snakebite.frontend.compiler: inFrontend;
+
+        // dmd emits no type information that druntime defines
+        // (`builtinTypeInfo`): only druntime defines it.
+        if (inFrontend!"builtinTypeInfo"(type))
+            return druntimeTypeInfo(type.deco.toDString);
         auto own = ownInfo(type);
         auto classType = type.isTypeClass;
         auto structType = type.isTypeStruct;
@@ -426,11 +433,15 @@ public struct RuntimeTypes {
     // name is `mangled`, as the name of its symbol, which dmd gives it
     // (`TypeInfoDeclaration`).
     private Linked!TypeInfo hostTypeInfo(string mangled)() {
+        return druntimeTypeInfo(mangled);
+    }
+
+    // As `hostTypeInfo`, for a name that is known only as the program runs.
+    private Linked!TypeInfo druntimeTypeInfo(in char[] mangled) {
         import std.conv: text;
 
-        enum symbol = text("_D", 9 + mangled.length, "TypeInfo_", mangled,
-            "6__initZ");
-        return Linked!TypeInfo.named(plans.names.named(symbol));
+        return Linked!TypeInfo.named(plans.names.named(text("_D",
+            9 + mangled.length, "TypeInfo_", mangled, "6__initZ")));
     }
 
     // The symbol of the class information of `declaration`.
