@@ -221,10 +221,6 @@ public struct PlanCache {
     private SharedTable!(string, CallPlan*) _rawPlans;
     private shared size_t _preparations;
 
-    public void* resolveThreadLocal(in char[] name) const {
-        return _store.resolver.resolveThreadLocal(name);
-    }
-
     version(unittest)
     public size_t symbolLookups() @safe @nogc nothrow pure const scope {
         return _store.resolver.lookups;

@@ -280,12 +280,13 @@ public auto inFrontend(alias dmdSymbol, Args...)(auto ref Args arguments) {
 // resolves by its arguments.
 private template doorFunction(string name, Args...) {
     import dmd.dinterpret, dmd.dsymbolsem, dmd.enumsem, dmd.expressionsem,
-        dmd.frontend, dmd.funcsem, dmd.mangle, dmd.semantic3, dmd.typesem;
+        dmd.frontend, dmd.funcsem, dmd.mangle, dmd.semantic3, dmd.typesem,
+        dmd.typinf;
     import std.meta: AliasSeq, NoDuplicates;
 
     alias doorModules = AliasSeq!(dmd.dinterpret, dmd.dsymbolsem,
         dmd.enumsem, dmd.expressionsem, dmd.frontend, dmd.funcsem, dmd.mangle,
-        dmd.semantic3, dmd.typesem);
+        dmd.semantic3, dmd.typesem, dmd.typinf);
     alias found = AliasSeq!();
     static foreach (module_; doorModules)
         static if (__traits(hasMember, module_, name)

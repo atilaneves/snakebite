@@ -391,7 +391,8 @@ private struct Shared {
                 (declaration, info) {
                     declarationOf.insert(cast(const(void)*) info, declaration);
                 }));
-        facts = PreparedFacts(&world.data, &world.types, &signatures);
+        facts = PreparedFacts(&world.data, &world.types, &signatures,
+            &planStore);
     }
 
     // The guest function a registered entry word stands for. A word that

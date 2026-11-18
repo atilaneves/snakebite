@@ -16,6 +16,7 @@ import snakebite.native.value: TypeFacts;
 import snakebite.language.statics.data: NativeData;
 import snakebite.native.value: BitfieldAccess;
 import snakebite.native.signature: SignatureTable;
+import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.sharedtable: SharedTable;
 
 // Facts have one program owner. Preparation and ordinary execution use the
@@ -34,14 +35,16 @@ package struct PreparedFacts {
     private NativeData* _nativeData;
     private RuntimeTypes* _runtimeTypes;
     private SignatureTable* _signatures;
+    private CallPlanStore* _plans;
 
     package this(
         NativeData* nativeData, RuntimeTypes* runtimeTypes,
-        SignatureTable* signatures,
+        SignatureTable* signatures, CallPlanStore* plans,
     ) {
         _nativeData = nativeData;
         _runtimeTypes = runtimeTypes;
         _signatures = signatures;
+        _plans = plans;
     }
 
     package TypeFacts typeOf(Type type) {
@@ -124,8 +127,11 @@ package struct PreparedFacts {
         attempt({ castOf(expression); });
     }
 
+    // The type information of a `typeid` is made ready to run when its
+    // function is prepared: the first use can be in a finalizer, where the
+    // GC forbids the allocation that a question to the process makes.
     package void prepareTypeInfo(Type type) {
-        attempt({ _runtimeTypes.get(type); });
+        attempt({ _plans.ready(_runtimeTypes.get(type)); });
     }
 
     // Failed eager analysis must stay for the execution that needs the node.

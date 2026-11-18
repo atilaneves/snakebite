@@ -75,7 +75,6 @@ public struct StaticWorld {
             &_program.isDefinedElsewhere,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
-            (name) => plans.resolveThreadLocal(name),
             &writeClassImage, (type) => types.get(type),
             backend.blocksOf, &callableKind);
         types = RuntimeTypes(&_program.isRootOwned,
@@ -144,12 +143,14 @@ public struct StaticWorld {
 
         return Hooks(
             &callableAddress,
-            &types.linkedClassInfo,
+            &types.classInfoName,
             &types.isNativeClass,
             &types.nativeVtable,
             (decl) => types.rtInfo(decl),
             _backend.classBuilt,
             &data,
+            &types.hasOwnCopy,
+            &types.ownClassInfo,
         );
     }
 

@@ -23,6 +23,15 @@ mixin template ExportClassData(T, string consumer) {
             ~ "\t" ~ T.stringof ~ "." ~ consumer);
 }
 
+// The type information of a fixture struct or enum, as the code generator
+// names it.
+mixin template ExportTypeInfo(T, string consumer) {
+    static assert(consumer.length != 0);
+    import std.conv: text;
+    pragma(msg, text("SB_EXPORT\t_D", 9 + T.mangleof.length, "TypeInfo_",
+        T.mangleof, "6__initZ\t", T.stringof, ".", consumer));
+}
+
 version (SnakebiteAcceptanceHostExports) {
     import dabi = at.ffi.dabi;
     import dvariadic = at.ffi.dvariadic;
@@ -48,6 +57,14 @@ mixin Export!(routing, "snakebite_ut_variadic_instance_sum", "instanceVariadic.d
 mixin Export!(routing, "routingSharedCount", "dependencyData.sharedAndThreadLocal.bothSides");
 mixin Export!(routing, "routingThreadCount", "dependencyData.sharedAndThreadLocal.bothSides");
 mixin Export!(routing, "routingBump", "dependencyData.sharedAndThreadLocal.bothSides");
+static foreach (function_; ["routingCountNative", "routingPointInfo",
+        "routingColourInfo", "routingBoxInfo", "routingIsBox"])
+    mixin Export!(routing, function_, "sharedDefinition");
+mixin Export!(routing.RoutingCounter!int, "perThread", "sharedDefinition.templateInstanceStatics.oneCopy");
+mixin Export!(routing.RoutingCounter!int, "everyThread", "sharedDefinition.templateInstanceStatics.oneCopy");
+mixin ExportTypeInfo!(routing.RoutingPoint, "sharedDefinition.dependencyTypeInfo.sameObject");
+mixin ExportTypeInfo!(routing.RoutingColour, "sharedDefinition.dependencyTypeInfo.sameObject");
+mixin ExportClassData!(routing.RoutingBox!int, "sharedDefinition.instanceClassInfo.sameObject");
 mixin Export!(symbols, "snakebite_symbol_dual_definition_test", "symbolAddress.loadedSharedObjectAnswersBeforeExecutable");
 mixin Export!(symbols, "snakebite_symbol_executable_only_test", "symbolAddress.fallsBackToExecutableWhenNothingElseHasIt");
 mixin Export!(concurrency, "snakebite_ut_concurrency_wide", "plan.concurrentFirstPlansOfAFreshStructTypeAgree");

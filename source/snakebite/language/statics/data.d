@@ -50,7 +50,6 @@ public struct NativeData {
     // null when the program holds the storage.
     private SharedTable!(VarDeclaration, Name*) _storageNames;
     private FunctionKind _functionKind;
-    private ThreadLocalAddress _threadLocalAddress;
     // Writes the initial image of an object of a class.
     private void delegate(ClassDeclaration, void*) _classImage;
     private TypeInfoOf _typeInfo;
@@ -98,7 +97,6 @@ public struct NativeData {
         bool delegate(Dsymbol) const isDefinedElsewhere,
         VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
-        ThreadLocalAddress threadLocalAddress,
         void delegate(ClassDeclaration, void*) classImage,
         TypeInfoOf typeInfo,
         StaticBlocks* delegate(Module) blocksOf = null,
@@ -108,7 +106,6 @@ public struct NativeData {
         _isDefinedElsewhere = isDefinedElsewhere;
         _linkedVariable = linkedVariable;
         _symbolAddress = symbolAddress;
-        _threadLocalAddress = threadLocalAddress;
         _classImage = classImage;
         _typeInfo = typeInfo;
         _store = store;
@@ -358,10 +355,8 @@ public struct NativeData {
             return;
         const address = cast(const(void)*) target.address;
         if (auto name = planStore.names.nameAt(address)) {
-            if (name.adjusted !is null)
-                internalFailure("a word points into an entry of host code");
-            target.address = cast(size_t) planStore.names.named(
-                name.symbol, name.distance + distance, name.declaredBy);
+            target.address = cast(size_t) planStore.names.further(
+                name, distance);
             distance = 0;
         }
     }
@@ -548,9 +543,12 @@ public struct NativeData {
             return Placed(_store.tlsSlots.slotFor(
                 cast(const(TlsDescriptor)*) tlsDescriptorOf(variable).ptr));
 
-        if (auto name = storageName(variable))
-            return *_statics.insert(variable, Placed(
-                (cast(void*) planStore.addressOf(name))[0 .. facts.size]));
+        if (auto name = storageName(variable)) {
+            auto address = planStore.addressOf(name);
+            return *_statics.insert(variable, address is name.own
+                ? Placed(address[0 .. facts.size], name.ownDatum)
+                : Placed(address[0 .. facts.size]));
+        }
 
         import snakebite.frontend.compiler: withCompilerLock;
 
@@ -591,25 +589,54 @@ public struct NativeData {
     }
 
     // The name of the native storage of `variable`, which is not
-    // thread-local, or null when the program holds the storage. The
+    // thread-local, or null when only the program holds the storage. The
     // declaration decides that another object defines the variable. A
-    // variable that the program and another object can both define uses the
-    // copy of the process when there is one.
+    // variable that the program and another object can both define is the
+    // name with the program's own copy (`namedWithOwnCopy`).
     private Name* storageName(VarDeclaration variable) {
         if (auto found = variable in _storageNames)
             return *found;
 
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
-        Name* name;
-        const kind = storageKindOf(variable);
-        if (kind != StorageKind.own) {
-            name = named(nativeSymbolName(variable), variable.toString);
-            if (kind == StorageKind.nativeIfPresent
-                    && planStore.addressIfPresent(name) is null)
-                name = null;
+        final switch (storageKindOf(variable)) {
+            case StorageKind.own:
+                return *_storageNames.insert(variable, null);
+            case StorageKind.native:
+                return *_storageNames.insert(variable,
+                    named(nativeSymbolName(variable), variable.toString));
+            case StorageKind.nativeIfPresent:
+                return namedWithOwnCopy(variable);
         }
-        return *_storageNames.insert(variable, name);
+    }
+
+    // The name of the storage of `variable`, which is not thread-local and
+    // which the program and another object can both define, with the
+    // program's own storage as its own copy (`Names.defineOwn`). The process
+    // is not asked: `CallPlanStore.chosenCopy` decides which copy is used
+    // when the program is made ready to run.
+    public Name* namedWithOwnCopy(VarDeclaration variable) {
+        import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
+
+        if (auto found = variable in _storageNames)
+            return *found;
+
+        Name* name;
+        withCompilerLock({
+            if (auto found = variable in _storageNames) {
+                name = *found;
+                return;
+            }
+            // An initializer that refers to its own variable reaches this
+            // again, and finds the storage that `buildInitialBytes` holds.
+            const own = buildInitialBytes(variable, typeFacts(variable.type));
+            name = planStore.names.namedWithOwn(nativeSymbolName(variable), 0,
+                variable.toString, own.ptr, own.where);
+            if (!(variable in _storageNames))
+                _storageNames.insert(variable, name);
+        });
+        return name;
     }
 
     // The descriptor of a thread-local variable: the bytes every thread's
@@ -636,22 +663,18 @@ public struct NativeData {
             string nativeName;
             const(char)[] declaredBy;
             const kind = storageKindOf(variable);
+            // Another object defines a native variable, and can define one
+            // of a template instance: its symbol is found on each thread
+            // (`TlsSlots.slotFor`). The program has its own copy of each
+            // other variable.
             if (kind != StorageKind.own) {
                 import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
-                const name = nativeSymbolName(variable);
-                // Only to learn that the symbol is there: this thread's
-                // address is not the descriptor's to keep. Another object
-                // defines a native variable: its symbol is found on each
-                // thread (`TlsSlots.slotFor`).
-                if (kind == StorageKind.native
-                        || _threadLocalAddress(name) !is null) {
-                    nativeName = name;
-                    declaredBy = variable.toString;
-                }
+                nativeName = nativeSymbolName(variable);
+                declaredBy = variable.toString;
             }
             Placed template_;
-            if (nativeName.length == 0)
+            if (kind != StorageKind.native)
                 template_ = buildInitialBytes(variable, facts);
 
             TypeFacts descriptorFacts;
@@ -665,7 +688,8 @@ public struct NativeData {
                     nativeName);
                 storeString(bytes + TlsDescriptor.declaredBy.offsetof,
                     declaredBy);
-            } else
+            }
+            if (kind != StorageKind.native)
                 storeAddress(&this, bytes + TlsDescriptor.templateBytes.offsetof,
                     Address(Target.Kind.staticData, template_.ptr,
                         template_.where));
@@ -831,8 +855,6 @@ private alias SymbolPlaceOf =
     Address delegate(imported!"snakebite.frontend.ast".Declaration);
 // What kind of target a function address is (`Target.Kind`).
 private alias FunctionKind = Target.Kind delegate(in void* address);
-// This thread's address of a thread-local symbol, by linker name.
-private alias ThreadLocalAddress = void* delegate(in char[] name);
 // The `TypeInfo` object of a type.
 private alias TypeInfoOf =
     Linked!TypeInfo delegate(imported!"snakebite.frontend.ast".Type);

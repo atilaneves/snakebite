@@ -340,11 +340,26 @@ public void routingBump() {
     routingThreadCount += 2;
 }
 
+// The declarations of this module that guest code sees. One text for each
+// test of this module: two texts for one module name would conflict.
 private enum dependencyDataModule = q{
     module ut.backends.call.routing;
     __gshared int routingSharedCount;
     int routingThreadCount;
     void routingBump();
+
+    struct RoutingCounter(T) {
+        static int perThread;
+        __gshared int everyThread;
+    }
+    struct RoutingPoint { int x; }
+    enum RoutingColour { red, green }
+    class RoutingBox(T) { T value; }
+    int routingCountNative();
+    TypeInfo routingPointInfo();
+    TypeInfo routingColourInfo();
+    TypeInfo_Class routingBoxInfo();
+    bool routingIsBox(Object object);
 };
 
 private enum dependencyDataCode = q{
@@ -396,5 +411,150 @@ static foreach (backend; Matrix!(
             routingSharedCount.should == 112;
             routingThreadCount.should == 224;
         }
+    }
+}
+
+
+// Data that the program and a dependency can both define: a static variable
+// of a template instance, the type information of a dependency struct or
+// enum, and the class information of an instance of a dependency class
+// template. A native build keeps one copy of each, so guest code and native
+// code see one copy.
+public struct RoutingCounter(T) {
+    static int perThread;
+    __gshared int everyThread;
+}
+
+public struct RoutingPoint { int x; }
+
+public enum RoutingColour { red, green }
+
+public class RoutingBox(T) { T value; }
+
+public int routingCountNative() {
+    return ++RoutingCounter!int.perThread * 1000
+        + ++RoutingCounter!int.everyThread;
+}
+
+public TypeInfo routingPointInfo() { return typeid(RoutingPoint); }
+
+public TypeInfo routingColourInfo() { return typeid(RoutingColour); }
+
+public TypeInfo_Class routingBoxInfo() { return typeid(RoutingBox!int); }
+
+public bool routingIsBox(Object object) {
+    return cast(RoutingBox!int) object !is null;
+}
+
+private enum sharedDefinitionCode = q{
+    // Each side adds one to each variable: with one copy of each, the native
+    // side sees the guest side's addition.
+    int counters() {
+        const before = routingCountNative();
+        ++RoutingCounter!int.perThread;
+        ++RoutingCounter!int.everyThread;
+        return routingCountNative() - before;
+    }
+    bool sameTypeInfo() {
+        return typeid(RoutingPoint) is routingPointInfo()
+            && typeid(RoutingColour) is routingColourInfo();
+    }
+    bool sameClassInfo() {
+        auto box = new RoutingBox!int;
+        return typeid(RoutingBox!int) is routingBoxInfo()
+            && typeid(box) is routingBoxInfo()
+            && routingIsBox(box);
+    }
+};
+
+// The arms of the test below run in parallel and share `everyThread`.
+private __gshared Object sharedDefinitionLock = new Object;
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE cannot call native code"),
+)) {
+    @("sharedDefinition.templateInstanceStatics.oneCopy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        synchronized (sharedDefinitionLock)
+            sharedDefinitionResult!(backend, "counters", int)
+                .should == 2002;
+    }
+
+    @("sharedDefinition.dependencyTypeInfo.sameObject." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        sharedDefinitionResult!(backend, "sameTypeInfo", bool)
+            .should == true;
+    }
+
+    @("sharedDefinition.instanceClassInfo.sameObject." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        sharedDefinitionResult!(backend, "sameClassInfo", bool)
+            .should == true;
+    }
+}
+
+// What the function `name` of `sharedDefinitionCode` returns on `backend`.
+private Result sharedDefinitionResult(backend, string name, Result)() {
+    Result result;
+    static if (is(backend == Native)) {
+        mixin(sharedDefinitionCode);
+        result = mixin(name ~ "()");
+    } else {
+        auto modules = parseSnippets([
+            "module routing_shared_definition_" ~ name ~ ";\n"
+                ~ "import ut.backends.call.routing;\n"
+                ~ sharedDefinitionCode,
+            dependencyDataModule,
+        ]);
+        auto backend_ = ownedBackend!backend(Program([modules[0]]));
+        backend_.call(findFunction(modules[0], name), &result, []);
+    }
+    return result;
+}
+
+
+// An instance of a dependency class template that the process does not have:
+// the program uses its own copy of the class information, and a root class
+// over it reaches the interface of that copy, from RAM and after a load.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE does not build class information"),
+)) {
+    @("sharedDefinition.ownInstanceClassInterface." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        static if (is(backend == Native)) {
+            interface Speaker(T) { int speak(); }
+            class Talker(T) : Speaker!T { int speak() { return 7; } }
+            class Loud : Talker!int {}
+            Speaker!int speaker = new Loud;
+            const result = speaker.speak() * 10
+                + (typeid(Loud).base is typeid(Talker!int));
+        } else {
+            auto modules = parseSnippets([
+                q{
+                    module routing_own_instance_root;
+                    import routing_own_instance_dep;
+                    class Loud : Talker!int {}
+                    int answer() {
+                        Speaker!int speaker = new Loud;
+                        return speaker.speak() * 10
+                            + (typeid(Loud).base is typeid(Talker!int));
+                    }
+                },
+                q{
+                    module routing_own_instance_dep;
+                    interface Speaker(T) { int speak(); }
+                    class Talker(T) : Speaker!T { int speak() { return 7; } }
+                },
+            ]);
+            auto backend_ = ownedBackend!backend(Program([modules[0]]));
+            int result;
+            backend_.call(findFunction(modules[0], "answer"), &result, []);
+        }
+        result.should == 71;
     }
 }
