@@ -298,9 +298,20 @@ public LoadedProgram loadProgramFile(
     imported!"std.stdio".File file,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
+    import snakebite.failure.report: SnakebiteException;
+
+    // `File.size` gives `ulong.max` for a file that cannot seek, such as a
+    // pipe: the load checks each count against the size.
+    const size = file.size;
+    if (size == ulong.max)
+        throw new SnakebiteException(
+            "the program file has no size: it is not a file that can seek");
+    static if (size_t.sizeof < ulong.sizeof)
+        if (size > size_t.max)
+            throw new SnakebiteException("the program file is too large");
     // The parts of the file go one after the other through this buffer.
     ubyte[64 * 1024] buffer = void;
-    return loadProgramFile(file.byChunk(buffer[]), file.size, jit);
+    return loadProgramFile(file.byChunk(buffer[]), cast(size_t) size, jit);
 }
 
 
@@ -319,8 +330,8 @@ public LoadedProgram loadProgramFile(
 // Reads the program file of `size` bytes that the input range `parts` gives,
 // part after part, into a new program wired to a new runner with `jit`. A
 // part stays valid until the range is advanced.
-private LoadedProgram loadProgramFile(Parts)(
-    Parts parts, in ulong size,
+public LoadedProgram loadProgramFile(Parts)(
+    Parts parts, in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
     import core.memory: GC;
@@ -344,8 +355,6 @@ private LoadedProgram loadProgramFile(Parts)(
         }
     }
 
-    if (size > size_t.max)
-        throw new SnakebiteException("the program file is too large");
     // A load starts no GC collection. The file gives the size of the memory
     // of the program, and the program keeps what the load takes, so a
     // collection would give back almost nothing. The GC collects when it
@@ -353,7 +362,7 @@ private LoadedProgram loadProgramFile(Parts)(
     GC.disable;
     scope(exit) GC.enable;
     auto source = Source(parts);
-    auto reader = ProgramReader(&source.next, cast(size_t) size);
+    auto reader = ProgramReader(&source.next, size);
     LoadedProgram loaded;
     loaded.header = reader.header;
     if (loaded.header.buildKey != generatorKey)

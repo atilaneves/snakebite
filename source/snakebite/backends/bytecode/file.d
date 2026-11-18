@@ -25,7 +25,8 @@ import snakebite.backends.bytecode.vm:
     Role, Roles, rolesOf, wordAt;
 import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
-import snakebite.memory.program: bytesFor, MemoryNeed, ProgramMemory;
+import snakebite.memory.program: bytesFor, MemoryNeed, pageAlignment,
+    ProgramMemory;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
 import snakebite.ffi.names: Name;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
@@ -76,14 +77,13 @@ public void saveProgram(
     file.scalar(need.scanned);
     // A load reads the header before it has the memory.
     file._need = MemoryNeed.init;
-    const signatureCount = file.length(body_._signatures.length);
-    file.need!(const(Signature)*)(signatureCount);
+    file.length(body_._signatures.length);
     foreach (signature; body_._signatures) {
         // The walk takes a mutable record; a write changes nothing in it.
         auto record = Signature(signature.parameters.dup, signature.variadic);
-        file.transfer(record);
+        transferSignature(file, record);
     }
-    file.transfer(body_._symbols);
+    transferTemporary(file, body_._symbols);
     transferNames(file, body_);
     file.append(body_._written.data);
     // Only the body takes scanned memory.
@@ -153,17 +153,24 @@ private void loadProgram(
     MemoryNeed need;
     file.scalar(need.data);
     file.scalar(need.scanned);
+    // As `Archive.length` checks a count: a size that the rest of the file
+    // cannot fill is of a damaged file.
+    if (need.data / maxLoadBytesPerFileByte
+            + need.scanned / maxLoadBytesPerFileByte > file.unreadLength)
+        throw new SnakebiteException(
+            "the program file ends before the program does");
     program.memory.reserve(need, &program);
     program.store.takeFrom(&program.memory);
     const signatureCount = file.length(0);
-    file._signatures = file.newArray!(const(Signature)*)(signatureCount);
+    // The load needs the signatures of the file only while it runs.
+    file._signatures = new const(Signature)*[signatureCount];
     foreach (ref interned; file._signatures) {
         Signature signature;
-        file.transfer(signature);
+        transferSignature(file, signature);
         interned = program.signatures.intern(
             signature.parameters, signature.variadic);
     }
-    file.transfer(file._symbols);
+    transferTemporary(file, file._symbols);
     transferNames(file, file);
     transferBody(file, program, &runner);
 
@@ -173,6 +180,29 @@ private void loadProgram(
             throw new SnakebiteException(
                 "the program file is not valid: " ~ reason);
     });
+    program.memory.checkFull;
+}
+
+
+// The most memory that a load takes for one byte of the file: two pages, for
+// a datum that starts a block of static data at a page (`transferBlocks`).
+// Each record that a load makes for a byte of the file is smaller.
+private enum maxLoadBytesPerFileByte = 2 * pageAlignment;
+static assert(Function.sizeof + (Function*).sizeof < maxLoadBytesPerFileByte);
+static assert(Module.sizeof + (Module*).sizeof < maxLoadBytesPerFileByte);
+static assert(CallSite.sizeof < maxLoadBytesPerFileByte);
+static assert(__traits(classInstanceSize, StartFunction)
+    < maxLoadBytesPerFileByte);
+
+
+// A signature of the file. `SignatureTable.intern` copies the parameters, so
+// the load needs the record only while it runs.
+private void transferSignature(ref Archive archive, ref Signature signature) {
+    static assert(FieldNameTuple!Signature
+        == AliasSeq!("parameters", "variadic"));
+
+    transferTemporary(archive, signature.parameters);
+    archive.transfer(signature.variadic);
 }
 
 
@@ -191,10 +221,12 @@ private void transferNames(ref Archive archive, ref Archive source) {
     auto declarationEnds = source._declarationEnds;
     auto declarations = source._declarations;
     auto signatures = source._adjustedSignatures;
-    archive.transfer(adjusted);
-    archive.transfer(targets);
-    archive.transfer(distances);
-    archive.transfer(declarationEnds);
+    // The load needs the tables only while it runs; the names keep the text
+    // of the declarations and the signatures.
+    transferTemporary(archive, adjusted);
+    transferTemporary(archive, targets);
+    transferTemporary(archive, distances);
+    transferTemporary(archive, declarationEnds);
     // The text of the declarations as one block of bytes.
     const textLength = archive.length(declarations.length);
     if (archive.isWriting) {
@@ -205,7 +237,7 @@ private void transferNames(ref Archive archive, ref Archive source) {
         archive.bytes(text);
         declarations = cast(string) text;
     }
-    archive.transfer(signatures);
+    transferTemporary(archive, signatures);
     if (archive.isWriting)
         return;
     const count = adjusted.length;
@@ -275,6 +307,9 @@ private struct Archive {
     private string[] _symbols;
     private size_t[string] _symbolIndex;
     private CallPlan*[] _plans;
+    // Reading: the relocations of names, from the read of their function to
+    // `Program.complete`.
+    private Reloc[][] _namedRelocs;
     // The names that the program refers to (`transferNames`). Writing: the
     // index of each name, and what makes it again. Reading: the names.
     private size_t[const(Name)*] _nameIndex;
@@ -642,16 +677,22 @@ private void transfer(T)(ref Archive archive, ref T value) {
     } else static if (is(T : real) || is(T == bool) || is(T : dchar)) {
         archive.scalar(value);
     } else static if (is(T == E[], E)) {
-        const count = archive.length(value.length);
-        if (archive.isWriting) {
-            archive.need!(Unqual!E)(count);
-            foreach (ref element; value)
-                archive.transfer(element);
-        } else {
-            auto fresh = archive.newArray!(Unqual!E)(count);
-            foreach (ref element; fresh)
-                archive.transfer(element);
-            value = cast(T) fresh;
+        // A load needs the relocations only while it runs: it applies them,
+        // and `Program.complete` the ones of names (`transferModule`).
+        static if (is(Unqual!E == Reloc))
+            transferTemporary(archive, value);
+        else {
+            const count = archive.length(value.length);
+            if (archive.isWriting) {
+                archive.need!(Unqual!E)(count);
+                foreach (ref element; value)
+                    archive.transfer(element);
+            } else {
+                auto fresh = archive.newArray!(Unqual!E)(count);
+                foreach (ref element; fresh)
+                    archive.transfer(element);
+                value = cast(T) fresh;
+            }
         }
     } else static if (is(T == E[N], E, size_t N)) {
         foreach (ref element; value)
@@ -668,6 +709,22 @@ private void transfer(T)(ref Archive archive, ref T value) {
             archive.transfer(value.tupleof[index]);
     } else
         static assert(false, "the file holds no " ~ T.stringof);
+}
+
+// As `transfer` for an array that a load needs only while it runs: the array
+// is a GC array that nothing references after the load, outside the memory
+// of the program. What its elements point to is in the memory of the program.
+private void transferTemporary(T : E[], E)(ref Archive archive, ref T value) {
+    const count = archive.length(value.length);
+    if (archive.isWriting) {
+        foreach (ref element; value)
+            archive.transfer(element);
+    } else {
+        auto fresh = new Unqual!E[count];
+        foreach (ref element; fresh)
+            archive.transfer(element);
+        value = cast(T) fresh;
+    }
 }
 
 // A struct of the VM: each field as it says. A field whose classification
@@ -948,18 +1005,18 @@ private void transferPlans(ref Archive archive, ref Program program) {
             names ~= name is null ? size_t.max : archive.nameIndexOf(name);
             failures ~= failure;
         });
-    archive.transfer(signatures);
-    archive.transfer(names);
-    archive.transfer(failures);
-    if (archive.isWriting) {
-        archive.need!(CallPlan*)(signatures.length);
+    // The load needs the lists only while it runs; the plans keep the
+    // signatures and the failure texts.
+    transferTemporary(archive, signatures);
+    transferTemporary(archive, names);
+    transferTemporary(archive, failures);
+    if (archive.isWriting)
         return;
-    }
     if (names.length != signatures.length
             || failures.length != signatures.length)
         throw new SnakebiteException(
             "the program file holds call plans that do not match");
-    archive._plans = archive.newArray!(CallPlan*)(signatures.length);
+    archive._plans = new CallPlan*[signatures.length];
     foreach (index, signature; signatures)
         archive._plans[index] = program.plans.plan(signature,
             names[index] == size_t.max ? null
@@ -1114,6 +1171,10 @@ private void transferModule(
                     applyReloc(*function_, reloc);
             function_.relocs = named == 0 ? null
                 : function_.relocs[0 .. named];
+            // The GC does not scan the function: the archive holds the
+            // relocations until `Program.complete` drops them.
+            if (named != 0)
+                archive._namedRelocs ~= function_.relocs;
         }
     }
 }
