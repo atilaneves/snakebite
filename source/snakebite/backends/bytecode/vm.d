@@ -2191,8 +2191,13 @@ static if (jitSupported && chainedDispatch) {
         if (GC.inFinalizer)
             return;
         auto lock = JitLock.tryTake(*(cast(Function*) caller).jit);
-        if (lock.held && lock.jitUsable)
-            lock.state.linkWindow!refresh(pc, caller, site, index, destination);
+        if (lock.held) {
+            void link() nothrow @nogc {
+                if (lock.jitUsable)
+                    lock.state.linkWindow!refresh(pc, caller, site, index, destination);
+            }
+            lock.onCompilerStack(&link);
+        }
     }
 }
 
@@ -5959,7 +5964,11 @@ static if (jitSupported) {
                 dispatch.observedFunction = null;
             }
         }
-        const ok = compileUnderLock(lock, function_, observed);
+        bool ok;
+        void compile() nothrow {
+            ok = compileUnderLock(lock, function_, observed);
+        }
+        lock.onCompilerStack(&compile);
         atomicStore!(MemoryOrder.rel)(*state,
             cast(uint) (ok ? JitTier.compiled : JitTier.failed));
         return ok;
