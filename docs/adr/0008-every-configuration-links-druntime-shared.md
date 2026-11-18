@@ -63,10 +63,8 @@ fallback serves designated test fixtures, plus `rt_options`, not ordinary
 host templates. Library-first order still prevents a test fixture from
 replacing an independent library definition with the same name.
 
-`Resolver.resolveIndependent` searches only the dependency image and
-loaded libraries. Call selection uses it when a call needs an independent
-native body: an executable fixture is not such a body, even if its name
-matches. Its cache stays separate from the full resolver cache because
-the two searches can give different answers for the same name. The export
-boundary does not change this routing rule or make a root-owned body a
-host body.
+Call selection asks the resolver no question. Whether another object
+defines a symbol comes from its declaration (ADR-0009,
+`Program.isDefinedElsewhere`), and the resolver only finds the address of a
+symbol that another object defines. The export boundary does not make a
+root-owned body a host body.

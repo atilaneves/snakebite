@@ -2,9 +2,8 @@ module ut.backends.call.routing;
 
 
 // A root-owned callee is interpreted. A non-root declaration uses native
-// code when that code exists; a callee with no native symbol uses the exact
-// body DMD produced for it. Names and packages do not
-// decide how a call runs.
+// code, and a missing native symbol for it is an error. Names and packages
+// do not decide how a call runs.
 
 
 import ut.backends;
@@ -82,51 +81,53 @@ static foreach (backend; Matrix!()) {
 }
 
 
-// ADR-0009 keeps a dependency's own body when its exact native symbol is
-// absent. Direct calls and callable addresses must select that same body,
-// including a D dependency body with C linkage.
-static foreach (backend; Matrix!()) {
-    @("nonRootOwned.missingNativeUsesOwnBody." ~ backend.stringof)
+// ADR-0009, decision 3: a dependency function with no native symbol is an
+// error for the missing symbol, with or without a body, as the link of a
+// native build reports it. No archive holds `routing_helper`. A direct call
+// and the address of the function each end with an error that names the
+// symbol; the body, which would answer 42, does not run.
+private enum missingHelperModule = q{
+    module routing_helper;
+    int fortyTwo() { return 42; }
+    extern(C) int cFortyTwo() { return 42; }
+};
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a missing symbol fails the native link before a test can run"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE runs each body from source and calls no native code"),
+)) {
+    @("nonRootOwned.missingNativeIsAnError." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        static if (is(backend == Native)) {
-            int fortyTwo() { return 42; }
-            extern(C) int cFortyTwo() { return 42; }
-            const direct = fortyTwo();
-            auto pointer = &fortyTwo;
-            direct.should == 42;
-            pointer().should == 42;
-            cFortyTwo().should == 42;
-            auto cPointer = &cFortyTwo;
-            cPointer().should == 42;
-        } else {
-            auto modules = parseSnippets([
-                q{
-                    module routing_root;
-                    import routing_helper;
-                    int answer() {
-                        assert(fortyTwo() == 42);
-                        assert(cFortyTwo() == 42);
-                        auto cPointer = &cFortyTwo;
-                        assert(cPointer() == 42);
-                        auto pointer = &fortyTwo;
-                        return pointer();
-                    }
-                },
-                q{
-                    module routing_helper;
-                    int fortyTwo() { return 42; }
-                    extern(C) int cFortyTwo() { return 42; }
-                },
-            ]);
-            auto program = Program([modules[0]]);
-            auto function_ = findFunction(modules[0], "answer");
+        auto modules = parseSnippets([
+            q{
+                module routing_root;
+                import routing_helper;
+                int direct() { return fortyTwo(); }
+                int cDirect() { return cFortyTwo(); }
+                int address() {
+                    auto pointer = &fortyTwo;
+                    return pointer();
+                }
+            },
+            missingHelperModule,
+        ]);
+        auto program = Program([modules[0]]);
+        auto backend_ = ownedBackend!backend(program);
 
+        static foreach (entry; [
+            ["direct", "_D14routing_helper8fortyTwoFZi"],
+            ["cDirect", "`cFortyTwo`"],
+            ["address", "_D14routing_helper8fortyTwoFZi"],
+        ]) {{
             int result;
-            auto backend_ = ownedBackend!backend(program);
-            backend_.call(function_, &result, []);
-            result.should == 42;
-        }
+            const thrown = backend_
+                .call(findFunction(modules[0], entry[0]), &result, [])
+                .shouldThrow;
+            entry[1].should.be in thrown.msg;
+        }}
     }
 }
 

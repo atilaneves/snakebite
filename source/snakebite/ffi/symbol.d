@@ -18,10 +18,6 @@ public struct Resolver {
     // several guest threads can each resolve a symbol for the first time
     // at once.
     private SharedTable!(string, void*) _addresses;
-    // Kept apart from `_addresses`: the same name can have two different
-    // cached answers, a full one that accepts the executable's own copy
-    // and an independent one that never does (see `resolveIndependent`).
-    private SharedTable!(string, void*) _independentAddresses;
 
     // The owner must outlive this resolver and every address it returns.
     public this(const(DependencyImage)* image) {
@@ -72,23 +68,6 @@ public struct Resolver {
             return name;
         } else
             return null;
-    }
-
-    // `name`'s address, but only when a genuine, independent native copy
-    // answers it: the dependency image, or an already-loaded shared
-    // object. Never the running executable's own copy - the tier
-    // `symbolAddress` only reaches as its last resort. Call selection asks
-    // here when it needs an independent body, not a designated host test
-    // fixture (ADR-0008). Ordinary host templates are private, but that
-    // export boundary does not make an executable fixture independent.
-    public void* resolveIndependent(in char[] name) {
-        if (auto cached = _independentAddresses.find(cast(string) name))
-            return *cached;
-
-        auto address = _image is null ? null : _image.resolve(name);
-        if (address is null)
-            address = sharedObjectAddress(name);
-        return *_independentAddresses.insert(name.idup, address);
     }
 
     // This thread's address of a thread-local symbol. Never cached: the
@@ -156,10 +135,6 @@ private void* sharedObjectAddress(in char[] name) {
 // remain private: their closures need not match a guest backend's layout.
 // Libraries still go first so a fixture cannot replace an independent
 // library definition with the same name.
-//
-// A caller that needs an independent native body asks
-// `Resolver.resolveIndependent` instead. It excludes executable fixtures
-// even when their names match, and keeps its answers in a separate cache.
 private void* symbolAddress(in char[] name) {
     import snakebite.druntime.atomicwrapper:
         atomicAddSymbol, snakebite_constructor_atomic_add_int;

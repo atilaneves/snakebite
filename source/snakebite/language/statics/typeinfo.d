@@ -25,6 +25,7 @@ public struct RuntimeTypes {
     import snakebite.native.value: TypeFacts;
 
     private bool delegate(Dsymbol) const _isRootOwned;
+    private bool delegate(Dsymbol) const _isDefinedElsewhere;
     private void* delegate(const(char)[]) _resolve;
     private void* delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
     private TypeInfo_Class delegate(ClassDeclaration) _classInfo;
@@ -44,12 +45,14 @@ public struct RuntimeTypes {
     // `declaration`" the same way.
     public this(
         bool delegate(Dsymbol) const isRootOwned,
+        bool delegate(Dsymbol) const isDefinedElsewhere,
         void* delegate(const(char)[]) resolve,
         void* delegate(FuncDeclaration, ptrdiff_t) methodAddress,
         TypeInfo_Class delegate(ClassDeclaration) classInfo,
         NativeData* data,
     ) {
         _isRootOwned = isRootOwned;
+        _isDefinedElsewhere = isDefinedElsewhere;
         _resolve = resolve;
         _methodAddress = methodAddress;
         _classInfo = classInfo;
@@ -329,30 +332,36 @@ public struct RuntimeTypes {
     }
 
     private TypeInfo linkedInfo(Type type) {
-        import snakebite.frontend.ast: OutBuffer;
-        import snakebite.frontend.dmd.mangle: completeMangleTargets;
-        import snakebite.frontend.compiler: inFrontend;
-        import std.conv: text;
-
         if (type.vtinfo is null)
             return null;
 
         auto name = type.vtinfo.ident.toString;
         auto classType = type.isTypeClass;
         if (classType !is null && type.mod == 0
-                && classType.sym.isInterfaceDeclaration is null) {
+                && classType.sym.isInterfaceDeclaration is null)
             // Codegen aliases an unqualified class's TypeInfo declaration
             // to its __Class symbol. The frontend alone leaves the alias
             // unresolved.
-            // `classType.sym` can be a class declared local to a function
-            // (nested inside it), whose mangled name recurses through that
-            // function's own mangled signature - see `completeMangleTargets`.
-            completeMangleTargets(classType.sym);
-            OutBuffer mangled;
-            inFrontend!"mangleToBuffer"(classType.sym, mangled);
-            name = text("_D", mangled[], "7__ClassZ");
-        }
+            name = classInfoSymbol(classType.sym);
         return cast(TypeInfo) _resolve(name);
+    }
+
+    // The symbol of the class information of `declaration`.
+    private static string classInfoSymbol(ClassDeclaration declaration) {
+        import snakebite.frontend.ast: OutBuffer;
+        import snakebite.frontend.dmd.mangle: completeMangleTargets;
+        import snakebite.frontend.compiler: inFrontend;
+        import std.conv: text;
+
+        // `declaration` can be a class declared local to a function (nested
+        // inside it), whose mangled name recurses through that function's
+        // own mangled signature - see `completeMangleTargets`.
+        completeMangleTargets(declaration);
+        OutBuffer mangled;
+        inFrontend!"mangleToBuffer"(declaration, mangled);
+        return text("_D", mangled[],
+            declaration.isInterfaceDeclaration is null
+                ? "7__ClassZ" : "11__InterfaceZ");
     }
 
     private TypeInfo qualified(Type type, TypeInfo base) {
@@ -371,19 +380,38 @@ public struct RuntimeTypes {
         return wrapper;
     }
 
-    // The host's own `TypeInfo_Class` for `declaration`, if one is linked
-    // into this process - `null` for a guest class (always fabricated) and
-    // for a native class the host never linked. Never falls back to
+    // The native `TypeInfo_Class` for `declaration`, or `null` when the
+    // program builds its own. Another object defines the class information
+    // of a class that another object defines, and a missing symbol for it
+    // is an error, as at the link of a native build. The program builds it
+    // for a class of its own. For a class of a dependency template instance
+    // the native copy is used when the process has one. Never falls back to
     // fabrication itself, so a caller that fabricates its own metadata
     // (`classinfo.classRuntimeInfo`) can call this without looping back
     // through that same fabrication path.
     public TypeInfo_Class linkedClassInfo(ClassDeclaration declaration) {
+        import std.conv: text;
+
+        const definedElsewhere = _isDefinedElsewhere(declaration);
+        if (!definedElsewhere && isRootOwned(declaration))
+            return null;
+
+        auto info = nativeClassInfo(declaration);
+        if (info is null && definedElsewhere)
+            throw new Exception(text(
+                "ffi cannot resolve the symbol `", classInfoSymbol(declaration),
+                "` declared by `", declaration.toString,
+                "`: it is not in this process"));
+        return info;
+    }
+
+    private TypeInfo_Class nativeClassInfo(ClassDeclaration declaration) {
         import snakebite.frontend.ast: toDString;
         import snakebite.frontend.dmd.functions: prettyNameOf;
 
-        if (isRootOwned(declaration))
-            return null;
-
+        if (auto info = cast(TypeInfo_Class) _resolve(
+                classInfoSymbol(declaration)))
+            return info;
         auto linked = linkedInfo(declaration.type);
         if (auto info = cast(TypeInfo_Interface) linked)
             return info.info;

@@ -151,4 +151,16 @@ public struct Program {
 
         return frontendIsRootOwned(declaration, _rootModuleSet);
     }
+
+    // Whether another object defines `declaration`: the one decision that
+    // the call selection and the static data, TypeInfo and class information
+    // take for a declaration (`snakebite.frontend.dmd.functions`).
+    public bool isDefinedElsewhere(
+        Dsymbol declaration,
+    ) const {
+        import snakebite.frontend.dmd.functions:
+            frontendIsDefinedElsewhere = isDefinedElsewhere;
+
+        return frontendIsDefinedElsewhere(declaration, _rootModuleSet);
+    }
 }

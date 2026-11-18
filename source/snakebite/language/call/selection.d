@@ -217,19 +217,13 @@ public struct CallSelection {
     // pass can change a shared package parent after this callee is complete.
     public Decision decisionOf(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isGuest,
-        lazy bool hasNativeSymbol,
-        lazy bool hasIndependentNativeSymbol,
+        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
     ) {
         if (auto cached = function_ in _decisions)
             return *cached;
 
         return *_decisions.insert(
-            function_,
-            buildDecision(
-                function_, hasNativeSymbol, hasIndependentNativeSymbol,
-                isGuest,
-            ),
+            function_, buildDecision(function_, isDefinedElsewhere),
         );
     }
 
@@ -241,13 +235,9 @@ public struct CallSelection {
     // and `decisionOf` both, which would pay the cache lookup twice.
     public bool usesGuestBody(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isGuest,
-        lazy bool hasNativeSymbol,
-        lazy bool hasIndependentNativeSymbol,
+        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
     ) {
-        return decisionOf(
-            function_, isGuest, hasNativeSymbol, hasIndependentNativeSymbol,
-        ).route == Route.guest;
+        return decisionOf(function_, isDefinedElsewhere).route == Route.guest;
     }
 
     // A host variadic function pointer must keep its host address. Its
@@ -268,33 +258,34 @@ public struct CallSelection {
     // arguments at each call site, so no entry stands in for it. With an
     // adjustment the vtable slot still needs an entry to carry the offset.
     public bool storesGuestWord(
-        FuncDeclaration function_, bool hasNativeSymbol,
+        FuncDeclaration function_,
+        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
         in ptrdiff_t adjustment,
     ) {
-        return adjustment == 0 && isVariadicGuest(function_, hasNativeSymbol);
+        return adjustment == 0
+            && isVariadicGuest(function_, isDefinedElsewhere);
     }
 
     public bool isVariadicGuest(
-        FuncDeclaration function_, bool hasNativeSymbol,
+        FuncDeclaration function_,
+        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
     ) {
         import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         return typeFunctionOf(function_).parameterList.varargs
                 == VarArg.variadic
-            && function_.fbody !is null && !hasNativeSymbol;
+            && usesGuestBody(function_, isDefinedElsewhere);
     }
 
-    // Guest execution and symbol resolution are outside the parent snapshot.
+    // Whether another object defines the function decides between native
+    // code and the guest body (ADR-0009). A missing native symbol is then
+    // the error of the native call, as at the link of a native build.
     private Decision buildDecision(
         FuncDeclaration function_,
-        lazy bool hasNativeSymbol,
-        lazy bool hasIndependentNativeSymbol,
-        scope bool delegate(FuncDeclaration) isGuest,
+        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
     ) {
-        import snakebite.frontend.ast: VarArg;
-        import snakebite.frontend.dmd.functions:
-            backendExecutes, bodyIsSelected, contextOf, typeFunctionOf;
+        import snakebite.frontend.dmd.functions: contextOf;
 
         const context = contextOf(function_);
 
@@ -311,53 +302,14 @@ public struct CallSelection {
                     : intrinsicPlanOf(function_).call;
         }
 
-        const rootOwned = isGuest(function_);
-        if (!bodyIsSelected(context.module_, rootOwned))
-            return Decision(Route.native);
-
-        const type = typeFunctionOf(function_);
-        if (type.parameterList.varargs == VarArg.variadic && hasNativeSymbol)
-            return Decision(Route.native);
-
-        // This includes siblings and deeper nested callees: every static
-        // chain points into frames whose offsets belong to this backend.
-        if (context.outerFunction !is null)
-            return Decision(Route.guest);
-
-        // A function literal in an imported aggregate has a body but no
-        // native symbol of its own. Keep it guest when it is root-owned or
-        // when the linker cannot resolve that symbol.
-        if (function_.isFuncLiteralDeclaration !is null
-                && function_.fbody !is null
-                && (rootOwned || !hasNativeSymbol))
-            return Decision(Route.guest);
-
         // The host compiler's druntime implements `va_copy` as an
         // intrinsic, so the process has no symbol for it, but the frontend's
         // druntime gives it a body.
         if (isVaCopy(function_, context))
             return Decision(Route.guest);
 
-        // A root-owned body must run as guest even when its linker name
-        // is in the host (notably _Dmain). A template instance runs as guest
-        // (ADR-0009, decision 1) unless no backend can execute its body.
-        // Then it uses a native copy, but only one that is independent of
-        // the running executable - the dependency image or an already-loaded
-        // shared object (ADR-0008). The executable's own copy is never
-        // preferred: snakebite instantiates plenty of the same templates a
-        // guest program also instantiates (`dirEntries` in
-        // `snakebite.project.loading` among them), and that copy's nested
-        // closures carry the host compiler's frame layout, not this
-        // backend's - reusing it for a guest call reads that closure with the
-        // wrong layout. A missing independent symbol leaves the guest body.
-        // An ordinary dependency uses its own frontend body when its exact
-        // native symbol is absent (ADR-0009, decision 3).
-        // The body is walked only when a native copy exists: that is the one
-        // case where the answer changes the route.
-        const prefers = context.instantiated
-            ? !hasIndependentNativeSymbol || backendExecutes(function_)
-            : rootOwned || !hasNativeSymbol;
-        return Decision(prefers ? Route.guest : Route.native);
+        return Decision(isDefinedElsewhere(function_)
+            ? Route.native : Route.guest);
     }
 
     // The test dmd's own glue applies (`dmd.glue.toir.intrinsic_op`) to

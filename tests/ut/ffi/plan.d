@@ -122,31 +122,10 @@ unittest {
 }
 
 
-// Nothing but `bin/ut` itself defines this symbol: no dependency image, no
-// separately loaded shared object. `CallSelection.buildDecision`
-// (`snakebite.language.call.selection`) asks `hasIndependentNativeSymbol`, never
-// `hasNativeSymbol`, for a template instance, precisely so a guest call
-// through one never reuses this process's own copy - the mismatch that
-// broke a guest program's own `dirEntries` call against `bin/sb`'s
-// instantiation of the same template (docs/adr/0008, docs/adr/0009).
+// Nothing but `bin/ut` itself defines this symbol.
 private extern(C) int snakebite_ut_plan_executable_only_target() {
     return 91;
 }
-
-@("hasIndependentNativeSymbol.excludesExecutableOnlyAnswer")
-unittest {
-    auto guestModule = parseSnippet(q{
-        pragma(mangle, "snakebite_ut_plan_executable_only_target")
-        extern(C) int target();
-    });
-    auto function_ = findFunction(guestModule, "target");
-    assert(function_ !is null, "No function `target` in the guest program");
-
-    mixin planCache;
-    cache.hasNativeSymbol(function_).should == true;
-    cache.hasIndependentNativeSymbol(function_).should == false;
-}
-
 
 // A function the program defines has no native copy, even when the process
 // has a symbol of the same linker name; a declaration without a body still
@@ -177,7 +156,6 @@ unittest {
     auto cache = PlanCache(&planStore, &ownership.owns);
     cache.hasNativeSymbol(declared).should == true;
     cache.hasNativeSymbol(defined).should == false;
-    cache.hasIndependentNativeSymbol(defined).should == false;
 }
 
 

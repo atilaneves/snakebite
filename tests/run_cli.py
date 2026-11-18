@@ -270,8 +270,8 @@ def test_process_collector_choice(
 
 
 # The DMD source declarations are @trusted; LDC exports @safe symbols.
-# ADR-0009 requires the original bodies, not renamed host declarations,
-# when these exact native symbols are absent from the release process.
+# Each call must reach the native definition of the declaration that the
+# frontend resolved, not a renamed host declaration (ADR-0009).
 @pytest.mark.parametrize("backend", ["dmd", "ldc2", *BACKENDS])
 def test_phobos_round_and_trunc_use_resolved_declarations(
     tmp_path: Path, backend: str,
