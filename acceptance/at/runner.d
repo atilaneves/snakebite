@@ -13,7 +13,7 @@ int run(string[] args) {
     return args.runTests!(
         "at.ffi.dvariadic", "at.ffi.dabi", "at.ffi.image",
         "at.bench.timing",
-        "at.runtime.arraycopy", "at.runtime.messaging",
+        "at.runtime.arraycopy", "at.runtime.messaging", "at.runtime.observedloop",
         "at.cli", "at.runtime.startup", "at.dub",
         "at.runtime.threads", "at.runtime.registration",
         "ut.process", "ut.backends.call.intrinsics",

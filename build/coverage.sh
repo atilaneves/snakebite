@@ -9,7 +9,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 command -v kcov > /dev/null
 
 build/reggae.sh
-ninja bin/ut bin/bench
+ninja bin/ut bin/at bin/bench
 
 rm -rf coverage coverage-runs
 mkdir coverage-runs
@@ -22,6 +22,9 @@ trap 'rm -rf coverage-runs' EXIT
 # absolute paths because children can change their working directory.
 kcov --include-path="$PWD/source/snakebite,$PWD/bench" \
     "$PWD/coverage-runs/unit" bin/ut
+# The observed-path recorder needs optimized chained dispatch.
+kcov --include-path="$PWD/source/snakebite" \
+    "$PWD/coverage-runs/observed-loop" bin/at at.runtime.observedloop
 
 while IFS= read -r benchmark; do
     name=${benchmark##*/}
