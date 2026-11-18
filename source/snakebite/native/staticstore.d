@@ -4,6 +4,7 @@ module snakebite.native.staticstore;
 private:
 
 
+import snakebite.memory.program: appendedBytes, MemoryNeed, ProgramMemory;
 import snakebite.native.address: DatumRef, Target;
 import snakebite.host.threads: PerThread;
 import snakebite.native.value: TypeFacts;
@@ -63,6 +64,27 @@ public struct StaticBlocks {
     private void[][] _blocks;
     private void[] _available;
     private Datum[] _data;
+    // The memory of the blocks and of their lists, for a program that a load
+    // made (`takeFrom`), or null for the GC heap. The lists hold
+    // `_blocksCapacity` and `_dataCapacity` elements.
+    private ProgramMemory* _memory;
+    private size_t _blocksCapacity;
+    private size_t _dataCapacity;
+
+    // Takes the blocks and their lists from `memory` from now on. The GC
+    // scans the blocks.
+    public void takeFrom(ProgramMemory* memory) @safe pure nothrow @nogc {
+        _memory = memory;
+    }
+
+    // Adds to `need` the memory that a load of these blocks takes after
+    // `takeFrom`: a load makes the same blocks.
+    public void addLoadNeed(ref MemoryNeed need) const @safe pure nothrow @nogc {
+        foreach (block; _blocks)
+            need.scannedAtPage(block.length);
+        need.data += appendedBytes!(void[])(_blocks.length)
+            + appendedBytes!Datum(_data.length);
+    }
 
     public const(Datum)[] data() const @safe pure nothrow @nogc {
         return _data;
@@ -190,14 +212,23 @@ public struct StaticBlocks {
             // and `assumeSafeAppend` on a datum would let an append grow it
             // over its neighbours.
             const size = max(4096, needed);
-            _available = GC.calloc(size, 0)[0 .. size];
-            _blocks ~= _available;
+            if (_memory is null) {
+                _available = GC.calloc(size, 0)[0 .. size];
+                _blocks ~= _available;
+            } else {
+                _available = _memory.scanned.allocateAtPage(size);
+                _memory.data.append(_blocks, _blocksCapacity, _available);
+            }
         }
         const start = -cast(size_t) _available.ptr & (facts.alignment - 1);
         auto bytes = _available[start .. start + facts.size];
-        _data ~= Datum(_blocks.length - 1,
+        auto datum = Datum(_blocks.length - 1,
             _blocks[$ - 1].length - _available.length + start, facts.size,
             facts.alignment, facts.canHoldAddress);
+        if (_memory is null)
+            _data ~= datum;
+        else
+            _memory.data.append(_data, _dataCapacity, datum);
         _available = _available[start + facts.size .. $];
         return Placed(bytes, DatumRef(&this, _data[$ - 1].block,
             _data[$ - 1].offset));
@@ -237,6 +268,19 @@ public struct StaticStore {
 
         foreach (string_; _strings)
             free(string_.ptr);
+    }
+
+    // Adds to `need` the memory that a load of the data that no D module owns
+    // takes after `takeFrom`.
+    public void addLoadNeed(ref MemoryNeed need) const @safe pure nothrow @nogc {
+        _blocks.addLoadNeed(need);
+    }
+
+    // Takes the data that no D module owns from `memory` from now on. Call
+    // it before the first datum.
+    public void takeFrom(ProgramMemory* memory) @safe pure nothrow @nogc {
+        assert(isEmpty);
+        _blocks.takeFrom(memory);
     }
 
     // The blocks of the data that no D module owns.

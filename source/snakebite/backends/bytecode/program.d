@@ -10,6 +10,7 @@ import snakebite.backends.bytecode.vm: bindHostCode,
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
 import snakebite.image.dependency: DependencyImage;
+import snakebite.memory.program: ProgramMemory;
 import snakebite.native.signature: SignatureTable;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.stack.tls: TlsSlots;
@@ -39,6 +40,11 @@ public struct Program {
         const planStore = &plans;
         store = StaticStore(() => heapNew!TlsSlots(planStore), recordsAddresses);
     }
+
+    // The memory of a program that a load made; a compile to RAM takes
+    // none.
+    @setBy("loadProgram")
+    public ProgramMemory memory;
 
     public bool recordsAddresses() const @safe pure nothrow @nogc {
         return store.recordsAddresses;
@@ -72,6 +78,15 @@ public struct Program {
         auto module_ = new Module;
         _modules ~= module_;
         return module_;
+    }
+
+    // `count` empty modules, in `memory`, for a load to fill.
+    public void newModules(in size_t count) {
+        _modules = memory.data.array!(Module*)(count);
+        foreach (ref module_; _modules) {
+            module_ = memory.data.make!Module;
+            module_.blocks.takeFrom(&memory);
+        }
     }
 
     public size_t functionCount() const @safe pure nothrow @nogc {
@@ -146,6 +161,14 @@ public struct Module {
         auto function_ = new Function;
         _functions ~= function_;
         return function_;
+    }
+
+    // `count` empty functions, in `memory`, for a load to fill.
+    public void newFunctions(ref ProgramMemory memory, in size_t count) {
+        auto functions = memory.data.array!Function(count);
+        _functions = memory.data.array!(Function*)(count);
+        foreach (index, ref function_; _functions)
+            function_ = &functions[index];
     }
 
     // Takes out the function that `newFunction` returned, for a compile that

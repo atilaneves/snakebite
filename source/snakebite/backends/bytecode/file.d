@@ -25,6 +25,7 @@ import snakebite.backends.bytecode.vm:
     Role, Roles, rolesOf, wordAt;
 import snakebite.failure.report: internalFailure, SnakebiteException;
 import snakebite.image.dependency: DependencyImage;
+import snakebite.memory.program: bytesFor, MemoryNeed, ProgramMemory;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
 import snakebite.ffi.names: Name;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
@@ -67,8 +68,16 @@ public void saveProgram(
     Header written = Header(
         header.buildKey, header.imagePath, header.workingDirectory);
     transferHeader(file, written);
-    size_t signatureCount = body_._signatures.length;
-    file.scalar(signatureCount);
+    // The memory that the load of the rest takes, before the rest: the save
+    // counts it as it writes the rest (`Archive.need`).
+    const needAt = file._written.data.length;
+    MemoryNeed need;
+    file.scalar(need.data);
+    file.scalar(need.scanned);
+    // A load reads the header before it has the memory.
+    file._need = MemoryNeed.init;
+    const signatureCount = file.length(body_._signatures.length);
+    file.need!(const(Signature)*)(signatureCount);
     foreach (signature; body_._signatures) {
         // The walk takes a mutable record; a write changes nothing in it.
         auto record = Signature(signature.parameters.dup, signature.variadic);
@@ -77,6 +86,15 @@ public void saveProgram(
     file.transfer(body_._symbols);
     transferNames(file, body_);
     file.append(body_._written.data);
+    // Only the body takes scanned memory.
+    assert(file._need.scanned == MemoryNeed.init.scanned);
+    need.data = file._need.data + body_._need.data;
+    need.scanned = body_._need.scanned;
+    auto needBytes = file._written.data[needAt .. needAt + 2 * size_t.sizeof];
+    needBytes[0 .. size_t.sizeof] =
+        (cast(const(ubyte)*) &need.data)[0 .. size_t.sizeof];
+    needBytes[size_t.sizeof .. $] =
+        (cast(const(ubyte)*) &need.scanned)[0 .. size_t.sizeof];
 
     const partial = path ~ ".partial";
     scope(failure) {
@@ -129,17 +147,23 @@ private void loadProgram(
     in DependencyImage* image,
 ) {
     file._image = image;
-    size_t signatureCount;
-    file.scalar(signatureCount);
-    foreach (index; 0 .. signatureCount) {
+    file._program = &program;
+    file._runner = &runner;
+    file._memory = &program.memory;
+    MemoryNeed need;
+    file.scalar(need.data);
+    file.scalar(need.scanned);
+    program.memory.reserve(need, &program);
+    program.store.takeFrom(&program.memory);
+    const signatureCount = file.length(0);
+    file._signatures = file.newArray!(const(Signature)*)(signatureCount);
+    foreach (ref interned; file._signatures) {
         Signature signature;
         file.transfer(signature);
-        file._signatures ~= program.signatures.intern(
+        interned = program.signatures.intern(
             signature.parameters, signature.variadic);
     }
     file.transfer(file._symbols);
-    file._program = &program;
-    file._runner = &runner;
     transferNames(file, file);
     transferBody(file, program, &runner);
 
@@ -173,10 +197,11 @@ private void transferNames(ref Archive archive, ref Archive source) {
     archive.transfer(declarationEnds);
     // The text of the declarations as one block of bytes.
     const textLength = archive.length(declarations.length);
-    if (archive.isWriting)
+    if (archive.isWriting) {
+        archive.need!char(textLength);
         archive.bytes(cast(char[]) declarations);
-    else {
-        auto text = new char[textLength];
+    } else {
+        auto text = archive.newArray!char(textLength);
         archive.bytes(text);
         declarations = cast(string) text;
     }
@@ -263,6 +288,21 @@ private struct Archive {
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
+    // Reading: the memory of the program, once there is a program.
+    private ProgramMemory* _memory;
+    // Writing: the memory that a load of what this wrote takes.
+    private MemoryNeed _need;
+
+    // `count` new elements, in the data of the memory of the program once
+    // there is one. A writer counts them with `need`.
+    T[] newArray(T)(in size_t count) {
+        return _memory is null ? new T[count] : _memory.data.array!T(count);
+    }
+
+    // Counts what `newArray!T(count)` takes on a load.
+    void need(T)(in size_t count) {
+        _need.data += bytesFor(count * T.sizeof);
+    }
 
     static Archive writing(ref Program program) {
         Archive archive;
@@ -604,10 +644,11 @@ private void transfer(T)(ref Archive archive, ref T value) {
     } else static if (is(T == E[], E)) {
         const count = archive.length(value.length);
         if (archive.isWriting) {
+            archive.need!(Unqual!E)(count);
             foreach (ref element; value)
                 archive.transfer(element);
         } else {
-            auto fresh = new Unqual!E[count];
+            auto fresh = archive.newArray!(Unqual!E)(count);
             foreach (ref element; fresh)
                 archive.transfer(element);
             value = cast(T) fresh;
@@ -854,16 +895,21 @@ private void transferBody(
 ) {
     // The shape first, so that a function can refer to any other.
     size_t moduleCount = archive.length(program._modules.length);
-    if (!archive.isWriting)
-        foreach (m; 0 .. moduleCount)
-            program.newModule;
+    if (archive.isWriting) {
+        // As `Program.newModules` and `Module.newFunctions` take them.
+        archive.need!(Module*)(moduleCount);
+        archive._need.data += moduleCount * bytesFor(Module.sizeof);
+    } else
+        program.newModules(moduleCount);
     foreach (m; 0 .. moduleCount) {
         size_t functionCount =
             archive.length(archive.isWriting
                 ? program._modules[m]._functions.length : 0);
-        if (!archive.isWriting)
-            foreach (f; 0 .. functionCount)
-                program._modules[m].newFunction;
+        if (archive.isWriting) {
+            archive.need!Function(functionCount);
+            archive.need!(Function*)(functionCount);
+        } else
+            program._modules[m].newFunctions(program.memory, functionCount);
     }
     transferStartData(archive, program);
     transferPlans(archive, program);
@@ -871,6 +917,11 @@ private void transferBody(
     // All data before any function: a function can point into any module.
     // The bytes of all data come before the addresses in them: a datum can
     // point into any block or string.
+    if (archive.isWriting) {
+        foreach (m; 0 .. moduleCount)
+            program._modules[m].blocks.addLoadNeed(archive._need);
+        program.store.addLoadNeed(archive._need);
+    }
     foreach (m; 0 .. moduleCount)
         transferBlocks(archive, program._modules[m].blocks);
     transferBlocks(archive, *program.store.blocks);
@@ -900,13 +951,15 @@ private void transferPlans(ref Archive archive, ref Program program) {
     archive.transfer(signatures);
     archive.transfer(names);
     archive.transfer(failures);
-    if (archive.isWriting)
+    if (archive.isWriting) {
+        archive.need!(CallPlan*)(signatures.length);
         return;
+    }
     if (names.length != signatures.length
             || failures.length != signatures.length)
         throw new SnakebiteException(
             "the program file holds call plans that do not match");
-    archive._plans = new CallPlan*[signatures.length];
+    archive._plans = archive.newArray!(CallPlan*)(signatures.length);
     foreach (index, signature; signatures)
         archive._plans[index] = program.plans.plan(signature,
             names[index] == size_t.max ? null
@@ -1078,8 +1131,10 @@ private void transferStartData(ref Archive archive, ref Program program) {
     archive.transfer(start.hasCEntryPoint);
     archive.transfer(start.betterC);
     const count = archive.length(start.modules.length);
-    if (!archive.isWriting)
-        start.modules = new ModuleStart*[count];
+    if (archive.isWriting)
+        archive.need!(ModuleStart*)(count);
+    else
+        start.modules = archive.newArray!(ModuleStart*)(count);
     foreach (i, ref record; start.modules) {
         size_t position;
         if (archive.isWriting) {
@@ -1131,8 +1186,10 @@ private void transferStart(ref Archive archive, ref ModuleStart record) {
 // A gate is the storage of a variable: a target and a length.
 private void transferGates(ref Archive archive, ref GateStorage[] gates) {
     const count = archive.length(gates.length);
-    if (!archive.isWriting)
-        gates = new GateStorage[count];
+    if (archive.isWriting)
+        archive.need!GateStorage(count);
+    else
+        gates = archive.newArray!GateStorage(count);
     foreach (ref gate; gates) {
         Target.Kind kind;
         size_t[3] reference;
@@ -1161,8 +1218,10 @@ private void transferGates(ref Archive archive, ref GateStorage[] gates) {
 
 private void transferHandles(ref Archive archive, ref FunctionHandle[] handles) {
     const count = archive.length(handles.length);
-    if (!archive.isWriting)
-        handles = new FunctionHandle[count];
+    if (archive.isWriting)
+        archive.need!FunctionHandle(count);
+    else
+        handles = archive.newArray!FunctionHandle(count);
     foreach (ref handle; handles)
         transferHandle(archive, handle);
 }
@@ -1175,9 +1234,12 @@ private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
         if (compiled is null)
             internalFailure("a start function is not one of the bytecode backend");
         position = archive.positionOf(compiled);
+        // The GC scans the object: it holds the runner.
+        archive._need.scanned +=
+            bytesFor(__traits(classInstanceSize, StartFunction));
     }
     archive.scalar(position);
     if (!archive.isWriting)
-        handle = new StartFunction(
+        handle = archive._memory.scanned.make!StartFunction(
             archive._runner, archive.functionAt(position[0], position[1]));
 }
