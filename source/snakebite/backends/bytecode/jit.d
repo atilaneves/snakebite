@@ -207,6 +207,17 @@ package struct JitOp {
     }
 }
 
+package struct CrossCallRegion {
+    import snakebite.backends.bytecode.vm: Function, Instruction;
+
+    size_t callSite;
+    const(Function)* callee;
+    const(Instruction)[] snapshot;
+    const(JitOp)[] ops;
+    const(Instruction.Handler)[] originals;
+    size_t[] labels;
+}
+
 private enum : ubyte {
     RAX = 0, RCX = 1, RDX = 2, RSI = 6, RDI = 7, R8 = 8, R9 = 9, R10 = 10,
     R11 = 11,
@@ -291,6 +302,10 @@ package struct JitState {
     Scratch!JitOp opScratch;
     Scratch!Instruction snapshotScratch;
     Scratch!(Instruction.Handler) originalScratch;
+    Scratch!Instruction crossCallSnapshotScratch;
+    Scratch!JitOp crossCallOpScratch;
+    Scratch!(Instruction.Handler) crossCallOriginalScratch;
+    Scratch!CrossCallRegion crossCallRegions;
 
     // Gives back the memory of the region and the buffers.
     void release() {
@@ -302,11 +317,16 @@ package struct JitState {
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
+        crossCallSnapshotScratch.release;
+        crossCallOpScratch.release;
+        crossCallOriginalScratch.release;
+        crossCallRegions.release;
     }
 
     Emitted emitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals)
+        const(Instruction.Handler)[] originals,
+        CrossCallRegion[] crossCalls = null)
     {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
         import snakebite.backends.bytecode.vm: chainedDispatch;
@@ -325,117 +345,30 @@ package struct JitState {
         g.frameSize = function_.frameSize;
         g.constants = function_.constants;
         g.callSites = function_.callSites;
-        auto labelMemory = labels.reserve(instructions.length + 1);
+        size_t labelCount = instructions.length + 1;
+        foreach (ref crossCall; crossCalls)
+            labelCount += crossCall.snapshot.length + 1;
+        auto labelMemory = labels.reserve(labelCount);
         if (labelMemory is null)
             return Emitted.failed;
         g.labels = labelMemory[0 .. instructions.length + 1];
+        size_t nextLabel = instructions.length + 1;
+        foreach (ref crossCall; crossCalls) {
+            crossCall.labels = labelMemory[nextLabel .. nextLabel
+                + crossCall.snapshot.length + 1];
+            nextLabel += crossCall.snapshot.length + 1;
+        }
+        g.crossCalls = crossCalls;
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
 
-        enum needsHandlerEntry = size_t.max;
-        size_t handlerEntryCount;
-        foreach (i; 0 .. instructions.length) {
-            if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
-                return Emitted.full;
-            g.labels[i] = g.a.n;
-            if (g.checkedLoop.update && i == g.checkedLoop.update) {
-                g.jumpToHandler(i, originals[i]);
-                g.emitCheckedLoopUpdate;
-                continue;
-            }
-            if (g.checkedLoop.update && i == g.checkedLoop.update + 1) {
-                g.emitCheckedLoopBackedge;
-                g.labels[i] = needsHandlerEntry;
-                ++handlerEntryCount;
-                continue;
-            }
-            if (!g.checkedLoop.update && !g.fpLoop.backedge
-                    && ops[i].kind == JitOp.Kind.branch)
-                g.fpLoop = g.planFpLoop(i, ops, originals);
-            if (g.fpLoop.backedge) {
-                if (i == g.fpLoop.head) {
-                    g.fpSlots = g.fpLoop.seed;
-                    g.fpSlots.reload(g.a);
-                    g.fpLoop.headBody = g.a.n;
-                } else if (i == g.fpLoop.compare) {
-                    g.fpLoop.joinFixups = g.fixupCount;
-                } else if (i == g.fpLoop.join) {
-                    // The compare preserves the map expected by its target.
-                    foreach (f; g.fixups[g.fpLoop.joinFixups .. g.fixupCount])
-                        g.patchHere(f.position);
-                    g.fixupCount = g.fpLoop.joinFixups;
-                }
-            }
-            const saved = g.a.n;
-            const savedFixups = g.fixupCount;
-            const savedLiterals = g.literalCount;
-            bool done;
-            g.usedKnown = false;
-            if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
-                done = g.emitOp(i, ops, originals[i]);
-            else {
-                g.fpSlots = FpSlots.init;
-                g.intSlots = IntSlots.init;
-            }
-            if (g.outOfMemory || (g.fpLoop.backedge && (!done || g.usedKnown)))
-                return Emitted.failed;
-            if (g.fpLoop.backedge && i == g.fpLoop.backedge) {
-                g.fpLoop = FpLoop.init;
-                g.fpSlots = FpSlots.init;
-            }
-            if (!done) {
-                g.a.n = saved;
-                g.fixupCount = savedFixups;
-                g.literalCount = savedLiterals;
-                if (originals[i] is null)
-                    g.a.ud2();
-                else
-                    g.jumpToHandler(i, originals[i]);
-                g.known = Gen.KnownConstant.init;
-            } else {
-                if (g.usedKnown) {
-                    g.labels[i] = needsHandlerEntry;
-                    ++handlerEntryCount;
-                }
-                g.rememberConstant(snapshot[i], ops[i]);
-            }
-        }
-        if (cap - g.a.n - g.literalBytes < codeAlignment)
-            return Emitted.full;
-        g.labels[instructions.length] = g.a.n;
-        g.a.ud2();
-        if (handlerEntryCount) {
-            foreach (i, ref label; g.labels[0 .. instructions.length]) {
-                if (label != needsHandlerEntry)
-                    continue;
-                if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
-                    return Emitted.full;
-                // Dispatch and branches can enter here without the values
-                // that the preceding machine code supplies.
-                label = g.a.n;
-                g.jumpToHandler(i, originals[i]);
-                if (--handlerEntryCount == 0)
-                    break;
-            }
-        }
-        if (g.literalCount && g.a.n + g.literalBytes > int.max)
-            return Emitted.failed;
-        g.emitLiterals;
-
-        foreach (ref const entry; reloadEntries.ptr[0 .. g.reloadEntryCount]) {
-            if (cap - g.a.n < maximumBytesPerInstruction)
-                return Emitted.full;
-            const body = g.labels[entry.index];
-            g.labels[entry.index] = g.a.n;
-            entry.fpSlots.reload(g.a);
-            entry.intSlots.reload(g.a);
-            g.a.b(0xE9);
-            g.a.d32(cast(int) (body - (g.a.n + int.sizeof)));
-        }
+        const emitted = g.emitRegion(cap, ops, originals);
+        if (emitted != Emitted.done)
+            return emitted;
 
         foreach (f; g.fixups[0 .. g.fixupCount])
             *cast(int*) (g.a.buf + f.position) = cast(int) (
-                g.labels[f.target] - (f.position + 4));
+                f.labels[f.target] - (f.position + 4));
 
         const size = (g.a.n + codeAlignment - 1) & ~(codeAlignment - 1UL);
         region.chunkUsed = start + size;
@@ -808,18 +741,21 @@ package struct JitLock {
     // function does not reserve room for its worst case before it emits.
     package bool jitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals)
+        const(Instruction.Handler)[] originals,
+        CrossCallRegion[] crossCalls = null)
     {
         if (snapshot.length == 0)
             return false;
         ref state = this.state;
-        auto result = state.emitFunction(function_, snapshot, ops, originals);
+        auto result = state.emitFunction(function_, snapshot, ops, originals,
+            crossCalls);
         if (result == Emitted.full) {
             const worst = snapshot.length * maximumBytesPerInstruction
                 + 4096;
             if (!state.region.newChunk(worst))
                 return false;
-            result = state.emitFunction(function_, snapshot, ops, originals);
+            result = state.emitFunction(function_, snapshot, ops, originals,
+                crossCalls);
         }
         return result == Emitted.done;
     }
@@ -992,6 +928,7 @@ private static immutable int[4] _chunkSizes = [8, 4, 2, 1];
 private struct Fixup {
     size_t position;
     size_t target;
+    size_t* labels;
 }
 
 private struct Literal {
@@ -1500,6 +1437,7 @@ private struct Gen {
     size_t frameSize;
     const(long)[] constants;
     const(CallSite)[] callSites;
+    CrossCallRegion[] crossCalls;
     size_t[] labels;
     Fixup* fixups;
     size_t fixupCount;
@@ -1558,7 +1496,7 @@ private struct Gen {
             fixups = grown;
             fixupCap = fixupScratch.cap;
         }
-        fixups[fixupCount++] = Fixup(a.n, target);
+        fixups[fixupCount++] = Fixup(a.n, target, labels.ptr);
         a.d32(0);
     }
 
@@ -1566,8 +1504,8 @@ private struct Gen {
         return literalCount * ulong.sizeof;
     }
 
-    void emitLiterals() {
-        foreach (literal; literalScratch.ptr[0 .. literalCount]) {
+    void emitLiterals(size_t first = 0) {
+        foreach (literal; literalScratch.ptr[first .. literalCount]) {
             *cast(int*) (a.buf + literal.displacement) = cast(int) (
                 a.n - (literal.displacement + int.sizeof));
             a.q64(literal.bits);
@@ -2244,6 +2182,115 @@ private struct Gen {
                     reloadInt ? incomingInt : IntSlots.init);
         }
         return done;
+    }
+
+    Emitted emitRegion(size_t cap, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals)
+    {
+        const literalStart = literalCount;
+        const reloadStart = reloadEntryCount;
+        enum needsHandlerEntry = size_t.max;
+        size_t handlerEntryCount;
+        foreach (i; 0 .. instructions.length) {
+            if (cap - a.n - literalBytes < maximumBytesPerInstruction)
+                return Emitted.full;
+            labels[i] = a.n;
+            if (checkedLoop.update && i == checkedLoop.update) {
+                jumpToHandler(i, originals[i]);
+                emitCheckedLoopUpdate;
+                continue;
+            }
+            if (checkedLoop.update && i == checkedLoop.update + 1) {
+                emitCheckedLoopBackedge;
+                labels[i] = needsHandlerEntry;
+                ++handlerEntryCount;
+                continue;
+            }
+            if (!checkedLoop.update && !fpLoop.backedge
+                    && ops[i].kind == JitOp.Kind.branch)
+                fpLoop = planFpLoop(i, ops, originals);
+            if (fpLoop.backedge) {
+                if (i == fpLoop.head) {
+                    fpSlots = fpLoop.seed;
+                    fpSlots.reload(a);
+                    fpLoop.headBody = a.n;
+                } else if (i == fpLoop.compare) {
+                    fpLoop.joinFixups = fixupCount;
+                } else if (i == fpLoop.join) {
+                    // The compare preserves the map expected by its target.
+                    foreach (f; fixups[fpLoop.joinFixups .. fixupCount])
+                        patchHere(f.position);
+                    fixupCount = fpLoop.joinFixups;
+                }
+            }
+            const saved = a.n;
+            const savedFixups = fixupCount;
+            const savedLiterals = literalCount;
+            bool done;
+            usedKnown = false;
+            if (originals[i] !is null && ops[i].kind != JitOp.Kind.none)
+                done = emitOp(i, ops, originals[i]);
+            else {
+                fpSlots = FpSlots.init;
+                intSlots = IntSlots.init;
+            }
+            if (outOfMemory || (fpLoop.backedge && (!done || usedKnown)))
+                return Emitted.failed;
+            if (fpLoop.backedge && i == fpLoop.backedge) {
+                fpLoop = FpLoop.init;
+                fpSlots = FpSlots.init;
+            }
+            if (!done) {
+                a.n = saved;
+                fixupCount = savedFixups;
+                literalCount = savedLiterals;
+                if (originals[i] is null)
+                    a.ud2();
+                else
+                    jumpToHandler(i, originals[i]);
+                known = KnownConstant.init;
+            } else {
+                if (usedKnown) {
+                    labels[i] = needsHandlerEntry;
+                    ++handlerEntryCount;
+                }
+                rememberConstant(snapshot[i], ops[i]);
+            }
+        }
+        if (cap - a.n - literalBytes < codeAlignment)
+            return Emitted.full;
+        labels[instructions.length] = a.n;
+        a.ud2;
+        if (handlerEntryCount) {
+            foreach (i, ref label; labels[0 .. instructions.length]) {
+                if (label != needsHandlerEntry)
+                    continue;
+                if (cap - a.n - literalBytes < maximumBytesPerInstruction)
+                    return Emitted.full;
+                // Dispatch and branches can enter here without the values
+                // that the preceding machine code supplies.
+                label = a.n;
+                jumpToHandler(i, originals[i]);
+                if (--handlerEntryCount == 0)
+                    break;
+            }
+        }
+        if (literalCount && a.n + literalBytes > int.max)
+            return Emitted.failed;
+        emitLiterals(literalStart);
+
+        foreach (ref const entry; reloadEntryScratch.ptr[reloadStart .. reloadEntryCount]) {
+            if (cap - a.n < maximumBytesPerInstruction)
+                return Emitted.full;
+            const body = labels[entry.index];
+            labels[entry.index] = a.n;
+            entry.fpSlots.reload(a);
+            entry.intSlots.reload(a);
+            a.b(0xE9);
+            a.d32(cast(int) (body - (a.n + int.sizeof)));
+        }
+        reloadEntryCount = reloadStart;
+        return Emitted.done;
     }
 
     bool isScalarCopy(size_t i, in JitOp op) const {

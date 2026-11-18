@@ -575,6 +575,41 @@ static foreach (backend; Matrix!(
 }
 
 static foreach (backend; Matrix!()) {
+    @("jit.directGuestCallReturnsAndResumesExceptions." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int transform(int value) {
+                assert(value != int.min);
+                const adjusted = value * 3 + 7;
+                if (value < 0)
+                    throw new Exception("negative input");
+                if (value & 1)
+                    return adjusted - 11;
+                return adjusted + 13;
+            }
+            int caller(int value) {
+                assert(value != int.max);
+                return transform(value) + 2;
+            }
+            int main() {
+                foreach (value; 0 .. 400) {
+                    const adjusted = value * 3 + 7;
+                    const expected = value & 1
+                        ? adjusted - 11 + 2 : adjusted + 13 + 2;
+                    if (caller(value) != expected)
+                        return 1;
+                }
+                try
+                    caller(-2);
+                catch (Exception exception) {
+                    return exception.msg == "negative input" ? 0 : 2;
+                }
+                return 3;
+            }
+        }, ["caller", "transform"]);
+    }
+
     // A backend that is gone gives back its JIT code region. Many backends
     // that one after the other make a function hot must not keep a code
     // file open each.
