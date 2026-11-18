@@ -4316,14 +4316,26 @@ private struct Gen {
         const w = cast(int) (op.width ? op.width : ins.width);
         if (!goodWidth(w))
             return false;
+        const sameCell = !p.leftInR0 && !p.resultInR0 && p.constantRight
+            && (ins.destination & indirectBit)
+            && (p.twoAddress || ins.source == ins.destination);
         Mem d, l;
+        int memoryImmediate;
+        // This cell has no frame-register cache entry, but the older
+        // observed path carries its updated value in REG0.
+        if (sameCell && !emittingPath && p.operation != JitOp.IntOperation.multiply
+                && immOf(w, constantAt(integerRightOperand(ins, p.twoAddress), w),
+                    memoryImmediate)) {
+            if (!opnd(ins.destination, R9, d))
+                return false;
+            a.aluMI(aluOf(p.operation), w, d, memoryImmediate);
+            intSlots = IntSlots.init;
+            return true;
+        }
         IntegerRight rhs;
         if (!binary(ins, p.twoAddress, p.constantRight, p.leftInR0,
                 p.resultInR0, w, d, l, rhs))
             return false;
-        const sameCell = !p.leftInR0 && !p.resultInR0 && p.constantRight
-            && (ins.destination & indirectBit)
-            && (p.twoAddress || ins.source == ins.destination);
         auto left = p.leftInR0 ? REG0 : cachedInt(l, w);
         if (emittingPath) {
             if (sameCell)
