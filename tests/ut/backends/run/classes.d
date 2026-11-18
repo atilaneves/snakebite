@@ -1639,6 +1639,36 @@ static foreach (backend; Matrix!(
 }
 
 
+// A root class that replaces one method of the interface of a dependency
+// base: a call through the interface of a method that it does not replace
+// gives a delegate to the native method.
+static foreach (backend; Matrix!()) {
+    @("rootClassOfDependencyBaseReplacingOneInterfaceMethod."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.concurrency: Scheduler, ThreadScheduler;
+
+            class Quiet : ThreadScheduler {
+                int yields;
+                override void yield() nothrow { ++yields; }
+            }
+
+            void main() {
+                auto quiet = new Quiet;
+                Scheduler scheduler = quiet;
+                bool ran;
+                scheduler.start({ ran = true; });
+                scheduler.yield();
+                assert(ran);
+                assert(quiet.yields == 1);
+            }
+        });
+    }
+}
+
+
 // An object of a dependency class with an interface in a static initialiser
 // of the root package: its vtable and its interface slot are those of the
 // dependency class.
