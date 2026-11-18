@@ -2107,8 +2107,7 @@ static if (jitSupported && chainedDispatch) {
             return;
         auto lock = JitLock.tryTake(*(cast(Function*) caller).jit);
         if (lock.held && lock.jitUsable)
-            lock.state.linkWindow(pc, site, index, destination,
-                caller.jitName.length != 0);
+            lock.state.linkWindow(pc, caller, site, index, destination);
     }
 }
 
