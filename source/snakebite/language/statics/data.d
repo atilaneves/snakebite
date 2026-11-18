@@ -349,7 +349,8 @@ public struct NativeData {
     private void foldDistance(ref Target target, ref size_t distance) {
         if (distance == 0)
             return;
-        if (auto name = _plans.names.nameAt(cast(const(void)*) target.address)) {
+        const address = cast(const(void)*) target.address;
+        if (auto name = _plans.names.nameAt(address)) {
             if (name.adjusted !is null)
                 internalFailure("a word points into an entry of host code");
             target.address = cast(size_t) _plans.names.named(

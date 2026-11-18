@@ -128,8 +128,8 @@ public void loadProgram(
     transferBody(file, program, &runner);
 
     program.eachFunction((function_) {
-        if (const reason = Program.complete(
-                function_, program.plans, runner.jitSetting, runner.jitInstance))
+        if (const reason = Program.complete(function_, program.plans,
+                runner.jitSetting, runner.jitInstance))
             throw new SnakebiteException(
                 "the program file is not valid: " ~ reason);
     });
@@ -336,7 +336,8 @@ private struct Archive {
         // The gate of a static destructor of a template instance that the
         // program and another object can both define, of which the process
         // has a copy: the storage has no name yet (name step 4 of #960).
-        internalFailure("the gate of a static destructor is storage of another object");
+        internalFailure(
+            "the gate of a static destructor is storage of another object");
     }
 
     void* dataAt(in size_t[3] position) {
@@ -396,8 +397,8 @@ private struct Archive {
             return _program.plans.names.named(
                 symbolNameAt(reference[0]), reference[1]);
         if (reference[0] >= _hostEntries.length)
-            throw new SnakebiteException(
-                "the program file names a callback entry that it does not hold");
+            throw new SnakebiteException("the program file names a callback "
+                ~ "entry that it does not hold");
         return _hostEntries[reference[0]];
     }
 
@@ -606,7 +607,8 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
             const guest = archive._program.plans.callbacks.guestTarget(
                 cast(const(void)*) target.address);
             if (guest.word is null)
-                internalFailure("a word points at a callback entry of no guest function");
+                internalFailure(
+                    "a word points at a callback entry of no guest function");
             const position =
                 archive.positionOf(cast(const(Function)*) guest.word);
             return [position[0], position[1], cast(size_t) guest.adjustment];

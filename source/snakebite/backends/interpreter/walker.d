@@ -5910,8 +5910,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             return _nativeData.write(_type, _facts, expression, _place);
 
         if (auto typeInfo = expression.typeInfoAddressedBy(*_runtimeTypes)) {
-            checkedStoreIntegral(_place, cast(size_t) cast(void*) ready(typeInfo),
-                _facts.size);
+            checkedStoreIntegral(_place,
+                cast(size_t) cast(void*) ready(typeInfo), _facts.size);
             return;
         }
 
@@ -6653,7 +6653,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (plan.objectKind == NewPlan.ObjectKind.class_) {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
-            const initial = readyBytes(_runtimeTypes.initializer(classType.sym));
+            const initial =
+                readyBytes(_runtimeTypes.initializer(classType.sym));
             memcpy(object, initial.ptr, initial.length);
         }
 
@@ -6710,7 +6711,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     extern(D) private void* callableAddress(
         FuncDeclaration method, ptrdiff_t adjustment,
     ) {
-        return cast(void*) ready(_shared.world.callableAddress(method, adjustment));
+        return cast(void*) ready(
+            _shared.world.callableAddress(method, adjustment));
     }
 
     // `value` as the evaluator uses it when it runs: a name that the

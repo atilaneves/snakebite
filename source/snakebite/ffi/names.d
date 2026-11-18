@@ -107,7 +107,8 @@ public struct Names {
         const count = atomicLoad!(MemoryOrder.acq)(_chunkCount);
         foreach (chunk; _chunks[0 .. count]) {
             const start = cast(const(void)*) chunk.ptr;
-            if (address < start || address >= start + chunk.length * Name.sizeof)
+            const end = start + chunk.length * Name.sizeof;
+            if (address < start || address >= end)
                 continue;
             if ((address - start) % Name.sizeof != 0)
                 return null;
@@ -124,7 +125,8 @@ public struct Names {
         const count = atomicLoad!(MemoryOrder.raw)(_chunkCount);
         if (count == 0 || _used == _chunks[count - 1].length) {
             if (count == maxChunks)
-                internalFailure("a program names more symbols than the table of names holds");
+                internalFailure(
+                    "a program names more symbols than its names can hold");
             _chunks[count] = new Name[firstChunkLength << count];
             _used = 0;
             atomicStore!(MemoryOrder.rel)(_chunkCount, count + 1);
