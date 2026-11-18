@@ -298,6 +298,7 @@ package struct JitState {
     Scratch!size_t labels;
     PerfMap perfMap;
     Scratch!ReloadEntry reloadEntries;
+    Scratch!(Gen.PathScratch, 1) paths;
     // The buffers of one compile in `vm.d`: the template of each instruction,
     // a snapshot of the instructions, and their handlers.
     Scratch!JitOp opScratch;
@@ -311,6 +312,7 @@ package struct JitState {
         labels.release;
         literals.release;
         reloadEntries.release;
+        paths.release;
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
@@ -425,8 +427,7 @@ package struct JitState {
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
 
-        Gen.PathPlan loopPlan;
-        const path = g.selectObservedPath(function_, ops, observed, loopPlan);
+        const path = g.selectObservedPath(function_, ops, observed, paths);
         size_t pathJump;
         enum needsHandlerEntry = size_t.max;
         size_t handlerEntryCount;
@@ -538,8 +539,10 @@ package struct JitState {
 
         if (pathJump != 0) {
             const startOfPath = g.a.n;
+            auto pathScratch = paths.ptr;
+            const loopPlan = pathScratch.best.memory.saved ? &pathScratch.best : null;
             const target = g.emitObservedPath(cap, function_, path, ops,
-                originals, loopPlan.memory.saved ? &loopPlan : null)
+                originals, *pathScratch, loopPlan)
                 ? startOfPath : pathJump + int.sizeof;
             if (target != startOfPath)
                 g.a.n = startOfPath;
@@ -1050,7 +1053,7 @@ private void checkCallingConvention(ref CodeRegion region) {
 }
 
 // A growable buffer that compiles reuse; `release` frees it.
-package struct Scratch(T) {
+package struct Scratch(T, size_t initialCapacity = 1024) {
     T* ptr;
     size_t cap;
 
@@ -1059,7 +1062,7 @@ package struct Scratch(T) {
         import core.stdc.stdlib: free, malloc;
 
         if (n > cap) {
-            auto newCap = cap ? cap : 1024;
+            auto newCap = cap ? cap : initialCapacity;
             while (newCap < n)
                 newCap *= 2;
             free(ptr);
@@ -2083,7 +2086,8 @@ private struct Gen {
     private enum pathDepth = 4;
 
     const(ObservedEdge)[] selectObservedPath(const(Function)* function_,
-        const(JitOp)[] ops, const(ObservedEdge)[] observed, ref PathPlan bestPlan)
+        const(JitOp)[] ops, const(ObservedEdge)[] observed,
+        ref Scratch!(PathScratch, 1) storage)
     {
         if (observed.length == 0 || function_.returnPlace.offset != size_t.max)
             return null;
@@ -2092,7 +2096,6 @@ private struct Gen {
         const(ObservedEdge)[] best;
         const(ObservedEdge)[] bestLoop;
         size_t bestLoopScore;
-        PathPlan plan;
         foreach (start, edge; observed) {
             const startsAtCall = edge.next == ObservedEdge.call;
             if (!startsAtCall && ops[edge.pc].kind != JitOp.Kind.fused)
@@ -2156,15 +2159,20 @@ private struct Gen {
             if (earlier || hits < 2)
                 continue;
             if (!startsAtCall) {
+                auto scratch = storage.reserve(1);
+                if (scratch is null)
+                    continue;
+                ref plan = scratch.candidate;
                 plan.guards.count = 0;
                 plan.memory = PathMemory.init;
-                if (!analyzePath(candidate, ops, plan, true))
+                if (!analyzePath(candidate, ops, *scratch, true))
                     continue;
                 plan.memory = PathMemory.init;
                 plan.checked[0 .. finished] = PathChecked.init;
-                if (!analyzePath(candidate, ops, plan, false))
+                if (!analyzePath(candidate, ops, *scratch, false))
                     continue;
-                if (!plan.checked[plan.memory.first].skipBounds)
+                if (!plan.checked[plan.memory.first].skipBounds
+                        || plan.memory.maximumIndex < 0)
                     continue;
                 // Charge two instructions for each entry comparison and the
                 // range checks even when the cold exit will never be taken.
@@ -2176,7 +2184,11 @@ private struct Gen {
                 if (loopScore > bestLoopScore) {
                     bestLoopScore = loopScore;
                     bestLoop = candidate;
-                    bestPlan = plan;
+                    const checks = plan.guards.count;
+                    scratch.best.guards.count = checks;
+                    scratch.best.guards.guards[0 .. checks] = plan.guards.guards[0 .. checks];
+                    scratch.best.memory = plan.memory;
+                    scratch.best.checked[0 .. finished] = plan.checked[0 .. finished];
                 }
                 continue;
             }
@@ -2189,7 +2201,9 @@ private struct Gen {
         }
         if (bestLoopScore > bestScore)
             return bestLoop;
-        bestPlan.memory.saved = 0;
+        if (!best.length || storage.reserve(1) is null)
+            return null;
+        storage.ptr.best.memory.saved = 0;
         return best;
     }
 
@@ -2436,9 +2450,11 @@ private struct Gen {
         if (!goodWidth(width)
                 || !pathPlace(ins.destination, calls, pending, dest, cast(uint) width))
             return false;
-        if (op.copy.staticSource)
+        if (isLiteralCopy(ins, op, width))
             return values.write(dest, PathValue(0, cast(ubyte) width,
                 constantAt(ins.source, cast(int) width)));
+        if (op.copy.staticSource)
+            return values.write(dest, PathValue(values.nextIdentity++, cast(ubyte) width));
         if (!pathPlace(ins.source, calls, pending, source, cast(uint) width))
             return false;
         const value = values.lookup(source, cast(ubyte) width);
@@ -2522,6 +2538,15 @@ private struct Gen {
         size_t known;
     }
 
+    private struct PathScratch {
+        PathPlan best;
+        PathPlan candidate;
+        PathValues values;
+        PathMemoryFacts facts;
+        PathCall[ObservedEdge.limit] calls;
+        PathExit[2 * ObservedEdge.limit + 16] exits;
+    }
+
     bool trackPathChecked(size_t position, in Instruction ins, in JitOp op,
         ref PathValues values, const(PathCall)[] calls, int pending,
         ref PathPlan plan, ref PathMemoryFacts facts, bool gatherGuards)
@@ -2568,8 +2593,9 @@ private struct Gen {
                 const extended = index.bits;
                 if (extended > int.max)
                     return false;
-                if (extended > memory.maximumIndex)
-                    memory.maximumIndex = cast(int) extended;
+                const boundedIndex = cast(int) extended;
+                if (boundedIndex > memory.maximumIndex)
+                    memory.maximumIndex = boundedIndex;
                 action.skipBounds = true;
             } else {
                 foreach (ref const earlier; facts.bounded[0 .. facts.checks])
@@ -2641,10 +2667,15 @@ private struct Gen {
     }
 
     bool analyzePath(const(ObservedEdge)[] edges, const(JitOp)[] ops,
-        ref PathPlan plan, bool gatherGuards)
+        ref PathScratch scratch, bool gatherGuards)
     {
-        PathValues values;
-        PathMemoryFacts facts;
+        ref plan = scratch.candidate;
+        ref values = scratch.values;
+        values.count = 0;
+        values.nextIdentity = 1;
+        ref facts = scratch.facts;
+        facts.checks = 0;
+        facts.known = 0;
         PathCall[pathDepth] frames = void;
         int pending = -1;
         PathGuards ignored;
@@ -2735,10 +2766,8 @@ private struct Gen {
         // The range includes the index of the first load, so a failing load
         // can resume before it reads the pointer field.
         a.ld(8, RAX, Mem(R10, arrayLengthOffset));
-        if (memory.maximumIndex >= 0) {
-            a.aluRI(Alu.cmp, 8, RAX, memory.maximumIndex);
-            exits[count++] = PathExit(pc, jccLocal(CC_BE), 0, pending);
-        }
+        a.aluRI(Alu.cmp, 8, RAX, memory.maximumIndex);
+        exits[count++] = PathExit(pc, jccLocal(CC_BE), 0, pending);
         a.integerToXmm(pathLength, RAX);
         a.ld(8, R11, Mem(R10, arrayPointerOffset));
         a.integerToXmm(pathPointer, R11);
@@ -2785,10 +2814,11 @@ private struct Gen {
 
     bool emitObservedPath(size_t cap, const(Function)* function_,
         const(ObservedEdge)[] path, const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals, const(PathPlan)* plan)
+        const(Instruction.Handler)[] originals,
+        ref PathScratch scratch, const(PathPlan)* plan)
     {
-        PathCall[ObservedEdge.limit] calls = void;
-        PathExit[2 * ObservedEdge.limit + 16] exits = void;
+        auto calls = scratch.calls[0 .. path.length];
+        auto exits = scratch.exits[0 .. 2 * path.length + 16];
         size_t callCount;
         size_t exitCount;
         int pending = -1;
