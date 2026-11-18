@@ -901,7 +901,9 @@ public struct Instruction {
     package enum size_t immutableSource = 1;
 
     // A built function holds the distance (`hostCodeOffset`) until
-    // `Program.complete` binds it.
+    // `Program.complete` binds it. This holds for each `@hostCode` field:
+    // `Instruction.handler`, `CountingSite.counted`, `CallSite.builtinEntry`
+    // and `AssertSite.halt`.
     @hostCode package Handler handler;
     // What a field means is decided by the opcode alone - never dmd's own
     // numeric types, so this VM has none of them to import. `0` means an
@@ -1124,7 +1126,7 @@ package void recordRelocs(T)(
 
 // The word of `compiled` at `place`, or null when the function has no such
 // place. This is the one map from a place to a word: a load writes through
-// it and a test reads through it.
+// it.
 package inout(size_t)* wordAt(ref inout Function compiled, in Place place) {
     import snakebite.backends.bytecode.relocation: relocatedWord;
 
@@ -4904,22 +4906,39 @@ package size_t hostCodeAt(in ptrdiff_t offset) {
     return cast(size_t) (cast(ptrdiff_t) &opReturnVoid + offset);
 }
 
-// Each word of `function_` that holds code of the host executable: the
-// handler of each instruction, the counting handler of each counting site, the
-// entry of each builtin call and the action of each halting check. An entry or
-// an action that is absent is null in both forms, and the visit does not get
-// it; a distance is never zero there, because neither is `opReturnVoid`.
+// Each word of `function_` that holds code of the host executable: each field
+// that says `@hostCode`, in each record of each array of `function_`. This is
+// the same classification that the file reads (`transferClassified`), so a new
+// `@hostCode` field joins the walk with no other edit. An entry or an action
+// that is absent is null in both forms, and the visit does not get it. The
+// test for null is right for a distance too, because no entry and no halt
+// action is `opReturnVoid`, so no distance of one is zero.
 private void eachHostCodeWord(alias visit)(ref Function function_) {
-    foreach (ref instruction; function_.instructions)
-        visit(*cast(size_t*) &instruction.handler);
-    foreach (ref site; function_.countingSites)
-        visit(*cast(size_t*) &site.counted);
-    foreach (ref site; function_.callSites)
-        if (site.builtinEntry !is null)
-            visit(*cast(size_t*) &site.builtinEntry);
-    foreach (ref site; function_.assertSites)
-        if (site.halt !is null)
-            visit(*cast(size_t*) &site.halt);
+    import snakebite.backends.bytecode.relocation:
+        classificationOf, HostCode, isClassified;
+    import std.range.primitives: ElementType;
+    import std.traits: FieldNameTuple, isDynamicArray, Unqual;
+
+    static foreach (index, name; FieldNameTuple!Function) {{
+        alias Records = typeof(Function.tupleof[index]);
+        static if (isDynamicArray!Records) {
+            alias Record = Unqual!(ElementType!Records);
+            static if (isClassified!Record) {
+                foreach (ref record; function_.tupleof[index]) {
+                    static foreach (field, fieldName; FieldNameTuple!Record)
+                        static if (is(typeof(classificationOf!(Record, field)) == HostCode)) {
+                            // A handler is never absent, and it can be
+                            // `opReturnVoid`, whose distance is zero.
+                            static if (is(typeof(record.tupleof[field])
+                                    == Instruction.Handler))
+                                visit(*cast(size_t*) &record.tupleof[field]);
+                            else if (record.tupleof[field] !is null)
+                                visit(*cast(size_t*) &record.tupleof[field]);
+                        }
+                }
+            }
+        }
+    }}
 }
 
 // Writes each word of host code of a function that the compiler has built as

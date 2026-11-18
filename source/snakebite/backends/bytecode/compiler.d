@@ -167,6 +167,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             StaticWorld.Backend(&guestWord, null, null,
                 (module_) => &moduleForD(module_).blocks));
         wire(compiledProgram, _runner, jit);
+        if (recordsAddresses)
+            _runner.refuseExecution;
     }
 
     protected override ref StartData startDataStorage() {
