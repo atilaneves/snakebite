@@ -148,8 +148,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     private SharedTable!(FuncDeclaration, FrameLayout) _layouts;
 
     // With `recordsAddresses`, the compiler records each word that holds an
-    // address, so that `save` can write the program. It is off for a run:
-    // the records cost compile time and memory.
+    // address, so that `save` can write the program, and does not make the
+    // functions ready to run. It is off for a run: the records cost compile
+    // time and memory.
     public this(
         const SourceProgram program, in JitSetting jit = JitSetting.init,
         bool recordsAddresses = false,
@@ -178,7 +179,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     // Compiles the whole program and writes it to `path`. The compile is the
     // one a run makes, except that every function with a body compiles, not
-    // only those that run, and the compiler records the relocations. What a
+    // only those that run, the compiler records the relocations, and no
+    // function is made ready to run (`Program.complete`). What a
     // first run fills lazily is filled first: each start handle, and the callee
     // of each guest call site. A function that does not compile ends the
     // save with that error, and no file is written.
@@ -766,10 +768,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
             if (_runner.jitSetting.perfMap || compiledProgram.recordsAddresses)
                 placeholder.mangledName = function_.mangledNameOf;
-            // Branch targets and call site cleanup ranges become addresses
-            // only now: the passes of the compile read them as indices.
-            if (const reason = Program.complete(
-                    placeholder, _runner.jitSetting, _runner.jitInstance)) {
+            // Branch targets, call site cleanup ranges and host code become
+            // addresses only now: the passes of the compile read them as
+            // indices, and a file holds them as indices and distances. A
+            // save executes nothing, so its functions stay in that form.
+            const reason = compiledProgram.recordsAddresses ? null
+                : Program.complete(
+                    placeholder, _runner.jitSetting, _runner.jitInstance);
+            if (reason !is null) {
                 import std.conv: text;
 
                 internalFailure(
@@ -872,6 +878,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ExceptionHandler, Function,
         Instruction, Role, Roles, addressSlotOf,
         branchTargetField, recordLocalReferences, recordRelocs, rolesOf,
+        writeHostCodeDistances,
         isFrameOperand, widthHoldsIndexSlot, withAddressSlot,
         opAdd3, opSubtract3, opMultiply3, opFloatAdd3, opFloatSubtract3,
         opFloatMultiply3, opFloatDivide3, opLessThanSigned3,
@@ -1318,6 +1325,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         result.windowBytes = _windowReach;
         result.windowCallable = windowFits(_function, _layout);
         recordLocalReferences(result);
+        writeHostCodeDistances(result);
         return result;
     }
 

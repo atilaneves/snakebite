@@ -900,6 +900,8 @@ public struct Instruction {
     // the compiler from mutable data-segment storage.
     package enum size_t immutableSource = 1;
 
+    // A built function holds the distance (`hostCodeOffset`) until
+    // `Program.complete` binds it.
     @hostCode package Handler handler;
     // What a field means is decided by the opcode alone - never dmd's own
     // numeric types, so this VM has none of them to import. `0` means an
@@ -1055,7 +1057,7 @@ public struct Function {
     @plain package Reloc[] relocs;
     // The local records of the instructions: `recordLocalReferences` writes
     // them when the instructions are final, and `Program.complete` reads
-    // them after a compile and after a load.
+    // them after a compile to RAM and after a load.
     @plain package TargetWord[] targetWords;
     @plain package CountingSite[] countingSites;
     // `size_t.max` unless this function lays out call windows. Otherwise
@@ -4892,14 +4894,50 @@ package string bindInstructionReferences(ref Function function_) {
 }
 
 // Code of the host executable (a handler, a builtin wrapper, the action of a
-// halt) as a file holds it: the distance from `opReturnVoid`. The distance
-// means something only to the build that made it.
+// halt) as the compiler writes it and a file holds it: the distance from
+// `opReturnVoid`. The distance means something only to the build that made it.
 package ptrdiff_t hostCodeOffset(in size_t address) {
     return cast(ptrdiff_t) address - cast(ptrdiff_t) &opReturnVoid;
 }
 
 package size_t hostCodeAt(in ptrdiff_t offset) {
     return cast(size_t) (cast(ptrdiff_t) &opReturnVoid + offset);
+}
+
+// Each word of `function_` that holds code of the host executable: the
+// handler of each instruction, the counting handler of each counting site, the
+// entry of each builtin call and the action of each halting check. An entry or
+// an action that is absent is null in both forms, and the visit does not get
+// it; a distance is never zero there, because neither is `opReturnVoid`.
+private void eachHostCodeWord(alias visit)(ref Function function_) {
+    foreach (ref instruction; function_.instructions)
+        visit(*cast(size_t*) &instruction.handler);
+    foreach (ref site; function_.countingSites)
+        visit(*cast(size_t*) &site.counted);
+    foreach (ref site; function_.callSites)
+        if (site.builtinEntry !is null)
+            visit(*cast(size_t*) &site.builtinEntry);
+    foreach (ref site; function_.assertSites)
+        if (site.halt !is null)
+            visit(*cast(size_t*) &site.halt);
+}
+
+// Writes each word of host code of a function that the compiler has built as
+// its distance (`hostCodeOffset`): the form that a file holds and that
+// `bindHostCode` binds.
+package void writeHostCodeDistances(ref Function function_) {
+    eachHostCodeWord!((ref size_t word) {
+        word = cast(size_t) hostCodeOffset(word);
+    })(function_);
+}
+
+// Makes each distance of host code in `function_` an address: one add for
+// each word.
+package void bindHostCode(ref Function function_) {
+    const base = cast(size_t) &opReturnVoid;
+    eachHostCodeWord!((ref size_t word) {
+        word += base;
+    })(function_);
 }
 
 // The word of `instructions` that `record` names, or null when it names no
@@ -4941,71 +4979,6 @@ package void recordLocalReferences(ref Function function_) {
     }
     function_.targetWords = targets;
     function_.countingSites = counting;
-}
-
-// The ways in which the local records of a complete `function_` disagree with
-// the role table and the table of counting twins: `targetWords` has to name
-// exactly the words that the role table says are branch targets, and
-// `countingSites` exactly the calls and backward branches that have a twin,
-// each with that twin. A function that runs as JIT code has no handlers to
-// compare, and passes.
-version (unittest)
-public string[] misplacedLocalRecords(const(Function)* function_) {
-    import std.conv: text;
-
-    // JIT code has replaced the handlers: the role table and the twin table
-    // no longer know them.
-    if (jitCompiled(function_))
-        return null;
-
-    string[] found;
-    auto instructions = cast(Instruction[]) function_.instructions;
-    TargetWord[] expectedTargets;
-    foreach (index, instruction; instructions) {
-        instruction.handler = withoutCount(instruction.handler);
-        auto target = branchTargetField(instruction);
-        if (target !is null)
-            expectedTargets ~= TargetWord(cast(uint) index,
-                cast(uint) (target - cast(size_t*) &instruction));
-    }
-    if (expectedTargets != function_.targetWords)
-        found ~= text("the target words are ", function_.targetWords,
-            ", the role table says ", expectedTargets);
-
-    static if (jitSupported) {
-        uint[] expectedSites;
-        foreach (index, instruction; instructions) {
-            const original = withoutCount(instruction.handler);
-            auto copy = instruction;
-            copy.handler = original;
-            auto target = branchTargetField(copy);
-            const counts = target is null
-                ? isCountedCall(original)
-                : *target <= cast(size_t) (instructions.ptr + index);
-            if (counts && original in _countingTwins.countedOf)
-                expectedSites ~= cast(uint) index;
-        }
-        uint[] sites;
-        foreach (site; function_.countingSites) {
-            sites ~= site.instruction;
-            if (site.instruction >= instructions.length) {
-                found ~= text("counting site ", site.instruction,
-                    " is outside the function");
-                continue;
-            }
-            const original = withoutCount(
-                instructions[site.instruction].handler);
-            const twin = original in _countingTwins.countedOf;
-            if (twin is null || *twin !is site.counted)
-                found ~= text("counting site ", site.instruction,
-                    " does not hold the twin of its handler");
-        }
-        if (sites != expectedSites)
-            found ~= text("the counting sites are ", sites,
-                ", the instructions that count are ", expectedSites);
-    } else if (function_.countingSites.length != 0)
-        found ~= "a build with no JIT has counting sites";
-    return found;
 }
 
 // The field of `instruction` that holds the instruction of the same function
@@ -5636,15 +5609,6 @@ static if (jitSupported) {
             function_.instructions[site.instruction].handler = site.counted;
         if (setting.perfMap)
             function_.jitName = name;
-    }
-
-    // The handler that `handler` is the counting twin of, or `handler`.
-    package Instruction.Handler withoutCount(
-        in Instruction.Handler handler,
-    ) nothrow {
-        if (const original = handler in _countingTwins.uncountedOf)
-            return cast(Instruction.Handler) *original;
-        return cast(Instruction.Handler) handler;
     }
 
     // For the paths that cannot know at compile time whether the JIT is on.
@@ -6284,12 +6248,6 @@ static if (jitSupported) {
 
     package void prepareForExecution(Function*, in JitSetting, void*,
         lazy const(char)[]) pure nothrow @nogc @safe {}
-
-    package Instruction.Handler withoutCount(
-        in Instruction.Handler handler,
-    ) pure nothrow @nogc @trusted {
-        return cast(Instruction.Handler) handler;
-    }
 
     private void countCall(const(Function)*) pure nothrow @nogc @safe {}
 
