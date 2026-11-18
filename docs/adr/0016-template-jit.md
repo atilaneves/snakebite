@@ -115,8 +115,18 @@ that uses it. The JIT reads the records when it compiles the caller. A
 release store of the entry publishes each callee and receiver adjustment.
 The JIT checks the live entry address before it uses either recorded value.
 It reads the receiver from the current window on every call. If the live
-entry matches none of the guards, the original handler takes over.
-Publication after compilation does not change the emitted guards.
+entry matches none of the initial guards, the code reads a per-site
+destination. The original handler resolves the first late miss. An eligible
+target that has a cache record can then get another guarded window arm.
+The instance lock protects emission. A release store publishes the complete
+arm, and each new arm keeps its predecessor available for other targets.
+The code still uses the original counted handler for stack growth or
+tier-up. A miss through all arms enters the resolver.
+
+The per-site destination lives with the call site in process-private memory
+and is not saved in a bytecode image. The parent and child can retain all the
+arms that existed at a fork. When the child links a new arm, it emits into a
+new code chunk and updates only its own destination.
 
 A return to a guest caller with no pending cleanup releases the frame and
 jumps through the caller's resume slot. A value return can copy up to 64
