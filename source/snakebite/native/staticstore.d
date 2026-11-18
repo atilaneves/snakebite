@@ -4,7 +4,8 @@ module snakebite.native.staticstore;
 private:
 
 
-import snakebite.memory.program: appendedBytes, MemoryNeed, ProgramMemory;
+import snakebite.memory.program: appendedBytes, loadedProgramGrows, MemoryNeed,
+    ProgramMemory;
 import snakebite.native.address: DatumRef, Target;
 import snakebite.host.threads: PerThread;
 import snakebite.native.value: TypeFacts;
@@ -77,6 +78,11 @@ public struct StaticBlocks {
         _memory = memory;
     }
 
+    // Whether the blocks are of a program that a load made.
+    public bool isLoaded() const @safe pure nothrow @nogc {
+        return _memory !is null;
+    }
+
     // Adds to `need` the memory that a load of these blocks takes after
     // `takeFrom`: a load makes the same blocks.
     public void addLoadNeed(ref MemoryNeed need) const @safe pure nothrow @nogc {
@@ -120,9 +126,12 @@ public struct StaticBlocks {
     }
 
     // Records that the word at `place` holds `target`. False when `place` is
-    // in no datum.
+    // in no datum. A loaded program does not grow: the GC does not scan the
+    // records of its data.
     public bool recordAddress(in void* place, Link link)
             @trusted pure nothrow {
+        if (_memory !is null)
+            loadedProgramGrows;
         const found = datumAt(place);
         if (found.index == size_t.max)
             return false;

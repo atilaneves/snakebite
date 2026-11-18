@@ -17,6 +17,9 @@ module snakebite.memory.program;
 private:
 
 
+import snakebite.failure.report: internalFailure;
+
+
 // Enough for any type that a program holds.
 private enum alignment = 16;
 
@@ -75,11 +78,41 @@ private size_t atPage(in size_t offset) @safe pure nothrow @nogc {
 }
 
 
+private noreturn doesNotFit() @safe pure nothrow @nogc {
+    internalFailure("the memory of a loaded program is full: the save and "
+        ~ "the load do not agree on its size, or the program grows");
+}
+
+
+// Ends the process: a loaded program does not grow. The GC does not scan
+// `ProgramMemory.data`, so a GC array that grew from a record in it would be
+// reached only from memory that the GC does not scan.
+public noreturn loadedProgramGrows(
+    in string file = __FILE__, in size_t line = __LINE__,
+) @safe pure nothrow @nogc {
+    internalFailure("a loaded program does not grow", file, line);
+}
+
+
 public struct ProgramMemory {
     @disable this(this);
 
     public Region data;
     public Region scanned;
+
+    // Whether a load took the memory (`reserve`): the program is loaded.
+    public bool isTaken() const @safe pure nothrow @nogc {
+        return scanned._block.length != 0;
+    }
+
+    // Ends the process unless the load used all of the memory that the file
+    // gave: the save and the load agree on each allocation.
+    public void checkFull() const @safe pure nothrow @nogc {
+        if (!data.isFull || !scanned.isFull)
+            internalFailure("a load did not use all of the memory that the "
+                ~ "file gives: the save and the load do not agree on its "
+                ~ "size");
+    }
 
     // Takes the blocks for `need` from the GC, with `owner` in the first word
     // of `scanned`. Call it once, before the first allocation.
@@ -93,58 +126,49 @@ public struct ProgramMemory {
 }
 
 
-// Memory that is given out from the front of one GC block. An allocation
-// that the block has no room for gets a GC block of its own, which the
-// region holds.
+// Memory that is given out from the front of one GC block, whose size the
+// file gives. The save counts what the load takes, so an allocation that
+// does not fit is a fault of snakebite: the save and the load do not agree,
+// or a loaded program grows.
 public struct Region {
     @disable this(this);
 
     private void[] _block;
     private size_t _used;
-    private uint _attributes;
-    // The blocks of the allocations that did not fit.
-    private void[][] _more;
 
     private void take(in size_t size, in uint attributes) {
         import core.memory: GC;
 
-        _attributes = attributes;
         if (size != 0)
             _block = GC.calloc(size, attributes)[0 .. size];
     }
 
+    // Whether all of the block is given out.
+    public bool isFull() const @safe pure nothrow @nogc {
+        return _used == _block.length;
+    }
+
     // `size` bytes of zeroed memory, aligned for any type.
     public void[] allocate(in size_t size) @trusted pure nothrow {
-        import core.memory: GC;
-
         if (size == 0)
             return null;
         const rounded = bytesFor(size);
-        if (rounded <= _block.length - _used) {
-            auto bytes = _block[_used .. _used + size];
-            _used += rounded;
-            return bytes;
-        }
-        auto more = GC.calloc(size, _attributes)[0 .. size];
-        _more ~= more;
-        return more;
+        if (rounded > _block.length - _used)
+            doesNotFit;
+        auto bytes = _block[_used .. _used + size];
+        _used += rounded;
+        return bytes;
     }
 
     // As `allocate`, at the start of a page of the block. A page or more of
     // the GC starts at a page.
     public void[] allocateAtPage(in size_t size) @trusted pure nothrow {
-        import core.memory: GC;
-
         const start = atPage(_used);
-        if (_block.length >= pageAlignment && start <= _block.length
-                && bytesFor(size) <= _block.length - start) {
-            _used = start + bytesFor(size);
-            return _block[start .. start + size];
-        }
-        const more = size > pageAlignment ? size : pageAlignment;
-        auto block = GC.calloc(more, _attributes)[0 .. more];
-        _more ~= block;
-        return block[0 .. size];
+        if (_block.length < pageAlignment || start > _block.length
+                || bytesFor(size) > _block.length - start)
+            doesNotFit;
+        _used = start + bytesFor(size);
+        return _block[start .. start + size];
     }
 
     // A new `T` with its initial value.
