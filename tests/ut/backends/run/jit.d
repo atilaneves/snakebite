@@ -1175,3 +1175,111 @@ static foreach (backend; Matrix!(
         }, ["visit"]);
     }
 }
+
+// Entering at the second update skips the first store. A branch after the
+// updates can read any field through the same aggregate or an overlapping field.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE rejects a read of an overlapping field"),
+)) {
+    @("jit.fieldBranchesSeeCurrentValuesOnEachEntry." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Record {
+                int marker;
+                int net;
+                union {
+                    int code;
+                    int codeAlias;
+                }
+                int distance;
+                int adjustment;
+                int mask;
+            }
+
+            void update(ref Record record, bool skipNet) {
+                assert(record.marker == 23);
+                if (skipNet)
+                    goto updateCode;
+                record.net = record.net - record.adjustment;
+            updateCode:
+                record.code = record.code ^ record.mask;
+                record.distance = record.distance + record.adjustment;
+                if (record.codeAlias != 7) {
+                    record.marker = -3;
+                    return;
+                }
+                if (record.distance > 11) {
+                    record.marker = 19;
+                    return;
+                }
+                if (record.codeAlias == record.distance)
+                    record.marker = 31;
+            }
+
+            int main() {
+                foreach (round; 0 .. 300) {
+                    Record record;
+                    record.marker = 23;
+                    record.net = 16;
+                    record.code = round % 3 == 0 ? 6 : 5;
+                    record.distance = round % 3 == 1 ? 8 : 3;
+                    record.adjustment = 4;
+                    record.mask = 2;
+                    const skipNet = round % 2 == 0;
+                    update(record, skipNet);
+                    assert(record.net == (skipNet ? 16 : 12));
+                    assert(record.marker == [-3, 19, 31][round % 3]);
+                    assert(record.code == (round % 3 == 0 ? 4 : 7));
+                    assert(record.distance == (round % 3 == 1 ? 12 : 7));
+                }
+                return 0;
+            }
+        }, ["update"]);
+    }
+}
+
+// A field store can change the pointer used for the next field access.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE rejects the cast of the pointer slot"),
+)) {
+    @("jit.fieldBranchesFollowAStoreThatChangesTheirReceiver." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Cell {
+                int first;
+                int second;
+            }
+
+            align(16) struct Storage {
+                Cell* cursor;
+                Cell data;
+            }
+
+            int advance(int seed) {
+                Storage storage;
+                storage.data = Cell(11, seed);
+                storage.cursor = cast(Cell*) &storage.cursor;
+
+                // Alignment keeps this change in the low word of the pointer.
+                storage.cursor.first += cast(int) Storage.data.offsetof;
+                storage.cursor.second += 2;
+                if (storage.cursor.second < 0)
+                    return 1;
+                if (storage.cursor.first > 30)
+                    return 2;
+                if (storage.cursor.second == 22)
+                    storage.data.first = 19;
+                assert(storage.cursor is &storage.data);
+                return storage.data == Cell(19, 22) ? 0 : 3;
+            }
+
+            int main() {
+                foreach (round; 0 .. 300)
+                    assert(advance(20) == 0);
+                return 0;
+            }
+        }, ["advance"]);
+    }
+}
