@@ -36,25 +36,25 @@ that gives `sb` a rule for it, does not follow the model.
 2. `sb` writes a `build.ninja` file for its units and runs ninja. All three
    modes go through ninja. They differ only in the build statements.
 3. ninja decides what is stale, with its own rule. `sb` adds no rule of its
-   own. Each compile step writes a dependency file from the list that the
-   frontend keeps of the files it read (`global.params.makeDeps.files`):
-   imported modules and string imports. `sb` adds the root files that it
-   reads itself. The place of the dependency file follows from the place of
-   the output by convention. No command line option names it. The import
-   paths, the versions and the flags from the description of the dub project
-   are in the command line of each compile statement, so a changed option
-   changes the command. The `sb` executable is an input of each compile
-   statement (this replaces item 2 of ADR-0020).
-4. `sb` writes `build.ninja` again only when its cached description of the
-   dub project is not valid.
-5. A child `sb` process compiles each stale unit: it runs the frontend,
-   compiles all functions of the unit to bytecode and writes the unit file.
-   The parent `sb` process gets the project directory and reads the
-   description of the dub project. The child does not get the directory and
-   does not read the description: its command line gives it what it needs
-   (item 3). The owner: "The parent gets the directory!"
-   The frontend holds process-global state, so two compiles cannot share a
-   process. Only the stale units go through the frontend.
+   own. Each compile step writes a dependency file of the files that it
+   read: imported modules and string imports. It is a `.dep` file, as in a
+   reggae build, and its place follows from the place of the output by
+   convention. No command line option names it. The import paths, the
+   versions and the flags from the description of the dub project are in
+   the command line of each compile statement, so a changed option changes
+   the command. The `sb` executable is an input of each compile statement
+   (this replaces item 2 of ADR-0020).
+4. On a run with no change, no process reads the description of the dub
+   project and no process makes `build.ninja` again. ninja's rule decides
+   when `build.ninja` is made again: when the dub recipe or the freeze file
+   (`dub.selections.json`) is newer than it. `sb` makes it when it does not
+   exist. The owner: "Why would it do any of that if nothing has changed?"
+5. Each compile is a command that ninja runs, and so a child `sb` process:
+   it runs the frontend, compiles all functions of the unit to bytecode and
+   writes the unit file. The parent `sb` process gets the project
+   directory. The child gets its inputs on its command line (item 3) and
+   does not read the description of the dub project. The owner: "The parent
+   gets the directory!" Only the stale units go through the frontend.
 6. The process that runs the program loads it from disk and starts no
    frontend. Each run uses this one path, also after a compile.
 7. With `project` there is one compile statement and no link step. The
@@ -69,13 +69,16 @@ that gives `sb` a rule for it, does not follow the model.
 10. A backend executes each template instance that it can (issue #961). The
     `module` and `package` modes assume that no root unit needs an instance
     that is native in the dependency image (ADR-0007).
-11. The files are in the project state directory that `sb` already has.
+11. The files are in the project state directory.
 12. The `--save` and `--load` options stay.
-13. The build of the dependency image (ADR-0007) is not a part of a compile
-    step. In the owner's words, `sb` "need only do that if the build.ninja
-    file doesn't exist or if the dub recipe or freeze file are newer than
-    it". The freeze file is `dub.selections.json`. A change of a dependency
-    is rare.
+13. The dependency image (ADR-0007) is built by build statements of its
+    own: one for the libraries of the dub dependencies and one for the
+    `.so` file of the image. It is not a part of a compile step, and a
+    change of a dependency is rare. The compile child loads no dependency
+    image. What the image needs from the root code is in the output of the
+    compile, and the statement that builds the `.so` takes it from there.
+    The owner, on the frontend result that the `.so` needs: "this could be
+    in the .sbc".
 
 ## Measurement
 
@@ -96,8 +99,9 @@ other work, gave 3.4 ms for 1 unit, 4.5 ms for 50 and 8.5 ms for 500.
 
 ## Order of work
 
-`project` is first. `module` and `package` start after `project` is
-measured and after the rule of #961 is on master.
+`project` is first. It needs a compile that loads no dependency image
+(item 13), so the parts of track A of #960 that give this come before it.
+`module` and `package` start after `project` is measured.
 
 ## Rules that stay
 
