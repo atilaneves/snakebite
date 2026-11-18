@@ -38,89 +38,15 @@ public DependencyImage prepareImage(
     import std.conv: text;
     import std.digest.sha: sha256Of;
     import std.digest: toHexString;
-    import std.file: exists, mkdirRecurse, rename, rmdirRecurse, write;
+    import std.file: exists, mkdirRecurse, rmdirRecurse, write;
     import std.path: absolutePath, buildPath;
     import std.uuid: randomUUID;
-
     import std.algorithm.iteration: map;
     import std.array: array;
 
-    string imageArgument(string argument) {
-        version (LDC) {
-            import std.algorithm: startsWith;
-            if (argument == "-debug" || argument.startsWith("-version=")
-                    || argument.startsWith("-debug="))
-                return "-d" ~ argument;
-        }
-        return argument;
-    }
-    string[] imageArguments() {
-        version (LDC) {
-            import snakebite.frontend.checks: ldcArguments;
-            return ldcArguments(compilerArguments);
-        } else {
-            import snakebite.frontend.checks: expandedCompilerArguments;
-            return expandedCompilerArguments(compilerArguments);
-        }
-    }
-    const arguments = imageArguments;
-    const importFlags = arguments.map!imageArgument.array
-        ~ importPaths.map!(path => "-I" ~ path).array
-        ~ stringImportPaths.map!(path => "-J" ~ path).array;
-    const executable = compilerPath(compiler);
-
-    // The only image compile flag that exists solely for optimisation is
-    // `-O`: `-allinst`/`-linkonce-templates` below are for correctness
-    // (a guest object supplies no template bodies of its own), not speed.
-    const optimiseFlags = optimise ? ["-O"] : null;
-    import snakebite.frontend.checks: Checks;
-
-    Checks checks;
-    foreach (argument; arguments)
-        checks.accept(argument);
-
-    // A BetterC object has no ModuleInfo section for the DSO startup object.
-    // Keep the same runtime choice for compilation and linking.
-    const runtimeFlags = checks.betterC ? ["-betterC"] : null;
-    const startupFlags = deferStartup
-        ? ["-L--wrap=_d_dso_registry", "-L-Bsymbolic-functions"]
-            ~ RuntimeEntry.symbols
-                .map!(symbol => "-L--wrap=" ~ symbol).array
-        : null;
-
-    // The image must emit transitive template bodies too, including runtime
-    // helpers introduced by assertion lowering. No guest object supplies them.
-    version (DigitalMars) {
-        const compileFlags = ["-c", "-fPIC", "-allinst"] ~ optimiseFlags;
-        const linkFlags = ["-shared", "-defaultlib=libphobos2.so",
-            "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
-    } else version (LDC) {
-        // -allinst also analyzes unused template members, which can fail
-        // under the project's compiler options. Emit referenced bodies instead.
-        const compileFlags = ["-c", "-relocation-model=pic",
-            "-linkonce-templates"] ~ optimiseFlags;
-        const linkFlags = ["-shared", "-link-defaultlib-shared",
-            "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
-    } else {
-        static assert(false, "Dependency images require DMD or LDC");
-    }
-    // A linker response file stops DMD from moving archives
-    // outside the whole-archive pair. Guest calls do not create undefined
-    // symbols in image.o, so ordinary archive extraction loses their code.
-    import std.algorithm: endsWith;
-    string[] dependencyFlags;
-    bool[string] linked;
-    foreach (file; linkerFiles) {
-        const path = file.absolutePath;
-        if (path in linked)
-            continue;
-        linked[path] = true;
-        if (path.endsWith(".a"))
-            dependencyFlags ~= ["--whole-archive", path,
-                "--no-whole-archive"];
-        else
-            dependencyFlags ~= path;
-    }
+    const build = ImageBuild(compiler, importPaths, stringImportPaths,
+        compilerArguments, linkerFiles, linkerArguments, optimise,
+        deferStartup);
     // Everything the content fingerprint below depends on, minus file
     // contents, keys a stamp record. An unchanged compiler, input set and
     // source hits there without a compiler probe or a content hash: the
@@ -129,25 +55,25 @@ public DependencyImage prepareImage(
     // run pays this path once per invocation, so it has to cost a few
     // stats, not a hash of the whole compiler executable.
     const directory = cacheDirectory.absolutePath;
-    const settings = text("snakebite-image-v1\n", executable, "\n",
-        __VERSION__, "\n", compileFlags, "\n", linkFlags, "\n", importFlags,
-        "\n", dependencyFlags, "\n", linkerArguments, "\n",
-        inputs.map!(input => input.absolutePath).array, "\n",
-        source.length, ":", source,
+    const settings = text("snakebite-image-v1\n", build.executable, "\n",
+        __VERSION__, "\n", build.compileFlags, "\n", build.linkFlags, "\n",
+        build.importFlags, "\n", build.dependencyFlags, "\n",
+        linkerArguments, "\n", inputs.map!(input => input.absolutePath).array,
+        "\n", source.length, ":", source,
         deferStartup ? DependencyImage.entryStartupSettings : "");
     auto stamps = ProjectImageCache(
         directory.buildPath(sourceDigest(settings) ~ ".json"), settings, null,
-        executable);
+        build.executable);
     // Every record written here names the image it was saved with.
     const recorded = stamps.restore(() => source);
     if (!recorded.isNull)
         return loadImage(recorded.get);
 
-    string fingerprint = text("snakebite-image-v1\n", executable, "\n",
-        fileDigest(executable),
-        "\n", __VERSION__, "\n", compileFlags, "\n", linkFlags,
-        "\n", importFlags, "\n", dependencyFlags, "\n", linkerArguments,
-        "\n", source.length, ":", source,
+    string fingerprint = text("snakebite-image-v1\n", build.executable, "\n",
+        fileDigest(build.executable),
+        "\n", __VERSION__, "\n", build.compileFlags, "\n", build.linkFlags,
+        "\n", build.importFlags, "\n", build.dependencyFlags, "\n",
+        linkerArguments, "\n", source.length, ":", source,
         deferStartup ? DependencyImage.entryStartupSettings : "");
     foreach (input; inputs ~ linkerFiles)
         fingerprint ~= text("\n", input.absolutePath.length, ":",
@@ -160,16 +86,162 @@ public DependencyImage prepareImage(
         staging.mkdirRecurse;
         scope(exit) staging.rmdirRecurse;
         const sourcePath = staging.buildPath("image.d");
+        sourcePath.write(imageModuleText(source, deferStartup));
+        build.make(sourcePath, staging, destination);
+    }
+    auto image = loadImage(destination); // Returned as mutable: its handle is.
+    stamps.save(destination, source, inputs ~ linkerFiles);
+    return image;
+}
+
+
+// The D module that the image compiles: `source`, the code that defers the
+// start of its modules when `deferStartup`, and a check that the image
+// compiler is the host compiler.
+public string imageModuleText(in string source, in bool deferStartup) {
+    import std.conv: text;
+
+    return source
+        ~ (deferStartup ? DependencyImage.entryStartupSettings : "")
+        ~ text("\nstatic assert(__VERSION__ == ", __VERSION__,
+            ", \"Image compiler must match the host compiler version\");\n");
+}
+
+
+// Whether the image module `text` (`imageModuleText`) defers the start of
+// its modules.
+public bool defersStartup(in string text) {
+    import std.algorithm.searching: canFind;
+
+    return text.canFind(DependencyImage.entryStartupSettings);
+}
+
+
+// The commands that compile an image module and link it with the libraries
+// of the dependencies.
+public struct ImageBuild {
+    public string executable;
+    public string[] compileFlags;
+    public string[] linkFlags;
+    public string[] importFlags;
+    public string[] dependencyFlags;
+    public string[] linkerArguments;
+
+    public this(
+        in string compiler,
+        in string[] importPaths,
+        in string[] stringImportPaths,
+        in string[] compilerArguments,
+        in string[] linkerFiles,
+        in string[] linkerArguments,
+        in Optimise optimise,
+        in bool deferStartup,
+    ) {
+        import std.algorithm.iteration: map;
+        import std.array: array;
+        import std.path: absolutePath;
+
+        string imageArgument(string argument) {
+            version (LDC) {
+                import std.algorithm: startsWith;
+                if (argument == "-debug" || argument.startsWith("-version=")
+                        || argument.startsWith("-debug="))
+                    return "-d" ~ argument;
+            }
+            return argument;
+        }
+        string[] imageArguments() {
+            version (LDC) {
+                import snakebite.frontend.checks: ldcArguments;
+                return ldcArguments(compilerArguments);
+            } else {
+                import snakebite.frontend.checks: expandedCompilerArguments;
+                return expandedCompilerArguments(compilerArguments);
+            }
+        }
+        const arguments = imageArguments;
+        importFlags = arguments.map!imageArgument.array
+            ~ importPaths.map!(path => "-I" ~ path).array
+            ~ stringImportPaths.map!(path => "-J" ~ path).array;
+        executable = compilerPath(compiler);
+
+        // The only image compile flag that exists solely for optimisation is
+        // `-O`: `-allinst`/`-linkonce-templates` below are for correctness
+        // (a guest object supplies no template bodies of its own), not speed.
+        const optimiseFlags = optimise ? ["-O"] : null;
+        import snakebite.frontend.checks: Checks;
+
+        Checks checks;
+        foreach (argument; arguments)
+            checks.accept(argument);
+
+        // A BetterC object has no ModuleInfo section for the DSO startup object.
+        // Keep the same runtime choice for compilation and linking.
+        const runtimeFlags = checks.betterC ? ["-betterC"] : null;
+        const startupFlags = deferStartup
+            ? ["-L--wrap=_d_dso_registry", "-L-Bsymbolic-functions"]
+                ~ RuntimeEntry.symbols
+                    .map!(symbol => "-L--wrap=" ~ symbol).array
+            : null;
+
+        // The image must emit transitive template bodies too, including runtime
+        // helpers introduced by assertion lowering. No guest object supplies them.
+        version (DigitalMars) {
+            compileFlags = ["-c", "-fPIC", "-allinst"] ~ optimiseFlags;
+            linkFlags = ["-shared", "-defaultlib=libphobos2.so",
+                "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
+        } else version (LDC) {
+            // -allinst also analyzes unused template members, which can fail
+            // under the project's compiler options. Emit referenced bodies instead.
+            compileFlags = ["-c", "-relocation-model=pic",
+                "-linkonce-templates"] ~ optimiseFlags;
+            linkFlags = ["-shared", "-link-defaultlib-shared",
+                "-L--no-undefined"] ~ runtimeFlags ~ startupFlags;
+        } else {
+            static assert(false, "Dependency images require DMD or LDC");
+        }
+        // A linker response file stops DMD from moving archives
+        // outside the whole-archive pair. Guest calls do not create undefined
+        // symbols in image.o, so ordinary archive extraction loses their code.
+        import std.algorithm: endsWith;
+        bool[string] linked;
+        foreach (file; linkerFiles) {
+            const path = file.absolutePath;
+            if (path in linked)
+                continue;
+            linked[path] = true;
+            if (path.endsWith(".a"))
+                dependencyFlags ~= ["--whole-archive", path,
+                    "--no-whole-archive"];
+            else
+                dependencyFlags ~= path;
+        }
+        this.linkerArguments = linkerArguments.dup;
+    }
+
+    // Compiles the image module `sourcePath` and links it to `destination`,
+    // with the intermediate files in the existing directory `staging`. With
+    // `makeDependencies`, the compiler writes there the files that it read,
+    // for its output, the object file that this returns.
+    public string make(
+        in string sourcePath,
+        in string staging,
+        in string destination,
+        in string makeDependencies = null,
+    ) const {
+        import std.algorithm.iteration: map;
+        import std.array: array, join;
+        import std.file: rename, write;
+        import std.path: buildPath;
+        import std.string: replace;
+
         const objectPath = staging.buildPath("image.o");
         const imagePath = staging.buildPath("image.so");
-        sourcePath.write(source ~ (deferStartup ? DependencyImage.entryStartupSettings : "")
-            ~ text("\nstatic assert(__VERSION__ == ",
-            __VERSION__, ", \"Image compiler must match the host compiler version\");\n"));
+        const dependencyFlag = makeDependencies.length
+            ? ["-makedeps=" ~ makeDependencies] : null;
         runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
-            ~ [sourcePath, "-of=" ~ objectPath]);
+            ~ dependencyFlag ~ [sourcePath, "-of=" ~ objectPath]);
 
-        import std.array: join;
-        import std.string: replace;
         const responsePath = staging.buildPath("linker.rsp");
         responsePath.write(dependencyFlags.map!(argument =>
             "\"" ~ argument.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\"")
@@ -190,10 +262,8 @@ public DependencyImage prepareImage(
         // Readers must never observe a partially linked image. Concurrent
         // builders publish equivalent complete files with atomic rename.
         rename(imagePath, destination);
+        return objectPath;
     }
-    auto image = loadImage(destination); // Returned as mutable: its handle is.
-    stamps.save(destination, source, inputs ~ linkerFiles);
-    return image;
 }
 
 
@@ -221,7 +291,9 @@ private void runCompiler(
 }
 
 
-private string compilerPath(in string compiler) {
+// The absolute path of the host compiler `compiler`, a path or a name that
+// `PATH` finds.
+public string compilerPath(in string compiler) {
     import std.file: exists;
     import std.path: absolutePath, buildPath;
     import std.process: environment;

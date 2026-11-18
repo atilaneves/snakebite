@@ -108,6 +108,48 @@ public imported!"dmd.dmodule".Module[] parseSnippets(in string[] sources) {
     return compiler.parseSnippets(sources);
 }
 
+// The files that the frontend read for a whole program, as dmd records them
+// for `-makedeps`: each module that it read (`Module.read`) and each string
+// import file. The root files are not in the record: dmd gets their text, not
+// their names. A name from dmd is the one dmd read, so a relative name is
+// relative to the directory that the frontend ran in. Empty in a snippet
+// process.
+public string[] filesRead() {
+    import std.algorithm.iteration: map;
+    import std.array: array;
+    import std.string: fromStringz;
+
+    // The names are frontend memory, which is never freed.
+    const names = compiler.inside(() {
+        import dmd.globals: global;
+
+        const(char)*[] copied;
+        foreach (name; global.params.makeDeps.files)
+            copied ~= name;
+        return copied;
+    });
+    return names.map!(name => name.fromStringz.idup).array;
+}
+
+// `path` as a Makefile rule names it, escaped as `dmd -makedeps` escapes it.
+public string escapedMakePath(in string path) {
+    import core.stdc.stdlib: free;
+    import std.string: toStringz;
+
+    const name = path.toStringz;
+    // `OutBuffer` allocates with C `malloc`: the copy below is the GC's.
+    auto escaped = compiler.inside(() {
+        import dmd.common.outbuffer: OutBuffer;
+        import dmd.deps: writeEscapedMakePath;
+
+        OutBuffer buffer;
+        buffer.writeEscapedMakePath(name);
+        return buffer.extractSlice;
+    });
+    scope(exit) free(escaped.ptr);
+    return escaped.idup;
+}
+
 // Runs host code under the frontend lock, so it sees dmd's state
 // settled and excludes every other thread's dmd work. It is still host
 // code: it allocates from the GC, and it reaches dmd only through
@@ -716,6 +758,9 @@ final class Compiler {
         if (snippets) {
             global.params.allInst = true;
             parseLightningRod;
+        } else {
+            // Keep dmd's record of the files that it reads (`filesRead`).
+            global.params.makeDeps.doOutput = true;
         }
     }
 

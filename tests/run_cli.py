@@ -3051,6 +3051,124 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
     assert "another build" in loaded.stderr, output(loaded)
 
 
+# A dub project with no dependency, whose recipe gives an import path, a
+# string import path and a version. The program prints on stdout and on
+# stderr what the three give. `declarations` are more declarations of the
+# root module.
+def write_build_project(
+    tmp_path: Path, name: str, declarations: str = "",
+) -> Path:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe(name)
+          + 'importPaths "source" "../lib"\n'
+          + 'stringImportPaths "views"\n'
+          + 'versions "Flavour"\n')
+    write(app / "source" / "calc.d", f"""
+        module calc;
+        import core.stdc.stdio: fprintf, printf, stderr;
+        import outside: answer;
+        {declarations}
+        version (Flavour) enum flavour = "flavoured";
+        else enum flavour = "plain";
+        enum text = import("text.txt");
+        unittest {{
+            printf("%.*s %d %.*s\\n", cast(int) flavour.length, flavour.ptr,
+                answer, cast(int) text.length, text.ptr);
+            fprintf(stderr, "on stderr\\n");
+        }}
+        """)
+    write(tmp_path / "lib" / "outside.d", """
+        module outside;
+        enum answer = 42;
+        """)
+    write(app / "views" / "text.txt", "viewed")
+    return app
+
+
+def touch(path: Path) -> None:
+    os.utime(path)
+
+
+def assert_runs_as_bin_sb(
+    built: subprocess.CompletedProcess[str],
+    direct: subprocess.CompletedProcess[str],
+) -> None:
+    assert built.returncode == direct.returncode, output(built)
+    assert guest_lines(built) == guest_lines(direct), output(built)
+    assert built.stderr == direct.stderr, output(built)
+
+
+# `--build=project` gives the result of `bin/sb DIR`: on the first run, on a
+# run with no change and on a run after a touch of a root file.
+def test_build_project_runs_as_bin_sb(tmp_path: Path) -> None:
+    app = write_build_project(tmp_path, "build-project-runs")
+
+    for change in (None, None, app / "source" / "calc.d"):
+        if change is not None:
+            touch(change)
+        built = run_sb("--build=project", str(app), cwd=tmp_path)
+        direct = run_sb(str(app), cwd=tmp_path)
+        assert_runs_as_bin_sb(built, direct)
+        assert "flavoured 42 viewed" in guest_lines(built), output(built)
+
+
+# The frontend runs, and prints the message of the `pragma(msg)`, only in a
+# compile, and a compile starts only after a change of what it reads: a root
+# file, an imported file, a string import file, the list of root files, the
+# recipe values, or the `sb` executable. A touch of the recipe that does not
+# change its values starts none.
+def test_build_project_compiles_only_after_a_change(tmp_path: Path) -> None:
+    message = "the frontend ran"
+    app = write_build_project(tmp_path, "build-project-changes",
+                              f'pragma(msg, "{message}");')
+    sb = tmp_path / "sb"
+    shutil.copy2(sb_path(), sb)
+
+    def compiles() -> int:
+        result = subprocess.run(
+            [str(sb), "--build=project", str(app)], capture_output=True,
+            check=False, text=True, timeout=120, cwd=tmp_path)
+        assert result.returncode == 0, output(result)
+        return output(result).count(message)
+
+    assert compiles() == 1
+    assert compiles() == 0
+    touch(app / "dub.sdl")
+    assert compiles() == 0
+    for changed in (app / "source" / "calc.d", tmp_path / "lib" / "outside.d",
+                    app / "views" / "text.txt"):
+        touch(changed)
+        assert compiles() == 1, changed
+    write(app / "source" / "extra.d", "module extra;\n")
+    assert compiles() == 1
+    with (app / "dub.sdl").open("a", encoding="utf-8") as recipe:
+        recipe.write('versions "Another"\n')
+    assert compiles() == 1
+    touch(sb)
+    assert compiles() == 1
+    assert compiles() == 0
+
+
+# A compile error ends the run with status 1 and the error text of
+# `bin/sb DIR`. The run after the correction gives the result of `bin/sb DIR`.
+def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
+    app = write_build_project(tmp_path, "build-project-error",
+                              "int broken() { return undefinedName; }")
+
+    built = run_sb("--build=project", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 1, output(direct)
+    assert built.returncode == 1, output(built)
+    assert "undefinedName" in direct.stderr, output(direct)
+    assert direct.stderr in built.stderr, output(built)
+
+    root = app / "source" / "calc.d"
+    root.write_text(root.read_text().replace("undefinedName", "3"))
+    built = run_sb("--build=project", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+
+
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(

@@ -58,9 +58,38 @@ private DependencyAnalysis dependencyAnalysis(
     DependencyAnalysis result;
     withCompilerLock({
         result = DependencyAnalysis(imageSource(program), imageInputs(program),
-            program.hasCEntryPoint && !program.checks.betterC);
+            defersStartup(program));
     });
     return result;
+}
+
+
+// The image module of `program` (`imageModuleText`): what the image of a
+// project entry needs from the root code.
+public string imageModule(imported!"snakebite.program".Program program) {
+    import snakebite.frontend.compiler: withCompilerLock;
+    import snakebite.image.preparation: imageModuleText;
+    import snakebite.project.imagesource: imageSource;
+
+    string text;
+    withCompilerLock({
+        text = imageModuleText(moduleSource(imageSource(program)),
+            defersStartup(program));
+    });
+    return text;
+}
+
+
+// Whether the image of a project entry defers the start of its modules.
+private bool defersStartup(imported!"snakebite.program".Program program) {
+    return program.hasCEntryPoint && !program.checks.betterC;
+}
+
+
+// The source of the image module: `generated`, or an empty module when the
+// image has no code of the root package.
+private string moduleSource(in string generated) {
+    return generated.length ? generated : "module snakebite_dependency_image;\n";
 }
 
 
@@ -118,8 +147,7 @@ private struct Preparation {
                 const generated = source();
                 DependencyImage built;
                 if (generated.length || _sources.linkerFiles.length)
-                    built = buildImage(generated.length ? generated
-                        : "module snakebite_dependency_image;\n", analysis);
+                    built = buildImage(moduleSource(generated), analysis);
                 return ProjectImageCache.Prepared(built,
                     watchedInputs(analysis.inputs));
             });

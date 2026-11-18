@@ -183,18 +183,26 @@ public ExecutionReport executeBackend(
 }
 
 // Compiles all of `program` and writes it to `path`; it runs nothing.
-// `workingDirectory` is where a load runs the program.
+// `workingDirectory` is where a load runs the program, and `imagePath` the
+// dependency image that it loads, or empty for none.
 public void saveProgram(
     imported!"snakebite.backends".Program program,
     in string path,
     in string workingDirectory,
+    in string imagePath,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode: Bytecode;
 
     auto backend = Owned!Bytecode(new Bytecode(program, jit, true));
-    backend.save(path, workingDirectory);
+    backend.save(path, workingDirectory, imagePath);
+}
+
+
+// The path of the dependency image of `program`, or empty when it has none.
+public string imagePathOf(imported!"snakebite.backends".Program program) {
+    return program.dependencyImage is null ? "" : program.dependencyImage.path;
 }
 
 
