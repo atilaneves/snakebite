@@ -57,8 +57,11 @@ that gives `sb` a rule for it, does not follow the model.
    gets the directory!" Only the stale units go through the frontend.
 6. The process that runs the program loads it from disk and starts no
    frontend. Each run uses this one path, also after a compile.
-7. With `project` there is one compile statement and no link step. The
-   output is the saved **Bytecode program** of ADR-0017.
+7. With `project` there is one compile statement. Its output is the saved
+   **Bytecode program** of ADR-0017. A symbol that root code uses and that
+   no object defines is an error of the build in each mode, as a native
+   link error. The owner: "the alternative is what native code does: linker
+   error." So `project` has the link statement too, with one unit.
 8. With `module` and `package` a link step writes one saved program from the
    unit files. A run loads only that file. A load of separate unit files is
    built only if the measured link time is a large part of the rebuild.
