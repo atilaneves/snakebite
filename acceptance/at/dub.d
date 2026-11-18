@@ -12,7 +12,9 @@ import std.typecons: nullable;
 
 // Separate processes match normal sb execution. DMD retains parsed modules
 // inside one process, independently of the discovery cache.
-static foreach (backend; Matrix!()) {
+static foreach (backend; Matrix!(
+    ChildProcessRun,
+)) {
     @("cache.normalExecutionSeesSourceEdits." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -73,6 +75,7 @@ configuration "unittest" {
 // otherwise, so `f`'s closure is always read with the layout that allocated
 // it.
 static foreach (backend; Matrix!(
+    ChildProcessRun,
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run file IO"),
 )) {
     @("guestDirEntriesFindsGuestFilesNotHostTemplateInstance." ~ backend.stringof)

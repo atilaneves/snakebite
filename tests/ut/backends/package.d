@@ -16,6 +16,7 @@ import snakebite.frontend.dmd.functions: findFunction, findStruct;
 import std.conv: text;
 import std.meta: Filter, staticIndexOf;
 import std.traits: isInstanceOf;
+import ut.loaded: LoadedOwner, SavedFile, saveProgram;
 
 
 // The native oracle, as a matrix entry. Not a snakebite backend: `code` is
@@ -28,8 +29,9 @@ import std.traits: isInstanceOf;
 public struct Native {}
 
 // Every implementation a guest program can run on in a test: the native
-// oracle plus every real backend.
-public alias TestBackends = AliasSeq!(Native, Backends);
+// oracle, every real backend, and the `Bytecode` backend after a save and a
+// load.
+public alias TestBackends = AliasSeq!(Native, Backends, LoadedBytecode);
 
 // Why a backend is missing from a test's `Matrix!(...)`. Every `Omit!(...)`
 // names one of these so the omission is documentation, not silence.
@@ -66,6 +68,20 @@ public struct Omit(B, Because why, string note = "") {
     public enum note_ = note;
 }
 
+// A save of the program meets a word that holds the address of host code or
+// data that has no symbol name, and the save ends the process.
+public alias SaveMeetsUnnamedHostAddress = Omit!(LoadedBytecode,
+    Because.unconfirmed,
+    "the save meets an address of host code or data that has no symbol "
+    ~ "name and ends the process; from RAM the test passes");
+
+// A test whose program runs in a child process, `bin/sb`, which compiles it.
+// No save and no load happens in the process of the test.
+public alias ChildProcessRun = Omit!(LoadedBytecode,
+    Because.inexpressible,
+    "the program runs in a child process that compiles it; the arm saves "
+    ~ "and loads in the process of the test");
+
 // The backends a test runs on: `TestBackends` minus every `Omit!(...)`.
 // Usable directly as `static foreach (backend; Matrix!(...))`.
 public template Matrix(specs...) {
@@ -80,7 +96,11 @@ public template Matrix(specs...) {
             alias Omitted = AliasSeq!(specs[0].Backend, Omitted!(specs[1 .. $]));
     }
 
-    private enum bool notOmitted(B) = staticIndexOf!(B, Omitted!specs) == -1;
+    // A test without the `Bytecode` arm has no `LoadedBytecode` arm: the
+    // second runs what the first compiles, after a save and a load.
+    private enum bool notOmitted(B) = staticIndexOf!(B, Omitted!specs) == -1
+        && (!is(B == LoadedBytecode)
+            || staticIndexOf!(Bytecode, Omitted!specs) == -1);
 
     public alias Matrix = Filter!(notOmitted, TestBackends);
 }
@@ -166,10 +186,12 @@ public void shouldBeStatusOfWithJitCode(
     in string file = __FILE__,
     in size_t line = __LINE__,
 ) {
-    static if (!is(BackendType == Bytecode))
+    static if (!is(BackendType == Bytecode)
+            && !is(BackendType == LoadedBytecode))
         shouldBeStatusOf!(BackendType, code, module_)(expected, file, line);
     else {
         import snakebite.backends.bytecode.inspection: isJitCompiled;
+        import snakebite.backends.bytecode.vm: Function;
 
         enum program_ = RegisterProgram!(module_, code).program;
         auto program = Program([parsedProgram(program_)], "snakebite");
@@ -182,12 +204,17 @@ public void shouldBeStatusOfWithJitCode(
         foreach (name; jitted) {
             bool found;
             bool compiled;
-            backend.eachCompiled((declaration, function_) {
-                if (declaration.ident.toString == name) {
-                    found = true;
-                    compiled = isJitCompiled(function_);
-                }
-            });
+            void visit(const(Function)* function_) {
+                found = true;
+                compiled = isJitCompiled(function_);
+            }
+            static if (is(BackendType == Bytecode))
+                backend.eachCompiled((declaration, function_) {
+                    if (declaration.ident.toString == name)
+                        visit(function_);
+                });
+            else
+                backend.eachLoaded(name, &visit);
             if (!found)
                 throw new UnitTestException(
                     text("`", name, "` was not compiled"), file, line);
@@ -524,9 +551,97 @@ public Module[] registeredSnippets(string[] sources, string module_ = __MODULE__
 
 // Every program each test module will run or call, filled in before `main`.
 private __gshared GuestProgram[][string] _registeredPrograms;
+// A parsed guest program, and the saved form of it once a test on
+// `LoadedBytecode` needs it. The file lives as long as the parsed program.
+private struct Parsed {
+    Module module_;
+    SavedFile* saved;
+}
+
 // Filled in one module at a time by `parsedProgram`.
-private __gshared Module[GuestProgram] _parsedPrograms;
+private __gshared Parsed[GuestProgram] _parsedPrograms;
 private __gshared bool[string] _parsedProgramModules;
+
+// A handle on a new backend of type `B` for `program`. A `Bytecode` backend
+// and a `LoadedBytecode` get the JIT setting of this run of `bin/ut`. Each
+// `LoadedBytecode` loads the file that one save of the program wrote.
+public auto ownedBackend(B)(const Program program) {
+    static if (is(B == Bytecode))
+        return Owned!B(new Bytecode(program, testJit));
+    else static if (is(B == LoadedBytecode))
+        return LoadedOwner(savedFileOf(program, testJit));
+    else
+        return Owned!B(program);
+}
+
+// The saved form of `program` for `jit`. A program that is one parsed guest
+// program keeps its file with it, so a save happens once for each program and
+// JIT setting. Any other program saves each time.
+private const(SavedFile)* savedFileOf(
+    const Program program, in JitSetting jit,
+) {
+    if (program.rootModules.length != 1)
+        return savedOnHeap(program, jit);
+
+    // The save runs outside the lock: it takes the frontend lock, and a
+    // thread that holds that lock can wait for this one. Two threads that
+    // save the same program at the same time both save; the first to store
+    // wins.
+    const(SavedFile)* stored() {
+        _mutex.lock;
+        scope(exit) _mutex.unlock;
+
+        foreach (ref parsed; _parsedPrograms)
+            if (parsed.module_ is program.rootModules[0])
+                return parsed.saved is null || parsed.saved.jit != jit
+                    ? null : parsed.saved;
+        return null;
+    }
+    if (auto saved = stored)
+        return saved;
+    if (auto saved = unregisteredSaved(cast(Module) program.rootModules[0], jit))
+        return saved;
+
+    auto saved = savedOnHeap(program, jit);
+    _mutex.lock;
+    scope(exit) _mutex.unlock;
+
+    foreach (ref parsed; _parsedPrograms) {
+        if (parsed.module_ !is program.rootModules[0])
+            continue;
+        if (parsed.saved is null || parsed.saved.jit != jit)
+            parsed.saved = saved;
+        return parsed.saved;
+    }
+    // A module that no registration parsed: a test that parses its own
+    // source. Arena memory is never freed, so the module is never replaced
+    // by another at its address.
+    auto own = cast(Module) program.rootModules[0] in _savedOfUnregistered;
+    if (own is null || (*own).jit != jit) {
+        _savedOfUnregistered[cast(Module) program.rootModules[0]] = saved;
+        return saved;
+    }
+    return *own;
+}
+
+// The file of a module that no registration parsed, or null.
+private const(SavedFile)* unregisteredSaved(
+    Module module_, in JitSetting jit,
+) {
+    _mutex.lock;
+    scope(exit) _mutex.unlock;
+
+    auto saved = module_ in _savedOfUnregistered;
+    return saved is null || (*saved).jit != jit ? null : *saved;
+}
+
+private __gshared SavedFile*[Module] _savedOfUnregistered;
+
+private SavedFile* savedOnHeap(const Program program, in JitSetting jit) {
+    auto saved = new SavedFile;
+    *saved = saveProgram(program, jit);
+    return saved;
+}
 
 private Module parsedProgram(in GuestProgram program) {
     _mutex.lock;
@@ -538,7 +653,7 @@ private Module parsedProgram(in GuestProgram program) {
     // The map keys by value, and `in` makes the lookup key const.
     auto found = cast(GuestProgram) program in _parsedPrograms;
     assert(found !is null, text("Program was not registered: ", program));
-    return *found;
+    return found.module_;
 }
 
 private void parseModulePrograms(in string module_) {
@@ -549,7 +664,7 @@ private void parseModulePrograms(in string module_) {
     const sources = programs.map!(program => program.code).array;
     auto guestModules = parseSnippets(sources);
     foreach (index, program; programs)
-        _parsedPrograms[cast(GuestProgram) program] = guestModules[index];
+        _parsedPrograms[cast(GuestProgram) program] = Parsed(guestModules[index]);
     _parsedProgramModules[module_] = true;
 }
 

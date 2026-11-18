@@ -3,9 +3,9 @@ module ut;
 public import unit_threaded;
 public import snakebite;
 public import snakebite.backends.bytecode.vm: JitSetting;
+public import ut.loaded: LoadedBytecode;
 
 import core.runtime: Runtime;
-import snakebite.backends.bytecode: Bytecode;
 import snakebite.memory.gc: lowmemHelp, selectFrontendMemory;
 import std.algorithm.iteration: filter;
 import std.algorithm.searching: canFind;
@@ -43,15 +43,6 @@ public mixin template planCache() {
 
     CallPlanStore planStore = CallPlanStore(null);
     PlanCache cache = PlanCache(&planStore);
-}
-
-// A handle on a new backend of type `B` for `program`. A `Bytecode` backend
-// gets the JIT setting of this run of `bin/ut`.
-public Owned!B ownedBackend(B)(const Program program) {
-    static if (is(B == Bytecode))
-        return Owned!B(new Bytecode(program, testJit));
-    else
-        return Owned!B(program);
 }
 
 // `--no-jit` and `--eager-jit` for a test runner, which set `testJit`, taken

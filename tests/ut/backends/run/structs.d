@@ -644,6 +644,7 @@ static foreach (backend; Matrix!(
 // the deprecated complex and imaginary types too.
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot read runtime TypeInfo"),
+    SaveMeetsUnnamedHostAddress,
 )) {
     @("runtimeTypeInfoEnumBaseOfEveryType." ~ backend.stringof)
     @Tags(backend.stringof)

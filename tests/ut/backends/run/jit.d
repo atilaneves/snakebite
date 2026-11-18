@@ -136,8 +136,8 @@ static foreach (backend; Matrix!()) {
     }
 
     @("jit.floatingLiteralsKeepTheirValues." ~ backend.stringof)
-    @Tags(is(backend == Bytecode) ? [backend.stringof, "requires-jit-code"]
-        : [backend.stringof])
+    @Tags(is(backend == Bytecode) || is(backend == LoadedBytecode)
+        ? [backend.stringof, "requires-jit-code"] : [backend.stringof])
     unittest {
         0.shouldBeStatusOfWithJitCode!(backend, q{
             int work(double value, float narrow) {
@@ -189,6 +189,12 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
+}
+
+static foreach (backend; Matrix!(
+    Omit!(LoadedBytecode, Because.unconfirmed,
+        "after a load, `orbit` gets no JIT code; from RAM it does (#1006)"),
+)) {
     @("jit.floatingPointLoopCanEnterAtTheCounterUpdate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -234,6 +240,9 @@ static foreach (backend; Matrix!()) {
             }
         }, ["orbit"]);
     }
+}
+
+static foreach (backend; Matrix!()) {
 
     @("jit.hotForLoopChecksItsFirstIterationAndContinue." ~ backend.stringof)
     @Tags(backend.stringof)

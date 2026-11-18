@@ -18,6 +18,33 @@ public bool isJitCompiled(const(Function)* function_) {
     return jitCompiled(function_);
 }
 
+// Each function that `backend` compiled, with the position of its function in
+// the compiled program: the index of its module in the program and its index
+// in the module. A save and a load keep both orders.
+public void eachCompiledPosition(
+    imported!"snakebite.backends.bytecode".Bytecode backend,
+    scope void delegate(
+        imported!"snakebite.frontend.ast".FuncDeclaration, size_t, size_t,
+    ) visit,
+) {
+    size_t[2][const(Function)*] positions;
+    foreach (m, module_; backend.compiledProgram._modules)
+        foreach (f, function_; module_._functions)
+            positions[function_] = [m, f];
+    backend.eachCompiled((declaration, compiled) {
+        if (const position = compiled in positions)
+            visit(declaration, (*position)[0], (*position)[1]);
+    });
+}
+
+// The function at `index` of the module `module_` of `program`.
+public const(Function)* functionAt(
+    ref imported!"snakebite.backends.bytecode.program".Program program,
+    size_t module_, size_t index,
+) {
+    return program._modules[module_]._functions[index];
+}
+
 // Whether the role table says that the handler's `field` holds an address
 // (`Role.address`) or an instruction (`Role.instruction`); "none" when the
 // table does not know the handler.

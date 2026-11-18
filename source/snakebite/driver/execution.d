@@ -242,34 +242,18 @@ public ExecutionReport executeLoaded(
     in string[] programArguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
-    import core.memory: GC;
-    import snakebite.backends.bytecode.file: loadProgram, readHeader;
-    import snakebite.backends.bytecode.program: Program;
-    import snakebite.backends.bytecode.runner: Runner, wire;
     import snakebite.backends.statistics: CompilationStatistics, ExecutionClock;
-    import snakebite.failure.report: SnakebiteException;
-    import snakebite.image.dependency: DependencyImage, loadImage, TestHooks;
-    import snakebite.image.preparation: generatorKey;
+    import snakebite.image.dependency: TestHooks;
     import snakebite.project.loading: EndsProcess, ProjectDirectory;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.stdio: stdin, stdout, stderr;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    const header = readHeader(contents);
-    if (header.buildKey != generatorKey)
-        throw new SnakebiteException(
-            "the program file was written by another build of snakebite");
-
-    // On the GC heap, as the image of a compile is: the program and its call
-    // plans and tables of thread-local variables refer to it until the
-    // module destructors have run, after this function returns.
-    DependencyImage* image;
-    if (header.imagePath.length) {
-        image = new DependencyImage;
-        *image = loadImage(header.imagePath);
-    }
+    auto loaded = loadProgramFile(contents, jit);
+    scope(exit) loaded.runner.end;
     scope entered = ProjectDirectory(
-        header.workingDirectory, header.workingDirectory, EndsProcess.yes);
+        loaded.header.workingDirectory, loaded.header.workingDirectory,
+        EndsProcess.yes);
     entered.enterWorking;
 
     auto savedInput = stdin;
@@ -281,21 +265,69 @@ public ExecutionReport executeLoaded(
         stderr = savedError;
     }
 
-    // On the GC heap, as the backend of a compile is: the module destructors
-    // run when the process ends, after this function returns, and callback
-    // entries reach the program and the runner until then.
-    auto program = new Program(image);
-    auto runner = cast(Runner*) GC.calloc(Runner.sizeof);
-    wire(*program, *runner, jit);
-    scope(exit) runner.end;
-    loadProgram(contents, *program, *runner, image);
-
+    auto program = loaded.program;
     CompilationStatistics compilation;
     const running = ExecutionClock.start(compilation);
     return runStartData(
         program.startData, compilation, running, stopWatch,
-        image is null ? TestHooks.init : image.testHooks, true,
+        loaded.image is null ? TestHooks.init : loaded.image.testHooks, true,
         [program.startData.programName] ~ programArguments, false, true);
+}
+
+
+// A program that `loadProgramFile` read, with no compiler. Its owner ends the
+// runner (`Runner.end`) when the program has run.
+public struct LoadedProgram {
+    import snakebite.backends.bytecode.file: Header;
+    import snakebite.backends.bytecode.program: Program;
+    import snakebite.backends.bytecode.runner: Runner;
+    import snakebite.image.dependency: DependencyImage;
+
+    public Header header;
+    // Null when the program runs on no dependency image.
+    public DependencyImage* image;
+    public Program* program;
+    public Runner* runner;
+}
+
+
+// Reads the program file whose bytes are `contents` into a new program wired
+// to a new runner with `jit`. It does not change the working directory.
+public LoadedProgram loadProgramFile(
+    const(ubyte)[] contents,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
+    import core.memory: GC;
+    import snakebite.backends.bytecode.file: loadProgram, readHeader;
+    import snakebite.backends.bytecode.program: Program;
+    import snakebite.backends.bytecode.runner: Runner, wire;
+    import snakebite.failure.report: SnakebiteException;
+    import snakebite.image.dependency: DependencyImage, loadImage;
+    import snakebite.image.preparation: generatorKey;
+
+    LoadedProgram loaded;
+    loaded.header = readHeader(contents);
+    if (loaded.header.buildKey != generatorKey)
+        throw new SnakebiteException(
+            "the program file was written by another build of snakebite");
+
+    // On the GC heap, as the image of a compile is: the program and its call
+    // plans and tables of thread-local variables refer to it until the
+    // module destructors have run, after a run returns.
+    if (loaded.header.imagePath.length) {
+        loaded.image = new DependencyImage;
+        *loaded.image = loadImage(loaded.header.imagePath);
+    }
+
+    // On the GC heap, as the backend of a compile is: the module destructors
+    // run when the process ends, after a run returns, and callback entries
+    // reach the program and the runner until then.
+    loaded.program = new Program(loaded.image);
+    loaded.runner = cast(Runner*) GC.calloc(Runner.sizeof);
+    wire(*loaded.program, *loaded.runner, jit);
+    scope(failure) loaded.runner.end;
+    loadProgram(contents, *loaded.program, *loaded.runner, loaded.image);
+    return loaded;
 }
 
 

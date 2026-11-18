@@ -3,6 +3,7 @@ module ut.backends.program;
 
 import snakebite.frontend.ast: FuncDeclaration;
 import snakebite.program: Program;
+import ut.backends: ownedBackend;
 import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.ctfe: Ctfe;
 import snakebite.failure.report: SnakebiteException;

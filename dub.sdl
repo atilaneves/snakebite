@@ -85,6 +85,7 @@ configuration "acceptance-test" {
     sourcePaths "acceptance"
     sourceFiles "tests/ut/process.d"
     sourceFiles "tests/ut/threadsync.d"
+    sourceFiles "tests/ut/loaded.d"
     sourceFiles "tests/ut/package.d" "tests/ut/backends/package.d"
     sourceFiles "tests/ut/backends/call/intrinsics.d"
     sourceFiles "tests/ut/backends/call/arrayoperations.d"

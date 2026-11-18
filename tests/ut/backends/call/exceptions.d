@@ -577,7 +577,7 @@ static foreach (backend; Matrix!(
 // `SnakebiteException` on both backends, in a normal `-release` build
 // too. `Native` cannot express a call with the wrong argument count, so
 // only the two backends that can be driven directly are covered here.
-static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
+static foreach (backend; AliasSeq!(Interpreter, Bytecode, LoadedBytecode)) {
     @("hostToGuestArguments.wrongCount.throws." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -604,7 +604,7 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
 // count check `hostToGuestArguments.wrongCount.throws` exercises without
 // a hidden `this`: the host handed a struct method zero arguments, one
 // short of the one slot its hidden `this` needs.
-static foreach (backend; AliasSeq!(Interpreter, Bytecode)) {
+static foreach (backend; AliasSeq!(Interpreter, Bytecode, LoadedBytecode)) {
     @("hostToGuestArguments.methodWithoutContext.throws." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
