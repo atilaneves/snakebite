@@ -528,7 +528,7 @@ static foreach (backend; Matrix!(
                     "index [18446744073709551614] is out of bounds for array of length 3",
                     [0, 1, 0]);
                 flags[] = 1;
-                verifyFailure(flags, 1, int.max, int.max,
+                verifyFailure(flags, 1, 1, int.max,
                     "index [2147483647] is out of bounds for array of length 3",
                     [0, 1, 1]);
                 return 0;
