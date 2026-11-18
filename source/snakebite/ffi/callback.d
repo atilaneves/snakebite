@@ -559,7 +559,7 @@ private void invoke(ref Slot slot, CallFrame* frame) {
     if (slot.nativeAddress is null)
         slot.handler(slot.owner, &call);
     else
-        plan.callAt(slot.nativeAddress, call.returnPlace,
+        plan.forwardAt(slot.nativeAddress, call.returnPlace,
             cast(const(void*)[]) addresses);
 
     plan.packResult(frame, call.returnPlace);

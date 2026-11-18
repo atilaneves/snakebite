@@ -14,6 +14,15 @@ mixin template Export(alias owner, string member, string consumer) {
         ~ "\t" ~ owner.stringof ~ "." ~ consumer);
 }
 
+// The data of a fixture class that the code generator names: its class
+// information, its vtable and its initial image.
+mixin template ExportClassData(T, string consumer) {
+    static assert(consumer.length != 0 && T.mangleof[0] == 'C');
+    static foreach (suffix; ["7__ClassZ", "6__vtblZ", "6__initZ"])
+        pragma(msg, "SB_EXPORT\t_D" ~ T.mangleof[1 .. $] ~ suffix
+            ~ "\t" ~ T.stringof ~ "." ~ consumer);
+}
+
 version (SnakebiteAcceptanceHostExports) {
     import dabi = at.ffi.dabi;
     import dvariadic = at.ffi.dvariadic;
@@ -36,6 +45,9 @@ import cost = ut.backends.interpreter.cost;
 import routing = ut.backends.call.routing;
 
 mixin Export!(routing, "snakebite_ut_variadic_instance_sum", "instanceVariadic.directAndAddressAgree");
+mixin Export!(routing, "routingSharedCount", "dependencyData.sharedAndThreadLocal.bothSides");
+mixin Export!(routing, "routingThreadCount", "dependencyData.sharedAndThreadLocal.bothSides");
+mixin Export!(routing, "routingBump", "dependencyData.sharedAndThreadLocal.bothSides");
 mixin Export!(symbols, "snakebite_symbol_dual_definition_test", "symbolAddress.loadedSharedObjectAnswersBeforeExecutable");
 mixin Export!(symbols, "snakebite_symbol_executable_only_test", "symbolAddress.fallsBackToExecutableWhenNothingElseHasIt");
 mixin Export!(concurrency, "snakebite_ut_concurrency_wide", "plan.concurrentFirstPlansOfAFreshStructTypeAgree");
@@ -221,6 +233,7 @@ mixin Export!(classes, "snakebite_ut_destructor_real_only_return", "destructorEx
 mixin Export!(classes, "hostDispatchObject", "hostCreatedObjectUsesVirtualGuestDispatch.Interpreter");
 mixin Export!(__traits(getMember, classes, "LinkedScopeResource"), "__ctor", "ut.backends.run.classes.linkedScopeClassRunsDestructorAtScopeExit");
 mixin Export!(__traits(getMember, classes, "LinkedScopeResource"), "__dtor", "ut.backends.run.classes.linkedScopeClassRunsDestructorAtScopeExit");
+mixin ExportClassData!(__traits(getMember, classes, "LinkedScopeResource"), "ut.backends.run.classes.linkedScopeClassRunsDestructorAtScopeExit");
 mixin Export!(cost, "fillFinalizerTestCache", "ordinaryCallbackGuest");
 mixin Export!(cost, "callFinalizerTestCallback", "ordinaryCallbackGuest");
 mixin Export!(cost, "callPreparedTestCallback", "ordinaryCallbackGuest");

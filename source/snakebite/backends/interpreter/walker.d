@@ -6634,11 +6634,11 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            auto runtime = classRuntimeInfo(declaration);
+            const initial = _runtimeTypes.initializer(declaration);
             const alignment = declaration.alignsize == 0
                 ? 1 : declaration.alignsize;
             auto object = _frames.reserve(declaration.structsize, alignment);
-            memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
+            memcpy(object, initial.ptr, initial.length);
             finishNew(expression, object);
             checkedStoreIntegral(_place, cast(size_t) object, _facts.size);
             return;
@@ -6653,8 +6653,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (plan.objectKind == NewPlan.ObjectKind.class_) {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
-            auto runtime = classRuntimeInfo(classType.sym);
-            memcpy(object, runtime.m_init.ptr, runtime.m_init.length);
+            const initial = _runtimeTypes.initializer(classType.sym);
+            memcpy(object, initial.ptr, initial.length);
         }
 
         visitLoweredNew(expression);

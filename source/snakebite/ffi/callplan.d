@@ -247,6 +247,20 @@ public struct CallPlan {
         callDirect(address, returnPlace, arguments);
     }
 
+    // As `callAt`, with arguments that host code passed: each value is
+    // already one that host code can call, a function or a delegate too.
+    public void forwardAt(
+        const(void)* address,
+        void* returnPlace,
+        scope const(void*)[] arguments,
+    ) const {
+        if (arguments.length != _parameterCount)
+            throwArgumentCountMismatch(_parameterCount, arguments.length);
+        if (_hiddenReturnPointer && returnPlace is null)
+            throwMissingReturnPlace;
+        callDirect(address, returnPlace, arguments);
+    }
+
     // The second half of `callAt`, once every argument slot holds bytes the
     // host can read as they are.
     pragma(inline, true)

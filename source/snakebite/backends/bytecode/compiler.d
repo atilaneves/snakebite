@@ -5911,14 +5911,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            auto runtime = _bytecode.classRuntimeInfo(declaration);
+            const initial = _bytecode._world.types.initializer(declaration);
             const alignment = declaration.alignsize == 0
                 ? 1 : declaration.alignsize;
             const object = reserveTemp(
                 TypeFacts(declaration.structsize, alignment));
             emit(&opStaticLoad, object,
-                _bytecode._world.data.addressOfData(runtime.m_init.ptr),
-                runtime.m_init.length);
+                _bytecode._world.data.addressOfData(initial.ptr),
+                initial.length);
             emit(&opFrameAddress, _destination, object, size_t.sizeof);
         }
 
@@ -5927,15 +5927,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            auto runtime = _bytecode.classRuntimeInfo(declaration);
+            const initial = _bytecode._world.types.initializer(declaration);
             const image = reserveTemp(TypeFacts(
-                runtime.m_init.length, declaration.alignsize == 0
+                initial.length, declaration.alignsize == 0
                     ? 1 : declaration.alignsize));
             emit(&opStaticLoad, image,
-                _bytecode._world.data.addressOfData(runtime.m_init.ptr),
-                runtime.m_init.length);
+                _bytecode._world.data.addressOfData(initial.ptr),
+                initial.length);
             emit(&opStoreIndirect, _destination, image,
-                runtime.m_init.length);
+                initial.length);
         }
 
         visitLoweredNew(expression);

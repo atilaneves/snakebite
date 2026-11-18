@@ -18,6 +18,11 @@ public struct Hooks {
         methodAddress;
     public TypeInfo_Class delegate(ClassDeclaration declaration)
         linkedClassInfo;
+    // Whether another object holds the class information, the vtable and
+    // the initial image of a class (`RuntimeTypes.isNativeClass`).
+    public bool delegate(ClassDeclaration declaration) isNativeClass;
+    // The address of the vtable of a native class.
+    public const(void)* delegate(ClassDeclaration declaration) nativeVtable;
     public immutable(void)* delegate(AggregateDeclaration declaration) rtInfo;
     public void delegate(ClassDeclaration declaration, TypeInfo_Class info)
         registerGenerated;
@@ -197,11 +202,9 @@ public TypeInfo_Class classRuntimeInfo(
             cast(void*) classRuntimeInfo(declaration.baseClass, cache, hooks));
 
     // An interface's methods live in the `Interface` tables of the classes
-    // that implement it, not in its own `TypeInfo_Class`.
-    const baseLength = info.base is null ? 0 : info.base.vtbl.length;
-    const length = isInterface ? 0
-        : declaration.vtbl.length > baseLength
-            ? declaration.vtbl.length : baseLength;
+    // that implement it, not in its own `TypeInfo_Class`. The vtable has the
+    // slots of the bases, so each slot comes from the declaration.
+    const length = isInterface ? 0 : declaration.vtbl.length;
     if (length != 0)
         data.storeSlice(&info.vtbl, data.reserve(
             TypeFacts(length * (void*).sizeof, (void*).alignof),
@@ -209,8 +212,6 @@ public TypeInfo_Class classRuntimeInfo(
     // An `extern(C++)` class has no classinfo slot: its first virtual
     // method is at index 0.
     const firstMethod = declaration.vtblOffset;
-    foreach (i; firstMethod .. baseLength)
-        data.storeFunction(&info.vtbl[i], info.base.vtbl[i]);
     if (firstMethod && !isInterface)
         data.storeReference(&info.vtbl[0], cast(void*) info);
 
@@ -248,20 +249,6 @@ public TypeInfo_Class classRuntimeInfo(
                 data.storeFunction(&info.vtbl[i],
                     hooks.methodAddress(method, 0));
         }
-        // An opaque class has no size, so its initialiser has no slots.
-        if (info.m_init.length != 0) {
-            if (info.base !is null) {
-                data.copyClassImage(info.m_init.ptr, info.base);
-                // The fields of a base of the host take their values from the
-                // declarations, as the fields of this class do.
-                if (data.isHostClass(info.base))
-                    for (auto parent = declaration.baseClass;
-                            parent !is null; parent = parent.baseClass)
-                        data.fillFields(parent, cast(ubyte*) info.m_init.ptr);
-            }
-            data.storeReference(info.m_init.ptr, info.vtbl.ptr);
-            data.fillFields(declaration, cast(ubyte*) info.m_init.ptr);
-        }
     }
 
     const interfaceCount = declaration.vtblInterfaces.length;
@@ -274,31 +261,104 @@ public TypeInfo_Class classRuntimeInfo(
         data.storeReference(cast(void*) &info.interfaces[i].classinfo,
             cast(void*) classRuntimeInfo(base.sym, cache, hooks));
         info.interfaces[i].offset = base.offset;
-        if (!isInterface) {
-            auto table = _interfaceVtable(
-                declaration, base, &info.interfaces[i], hooks);
-            data.storeSlice(&info.interfaces[i].vtbl, table, (void*).sizeof);
-            data.storeReference(info.m_init.ptr + base.offset, table.ptr);
-        }
     }
 
-    // An inherited interface keeps its object offset and its Interface
-    // descriptor. A derived override gets a new table at that same offset.
-    if (!isInterface)
-        for (auto parent = declaration.baseClass;
-                parent !is null; parent = parent.baseClass) {
-            auto parentInfo = classRuntimeInfo(parent, cache, hooks);
-            foreach (i; 0 .. parent.vtblInterfaces.length) {
-                import snakebite.frontend.ast: fillVtbl;
-                auto base = (*parent.vtblInterfaces)[i];
-                if (!base.fillVtbl(declaration, null, 0))
-                    continue;
-                auto table = _interfaceVtable(
-                    declaration, base, &parentInfo.interfaces[i], hooks);
-                data.storeReference(info.m_init.ptr + base.offset, table.ptr);
-            }
-        }
+    // An opaque class has no size, so its initialiser has no slots.
+    if (!isInterface && info.m_init.length != 0)
+        writeImage(declaration, cast(ubyte*) info.m_init.ptr,
+            info.vtbl.ptr, cache, hooks);
     return info;
+}
+
+// Writes at `place` the initial image of an object of the class
+// `declaration`, of `declaration.structsize` bytes. A class of the program
+// has it in its class information. For a native class it comes from the
+// declarations, as for a class of the program with a native base: nothing
+// reads the memory of a native class.
+public void initialImage(
+    ClassDeclaration declaration, void* place,
+    ref ClassRuntimeCache cache, Hooks hooks,
+) {
+    if (!hooks.isNativeClass(declaration))
+        return hooks.data.copyBytes(place,
+            classRuntimeInfo(declaration, cache, hooks).m_init);
+
+    import core.stdc.string: memset;
+
+    memset(place, 0, declaration.structsize);
+    writeImage(declaration, cast(ubyte*) place,
+        hooks.nativeVtable(declaration), cache, hooks);
+}
+
+// The words of the image of `declaration` at `place`, with the vtable
+// `vtable`. When `declaration` and its base are classes of the program, the
+// part of the bases is a copy of the image of the base, and an interface
+// slot of a base gets a table of its own only when `declaration` replaces a
+// method of the interface. Otherwise each part comes from the declarations
+// and each interface slot gets a table built here: nothing reads the image
+// or the tables of a native class.
+private void writeImage(
+    ClassDeclaration declaration, ubyte* place, in void* vtable,
+    ref ClassRuntimeCache cache, Hooks hooks,
+) {
+    import snakebite.frontend.ast: fillVtbl;
+
+    auto data = hooks.data;
+    auto base = declaration.baseClass;
+    const copiesBase = base !is null && !hooks.isNativeClass(declaration)
+        && !hooks.isNativeClass(base);
+    if (copiesBase)
+        data.copyBytes(place, classRuntimeInfo(base, cache, hooks).m_init);
+    data.storeReference(place, vtable);
+
+    for (auto parent = declaration; parent !is null;
+            parent = parent.baseClass) {
+        const own = parent is declaration;
+        if (own || !copiesBase)
+            data.fillFields(parent, place);
+        foreach (i; 0 .. parent.vtblInterfaces.length) {
+            auto interface_ = (*parent.vtblInterfaces)[i];
+            if (!own && copiesBase
+                    && !interface_.fillVtbl(declaration, null, 0))
+                continue;
+            auto descriptor = interfaceDescriptor(
+                declaration, parent, i, cache, hooks);
+            auto table = _interfaceVtable(
+                declaration, interface_, descriptor.record, hooks);
+            if (own || descriptor.isNew)
+                data.storeSlice(&descriptor.record.vtbl, table,
+                    (void*).sizeof);
+            data.storeReference(place + interface_.offset, table.ptr);
+        }
+    }
+}
+
+private struct Descriptor {
+    Interface* record;
+    // Whether the record was made for the table of `declaration`.
+    bool isNew;
+}
+
+// The `Interface` record that the table of `declaration` for interface `i` of
+// `parent` starts with. A class of the program holds its records in its class
+// information. The record of a native class is not read: a record with the
+// same values is made from the declarations.
+private Descriptor interfaceDescriptor(
+    ClassDeclaration declaration, ClassDeclaration parent, in size_t i,
+    ref ClassRuntimeCache cache, Hooks hooks,
+) {
+    if (!hooks.isNativeClass(parent))
+        return Descriptor(
+            &classRuntimeInfo(parent, cache, hooks).interfaces[i], false);
+
+    auto data = hooks.data;
+    auto interface_ = (*parent.vtblInterfaces)[i];
+    auto record = cast(Interface*) data.reserve(
+        TypeFacts(Interface.sizeof, (void*).alignof), declaration).ptr;
+    data.storeReference(cast(void*) &record.classinfo,
+        cast(void*) classRuntimeInfo(interface_.sym, cache, hooks));
+    record.offset = interface_.offset;
+    return Descriptor(record, true);
 }
 
 private void*[] _interfaceVtable(

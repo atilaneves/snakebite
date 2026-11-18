@@ -1576,6 +1576,99 @@ static foreach (backend; Matrix!(
     }
 }
 
+// A root class over a dependency class with an interface: the vtable, the
+// initial image and each interface slot of the object come from the
+// declarations, as native code gives them. `Guarded` replaces no method of
+// `Object.Monitor`, `Counted` replaces one, and `Twice` extends a root class
+// whose base is the dependency class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot construct a native class, which calls `pthread_mutexattr_init`"),
+)) {
+    @("rootClassOfDependencyBaseWithInterface." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.sync.mutex: Mutex;
+
+            class Guarded : Mutex {
+                int value = 7;
+            }
+            class Counted : Mutex {
+                int locks;
+                override void lock() { ++locks; super.lock(); }
+            }
+            class Twice : Counted {
+                int unlocks;
+                override void unlock() { ++unlocks; super.unlock(); }
+            }
+
+            void use(Object.Monitor monitor) {
+                monitor.lock();
+                monitor.unlock();
+            }
+
+            void main() {
+                auto guarded = new Guarded;
+                Object.Monitor monitor = guarded;
+                use(monitor);
+                assert(cast(Object) monitor is guarded);
+                assert(guarded.value == 7);
+                assert(typeid(guarded).base is typeid(Mutex));
+
+                auto counted = new Counted;
+                use(counted);
+                assert(counted.locks == 1);
+                assert(cast(Object) cast(Object.Monitor) counted is counted);
+
+                auto twice = new Twice;
+                use(twice);
+                auto unlock = &(cast(Object.Monitor) twice).unlock;
+                twice.lock();
+                unlock();
+                assert(twice.locks == 2 && twice.unlocks == 2);
+
+                scope Guarded local = new Guarded;
+                use(local);
+                assert(local.value == 7);
+                assert(__traits(initSymbol, Mutex).length
+                    == __traits(classInstanceSize, Mutex));
+            }
+        });
+    }
+}
+
+
+// An object of a dependency class with an interface in a static initialiser
+// of the root package: its vtable and its interface slot are those of the
+// dependency class.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read a static variable"),
+)) {
+    @("dependencyClassObjectWithInterfaceInStaticInitialiser."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import std.concurrency: Scheduler, ThreadScheduler;
+
+            __gshared ThreadScheduler global = new ThreadScheduler;
+
+            void main() {
+                Scheduler scheduler = global;
+                bool ran;
+                scheduler.start({ ran = true; });
+                assert(ran);
+                scheduler.yield();
+                assert(cast(Object) scheduler is global);
+                assert(typeid(global) is typeid(ThreadScheduler));
+            }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot take the address of an initializer symbol"),

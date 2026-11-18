@@ -345,23 +345,17 @@ public TypeInfo typeInfoAddressedBy(Types)(
 
 // The object that the symbol of `declaration` is. `typeid(I)` of an
 // interface is a `TypeInfo_Interface`, but `I.classinfo` is the symbol of
-// the `TypeInfo_Class` that this one holds.
+// the class information of `I`.
 public TypeInfo typeInfoObjectOf(Types)(
     imported!"snakebite.frontend.ast".TypeInfoDeclaration declaration,
     ref Types types,
 ) {
     import snakebite.frontend.ast: TypeInfoClassDeclaration;
 
-    auto info = types.get(declaration.tinfo);
-    if (cast(TypeInfoClassDeclaration) declaration is null)
-        return info;
-
     auto classType = declaration.tinfo.isTypeClass;
-    if (classType is null || classType.sym.isInterfaceDeclaration is null)
-        return info;
-
-    auto interfaceInfo = cast(TypeInfo_Interface) info;
-    if (interfaceInfo is null)
-        internalFailure("the runtime type of an interface is a `TypeInfo_Interface`");
-    return interfaceInfo.info;
+    if (cast(TypeInfoClassDeclaration) declaration !is null
+            && classType !is null
+            && classType.sym.isInterfaceDeclaration !is null)
+        return types.classInfo(classType.sym);
+    return types.get(declaration.tinfo);
 }
