@@ -2248,7 +2248,8 @@ def test_saved_program_that_reads_an_absent_variable_fails_as_the_compiled_progr
     loaded = run_sb(f"--load={tmp_path / 'program.sbc'}", cwd=tmp_path)
     for result in (from_ram, loaded):
         assert result.returncode != 0, output(result)
-        assert "`snakebite_test_no_such_variable`" in result.stderr, (
+        assert "symbol `snakebite_test_no_such_variable` declared by "\
+            "`snakebite_test_no_such_variable`" in result.stderr, (
             output(result))
 
 
