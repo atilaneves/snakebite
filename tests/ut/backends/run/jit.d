@@ -273,6 +273,38 @@ static foreach (backend; Matrix!()) {
         }, ["update"]);
     }
 
+    @("jit.floatingPointStoreReadsEarlierPointerWrites." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            void update(double* first, double* second, double* third,
+                    double* output) {
+                assert(output !is null);
+                double value = *first + *second;
+                value = value * *third;
+                value = value - *second;
+                *first = value + *third;
+                *output = *first + *second;
+            }
+
+            int main() {
+                foreach (i; 0 .. 300) {
+                    double first = 2;
+                    double second = 3;
+                    double third = 4;
+                    double output = 0;
+                    update(&first, &second, &third, &output);
+                    if (first != 21 || output != 24)
+                        return 1;
+                    update(&first, &second, &third, &second);
+                    if (first != 97 || second != 100)
+                        return 2;
+                }
+                return 0;
+            }
+        }, ["update"]);
+    }
+
 }
 
 static foreach (backend; Matrix!()) {

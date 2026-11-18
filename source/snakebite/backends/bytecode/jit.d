@@ -1676,10 +1676,14 @@ private struct FpRegion {
         int end;
     }
 
+    static struct Ranges {
+        Range[pointerRegisters.length] entries;
+        size_t count;
+    }
+
     Step[instructionLimit] steps;
     size_t length;
-    Range[pointerRegisters.length] ranges;
-    size_t rangeCount;
+    Ranges ranges;
 }
 
 private struct FpLoop {
@@ -4927,7 +4931,7 @@ private struct Gen {
                 < 128 + 64 * region.length + maximumBytesPerInstruction)
             return end;
 
-        const ranges = region.ranges[0 .. region.rangeCount];
+        const ranges = region.ranges.entries[0 .. region.ranges.count];
         foreach (ref const step; region.steps[0 .. region.length]) {
             if (step.fp.resultInFp0 || step.destination.base != FRAME)
                 continue;
@@ -4999,11 +5003,13 @@ private struct Gen {
             ref const op = ops[pc];
             ref const ins = snapshot[pc];
             FpRegion.Step step;
+            // Only a complete instruction can add to the entry guards.
+            auto ranges = region.ranges;
             if (op.kind == JitOp.Kind.fp3 && ins.width == FpRegion.width) {
                 step.fp = op.fp3;
                 if (step.fp.constantRight)
                     step.literalAddress = ins.sourceWidth;
-                else if (!fpRegionOperand(ins.sourceWidth, region, step.right))
+                else if (!fpRegionOperand(ins.sourceWidth, ranges, step.right))
                     break;
             } else if (op.kind == JitOp.Kind.copy && !op.copy.staticSource
                     && (op.width ? op.width : ins.width) == FpRegion.width
@@ -5021,20 +5027,19 @@ private struct Gen {
             }
             const source = step.kind == FpRegion.Kind.squareRoot
                 ? ins.destination : ins.source;
-            if ((!step.fp.leftInFp0 && !fpRegionOperand(source, region, step.left))
+            if ((!step.fp.leftInFp0 && !fpRegionOperand(source, ranges, step.left))
                     || (!step.fp.resultInFp0
-                        && !fpRegionOperand(ins.destination, region, step.destination))) {
-                // Range discovery for an incomplete instruction must not
-                // change the set of reads at entry.
-                region.length = 0;
+                        && !fpRegionOperand(ins.destination, ranges, step.destination)))
                 break;
-            }
+
+            region.ranges = ranges;
             region.steps[region.length++] = step;
         }
         return first + region.length;
     }
 
-    bool fpRegionOperand(size_t raw, ref FpRegion region, out Mem memory) const {
+    bool fpRegionOperand(size_t raw, ref FpRegion.Ranges ranges,
+        out Mem memory) const {
         Mem slot;
         if (!storageOperand(raw, FpRegion.pointerRegisters[0], memory, slot))
             return false;
@@ -5043,19 +5048,19 @@ private struct Gen {
         if (slot.disp + size_t.sizeof > frameSize)
             return false;
         size_t i;
-        for (; i < region.rangeCount; ++i)
-            if (region.ranges[i].slot.disp == slot.disp)
+        for (; i < ranges.count; ++i)
+            if (ranges.entries[i].slot.disp == slot.disp)
                 break;
-        if (i == region.rangeCount) {
-            if (i == region.ranges.length)
+        if (i == ranges.count) {
+            if (i == ranges.entries.length)
                 return false;
-            ++region.rangeCount;
-            region.ranges[i] = FpRegion.Range(slot, memory.disp,
+            ++ranges.count;
+            ranges.entries[i] = FpRegion.Range(slot, memory.disp,
                 memory.disp + FpRegion.width);
         } else {
             import std.algorithm.comparison: min, max;
-            region.ranges[i].first = min(region.ranges[i].first, memory.disp);
-            region.ranges[i].end = max(region.ranges[i].end,
+            ranges.entries[i].first = min(ranges.entries[i].first, memory.disp);
+            ranges.entries[i].end = max(ranges.entries[i].end,
                 memory.disp + FpRegion.width);
         }
         memory.base = FpRegion.pointerRegisters[i];
