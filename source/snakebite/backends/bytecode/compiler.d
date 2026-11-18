@@ -196,11 +196,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     // Compiles the whole program and writes it to `path`. The compile is the
-    // one a run makes, except that every function with a body compiles, not
-    // only those that run, the compiler records the relocations, and no
+    // one a run makes, except that every function of the root modules with a
+    // body compiles, not only those that run, the compiler records the
+    // relocations, and no
     // function is made ready to run (`Program.complete`). What a
     // first run fills lazily is filled first: each start handle, and the callee
-    // of each guest call site. A function that does not compile ends the
+    // of each guest call site. A template instance that the frontend adds
+    // during a compile compiles only when one of these reaches it. A function that does not compile ends the
     // save with that error, and no file is written. A load runs the program
     // in `workingDirectory`, with the dependency image `imagePath`, or with
     // none when it is empty.
