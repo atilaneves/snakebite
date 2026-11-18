@@ -2325,10 +2325,14 @@ private struct Gen {
     }
 
     bool pathPlace(size_t raw, const(PathCall)[] calls, int pending,
-        out PathPlace place)
+        out PathPlace place, uint width = 0)
     {
         const inWindow = (raw & indirectBit) != 0;
         if (inWindow && ((raw >> 32) & 0x7fff_ffff) != function_.windowSlot)
+            return false;
+        if (!inWindow && width && function_.windowSlot != size_t.max
+                && raw < function_.windowSlot + size_t.sizeof
+                && function_.windowSlot < raw + width)
             return false;
         long offset = inWindow ? cast(uint) raw : cast(long) raw;
         if (pending >= 0) {
@@ -2394,7 +2398,7 @@ private struct Gen {
                 && !(!condition && comparison.comparison == Comparison.notEqual))
             return true;
         PathPlace place;
-        if (!pathPlace(ins.destination, calls, pending, place))
+        if (!pathPlace(ins.destination, calls, pending, place, cast(uint) ins.width))
             return false;
         const width = cast(ubyte) ins.width;
         return guards.constrain(values.lookup(place, width),
@@ -2414,7 +2418,7 @@ private struct Gen {
             return false;
         PathPlace base;
         const slot = (raw >> 32) & 0x7fff_ffff;
-        if (!pathPlace(slot, calls, pending, base))
+        if (!pathPlace(slot, calls, pending, base, size_t.sizeof))
             return false;
         const value = values.lookup(base, size_t.sizeof);
         const displacement = cast(uint) raw;
@@ -2429,12 +2433,13 @@ private struct Gen {
     {
         const width = op.width ? op.width : ins.width;
         PathPlace dest, source;
-        if (!goodWidth(width) || !pathPlace(ins.destination, calls, pending, dest))
+        if (!goodWidth(width)
+                || !pathPlace(ins.destination, calls, pending, dest, cast(uint) width))
             return false;
         if (op.copy.staticSource)
             return values.write(dest, PathValue(0, cast(ubyte) width,
                 constantAt(ins.source, cast(int) width)));
-        if (!pathPlace(ins.source, calls, pending, source))
+        if (!pathPlace(ins.source, calls, pending, source, cast(uint) width))
             return false;
         const value = values.lookup(source, cast(ubyte) width);
         return value.width && values.write(dest, value);
@@ -2450,7 +2455,7 @@ private struct Gen {
         const width = cast(ubyte) w;
         const leftRaw = arithmetic.twoAddress ? ins.destination : ins.source;
         PathPlace dest, left;
-        if (!pathPlace(ins.destination, calls, pending, dest)) {
+        if (!pathPlace(ins.destination, calls, pending, dest, width)) {
             if (ins.destination != leftRaw)
                 return false;
             PathAddress address;
@@ -2460,10 +2465,10 @@ private struct Gen {
             scalar = address;
             return true;
         }
-        if (!pathPlace(leftRaw, calls, pending, left))
+        if (!pathPlace(leftRaw, calls, pending, left, width))
             return false;
         const prior = values.lookup(left, width);
-        const right = constantAt(ins.sourceWidth, width);
+        const right = constantAt(integerRightOperand(ins, arithmetic.twoAddress), width);
         if (!prior.width)
             return false;
         with (JitOp.IntOperation) final switch (arithmetic.operation) {
@@ -2545,7 +2550,7 @@ private struct Gen {
             memory.first = position;
         }
         PathPlace indexPlace;
-        if (!pathPlace(cast(uint) ins.width, calls, pending, indexPlace))
+        if (!pathPlace(cast(uint) ins.width, calls, pending, indexPlace, p.indexWidth))
             return false;
         auto index = values.lookup(indexPlace, p.indexWidth);
         if (!index.width)
@@ -2581,7 +2586,8 @@ private struct Gen {
         if (check)
             return true;
         PathPlace valuePlace;
-        if (!p.constantValue && !pathPlace(ins.destination, calls, pending, valuePlace))
+        if (!p.constantValue
+                && !pathPlace(ins.destination, calls, pending, valuePlace, op.width))
             return false;
         PathElement* previous;
         if (!gatherGuards)
@@ -2595,7 +2601,7 @@ private struct Gen {
             const value = previous is null ? fresh : previous.value;
             if (previous !is null && previous.operand != size_t.max) {
                 PathPlace readable;
-                if (pathPlace(previous.operand, calls, pending, readable)
+                if (pathPlace(previous.operand, calls, pending, readable, op.width)
                         && readable == previous.place
                         && values.current(readable, op.width) == value) {
                     action.forwarded = previous.operand;
@@ -2652,7 +2658,8 @@ private struct Gen {
                         return false;
                     const arm = observedWindow(function_, step.pc, op.callWindow);
                     int child;
-                    if (!arm.callee || arm.adjustment || arm.hasPlace
+                    if (!arm.callee || arm.adjustment || arm.hasPlace || !arm.hasWindows
+                            || arm.fast.windowStore != function_.windowSlot
                             || !pathWindowFrame(&callSites[ins.source], arm, calls,
                                 pending, child))
                         return false;
@@ -3921,8 +3928,12 @@ private struct Gen {
             l = d;
         else if (!leftInReg && !opnd(ins.source, R10, l))
             return false;
-        return integerRight(twoAddress ? ins.source : ins.sourceWidth,
+        return integerRight(integerRightOperand(ins, twoAddress),
             literalRight, width, R11, right);
+    }
+
+    static size_t integerRightOperand(in Instruction ins, bool twoAddress) {
+        return twoAddress ? ins.source : ins.sourceWidth;
     }
 
     bool emitArrayEqual(size_t i, in Instruction ins,
