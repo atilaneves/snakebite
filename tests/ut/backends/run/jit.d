@@ -191,15 +191,14 @@ static foreach (backend; Matrix!()) {
 
 }
 
-static foreach (backend; Matrix!(
-    Omit!(LoadedBytecode, Because.unconfirmed,
-        "after a load, `orbit` gets no JIT code; from RAM it does (#1006)"),
-)) {
+static foreach (backend; Matrix!()) {
     @("jit.floatingPointLoopCanEnterAtTheCounterUpdate." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOfWithJitCode!(backend, q{
             int orbit(double realPart, double imaginaryPart, bool skipFirst) {
+                // An assert leaves no inline body: `orbit` stays a call.
+                assert(realPart < 100);
                 double realSquared = 0;
                 double imaginarySquared = 0;
                 double imaginary = 0;
