@@ -567,6 +567,12 @@ public auto ownedBackend(B)(const Program program) {
         return Owned!B(program);
 }
 
+// A `LoadedBytecode` for `program` that loads the file in parts of
+// `partSize` bytes.
+public LoadedOwner loadedInParts(const Program program, in size_t partSize) {
+    return LoadedOwner(savedFileOf(program, testJit), partSize);
+}
+
 // The saved form of `program` for `jit`. A program that is one parsed guest
 // program keeps its file with it, so a save happens once for each program and
 // JIT setting. Any other program saves each time.

@@ -72,6 +72,16 @@ public struct LoadedOwner {
             loadProgramFile(saved.bytes, saved.jit), saved);
     }
 
+    // As the other constructor, with the bytes in parts of `partSize` bytes,
+    // as a file gives them through its buffer.
+    public this(const(SavedFile)* saved, in size_t partSize) {
+        import std.range: chunks;
+
+        _backend = LoadedBytecode(loadProgramFile(
+            saved.bytes.chunks(partSize), saved.bytes.length, saved.jit),
+            saved);
+    }
+
     ~this() {
         if (_backend._loaded.runner !is null)
             _backend._loaded.runner.end;
