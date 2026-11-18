@@ -100,30 +100,81 @@ public string bindWithRecords(Instruction[] instructions,
 
 // The jump after a short-circuit chain returns to the chain's last test.
 public ubyte runBranchReentry(bool jit, out bool compiled) {
-    import snakebite.backends.bytecode.jit: jitSupported;
-    import snakebite.backends.bytecode.vm: JitSetting, Vm, opBranchFalse,
-        opBranchTrue, opCopyFixed, opJump, opReturn, opZero,
-        prepareForExecution, recordLocalReferences;
+    import snakebite.backends.bytecode.vm: Vm, opBranchFalse, opBranchTrue,
+        opCopyFixed, opJump, opReturn, opZero;
 
     enum temporary = 0, first = 1, second = 2, repeat = 3, falseValue = 4;
     enum lastTest = 4, succeeded = 8, failed = 9;
     enum byteWidth = ubyte.sizeof;
     ubyte[5] seed = [0, 1, 1, 1, 0];
-    auto function_ = Function(
-        [
-            Instruction(&opCopyFixed!byteWidth, temporary, first, byteWidth),
-            Instruction(&opBranchTrue, temporary, lastTest, byteWidth),
-            Instruction(&opCopyFixed!byteWidth, temporary, second, byteWidth),
-            Instruction(&opBranchFalse, temporary, failed, byteWidth),
-            Instruction(&opBranchFalse, temporary, failed, byteWidth),
-            Instruction(&opBranchFalse, repeat, succeeded, byteWidth),
-            Instruction(&opZero, repeat, 0, byteWidth),
-            Instruction(&opJump, lastTest, 0, 0),
-            Instruction(&opReturn, 0, first, byteWidth),
-            Instruction(&opReturn, 0, falseValue, byteWidth),
-        ],
-        [], [], [], [], seed.sizeof, ubyte.alignof,
-    );
+    auto instructions = [
+        Instruction(&opCopyFixed!byteWidth, temporary, first, byteWidth),
+        Instruction(&opBranchTrue, temporary, lastTest, byteWidth),
+        Instruction(&opCopyFixed!byteWidth, temporary, second, byteWidth),
+        Instruction(&opBranchFalse, temporary, failed, byteWidth),
+        Instruction(&opBranchFalse, temporary, failed, byteWidth),
+        Instruction(&opBranchFalse, repeat, succeeded, byteWidth),
+        Instruction(&opZero, repeat, 0, byteWidth),
+        Instruction(&opJump, lastTest, 0, 0),
+        Instruction(&opReturn, 0, first, byteWidth),
+        Instruction(&opReturn, 0, falseValue, byteWidth),
+    ];
+    return runBranchFunction(instructions, seed.sizeof, ubyte.alignof,
+        [Vm.HostArgument(0, &seed, seed.sizeof)], jit, compiled);
+}
+
+// Two independent conditions both have to pass for the function to return
+// the success value. The inputs are bytes, so any nonzero value is true.
+public ubyte runBranchConditions(ref const ubyte[6] flags, bool jit,
+    out bool compiled)
+{
+    import snakebite.backends.bytecode.vm: Vm, indirectStorage,
+        opBranchFalse, opBranchTrue, opCopyFixed, opLogicalNot, opReturn, opZero;
+
+    enum left = 0, right = 1, success = 2, failure = 3;
+    enum pointerSlot = (ubyte*).alignof;
+    enum firstJoin = 8, secondJoin = 15, failed = 17;
+    enum byteWidth = ubyte.sizeof;
+    const data = flags.ptr;
+    const ubyte successValue = 42;
+    const fields = indirectStorage(pointerSlot);
+    auto instructions = [
+        Instruction(&opCopyFixed!(byteWidth, true), success,
+            cast(size_t) &successValue, byteWidth),
+        Instruction(&opZero, failure, 0, byteWidth),
+        Instruction(&opCopyFixed!byteWidth, left, fields, byteWidth),
+        Instruction(&opBranchTrue, left, firstJoin, byteWidth),
+        Instruction(&opCopyFixed!byteWidth, left, fields + 1, byteWidth),
+        Instruction(&opLogicalNot, left, 0, byteWidth),
+        Instruction(&opBranchFalse, left, firstJoin, byteWidth),
+        Instruction(&opCopyFixed!byteWidth, left, fields + 2, byteWidth),
+        Instruction(&opBranchFalse, left, failed, byteWidth),
+        Instruction(&opCopyFixed!byteWidth, right, fields + 3, byteWidth),
+        Instruction(&opBranchFalse, right, secondJoin, byteWidth),
+        Instruction(&opCopyFixed!byteWidth, right, fields + 4, byteWidth),
+        Instruction(&opBranchFalse, right, secondJoin, byteWidth),
+        Instruction(&opCopyFixed!byteWidth, right, fields + 5, byteWidth),
+        Instruction(&opLogicalNot, right, 0, byteWidth),
+        Instruction(&opBranchFalse, right, failed, byteWidth),
+        Instruction(&opReturn, 0, success, byteWidth),
+        Instruction(&opReturn, 0, failure, byteWidth),
+    ];
+    return runBranchFunction(instructions, pointerSlot + data.sizeof,
+        (ubyte*).alignof, [Vm.HostArgument(pointerSlot, &data, data.sizeof)],
+        jit, compiled);
+}
+
+private ubyte runBranchFunction(Instruction[] instructions, size_t frameSize,
+    uint alignment,
+    scope const imported!"snakebite.backends.bytecode.vm".Vm.HostArgument[] args,
+    bool jit, out bool compiled)
+{
+    import snakebite.backends.bytecode.jit: jitSupported;
+    import snakebite.backends.bytecode.vm: JitSetting, Vm, prepareForExecution,
+        recordLocalReferences;
+    import snakebite.stack.frames: defaultFrameCapacity;
+
+    auto function_ = Function(instructions, [], [], [], [], frameSize, alignment);
     function_.recordLocalReferences;
     const error = function_.bindInstructionReferences;
     assert(error is null, error);
@@ -138,11 +189,9 @@ public ubyte runBranchReentry(bool jit, out bool compiled) {
     static if (jitSupported)
         prepareForExecution(&function_, JitSetting(jit, true), &instance, null);
 
-    import snakebite.stack.frames: defaultFrameCapacity;
-
     auto vm = Vm(defaultFrameCapacity);
     ubyte result;
-    vm.call(function_, &result, [Vm.HostArgument(0, &seed, seed.sizeof)]);
+    vm.call(function_, &result, args);
     compiled = isJitCompiled(&function_);
     return result;
 }

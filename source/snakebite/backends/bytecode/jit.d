@@ -3798,7 +3798,7 @@ private struct Gen {
     {
         import snakebite.backends.bytecode.emitted: EmittedCode;
         import snakebite.backends.bytecode.vm:
-            addressSlotOf, branchTargetField, discardResult;
+            addressSlotOf, branchTargetField, discardResult, opReturn, opReturnVoid;
         import std.algorithm.sorting: sort;
 
         if (function_.exceptionHandlers.length || function_.closureSize
@@ -3896,6 +3896,12 @@ private struct Gen {
                     break;
                 case zero, jump, branch, fused, boolOp, returnVoid, returnValue:
                     break;
+                case none:
+                    // A non-chained return uses the original handler. It has
+                    // the same frame accesses as a return with a template.
+                    if (ins.handler is &opReturn || ins.handler is &opReturnVoid)
+                        break;
+                    return null;
                 default:
                     // An unclassified operation can expose the frame.
                     return null;
