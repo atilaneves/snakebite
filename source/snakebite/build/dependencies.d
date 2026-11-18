@@ -41,50 +41,59 @@ private struct Directory {
     SysTime accessed;
     SysTime modified;
     string[] entries;
+    // The entries that dub's copies of the targets give the directory.
+    string[] copies;
 }
 
 
 // The directories that exist and that dub copies a target into, after each
 // build of a package and also when the target is up to date. Such a directory
 // can be an input of `build.ninja`, whose statement must not run because of a
-// copy.
+// copy: the copy is an output of the dependencies statement.
 private Directory[] targetDirectories(
     in imported!"dub.description".ProjectDescription project,
 ) {
-    import std.algorithm.iteration: map, uniq;
-    import std.algorithm.sorting: sort;
-    import std.array: array;
     import std.file: exists, getTimes, isDir;
-    import std.path: buildNormalizedPath;
+    import std.path: baseName, buildNormalizedPath, buildPath;
 
     string[string] packagePaths;
     foreach (package_; project.packages)
         packagePaths[package_.name] = package_.path;
+    string[][string] copies;
+    foreach (target; project.targets) {
+        const path = buildNormalizedPath(packagePaths[target.rootPackage],
+            target.buildSettings.targetPath);
+        copies[path] ~= buildPath(path, target.cacheArtifactPath.baseName);
+    }
     Directory[] directories;
-    foreach (path; project.targets
-            .map!(target => buildNormalizedPath(packagePaths[target.rootPackage],
-                target.buildSettings.targetPath))
-            .array.sort.uniq) {
+    foreach (path, names; copies) {
         if (!path.exists || !path.isDir)
             continue;
         Directory directory;
         directory.path = path;
         getTimes(path, directory.accessed, directory.modified);
         directory.entries = entryNames(path);
+        directory.copies = names.dup;
         directories ~= directory;
     }
     return directories;
 }
 
 
-// Gives each directory of `directories` its times again when it has the same
-// entries: a copy replaced a file with a file of the same name.
+// Gives each directory of `directories` its times again when the copies of
+// the targets are its only new entries and no entry went: a copy replaced a
+// file with a file of the same name, or it is the first copy.
 private void restoreUnchanged(in Directory[] directories) {
+    import std.algorithm.iteration: uniq;
+    import std.algorithm.sorting: sort;
+    import std.array: array;
     import std.file: exists, setTimes;
 
-    foreach (directory; directories)
-        if (directory.path.exists && entryNames(directory.path) == directory.entries)
+    foreach (directory; directories) {
+        auto expected = (directory.entries ~ directory.copies).dup.sort.uniq.array;
+        if (directory.path.exists && entryNames(directory.path) == expected)
             setTimes(directory.path, directory.accessed, directory.modified);
+    }
 }
 
 

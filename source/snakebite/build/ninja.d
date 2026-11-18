@@ -31,7 +31,8 @@ public void writeBuildFile(in string directory) {
 
 
 // The files of the configuration of the host compiler that the frontend of
-// a compile in `directory` reads.
+// a compile in `directory` reads. The host compiler reads the same files
+// when it compiles a dependency in dub's build and the image module.
 private string[] configurationFiles(in string directory) {
     import snakebite.frontend.hostcompiler: hostCompiler, hostConfigurationFiles;
     import snakebite.project.loading: EndsProcess, ProjectDirectory;
@@ -46,7 +47,7 @@ private string[] configurationFiles(in string directory) {
 // dependencies, the compile of the root package to the program and the image
 // module, and the dependency image. `watched` are the paths whose change can
 // change `sources`, and `configuration` the files of the configuration of the
-// host compiler that the frontend of the compile reads.
+// host compiler that the dependencies, the compile and the image read.
 private string buildFileText(
     in string directory,
     in imported!"snakebite.project.dub".SourceSet sources,
@@ -103,7 +104,7 @@ private string buildFileText(
     // the files that exist are inputs.
     if (sources.linkerFiles.length)
         text ~= "\n" ~ statement(sources.linkerFiles, "dependencies", null,
-            [sb, compiler]
+            [sb, compiler] ~ configuration
                 ~ sources.dependencies.inputs.filter!(path => path.exists).array);
     text ~= "\n" ~ statement([files.program, files.imageSource], "compile",
         sources.files, [sb] ~ configuration);
@@ -115,7 +116,7 @@ private string buildFileText(
         "--image-path=" ~ files.image,
     ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null));
     text ~= "\n" ~ statement([files.image], "image",
-        [files.imageSource] ~ sources.linkerFiles, [sb, compiler]);
+        [files.imageSource] ~ sources.linkerFiles, [sb, compiler] ~ configuration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
     text ~= statementVariable("options",

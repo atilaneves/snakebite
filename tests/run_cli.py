@@ -3441,6 +3441,36 @@ def test_build_project_with_a_dependency_runs_as_bin_sb(
         assert_prints_dependency_lines(built, 42)
 
 
+# The run after a run that builds the dependencies has no change and reads
+# no recipe, as in `test_build_project_without_a_change_reads_no_recipe`:
+# dub's build of the dependencies changes no input of `build.ninja`.
+def test_build_project_after_a_dependency_build_reads_no_recipe(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project_with_dependency(
+        tmp_path, "build-project-dep-no-recipe")
+    recipe = app / "dub.sdl"
+    valid = recipe.read_text()
+
+    def run_without_recipe() -> subprocess.CompletedProcess[str]:
+        old = recipe.stat()
+        recipe.write_text("this is no recipe {{{\n")
+        os.utime(recipe, ns=(old.st_atime_ns, old.st_mtime_ns))
+        result = run_sb("--build=project", str(app), cwd=tmp_path)
+        recipe.write_text(valid)
+        os.utime(recipe, ns=(old.st_atime_ns, old.st_mtime_ns))
+        return result
+
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert_prints_dependency_lines(first, 42)
+    assert_runs_as_bin_sb(run_without_recipe(), first)
+
+    touch(tmp_path / "dep" / "source" / "dep.d")
+    assert_runs_as_bin_sb(
+        run_sb("--build=project", str(app), cwd=tmp_path), first)
+    assert_runs_as_bin_sb(run_without_recipe(), first)
+
+
 # A changed function body in the dependency changes the output of the next
 # run.
 def test_build_project_runs_a_changed_dependency(tmp_path: Path) -> None:
@@ -3525,6 +3555,46 @@ def test_build_project_reads_a_new_compiler_configuration(
         path.unlink()
     assert_runs_as_bin_sb(
         run_sb("--build=project", str(app), cwd=tmp_path), first)
+
+
+# The configuration of `IMAGE_COMPILER` that it reads outside the project.
+def host_image_compiler_configuration(directory: Path) -> Path:
+    write(directory / "empty.d", "module empty;\n")
+    verbose = subprocess.run(
+        [IMAGE_COMPILER, "-v", "-c", "-o-", "empty.d"],
+        capture_output=True, check=True, text=True, cwd=directory)
+    line = next(line for line in verbose.stdout.splitlines()
+                if line.startswith("config "))
+    return Path(line.split()[1])
+
+
+# A configuration of the host compiler that is made in the project directory
+# after the first run is also the one that the host compiler reads in dub's
+# build of the dependencies, as in `bin/sb DIR`. This one gives the import
+# paths of the host configuration, so the frontend reads the program, and a
+# library that does not exist to each link.
+def test_build_project_links_with_a_new_compiler_configuration(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project_with_dependency(
+        tmp_path, "build-project-link-configuration")
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert_prints_dependency_lines(first, 42)
+
+    host = host_image_compiler_configuration(tmp_path)
+    configuration = app / f"{IMAGE_COMPILER}.conf"
+    if host.is_dir():
+        shutil.copytree(host, configuration)
+    else:
+        write(configuration / "00-host.conf", host.read_text())
+    write(configuration / "99-link.conf",
+          'default: { post-switches ~= ["-L-lsbnonexistent"]; };\n')
+    built = run_sb("--build=project", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 1, output(direct)
+    assert "sbnonexistent" in direct.stderr, output(direct)
+    assert built.returncode == 1, output(built)
+    assert direct.stderr in built.stderr, output(built)
 
 
 # A compile error ends the run with status 1 and the error text of
