@@ -5013,16 +5013,55 @@ private struct Gen {
         patchHere(before);
         patchHere(after);
 
+        a.ldsx(4, checkedLimit, Mem(FRAME, checkedLoop.limitSlot));
+        a.ldsx(4, checkedStep, Mem(FRAME, checkedLoop.stepSlot));
+        const offset = cast(int) (ins.width >> 32);
+        emitCountedByteLoop(ins, offset);
+
         a.ld(4, RAX, Mem(FRAME, checkedLoop.indexSlot));
-        a.ld(4, checkedLimit, Mem(FRAME, checkedLoop.limitSlot));
-        a.ld(4, checkedStep, Mem(FRAME, checkedLoop.stepSlot));
         // The bounds check consumes k + offset. Bias the step so its
         // next 32-bit add produces k + step, including on wraparound.
-        const offset = cast(int) (ins.width >> 32);
         if (offset)
             a.aluRI(Alu.sub, 4, checkedStep, offset);
         checkedLoop.body = a.n;
         return emitChecked!true(i, ins, op);
+    }
+
+    void emitCountedByteLoop(in Instruction ins, int offset) {
+        const index = Mem(FRAME, checkedLoop.indexSlot);
+        a.aluRI(Alu.cmp, 8, checkedStep, 0);
+        const nonpositive = jccLocal(CC_LE);
+        a.ldsx(4, RAX, index);
+        a.aluRI(Alu.cmp, 8, RAX, 0);
+        const negative = jccLocal(CC_L);
+        a.aluRR(Alu.cmp, 8, RAX, checkedLimit);
+        const pastLimit = jccLocal(CC_G);
+
+        // A positive step makes the endpoint checks sufficient for each store.
+        a.lea(RAX, Mem(RAX, offset));
+        a.aluRI(Alu.cmp, 8, RAX, 0);
+        const below = jccLocal(CC_L);
+        a.lea(RAX, Mem(checkedLimit, offset));
+        a.aluRI(Alu.cmp, 8, RAX, int.max);
+        const offsetWrap = jccLocal(CC_G);
+        a.aluRR(Alu.cmp, 8, RAX, checkedLength);
+        const above = jccLocal(CC_AE);
+        a.lea(RAX, Mem(checkedLimit, 0, checkedStep));
+        a.aluRI(Alu.cmp, 8, RAX, int.max);
+        const stepWrap = jccLocal(CC_G);
+
+        a.ld(4, RAX, index);
+        const body = a.n;
+        const element = Mem(SC2, offset, RAX);
+        storeConstant(ubyte.sizeof, element, constantAt(ins.destination, ubyte.sizeof));
+        a.aluRR(Alu.add, 4, RAX, checkedStep);
+        a.aluRR(Alu.cmp, 4, RAX, checkedLimit);
+        jccTo(CC_LE, 0, body);
+        a.st(4, index, RAX);
+        jmpTo(checkedLoop.update + 2);
+
+        foreach (miss; [nonpositive, negative, pastLimit, below, offsetWrap, above, stepWrap])
+            patchHere(miss);
     }
 
     void emitCheckedLoopUpdate() {
