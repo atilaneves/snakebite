@@ -37,6 +37,8 @@ else
 
 static if (jitSupported):
 
+import snakebite.backends.bytecode.jitflow: ScalarFlow;
+
 @nogc nothrow:
 
 // Each guest call or backward branch adds `jitStep` to `Function.jitHeat`.
@@ -303,6 +305,8 @@ package struct JitState {
     Scratch!(Gen.BranchOnlyCandidate) branchOnlyCandidates;
     Scratch!(Gen.BranchOnlyEntry) branchOnlyEntries;
     Scratch!(Gen.PathScratch, 1) paths;
+    Scratch!(ScalarFlow, 1) scalarFlow;
+    Scratch!(ScalarEmitter, 1) scalarEmitter;
     // The buffers of one compile in `vm.d`: the template of each instruction,
     // a snapshot of the instructions, and their handlers.
     Scratch!JitOp opScratch;
@@ -324,6 +328,8 @@ package struct JitState {
         branchOnlyCandidates.release;
         branchOnlyEntries.release;
         paths.release;
+        scalarFlow.release;
+        scalarEmitter.release;
         opScratch.release;
         snapshotScratch.release;
         originalScratch.release;
@@ -386,6 +392,8 @@ package struct JitState {
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
         g.literalScratch = &literals;
+        g.scalarScratch = &scalarFlow;
+        g.scalarEmitterScratch = &scalarEmitter;
         g.inlineBodies = inlineBodies.reserve(Gen.inlineDepthLimit);
         g.bmi2 = bmi2;
         const op = JitOp.CallWindow(destination, counted: true, indirect: true);
@@ -459,6 +467,8 @@ package struct JitState {
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
         g.literalScratch = &literals;
+        g.scalarScratch = &scalarFlow;
+        g.scalarEmitterScratch = &scalarEmitter;
         g.reloadEntryScratch = &reloadEntries;
         g.inlineBodies = inlineBodies.reserve(Gen.inlineDepthLimit);
         g.bmi2 = bmi2;
@@ -482,6 +492,8 @@ package struct JitState {
         size_t fpRegionEnd;
         size_t intRegionEnd;
         const branchOnly = g.proveBranchOnly(ops, branchOnlyCandidates, branchOnlyEntries);
+        bool inlineReturn;
+        const scalarEntry = g.emitScalarEntry(ops, originals, inlineReturn);
         foreach (i; 0 .. instructions.length) {
             if (i < branchOnlyEnd)
                 continue;
@@ -667,6 +679,8 @@ package struct JitState {
             cast(const(Instruction.Handler)*) (code + handlerStart);
         if (function_.jitName.length)
             perfMap.record(code, g.a.n, function_.jitName);
+        if (scalarEntry)
+            g.labels[0] = 0;
         // One aligned 8-byte store with release order for each word, after
         // the code is complete. A thread that runs the function moves to JIT
         // code at its next dispatch.
@@ -1820,6 +1834,654 @@ private struct InlineBody {
     size_t[Gen.inlineInstructionLimit + 1] labels;
 }
 
+
+private struct ScalarEmitter {
+    import snakebite.backends.bytecode.vm: CallSite, CompareKind, Comparison, DispatchState,
+        Instruction;
+    import snakebite.stack.frames: FrameStack;
+
+    @nogc nothrow:
+
+    alias Flow = ScalarFlow;
+    alias Plan = Flow.Program;
+    alias Kind = Plan.Kind;
+    alias Lane = Flow.Lane;
+    alias Value = Flow.Value;
+    alias Block = Flow.Block;
+    alias Node = Flow.Node;
+    alias Origin = Flow.Origin;
+    enum none = Flow.none;
+    private static immutable ubyte[Flow.gpCount] _gp = [R9, R10, R11, SC2];
+    enum firstFp = 3;
+
+    private enum LocationKind : ubyte { none, integer, floating, frame, literal, address }
+
+    private static struct Location {
+        LocationKind kind;
+        ulong bits;
+        ubyte width;
+    }
+
+    private static struct Move {
+        Location from;
+        Location to;
+    }
+
+    private static struct Branch {
+        size_t[2] patches;
+        ubyte count;
+        ushort block;
+        ushort target;
+    }
+
+    Gen* gen;
+    Flow* flow;
+    const(Instruction.Handler)[] originals;
+    size_t[Plan.instructionLimit] offsets;
+    Branch[Plan.instructionLimit * 2] branches;
+    size_t branchCount;
+    size_t[Plan.slotLimit * 6 + 1] misses;
+    size_t missCount;
+    Move[Plan.slotLimit] moveScratch;
+    bool inlineReturn;
+    bool failed;
+
+    ref Asm a() { return gen.a; }
+
+    bool emit() {
+        guards;
+        entry;
+        foreach (i, ref const block; flow.blocks[0 .. flow.blockCount]) {
+            if (!space(Gen.handlerJumpBytes + 128))
+                return false;
+            offsets[i] = a.n;
+            foreach (ref const node; flow.nodes[block.firstNode .. block.endNode]) {
+                if (node.used && !emitNode(node))
+                    return false;
+            }
+            if (!finish(block, cast(ushort) i))
+                return false;
+        }
+
+        foreach (ref const branch; branches[0 .. branchCount]) {
+            ref const target = flow.blocks[branch.target];
+            if (branch.block != none && movesNeeded(flow.blocks[branch.block], target)) {
+                foreach (patch; branch.patches[0 .. branch.count])
+                    gen.patchHere(patch);
+                edge(flow.blocks[branch.block], target);
+                if (!space(8))
+                    return false;
+                gen.jmpLocalTo(offsets[branch.target]);
+            } else {
+                foreach (patch; branch.patches[0 .. branch.count])
+                    gen.patchTo(patch, offsets[branch.target]);
+            }
+        }
+        foreach (miss; misses[0 .. missCount])
+            gen.patchHere(miss);
+        return !failed;
+    }
+
+    private bool space(size_t bytes) {
+        const used = a.n + gen.literalBytes;
+        if (used <= gen.codeLimit && bytes <= gen.codeLimit - used)
+            return true;
+        failed = true;
+        return false;
+    }
+
+    private void guard(int cc) {
+        misses[missCount++] = gen.jccLocal(cc);
+    }
+
+    private void guards() {
+        if (flow.ranges.hasFloats && space(32)) {
+            enum masks = 0x1F80;
+            const environment = Mem(STATE, DispatchState.jitFloatEnvironment.offsetof);
+            a.memOp(4, false, 3, environment, 0x0FAE); // STMXCSR
+            a.ld(4, RAX, environment);
+            a.aluRI(Alu.and, 4, RAX, masks);
+            a.aluRI(Alu.cmp, 4, RAX, masks);
+            guard(CC_NE);
+        }
+        const frameSize = flow.ranges.program.frameSize;
+        foreach (i, ref const span; flow.ranges.spans[0 .. flow.ranges.program.slotCount]) {
+            if (!span.end)
+                continue;
+            if (!space(128))
+                return;
+            const root = flow.ranges.program.slots[i];
+            a.ld(8, R10, Mem(FRAME, root.offset));
+            a.lea(R11, Mem(R10, cast(int) span.end - 1));
+            a.aluRR(Alu.cmp, 8, R11, R10);
+            guard(CC_B);
+            a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+            a.lea(RAX, Mem(R10, cast(int) span.first));
+            a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.baseOffset));
+            guard(CC_B);
+            a.alu(Alu.cmp, 8, R11, Mem(R9, FrameStack.fastEndOffset));
+            guard(CC_AE);
+            a.lea(R10, Mem(FRAME, frameSize));
+            a.aluRR(Alu.cmp, 8, RAX, R10);
+            const above = gen.jccLocal(CC_AE);
+            a.aluRR(Alu.cmp, 8, R11, FRAME);
+            guard(CC_AE);
+            gen.patchHere(above);
+        }
+    }
+
+    private void entry() {
+        ref const block = flow.blocks[0];
+        foreach (home, id; block.incoming[0 .. flow.ranges.program.slotCount]) {
+            if (id != none && flow.values[id].used)
+                move(homeLocation(cast(ushort) home), location(id));
+        }
+    }
+
+    private bool emitNode(in Node node) {
+        if (!space(120))
+            return false;
+        const out_ = location(node.output);
+        const left = location(node.left);
+        const right = location(node.right);
+        final switch (node.action) with (Flow.Action) {
+        case load: {
+            const memory = memoryOf(node);
+            if (out_.kind == LocationKind.floating)
+                a.sse(prefix(node.width), loadOpcode, cast(int) out_.bits, memory);
+            else {
+                const dest = out_.kind == LocationKind.integer ? cast(int) out_.bits : RAX;
+                a.ldzx(node.width, dest, memory);
+                saveInteger(dest, out_);
+            }
+            break;
+        }
+        case store: {
+            if (node.address == none) {
+                move(left, Location(LocationKind.frame, node.offset, node.width));
+                break;
+            }
+            if (left.kind == LocationKind.floating) {
+                const memory = memoryOf(node);
+                a.sse(prefix(node.width), storeOpcode, cast(int) left.bits, memory);
+            } else if (left.kind == LocationKind.integer) {
+                const memory = memoryOf(node);
+                a.st(node.width, memory, cast(int) left.bits);
+            } else {
+                assignInteger(left, RAX);
+                const base = location(node.address);
+                if (base.kind == LocationKind.integer)
+                    a.st(node.width, Mem(cast(ubyte) base.bits, cast(int) node.offset), RAX);
+                else {
+                    // Preserve the raw bits while resolving a spilled address.
+                    a.integerToXmm(XMM2, RAX);
+                    const memory = memoryOf(node);
+                    if (node.width != 4 && node.width != 8)
+                        return false;
+                    a.sse(prefix(node.width), storeOpcode, XMM2, memory);
+                }
+            }
+            break;
+        }
+        case operation:
+            return emitOperation(node, out_, left, right);
+        }
+        return true;
+    }
+
+    private Mem memoryOf(in Node node) {
+        if (node.address == none)
+            return Mem(FRAME, cast(int) node.offset);
+        const base = integer(location(node.address), RAX);
+        return Mem(cast(ubyte) base, cast(int) node.offset);
+    }
+
+    private bool emitOperation(in Node node, in Location dest,
+        in Location left, in Location right)
+    {
+        ref const step = flow.ranges.resolved[node.pc];
+        const w = step.left.width;
+        final switch (step.kind) with (Kind) {
+        case integer:
+            return emitInteger(step.integer, w, dest, left, right);
+        case index:
+            return emitIndex(step.stride, dest, left, right);
+        case floating, sqrt: {
+            const fp = dest.kind == LocationKind.floating ? cast(int) dest.bits : XMM1;
+            const prefix = prefix(w);
+            if (step.kind == sqrt) {
+                enum sqrtOpcode = 0x51;
+                if (left.kind == LocationKind.frame)
+                    a.sse(prefix, sqrtOpcode, fp, Frame(left));
+                else
+                    a.sseRR(prefix, sqrtOpcode, fp, this.floating(left, fp));
+            } else {
+                const opcode = _floatOpcodes[step.floating];
+                if (right.kind == LocationKind.frame || right.kind == LocationKind.literal) {
+                    assignFloat(left, fp);
+                    if (right.kind == LocationKind.frame)
+                        a.sse(prefix, opcode, fp, Frame(right));
+                    else
+                        literalSse(prefix, opcode, fp, right.bits);
+                } else {
+                    const b = this.floating(right, XMM2);
+                    const accumulator = b == fp && left != right ? XMM1 : fp;
+                    assignFloat(left, accumulator);
+                    a.sseRR(prefix, opcode, accumulator, b);
+                    if (accumulator != fp)
+                        a.sseRR(noPrefix, moveAlignedOpcode, fp, accumulator);
+                }
+            }
+            if (dest.kind == LocationKind.frame)
+                a.sse(prefix, storeOpcode, fp, Frame(dest));
+            else if (dest.kind == LocationKind.integer)
+                a.xmmToInteger(cast(int) dest.bits, fp);
+            return true;
+        }
+        case compare:
+            if (!this.compare(step, left, right))
+                return false;
+            if (dest.kind == LocationKind.frame)
+                a.setcc(intCondition(step), Frame(dest));
+            else if (dest.kind == LocationKind.integer)
+                a.setccR(intCondition(step), cast(int) dest.bits);
+            else
+                return false;
+            return true;
+        case branch:
+            return this.compare(step, left, right);
+        case exit, jump, move, returnVoid, returnValue:
+            return false;
+        }
+    }
+
+    private bool emitInteger(JitOp.IntOperation operation, int w, in Location dest,
+        in Location left, in Location right)
+    {
+        auto accumulator = dest.kind == LocationKind.integer && dest != right
+            ? cast(int) dest.bits : RAX;
+        if (dest.kind == LocationKind.integer && left == right)
+            accumulator = cast(int) dest.bits;
+        assignInteger(left, accumulator);
+        int immediate;
+        const fits = right.kind == LocationKind.literal && Gen.immOf(w, right.bits, immediate);
+        if (operation == JitOp.IntOperation.multiply) {
+            if (w != 8 && w != 4)
+                return false;
+            if (fits && w == 8)
+                a.imulRI(accumulator, accumulator, immediate);
+            else if (right.kind == LocationKind.frame)
+                a.imulM(w, accumulator, Frame(right));
+            else if (right.kind == LocationKind.integer)
+                a.imulRR(w, accumulator, cast(int) right.bits);
+            else if (accumulator != RAX)
+                a.imulRR(w, accumulator, integer(right, RAX));
+            else
+                return false;
+        } else {
+            const opcode = Gen.aluOf(operation);
+            if (fits)
+                a.aluRI(opcode, w, accumulator, immediate);
+            else if (right.kind == LocationKind.frame)
+                a.alu(opcode, w, accumulator, Frame(right));
+            else if (right.kind == LocationKind.integer)
+                a.aluRR(opcode, w, accumulator, cast(int) right.bits);
+            else if (accumulator != RAX)
+                a.aluRR(opcode, w, accumulator, integer(right, RAX));
+            else
+                return false;
+        }
+        saveInteger(accumulator, dest);
+        return true;
+    }
+
+    private bool emitIndex(int stride, in Location dest, in Location left, in Location right) {
+        int accumulator = dest.kind == LocationKind.integer ? cast(int) dest.bits : RAX;
+        const scaled = stride == 1 || stride == 2 || stride == 4 || stride == 8;
+        if (right.kind == LocationKind.literal && right.bits <= int.max / stride) {
+            const base = integer(left, accumulator);
+            a.lea(accumulator, Mem(cast(ubyte) base, cast(int) (right.bits * stride)));
+        } else if (scaled && right.kind == LocationKind.integer) {
+            const index = cast(int) right.bits;
+            const base = integer(left, index == accumulator ? RAX : accumulator);
+            a.lea(accumulator, Mem(cast(ubyte) base, 0, index, cast(ubyte) stride));
+        } else {
+            if (dest == left)
+                accumulator = RAX;
+            const index = integer(right, accumulator);
+            a.imulRI(accumulator, index, stride);
+            if (left.kind == LocationKind.frame)
+                a.alu(Alu.add, 8, accumulator, Frame(left));
+            else if (left.kind == LocationKind.integer)
+                a.aluRR(Alu.add, 8, accumulator, cast(int) left.bits);
+            else if (accumulator != RAX)
+                a.aluRR(Alu.add, 8, accumulator, integer(left, RAX));
+            else
+                return false;
+        }
+        saveInteger(accumulator, dest);
+        return true;
+    }
+
+    private bool compare(in Plan.Operation step, in Location aOp, in Location bOp) {
+        const w = step.left.width;
+        if (step.compareKind == CompareKind.floating) {
+            const ccPrefix = w == 8 ? operandSizePrefix : noPrefix;
+            const reverse = step.comparison == Comparison.lessThan
+                || step.comparison == Comparison.lessOrEqual;
+            const a = reverse ? bOp : aOp;
+            const b = reverse ? aOp : bOp;
+            const left = floating(a, XMM1);
+            if (b.kind == LocationKind.frame)
+                this.a.sse(ccPrefix, compareOpcode, left, Frame(b));
+            else if (b.kind == LocationKind.literal)
+                literalSse(ccPrefix, compareOpcode, left, b.bits);
+            else
+                this.a.sseRR(ccPrefix, compareOpcode, left, floating(b, XMM2));
+            return true;
+        }
+        int immediate;
+        const fits = bOp.kind == LocationKind.literal && Gen.immOf(w, bOp.bits, immediate);
+        if (aOp.kind == LocationKind.frame && fits) {
+            a.aluMI(Alu.cmp, w, Frame(aOp), immediate);
+            return true;
+        }
+        const left = integer(aOp, RAX);
+        if (fits)
+            a.aluRI(Alu.cmp, w, left, immediate);
+        else if (bOp.kind == LocationKind.frame)
+            a.alu(Alu.cmp, w, left, Frame(bOp));
+        else if (bOp.kind == LocationKind.integer)
+            a.aluRR(Alu.cmp, w, left, cast(int) bOp.bits);
+        else if (left != RAX)
+            a.aluRR(Alu.cmp, w, left, integer(bOp, RAX));
+        else
+            return false;
+        return true;
+    }
+
+    private static int intCondition(in Plan.Operation step) {
+        return Gen.integerBranchCc(JitOp.Fused(step.comparison,
+            step.compareKind, true));
+    }
+
+    private Branch conditional(in Plan.Operation step, ushort block, ushort target) {
+        Branch branch;
+        branch.block = block;
+        branch.target = target;
+        if (step.compareKind == CompareKind.floating) {
+            final switch (step.comparison) with (Comparison) {
+            case greaterThan, greaterOrEqual, lessThan, lessOrEqual:
+                const strict = step.comparison == greaterThan || step.comparison == lessThan;
+                branch.patches[branch.count++] = gen.jccLocal(
+                    (strict ? CC_A : CC_AE) ^ !step.jumpWhen);
+                break;
+            case equal, notEqual:
+                if ((step.comparison == equal) == step.jumpWhen) {
+                    const skip = gen.jccLocal(CC_P);
+                    branch.patches[branch.count++] = gen.jccLocal(CC_E);
+                    gen.patchHere(skip);
+                } else {
+                    branch.patches[branch.count++] = gen.jccLocal(CC_P);
+                    branch.patches[branch.count++] = gen.jccLocal(CC_NE);
+                }
+                break;
+            }
+        } else {
+            branch.patches[branch.count++] = gen.jccLocal(intCondition(step) ^ !step.jumpWhen);
+        }
+        return branch;
+    }
+
+    private bool finish(in Block block, ushort id) {
+        import snakebite.backends.bytecode.vm: jitFallback;
+
+        const pc = block.end - 1;
+        ref const step = flow.ranges.resolved[pc];
+        if (step.kind == Kind.exit || step.kind == Kind.returnValue || step.kind == Kind.returnVoid) {
+            const canonical = step.kind != Kind.returnVoid;
+            size_t count;
+            foreach (home, value; block.outgoing[0 .. flow.ranges.program.slotCount]) {
+                if (value == none || !flow.modified.has(home))
+                    continue;
+                if (canonical || home == flow.fp0Slot || home == flow.r0Slot)
+                    moveScratch[count++] = Move(location(value), homeLocation(cast(ushort) home));
+            }
+            parallelMoves(moveScratch[0 .. count]);
+            if (!space(192))
+                return false;
+            if (step.kind == Kind.returnVoid) {
+                if (gen.inlineCaller !is null) {
+                    inlineReturn = true;
+                    return gen.emitInlineReturn(pc, false);
+                }
+                return gen.emitReturn(pc, false, originals[pc]);
+            }
+            if (step.kind == Kind.returnValue && gen.inlineCaller !is null) {
+                inlineReturn = true;
+                return gen.emitInlineReturn(pc, true);
+            }
+            if (originals[pc] is null)
+                a.ud2;
+            else
+                gen.jumpToHandler(pc, jitFallback(gen.function_, gen.snapshot[pc], originals[pc]));
+            return true;
+        }
+
+        if (step.kind == Kind.branch && block.target != block.next) {
+            branches[branchCount++] = conditional(step, id, block.target);
+        }
+        const target = block.next == none ? block.target : block.next;
+        if (target == none)
+            return false;
+        edge(block, flow.blocks[target]);
+        if (!space(8))
+            return false;
+        if (target != id + 1) {
+            a.b(0xE9);
+            const patch = a.n;
+            a.d32(0);
+            // The copies are already on this edge.
+            branches[branchCount++] = Branch([patch, 0], 1, none, target);
+        }
+        return true;
+    }
+
+    private bool movesNeeded(in Block from, in Block to) {
+        foreach (home, id; to.incoming[0 .. flow.ranges.program.slotCount]) {
+            if (id != none && flow.values[id].used
+                    && location(id) != location(from.outgoing[home]))
+                return true;
+        }
+        return false;
+    }
+
+    private void edge(in Block from, in Block to) {
+        size_t count;
+        foreach (home, id; to.incoming[0 .. flow.ranges.program.slotCount]) {
+            if (id != none && flow.values[id].used)
+                moveScratch[count++] = Move(location(from.outgoing[home]), location(id));
+        }
+        parallelMoves(moveScratch[0 .. count]);
+    }
+
+    private void parallelMoves(Move[] moves) {
+        while (moves.length) {
+            bool progress;
+            foreach (i, ref const transfer; moves) {
+                bool occupied;
+                foreach (j, ref const waiting; moves)
+                    occupied |= j != i && samePlace(transfer.to, waiting.from);
+                if (!occupied || samePlace(transfer.from, transfer.to)) {
+                    move(transfer.from, transfer.to);
+                    moves[i] = moves[$ - 1];
+                    moves = moves[0 .. $ - 1];
+                    progress = true;
+                    break;
+                }
+            }
+            if (!progress) {
+                const saved = moves[0].from;
+                const scratch = Location(LocationKind.floating, XMM2, saved.width);
+                move(saved, scratch);
+                foreach (ref transfer; moves)
+                    if (samePlace(transfer.from, saved))
+                        transfer.from = scratch;
+            }
+            if (failed)
+                return;
+        }
+    }
+
+    private static bool samePlace(in Location a, in Location b) {
+        return a.kind == b.kind && a.bits == b.bits
+            && (a.kind == LocationKind.floating || a.kind == LocationKind.integer
+                || a.kind == LocationKind.frame);
+    }
+
+    private Location homeLocation(ushort home) {
+        ref const slot = flow.ranges.program.slots[home];
+        if (home == flow.fp0Slot)
+            return Location(LocationKind.floating, fp0Register, slot.width);
+        if (home == flow.r0Slot)
+            return Location(LocationKind.integer, REG0, slot.width);
+        return Location(LocationKind.frame, slot.offset, slot.width);
+    }
+
+    private Location location(ushort id) {
+        if (id == none)
+            return Location.init;
+        ref const value = flow.values[id];
+        final switch (value.origin) with (Origin) {
+        case literal: return Location(LocationKind.literal, value.bits, value.width);
+        case address: return Location(LocationKind.address, value.bits, value.width);
+        case entry: return homeLocation(value.home);
+        case phi, produced:
+            if (value.spilled)
+                return homeLocation(value.home);
+            if (!value.used)
+                return Location.init;
+            if (value.lane == Lane.floating)
+                return Location(LocationKind.floating, firstFp + value.color, value.width);
+            return Location(LocationKind.integer, _gp[value.color], value.width);
+        }
+    }
+
+    private void move(in Location source, in Location dest) {
+        if (source == dest || !space(32))
+            return;
+        final switch (dest.kind) with (LocationKind) {
+        case none, literal, address:
+            return;
+        case integer:
+            assignInteger(source, cast(int) dest.bits);
+            return;
+        case floating:
+            assignFloat(source, cast(int) dest.bits);
+            return;
+        case frame:
+            if (source.kind == floating && (dest.width == 4 || dest.width == 8)) {
+                a.sse(prefix(dest.width), storeOpcode, cast(int) source.bits, Frame(dest));
+            } else if (source.kind == literal) {
+                gen.storeConstant(dest.width, Frame(dest), source.bits);
+            } else {
+                const reg = this.integer(source, RAX);
+                a.st(dest.width, Frame(dest), reg);
+            }
+            return;
+        }
+    }
+
+    private int integer(in Location value, int scratch) {
+        if (value.kind == LocationKind.integer)
+            return cast(int) value.bits;
+        assignInteger(value, scratch);
+        return scratch;
+    }
+
+    private void assignInteger(in Location value, int reg) {
+        final switch (value.kind) with (LocationKind) {
+        case integer:
+            if (reg != value.bits)
+                a.movRR64(reg, cast(int) value.bits);
+            break;
+        case floating:
+            a.xmmToInteger(reg, cast(int) value.bits);
+            break;
+        case frame:
+            a.ldzx(value.width, reg, Frame(value));
+            break;
+        case literal:
+            a.movI(reg, value.bits);
+            break;
+        case address:
+            a.lea(reg, Mem(FRAME, cast(int) value.bits));
+            break;
+        case none:
+            failed = true;
+            break;
+        }
+    }
+
+    private void saveInteger(int source, in Location dest) {
+        if (dest.kind == LocationKind.integer) {
+            if (dest.bits != source)
+                a.movRR64(cast(int) dest.bits, source);
+        } else if (dest.kind == LocationKind.frame)
+            a.st(dest.width, Frame(dest), source);
+        else if (dest.kind == LocationKind.floating)
+            a.integerToXmm(cast(int) dest.bits, source);
+    }
+
+    private int floating(in Location value, int scratch) {
+        if (value.kind == LocationKind.floating)
+            return cast(int) value.bits;
+        assignFloat(value, scratch);
+        return scratch;
+    }
+
+    private void assignFloat(in Location value, int reg) {
+        final switch (value.kind) with (LocationKind) {
+        case floating:
+            if (reg != value.bits)
+                a.sseRR(noPrefix, moveAlignedOpcode, reg, cast(int) value.bits);
+            break;
+        case frame:
+            if (value.width == 4 || value.width == 8)
+                a.sse(prefix(value.width), loadOpcode, reg, Frame(value));
+            else
+                a.integerToXmm(reg, this.integer(value, RAX));
+            break;
+        case literal:
+            literalSse(prefix(value.width), loadOpcode, reg, value.bits);
+            break;
+        case integer, address:
+            a.integerToXmm(reg, this.integer(value, RAX));
+            break;
+        case none:
+            failed = true;
+            break;
+        }
+    }
+
+    private void literalSse(ubyte prefix, ubyte opcode, int reg, ulong bits) {
+        if (gen.literalScratch.grow(gen.literalCount + 1) is null) {
+            failed = true;
+            return;
+        }
+        a.sseRip(prefix, opcode, reg);
+        gen.literalScratch.ptr[gen.literalCount++] = Literal(a.n - int.sizeof, bits);
+    }
+
+    private static ubyte prefix(int width) {
+        return width == double.sizeof ? doublePrefix : singlePrefix;
+    }
+
+    private static Mem Frame(in Location location) {
+        return Mem(FRAME, cast(int) location.bits);
+    }
+}
+
 private struct Gen {
     import snakebite.backends.bytecode.vm: Activation, CallSite,
         chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
@@ -1833,6 +2495,8 @@ private struct Gen {
     Asm a;
     Scratch!Fixup* fixupScratch;
     Scratch!Literal* literalScratch;
+    Scratch!(ScalarFlow, 1)* scalarScratch;
+    Scratch!(ScalarEmitter, 1)* scalarEmitterScratch;
     Scratch!ReloadEntry* reloadEntryScratch;
     InlineBody* inlineBodies;
     FpSlots fpSlots;
@@ -3329,6 +3993,37 @@ private struct Gen {
     private enum inlineDepthLimit = 3;
     private enum inlineCodeLimit = 8 * 1024;
 
+    bool emitScalarEntry(const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals, ref bool inlineReturn)
+    {
+        static if (!chainedDispatch)
+            return false;
+        if (scalarScratch is null)
+            return false;
+        auto flow = scalarScratch.reserve(1);
+        if (flow is null || !flow.prepare(function_, snapshot, ops))
+            return false;
+
+        const start = a.n;
+        const savedFixups = fixupCount;
+        const savedLiterals = literalCount;
+        auto emitter = scalarEmitterScratch.reserve(1);
+        if (emitter is null)
+            return false;
+        *emitter = ScalarEmitter.init;
+        emitter.gen = &this;
+        emitter.flow = flow;
+        emitter.originals = originals;
+        if (!emitter.emit) {
+            a.n = start;
+            fixupCount = savedFixups;
+            literalCount = savedLiterals;
+            return false;
+        }
+        inlineReturn |= emitter.inlineReturn;
+        return true;
+    }
+
     bool emitWindowBody(size_t i, in Instruction ins, in JitOp.CallWindow op,
         const(CallSite)* site, ref WindowArm arm)
     {
@@ -3373,6 +4068,8 @@ private struct Gen {
         child.fixupCap = fixupCap;
         child.fixupCount = fixupCount;
         child.literalScratch = literalScratch;
+        child.scalarScratch = scalarScratch;
+        child.scalarEmitterScratch = scalarEmitterScratch;
         child.inlineBodies = inlineBodies;
         child.literalCount = literalCount;
         child.bmi2 = bmi2;
@@ -3414,6 +4111,8 @@ private struct Gen {
         import snakebite.backends.bytecode.vm: jitCountsBranch, JitTier;
 
         bool returned;
+        if (function_.jitHandlers !is null)
+            emitScalarEntry(ops, originals, returned);
         foreach (i, ref const op; ops) {
             if (a.n + literalBytes + maximumBytesPerInstruction > codeLimit)
                 return false;

@@ -1420,6 +1420,10 @@ package struct DispatchState {
     const(void)* decodedAddress;
     const(void)* decodedWord;
     ptrdiff_t decodedAdjustment;
+    // STMXCSR needs a memory operand. This word belongs to the dispatch
+    // that checks the floating-point masks and is not part of the guest.
+    static if (jitSupported)
+        uint jitFloatEnvironment;
     static if (observeGuestPaths) {
         const(Function)* observedFunction;
         Scratch!ObservedEdge observedEdges;
