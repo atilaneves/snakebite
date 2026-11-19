@@ -2442,36 +2442,33 @@ package struct ScalarFlow {
                 coalesce(false);
                 rejected = color;
             }
-            ushort spill = none;
+            Live candidates;
             if (rejected == none) {
                 foreach (id, ref value; values[0 .. valueCount])
                     value.color = value.used && value.allocated && !value.spilled
                         ? _assigned[group(cast(ushort) id)] : -1;
-                Live blockers;
-                if (recordScratch(blockers))
+                if (recordScratch(candidates))
                     return true;
-                if (!classifiedUses) {
-                    computational = computationalUses;
-                    classifiedUses = true;
-                }
-                foreach (id; blockers)
-                    if (canSpill(id) && (spill == none
-                            || (!computational.has(id) && computational.has(spill))
-                            || (computational.has(id) == computational.has(spill)
-                                && _cost[id] < _cost[spill])))
-                        spill = id;
             } else {
-                foreach (id; 0 .. valueCount) {
-                    if (!canSpill(cast(ushort) id)
-                            || isFloat(cast(ushort) id) != isFloat(rejected))
+                foreach (id; cast(ushort) 0 .. valueCount) {
+                    if (isFloat(id) != isFloat(rejected))
                         continue;
-                    const range = group(cast(ushort) id);
-                    if (range != rejected && !_interference[rejected].has(range))
-                        continue;
-                    if (spill == none || _cost[id] < _cost[spill])
-                        spill = cast(ushort) id;
+                    const range = group(id);
+                    if (range == rejected || _interference[rejected].has(range))
+                        candidates.add(id);
                 }
             }
+            if (!classifiedUses) {
+                computational = computationalUses;
+                classifiedUses = true;
+            }
+            ushort spill = none;
+            foreach (id; candidates)
+                if (canSpill(id) && (spill == none
+                        || (!computational.has(id) && computational.has(spill))
+                        || (computational.has(id) == computational.has(spill)
+                            && _cost[id] < _cost[spill])))
+                    spill = id;
             if (spill == none)
                 return false;
             values[spill].spilled = true;
