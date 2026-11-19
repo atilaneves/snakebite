@@ -93,4 +93,6 @@ jobs:
       - if: matrix.os == 'ubuntu-24.04'
         uses: codecov/codecov-action@v5.1.2
         with:
+          files: coverage/kcov-merged/codecov.json
+          disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}

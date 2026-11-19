@@ -508,8 +508,15 @@ Build reggaeBuild() {
         ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);
     // Optional: `ninja bin/sb-prof` builds it, a plain `ninja` does not.
     auto profTargets = dubTarget("ldc2", "sb", "sb-prof", "sb-prof", profFlags);
+    // Coverage needs full DWARF for the optimized chained dispatcher.
+    // ThinLTO drops some of that information in LDC 1.43.
+    auto coverageFlags = CompilerFlags("-release", "-O", "-g", "--dwarf-version=4",
+        "-cov");
+    auto coverageTargets = dubTarget("ldc2", "sb", "sb-coverage", "sb-coverage",
+        coverageFlags);
     return Build(targets.map!(a => createTopLevelTarget(a)).array
-        ~ profTargets.map!(a => optional(a)).array);
+        ~ profTargets.map!(a => optional(a)).array
+        ~ coverageTargets.map!(a => optional(a)).array);
 }
 
 mixin BuildgenMain;

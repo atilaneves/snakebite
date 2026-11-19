@@ -1,0 +1,124 @@
+module select_abi_checks;
+
+import core.memory : GC;
+import core.stdc.stdlib : alloca, qsort;
+import core.thread.fiber : Fiber;
+import core.stdc.stdio : puts;
+
+int cleaned;
+int sorted;
+
+
+extern(C) int compare(scope const void* a, scope const void* b) {
+    assert(walk(8, false, false) == 80);
+    return *cast(const(int)*) a - *cast(const(int)*) b;
+}
+
+Exception makeError(bool shouldYield) {
+    if (shouldYield) {
+        int[2] values = [2, 1];
+        qsort(values.ptr, values.length, int.sizeof, &compare);
+        assert(values[0] == 1);
+        ++sorted;
+        Fiber.yield();
+        GC.collect();
+    }
+    return new Exception("at the bottom");
+}
+
+void check(bool shouldThrow, bool shouldYield) {
+    if (shouldThrow)
+        throw makeError(shouldYield);
+}
+
+int walk(int depth, bool shouldThrow, bool shouldYield) {
+    align(32) int[19] kept = void;
+    kept[0] = depth;
+    kept[$ - 1] = depth + 1;
+    if (depth == 0) {
+        check(shouldThrow, shouldYield);
+        return kept[0];
+    }
+    return walk(depth - 1, shouldThrow, shouldYield) + kept[0] + kept[$ - 1];
+}
+
+int caller(int depth, bool shouldThrow, bool shouldYield) {
+    auto reserved = cast(int*) alloca(32 * int.sizeof);
+    reserved[0] = 24;
+    reserved[31] = 18;
+    scope (exit) {
+        assert(reserved[0] + reserved[31] == 42);
+        ++cleaned;
+    }
+    try {
+        return walk(depth, shouldThrow, shouldYield);
+    } catch (Exception caught) {
+        assert(caught.msg == "at the bottom");
+        return -1;
+    }
+}
+
+int callPublishedWalk(int depth) {
+    return walk(depth, false, false) + 1;
+}
+
+int sumExpanded(int depth) {
+    if (depth == 0)
+        return 0;
+    int total = sumExpanded(depth - 1);
+    static foreach (step; 0 .. 112)
+        total += depth;
+    return total;
+}
+
+int callExpandedSum(int depth) {
+    return sumExpanded(depth) + 1;
+}
+
+void addBothWays(int depth, ref int total) {
+    if (depth == 0)
+        return;
+    total += depth;
+    addBothWays(depth - 1, total);
+    total += depth;
+}
+
+int callIndirect(int function(int) callee, int depth) {
+    return callee(depth);
+}
+
+void entry() {
+    assert(caller(37, true, true) == -1);
+}
+
+void main() {
+    foreach (i; 0 .. 400)
+        assert(caller(11, false, false) == 143);
+    const depth = 1600;
+    assert(caller(depth, false, false) == depth * (depth + 2));
+    assert(caller(37, true, false) == -1);
+
+    auto fiber = new Fiber(&entry);
+    fiber.call();
+    assert(fiber.state != Fiber.State.TERM);
+    GC.collect();
+    assert(caller(11, false, false) == 143);
+    fiber.call();
+    assert(fiber.state == Fiber.State.TERM && sorted == 1);
+    assert(cleaned == 404);
+
+    foreach (i; 0 .. 400) {
+        assert(callPublishedWalk(11) == 144);
+        assert(callIndirect(&callPublishedWalk, 11) == 144);
+        int total;
+        addBothWays(11, total);
+        assert(total == 132);
+    }
+
+    foreach (i; 0 .. 400)
+        assert(sumExpanded(3) == 672);
+    foreach (i; 0 .. 400)
+        assert(callExpandedSum(3) == 673);
+
+    puts("selective ABI checks passed");
+}
