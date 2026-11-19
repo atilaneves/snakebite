@@ -36,6 +36,48 @@ double calibratedTotal(ChannelSpan channel, int count, int skipAt,
     return total;
 }
 
+float decodeLevels(T)(T value, int resolution, int count) {
+    float total = 0;
+    for (int sample = 0; sample < count; ++sample) {
+        auto level = value;
+        static if (is(T == short)) {
+            level >>= resolution;
+            level >>= 1;
+        } else {
+            level >>>= resolution;
+            level >>>= 2;
+        }
+        total += 2.0f * cast(float) level;
+    }
+    return total;
+}
+
+double decodeSequences(uint sequence, int resolution, int count) {
+    double total = 0;
+    for (int sample = 0; sample < count; ++sample) {
+        const decoded = sequence >>> resolution;
+        const coarse = sequence >> 2;
+        total += cast(double) decoded + 2.0 * cast(double) coarse;
+    }
+    return total;
+}
+
+float calibrationResidual(short level, ushort offset, int count) {
+    float total = 0;
+    for (int sample = 0; sample < count; ++sample)
+        total += cast(float) level * 2.0f + cast(float) offset;
+    return total;
+}
+
+float lastSequenceLevel(uint sequence, int count) {
+    float level = 0;
+    for (int sample = 0; sample < count; ++sample) {
+        level = cast(float) sequence;
+        sequence += 2;
+    }
+    return level;
+}
+
 enum byteCount = 600;
 enum ubyte replacement = 0xA5;
 
@@ -74,6 +116,21 @@ int main() {
     assert(calibrate(channel, 400, -1, -1, 7) == 81_800);
     assert(calibrate(channel, 400, 3, 4, 7) == 81_405);
     assert(calibrate(channel, 0, -1, -1, 7) == 0);
+
+    auto decodeDeltas = &decodeLevels!short;
+    auto decodeMagnitudes = &decodeLevels!ushort;
+    auto decodeSequenceNumbers = &decodeSequences;
+    auto calibrateLevel = &calibrationResidual;
+    auto convertSequence = &lastSequenceLevel;
+    assert(decodeDeltas(-513, 3, 300) == -19_800.0f);
+    assert(decodeDeltas(-513, 0, 1) == -514.0f);
+    assert(decodeMagnitudes(0x9002, 3, 300) == 691_200.0f);
+    assert(decodeMagnitudes(0x9002, 0, 1) == 18_432.0f);
+    assert(decodeSequenceNumbers(uint.max, 3, 300) == 805_306_367_100.0);
+    assert(decodeSequenceNumbers(uint.max, 0, 1) == 6_442_450_941.0);
+    assert(calibrateLevel(short.min, ushort.max, 300) == -300.0f);
+    assert(convertSequence(16_777_217, 300) == 16_777_816.0f);
+    assert(convertSequence(16_777_215, 1) == 16_777_215.0f);
 
     auto readings = new ubyte[byteCount];
     auto destination = new ubyte[byteCount];
