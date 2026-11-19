@@ -941,7 +941,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         CompareKind, Comparison, constantForm, fusedBranchHandler, fusesConstant,
         firstComparisonHandler, threeAddressConstantHandlers,
         threeAddressHandlers,
-        decodesIndirect, isFusedBranch, specialiseHandlers,
+        decodesIndirect, frameCopyWidths, isFusedBranch, specialiseHandlers,
         RegisterFamily, registerFamily,
         fusedRegisterFamily, registerForm, fusedRegisterForm,
         opAdd, opAssert, opBitAnd, opBitOr, opBitXor, opBranchFalse,
@@ -1962,7 +1962,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 handler = &opModuloSigned32;
         }
         if (handler is &opCopy) {
-            static foreach (size; [1, 2, 4, 8, 16]) {
+            static foreach (size; frameCopyWidths) {
                 if (width == size)
                     handler = &opCopyFixed!size;
             }

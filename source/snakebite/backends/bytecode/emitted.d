@@ -577,7 +577,7 @@ package struct EmittedCode {
                     access.kind = pureWriter;
                     access.destinationExtent = size_t.sizeof;
                 }
-            static foreach (width; copyWidths)
+            static foreach (width; frameCopyWidths)
                 if (handler is &opCopyFixed!width) {
                     access.kind = pureWriter;
                     access.copyWidth = width;
@@ -638,8 +638,6 @@ package struct EmittedCode {
                 access.takesAddress = true;
         return access;
     }
-
-    package enum copyWidths = [1, 2, 4, 8, 16];
 
     package static immutable Field[3] allFields = [
         Field.destination, Field.source, Field.right,
@@ -1070,11 +1068,13 @@ package struct EmittedCode {
             // fused path must still write the producer's destination.
             static foreach (operation; AliasSeq!(
                 opConstant, opCopy, opLoadIndirect, opFrameAddress,
-                opCopyFixed!1, opCopyFixed!2, opCopyFixed!4,
-                opCopyFixed!8, opCopyFixed!16,
             )) {
                 if (instruction.handler is &operation)
                     instruction.handler = &opThenReturn!operation;
+            }
+            static foreach (width; frameCopyWidths) {
+                if (instruction.handler is &opCopyFixed!width)
+                    instruction.handler = &opThenReturn!(opCopyFixed!width);
             }
             static foreach (width; indirectCopyWidths) {
                 if (instruction.handler is &opLoadIndirectFixed!width)
