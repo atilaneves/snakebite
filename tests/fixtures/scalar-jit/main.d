@@ -69,6 +69,15 @@ float calibrationResidual(short level, ushort offset, int count) {
     return total;
 }
 
+void accumulateReadings(ref double total, ref int reading, int replacement,
+        int count) {
+    double scale = 2.0;
+    for (int sample = 0; sample < count; ++sample) {
+        total += scale * cast(double) reading;
+        reading = replacement;
+    }
+}
+
 float lastSequenceLevel(uint sequence, int count) {
     float level = 0;
     for (int sample = 0; sample < count; ++sample) {
@@ -122,6 +131,7 @@ int main() {
     auto decodeSequenceNumbers = &decodeSequences;
     auto calibrateLevel = &calibrationResidual;
     auto convertSequence = &lastSequenceLevel;
+    auto accumulate = &accumulateReadings;
     assert(decodeDeltas(-513, 3, 300) == -19_800.0f);
     assert(decodeDeltas(-513, 0, 1) == -514.0f);
     assert(decodeMagnitudes(0x9002, 3, 300) == 691_200.0f);
@@ -131,6 +141,18 @@ int main() {
     assert(calibrateLevel(short.min, ushort.max, 300) == -300.0f);
     assert(convertSequence(16_777_217, 300) == 16_777_816.0f);
     assert(convertSequence(16_777_215, 1) == 16_777_215.0f);
+
+    int reading = -19;
+    double total = 0;
+    accumulate(total, reading, 13, 305);
+    assert(total == 7_866.0);
+    assert(reading == 13);
+
+    reading = int.min;
+    total = 0;
+    accumulate(total, reading, int.max, 2);
+    assert(total == -2.0);
+    assert(reading == int.max);
 
     auto readings = new ubyte[byteCount];
     auto destination = new ubyte[byteCount];
