@@ -168,6 +168,37 @@ static foreach (backend; Matrix!()) {
         }, ["work"]);
     }
 
+    @("jit.shiftKeepsLiveInputAcrossCountJoins." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            double reconcileChannels(int slots, int gain, int shift, int pivot, double bias) {
+                double score = 0;
+                for (; slots > 0; --slots) {
+                    const sample = slots + gain;
+                    int count = shift;
+                    if (slots > pivot)
+                        count += 2;
+                    const shifted = sample << count;
+                    const corrected = shifted ^ sample;
+                    score += 2.0 * cast(double) corrected + bias;
+                }
+                return score;
+            }
+
+            int main() {
+                auto reconcile = &reconcileChannels;
+                foreach (_; 0 .. 3) {
+                    assert(reconcile(512, -18, 4, 193, -2) == 14_198_752);
+                    assert(reconcile(513, 6, 8, 281, 3) == 213_121_553);
+                    assert(reconcile(0, -8, 1, 0, -3) == 0);
+                    assert(reconcile(1, -8, 1, 0, -3) == 95);
+                }
+                return 0;
+            }
+        }, ["reconcileChannels"]);
+    }
+
     @("jit.mixedArithmeticKeepsValuesAcrossBackedges." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
