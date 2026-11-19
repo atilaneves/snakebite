@@ -991,17 +991,18 @@ package struct ScalarFlow {
     enum none = Program.none;
     enum valueLimit = 4096;
     enum nodeLimit = Program.instructionLimit * 8;
-    enum gpCount = 4;
-    enum fpCount = 13;
+    enum gpCount = 7;
+    enum fpCount = 16;
+    enum gpResult = gpCount - 1;
 
     enum Lane : ubyte { either, integer, floating }
-    enum Origin : ubyte { produced, phi, literal, address, entry }
+    enum Origin : ubyte { produced, phi, literal, address }
     enum Action : ubyte { load, store, operation }
 
-    static struct Set {
+    static struct Bits(size_t count) {
         @nogc nothrow:
 
-        ulong[(Program.slotLimit + 63) / 64] words;
+        ulong[(count + 63) / 64] words;
 
         bool has(size_t index) const {
             return (words[index / 64] & (1UL << (index % 64))) != 0;
@@ -1011,33 +1012,53 @@ package struct ScalarFlow {
             words[index / 64] |= 1UL << (index % 64);
         }
 
-        void include(in Set other) {
+        void remove(size_t index) {
+            words[index / 64] &= ~(1UL << (index % 64));
+        }
+
+        void include(in Bits other) {
             foreach (i; 0 .. words.length)
                 words[i] |= other.words[i];
         }
 
-        void exclude(in Set other) {
+        void exclude(in Bits other) {
             foreach (i; 0 .. words.length)
                 words[i] &= ~other.words[i];
         }
+
+        int opApply(scope int delegate(ushort) @nogc nothrow visit) const {
+            import core.bitop: bsf;
+
+            foreach (word, mask; words) {
+                auto bits = cast(ulong) mask;
+                while (bits) {
+                    const stop = visit(cast(ushort) (word * 64 + bsf(bits)));
+                    if (stop)
+                        return stop;
+                    bits &= bits - 1;
+                }
+            }
+            return 0;
+        }
     }
+
+    alias Set = Bits!(Program.slotLimit);
+    private alias Live = Bits!valueLimit;
 
     static struct Value {
         ulong bits;
         ushort home = none;
         ushort first;
-        ushort last;
-        ushort overwrite = none;
-        ushort preference = none;
         ubyte width;
         Lane lane;
         Origin origin;
         byte color = -1;
         bool spilled;
         bool used;
+        bool folded;
 
         bool allocated() const @nogc nothrow {
-            return origin == Origin.produced || origin == Origin.phi;
+            return !folded && (origin == Origin.produced || origin == Origin.phi);
         }
     }
 
@@ -1053,6 +1074,8 @@ package struct ScalarFlow {
         Lane lane;
         bool used;
         ScalarRanges.Memory memory;
+        ushort availableGp;
+        ushort availableFp;
     }
 
     static struct Block {
@@ -1069,6 +1092,8 @@ package struct ScalarFlow {
         Set uses;
         Set defs;
         Set live;
+        Live liveOut;
+        ubyte weight = 1;
     }
 
     ScalarRanges ranges;
@@ -1084,6 +1109,7 @@ package struct ScalarFlow {
     ushort fp0Slot;
     ushort r0Slot;
     bool failed;
+    private bool _hasFrameExit;
 
     bool prepare(const(Function)* function_, const(Instruction)[] instructions,
         const(JitOp)[] ops)
@@ -1093,6 +1119,7 @@ package struct ScalarFlow {
         blockCount = valueCount = nodeCount = 0;
         failed = false;
         canonical = modified = Set.init;
+        _hasFrameExit = false;
         hoistLoads;
         auto p = &ranges.program;
         fp0Slot = p.slotOf(Program.fp0, double.sizeof);
@@ -1116,14 +1143,20 @@ package struct ScalarFlow {
         if (canonical.has(r0Slot) || canonical.has(fp0Slot))
             return false;
         splitBlocks;
+        foreach (ref block; blocks[0 .. blockCount]) {
+            const kind = ranges.resolved[block.end - 1].kind;
+            _hasFrameExit |= kind == Kind.exit || kind == Kind.returnValue;
+        }
         findLiveHomes;
         foreach (i; 0 .. blockCount)
             rename(blocks[i]);
         if (failed)
             return false;
         connect;
+        selectOperands;
+        measureEdges;
         scheduleBlocks;
-        return !failed && color;
+        return !failed && allocate;
     }
 
 
@@ -1398,9 +1431,9 @@ package struct ScalarFlow {
                 block.uses.include(uses);
             }
             if (last == Kind.returnVoid || last == Kind.returnValue || last == Kind.exit) {
-                if (modified.has(fp0Slot) && !block.defs.has(fp0Slot))
+                if (!block.defs.has(fp0Slot))
                     block.uses.add(fp0Slot);
-                if (modified.has(r0Slot) && !block.defs.has(r0Slot))
+                if (!block.defs.has(r0Slot))
                     block.uses.add(r0Slot);
             }
         }
@@ -1456,8 +1489,7 @@ package struct ScalarFlow {
             if (!block.live.has(home))
                 continue;
             const lane = home == fp0Slot ? Lane.floating : Lane.either;
-            const id = value(Value(0, cast(ushort) home, nodeCount, nodeCount,
-                none, none, slot.width, lane, Origin.phi));
+            const id = value(Value(0, cast(ushort) home, nodeCount, slot.width, lane, Origin.phi));
             block.incoming[home] = block.outgoing[home] = id;
         }
         foreach (pc; block.pc .. block.end) {
@@ -1490,8 +1522,7 @@ package struct ScalarFlow {
                 continue;
             }
             const destination = step.output;
-            const result = value(Value(0, none, nodeCount, nodeCount,
-                none, left, destination.width, lane));
+            const result = value(Value(0, none, nodeCount, destination.width, lane));
             append(Node(Action.operation, index, result, left, right));
             write(block, destination, result, index);
         }
@@ -1505,8 +1536,7 @@ package struct ScalarFlow {
             return none;
         case literal, address:
             const origin = operand.mode == literal ? Origin.literal : Origin.address;
-            return value(Value(operand.word, none, nodeCount, nodeCount,
-                none, none, operand.width, lane, origin));
+            return value(Value(operand.word, none, nodeCount, operand.width, lane, origin));
         case frame, register, temporary: {
             const home = ranges.program.slotOf(operand);
             if (home == none) {
@@ -1514,8 +1544,7 @@ package struct ScalarFlow {
                 return none;
             }
             if (canonical.has(home)) {
-                const result = value(Value(0, none, nodeCount, nodeCount, none, none,
-                    operand.width, lane));
+                const result = value(Value(0, none, nodeCount, operand.width, lane));
                 append(Node(Action.load, pc, result, none, none, none,
                     cast(uint) operand.word, operand.width, lane, false, ranges.memoryOf(operand, pc)));
                 return result;
@@ -1541,8 +1570,7 @@ package struct ScalarFlow {
                     return previous.output;
                 }
             }
-            const result = value(Value(0, none, nodeCount, nodeCount, none, none,
-                operand.width, lane));
+            const result = value(Value(0, none, nodeCount, operand.width, lane));
             append(Node(Action.load, pc, result, none, none, address,
                 operand.offset, operand.width, lane, false, memory));
             return result;
@@ -1573,10 +1601,6 @@ package struct ScalarFlow {
                 ranges.memoryOf(operand, pc)));
             return;
         }
-        const previous = block.outgoing[home];
-        if (previous != none && previous != id && values[previous].home == home
-                && values[previous].overwrite == none)
-            values[previous].overwrite = nodeCount;
         if (values[id].home == none && values[id].allocated
                 && nodes[values[id].first].pc == pc)
             values[id].home = home;
@@ -1601,13 +1625,10 @@ package struct ScalarFlow {
         nodes[nodeCount++] = node;
     }
 
-    private void use(ushort id, ushort position) {
+    private void use(ushort id) {
         if (id == none)
             return;
-        ref v = values[id];
-        v.used = true;
-        if (position > v.last)
-            v.last = position;
+        values[id].used = true;
     }
 
     private void prefer(ushort id, Lane lane) {
@@ -1619,6 +1640,10 @@ package struct ScalarFlow {
     }
 
     private void connect() {
+        foreach (ref value; values[0 .. valueCount])
+            value.used = false;
+        foreach (ref node; nodes[0 .. nodeCount])
+            node.used = false;
         // Phi operands are uses on the incoming edge. This distinguishes
         // definitions within the block from definitions at the join.
         bool changed;
@@ -1638,8 +1663,8 @@ package struct ScalarFlow {
                             failed = true;
                             return;
                         }
-                        if (values[id].used)
-                            use(from, block.endNode);
+                        if (values[id].used && !frameResident(id))
+                            use(from);
                         const source = values[from].lane;
                         const dest = values[id].lane;
                         if (source == Lane.either && dest != Lane.either) {
@@ -1655,13 +1680,11 @@ package struct ScalarFlow {
                 if (last == Kind.exit || last == Kind.returnValue) {
                     foreach (home, id; block.outgoing[0 .. ranges.program.slotCount])
                         if (modified.has(home))
-                            use(id, block.endNode);
+                            use(id);
                 }
                 if (last == Kind.exit || last == Kind.returnValue || last == Kind.returnVoid) {
-                    if (modified.has(fp0Slot))
-                        use(block.outgoing[fp0Slot], block.endNode);
-                    if (modified.has(r0Slot))
-                        use(block.outgoing[r0Slot], block.endNode);
+                    use(block.outgoing[fp0Slot]);
+                    use(block.outgoing[r0Slot]);
                 }
             }
             markLiveNodes;
@@ -1674,16 +1697,177 @@ package struct ScalarFlow {
     }
 
     private void markLiveNodes() {
-        foreach_reverse (index, ref node; nodes[0 .. nodeCount]) {
+        foreach_reverse (ref node; nodes[0 .. nodeCount]) {
+            if (node.output != none && values[node.output].folded)
+                continue;
             const kind = ranges.resolved[node.pc].kind;
-            node.used = node.output == none || values[node.output].used
+            node.used = (node.output == none && (node.action != Action.store
+                    || node.address != none || frameStoreNeeded(node)))
+                || (node.output != none && values[node.output].used)
                 || (node.action == Action.operation && (kind == Kind.floating || kind == Kind.sqrt));
             if (node.used) {
-                use(node.left, cast(ushort) index);
-                use(node.right, cast(ushort) index);
-                use(node.address, cast(ushort) index);
+                if (node.output != none && (kind == Kind.floating || kind == Kind.sqrt))
+                    use(node.output);
+                use(node.left);
+                use(node.right);
+                foreach (id; inputs(node))
+                    use(id);
             }
         }
+    }
+
+    private bool frameStoreNeeded(in Node store) const {
+        if (_hasFrameExit)
+            return true;
+        foreach (ref const load; nodes[0 .. nodeCount])
+            if (load.used && load.action == Action.load && load.address == none
+                    && !store.memory.disjoint(load.memory))
+                return true;
+        return false;
+    }
+
+    private void selectOperands() {
+        ushort[valueLimit] uses;
+        foreach (ref const block; blocks[0 .. blockCount])
+            edgeUses(block, (ushort id) { ++uses[id]; });
+        foreach (ref const node; nodes[0 .. nodeCount]) {
+            if (!node.used)
+                continue;
+            foreach (id; [node.left, node.right, node.address])
+                if (id != none)
+                    ++uses[id];
+        }
+        foreach (index, ref const node; nodes[0 .. nodeCount]) {
+            if (!node.used || node.action != Action.operation)
+                continue;
+            const kind = ranges.resolved[node.pc].kind;
+            if (kind == Kind.floating || kind == Kind.sqrt)
+                foldLoad(node.left, index, uses[]);
+            if (kind == Kind.floating || kind == Kind.integer)
+                foldLoad(node.right, index, uses[]);
+        }
+    }
+
+    private void foldLoad(ushort input, size_t index, scope const(ushort)[] uses) {
+        if (input == none || uses[input] != 1)
+            return;
+        ref value = values[input];
+        if (value.origin != Origin.produced)
+            return;
+        ref source = nodes[value.first];
+        if (source.action != Action.load || source.width != value.width)
+            return;
+        foreach (ref const between; nodes[value.first + 1 .. index])
+            if (between.used && between.action == Action.store
+                    && !between.memory.disjoint(source.memory))
+                return;
+        source.used = false;
+        value.folded = true;
+    }
+
+    private void edgeUses(in Block block, scope void delegate(ushort) @nogc nothrow visit) const {
+        foreach (successor; [block.next, block.target]) {
+            if (successor == none)
+                continue;
+            foreach (home, id; blocks[successor].incoming[0 .. ranges.program.slotCount])
+                if (id != none && values[id].used && !frameResident(id))
+                    visit(block.outgoing[home]);
+        }
+        const kind = ranges.resolved[block.end - 1].kind;
+        if (kind == Kind.exit || kind == Kind.returnValue)
+            foreach (home; modified)
+                if (block.outgoing[home] != none)
+                    visit(block.outgoing[home]);
+        if (kind == Kind.exit || kind == Kind.returnValue || kind == Kind.returnVoid) {
+            visit(block.outgoing[r0Slot]);
+            visit(block.outgoing[fp0Slot]);
+        }
+    }
+
+    private void measureEdges() {
+        Set[Program.instructionLimit] predecessors;
+        Set[Program.instructionLimit] dominators;
+        Set all;
+        foreach (i, ref const block; blocks[0 .. blockCount]) {
+            all.add(i);
+            foreach (successor; [block.next, block.target])
+                if (successor != none)
+                    predecessors[successor].add(i);
+        }
+        dominators[0].add(0);
+        dominators[1 .. blockCount] = all;
+        bool changed;
+        do {
+            changed = false;
+            foreach (i; 1 .. blockCount) {
+                Set common = all;
+                foreach (p; predecessors[i])
+                    foreach (word; 0 .. common.words.length)
+                        common.words[word] &= dominators[p].words[word];
+                common.add(i);
+                changed |= common != dominators[i];
+                dominators[i] = common;
+            }
+        } while (changed);
+        foreach (header; 0 .. blockCount) {
+            Set loop;
+            foreach (p; predecessors[header])
+                if (dominators[p].has(header))
+                    loop.add(p);
+            if (loop == Set.init)
+                continue;
+            loop.add(header);
+            auto pending = loop;
+            pending.remove(header);
+            while (pending != Set.init) {
+                Set added;
+                foreach (p; pending)
+                    added.include(predecessors[p]);
+                added.exclude(loop);
+                loop.include(added);
+                pending = added;
+            }
+            foreach (i; loop)
+                if (blocks[i].weight < 64)
+                    blocks[i].weight *= 8;
+        }
+    }
+
+    bool frameResident(ushort id) const {
+        ref const value = values[id];
+        return value.spilled && value.origin == Origin.phi && !modified.has(value.home);
+    }
+
+    private void findEdgeUses() {
+        foreach (ref block; blocks[0 .. blockCount]) {
+            block.liveOut = Live.init;
+            edgeUses(block, (ushort id) {
+                if (values[id].allocated)
+                    block.liveOut.add(id);
+            });
+        }
+    }
+
+    private ushort machineInput(ushort id) const {
+        return id != none && values[id].folded ? nodes[values[id].first].address : id;
+    }
+
+    private ushort[3] inputs(in Node node) const {
+        return [machineInput(node.left), machineInput(node.right), node.address];
+    }
+
+    private bool orderedMemory(in Node a, in Node b) const {
+        if (a.action == Action.store) {
+            if (b.action == Action.store)
+                return true;
+            if (b.action == Action.load && !a.memory.disjoint(b.memory))
+                return true;
+            foreach (id; [b.left, b.right])
+                if (id != none && values[id].folded
+                        && !a.memory.disjoint(nodes[values[id].first].memory))
+                    return true;
+        }
+        return false;
     }
 
 
@@ -1693,7 +1877,6 @@ package struct ScalarFlow {
         bool[scheduleLimit][scheduleLimit] depends;
         ushort[scheduleLimit] pending;
         ushort[scheduleLimit] height;
-        ushort[scheduleLimit] readyAt;
         ushort[scheduleLimit] oldToNew;
         ushort[valueLimit] uses;
         bool[scheduleLimit] issued;
@@ -1701,20 +1884,15 @@ package struct ScalarFlow {
     }
 
     private Schedule schedule;
-    private ushort[valueLimit] allocationOrder;
 
     private void scheduleBlocks() {
+        findEdgeUses;
         foreach (ref const block; blocks[0 .. blockCount]) {
             const count = block.endNode - block.firstNode;
             if (count < 2 || count > scheduleLimit)
                 continue;
             scheduleBlock(block, count);
         }
-        foreach (ref value; values[0 .. valueCount]) {
-            value.used = false;
-            value.last = value.first;
-        }
-        connect;
     }
 
     private void scheduleBlock(in Block block, size_t count) {
@@ -1722,10 +1900,10 @@ package struct ScalarFlow {
         auto work = nodes[block.firstNode .. block.endNode];
         int gpPressure;
         int fpPressure;
+        foreach (id; block.liveOut)
+            ++schedule.uses[id];
         foreach (id; block.firstValue .. block.endValue) {
             ref const value = values[id];
-            if (value.used && value.last == block.endNode)
-                ++schedule.uses[id];
             if (value.used && value.origin == Origin.phi) {
                 if (value.lane == Lane.floating)
                     ++fpPressure;
@@ -1736,7 +1914,7 @@ package struct ScalarFlow {
         foreach (now, ref const node; work) {
             if (!node.used)
                 continue;
-            foreach (id; [node.left, node.right, node.address]) {
+            foreach (id; inputs(node)) {
                 if (id == none || !values[id].allocated)
                     continue;
                 ++schedule.uses[id];
@@ -1748,10 +1926,7 @@ package struct ScalarFlow {
                     continue;
                 const terminal = node.action == Action.operation
                     && ranges.resolved[node.pc].kind == Kind.branch;
-                const orderedStores = node.action == Action.store && earlier.action == Action.store;
-                const aliased = (node.action == Action.load && earlier.action == Action.store)
-                    || (node.action == Action.store && earlier.action == Action.load);
-                if (terminal || orderedStores || (aliased && !node.memory.disjoint(earlier.memory)))
+                if (terminal || orderedMemory(earlier, node) || orderedMemory(node, earlier))
                     schedule.depends[now][prior] = true;
             }
             foreach (prior; 0 .. now)
@@ -1768,33 +1943,29 @@ package struct ScalarFlow {
             schedule.height[i] = cast(ushort) (best + latency(node));
         }
 
-        ushort tick;
-        size_t issue;
         foreach (position; 0 .. count) {
             size_t chosen = count;
-            while (chosen == count) {
-                int score = int.min;
-                foreach (i, ref const node; work) {
-                    if (schedule.issued[i] || schedule.pending[i] || schedule.readyAt[i] > tick)
-                        continue;
-                    const priority = schedulingPriority(node, schedule.height[i],
-                        gpPressure, fpPressure);
-                    if (priority > score) {
-                        chosen = i;
-                        score = priority;
-                    }
+            int score = int.min;
+            foreach (i, ref const node; work) {
+                if (schedule.issued[i] || schedule.pending[i])
+                    continue;
+                const priority = schedulingPriority(node, schedule.height[i],
+                    gpPressure, fpPressure);
+                if (priority > score) {
+                    chosen = i;
+                    score = priority;
                 }
-                if (chosen == count) {
-                    ++tick;
-                    issue = 0;
-                }
+            }
+            if (chosen == count) {
+                failed = true;
+                return;
             }
             const node = work[chosen];
             schedule.ordered[position] = node;
             schedule.oldToNew[chosen] = cast(ushort) position;
             schedule.issued[chosen] = true;
             if (node.used) {
-                foreach (id; [node.left, node.right, node.address]) {
+                foreach (id; inputs(node)) {
                     if (id == none || !values[id].allocated || --schedule.uses[id])
                         continue;
                     if (values[id].lane == Lane.floating)
@@ -1808,19 +1979,9 @@ package struct ScalarFlow {
                     else
                         ++gpPressure;
                 }
-                const ready = cast(ushort) (tick + latency(node));
-                foreach (later; chosen + 1 .. count) {
-                    if (!schedule.depends[later][chosen])
-                        continue;
-                    --schedule.pending[later];
-                    if (schedule.readyAt[later] < ready)
-                        schedule.readyAt[later] = ready;
-                }
-            }
-            enum issueWidth = 3;
-            if (++issue == issueWidth) {
-                ++tick;
-                issue = 0;
+                foreach (later; chosen + 1 .. count)
+                    if (schedule.depends[later][chosen])
+                        --schedule.pending[later];
             }
         }
         work[] = schedule.ordered[0 .. count];
@@ -1829,10 +1990,6 @@ package struct ScalarFlow {
             if (value.origin == Origin.produced)
                 value.first = cast(ushort) (block.firstNode
                     + schedule.oldToNew[value.first - block.firstNode]);
-            if (value.overwrite != none && value.overwrite != block.firstNode) {
-                value.overwrite = cast(ushort) (block.firstNode
-                    + schedule.oldToNew[value.overwrite - block.firstNode - 1] + 1);
-            }
         }
     }
 
@@ -1841,8 +1998,12 @@ package struct ScalarFlow {
             return int.min + 1;
         int gpGrowth;
         int fpGrowth;
-        foreach (id; [node.left, node.right, node.address]) {
-            if (id != none && values[id].allocated && schedule.uses[id] == 1) {
+        const operands = inputs(node);
+        foreach (i, id; operands) {
+            size_t occurrences = 1;
+            foreach (other; operands[0 .. i])
+                occurrences += other == id;
+            if (id != none && values[id].allocated && schedule.uses[id] == occurrences) {
                 if (values[id].lane == Lane.floating)
                     --fpGrowth;
                 else
@@ -1855,10 +2016,10 @@ package struct ScalarFlow {
             else
                 ++gpGrowth;
         }
-        if (gpPressure >= gpCount - 1)
-            height -= 36 * gpGrowth;
-        if (fpPressure >= fpCount - 3)
-            height -= 64 * fpGrowth;
+        if (gpPressure >= gpCount - 2)
+            height -= 32 * gpGrowth;
+        if (fpPressure >= fpCount - 4)
+            height -= 32 * fpGrowth;
         return height;
     }
 
@@ -1878,78 +2039,279 @@ package struct ScalarFlow {
         return 1;
     }
 
-    private bool color() {
-        byte[Program.slotLimit] hints = -1;
-        foreach (ref const block; blocks[0 .. blockCount]) {
-            ushort[gpCount] gp = none;
-            ushort[fpCount] fp = none;
-            size_t count;
-            foreach (id; block.firstValue .. block.endValue) {
-                if (!values[id].allocated || !values[id].used)
-                    continue;
-                size_t at = count++;
-                while (at && values[allocationOrder[at - 1]].first > values[id].first) {
-                    allocationOrder[at] = allocationOrder[at - 1];
-                    --at;
-                }
-                allocationOrder[at] = cast(ushort) id;
+    private Live[valueLimit] _interference;
+    private ushort[valueLimit] _parent;
+    private ushort[valueLimit] _allowed;
+    private ushort[valueLimit] _degree;
+    private ushort[valueLimit] _order;
+    private uint[valueLimit] _cost;
+    private byte[valueLimit] _assigned;
+    private bool[valueLimit] _active;
+
+    private bool allocate() {
+        // Keep joins separate when coalescing makes a range hard to color.
+        // A spill then applies to one SSA part.
+        foreach (attempt; 0 .. valueCount) {
+            if (attempt) {
+                connect;
+                findEdgeUses;
             }
-            foreach (id; allocationOrder[0 .. count]) {
-                ref v = values[id];
-                if (!v.used || !v.allocated)
+            buildInterference;
+            coalesce(true);
+            auto rejected = color;
+            if (rejected != none) {
+                buildInterference;
+                coalesce(false);
+                rejected = color;
+            }
+            if (rejected == none) {
+                foreach (id, ref value; values[0 .. valueCount])
+                    if (value.used && value.allocated && !value.spilled)
+                        value.color = _assigned[group(cast(ushort) id)];
+                recordScratch;
+                return true;
+            }
+            ushort spill = none;
+            foreach (id; 0 .. valueCount) {
+                if (!canSpill(cast(ushort) id) || isFloat(cast(ushort) id) != isFloat(rejected))
                     continue;
-                auto bank = v.lane == Lane.floating ? fp[] : gp[];
-                byte wanted = -1;
-                if (v.home != none)
-                    wanted = hints[v.home];
-                if (v.preference != none) {
-                    const left = values[v.preference];
-                    if (left.lane == v.lane && left.last == v.first && left.color >= 0)
-                        wanted = left.color;
+                const range = group(cast(ushort) id);
+                if (range != rejected && !_interference[rejected].has(range))
+                    continue;
+                if (spill == none || _cost[id] < _cost[spill])
+                    spill = cast(ushort) id;
+            }
+            if (spill == none)
+                return false;
+            values[spill].spilled = true;
+        }
+        return false;
+    }
+
+    private void buildInterference() {
+        _interference[0 .. valueCount] = Live.init;
+        _cost[0 .. valueCount] = 0;
+        _degree[0 .. valueCount] = 0;
+        foreach (id, ref const value; values[0 .. valueCount]) {
+            _parent[id] = cast(ushort) id;
+            _allowed[id] = bankMask(value.lane);
+            _active[id] = value.used && value.allocated && !value.spilled;
+        }
+        const entry = &blocks[0];
+        if (entry.incoming[r0Slot] != none)
+            _allowed[entry.incoming[r0Slot]] = 1 << gpResult;
+        if (entry.incoming[fp0Slot] != none)
+            _allowed[entry.incoming[fp0Slot]] = 1;
+        foreach (ref const block; blocks[0 .. blockCount]) {
+            Live live = block.liveOut;
+            foreach (id; live)
+                _cost[id] += block.weight;
+            foreach_reverse (ref const node; nodes[block.firstNode .. block.endNode]) {
+                if (!node.used)
+                    continue;
+                const out_ = node.output;
+                const operands = inputs(node);
+                if (out_ != none && values[out_].allocated) {
+                    live.remove(out_);
+                    _cost[out_] += block.weight;
+                    foreach (id; live)
+                        interfere(out_, id);
+                    if (node.action == Action.operation) {
+                        const kind = ranges.resolved[node.pc].kind;
+                        if ((kind == Kind.floating || kind == Kind.integer)
+                                && node.left != node.right)
+                            interfere(out_, operands[1]);
+                        if (kind == Kind.index && !scaled(ranges.resolved[node.pc].stride))
+                            interfere(out_, operands[0]);
+                    }
                 }
-                foreach (ref assigned; bank)
-                    if (assigned != none && values[assigned].last < v.first)
-                        assigned = none;
-                if (wanted >= 0 && wanted < bank.length && bank[wanted] == none) {
-                    v.color = wanted;
-                } else if (wanted >= 0 && wanted < bank.length && bank[wanted] == v.preference
-                        && v.preference != none && values[v.preference].last == v.first) {
-                    v.color = wanted;
-                } else {
-                    foreach (index, assigned; bank)
-                        if (assigned == none) {
-                            v.color = cast(byte) index;
-                            break;
-                        }
+                foreach (id; operands) {
+                    if (id != none && values[id].allocated) {
+                        _cost[id] += block.weight;
+                        live.add(id);
+                    }
                 }
-                if (v.color < 0) {
-                    if (canSpill(v)) {
-                        v.spilled = true;
+            }
+            foreach (id; live)
+                foreach (other; live)
+                    if (other < id)
+                        interfere(id, other);
+        }
+    }
+
+    static bool scaled(uint stride) {
+        return stride == 1 || stride == 2 || stride == 4 || stride == 8;
+    }
+
+    static ushort bankMask(Lane lane) {
+        return cast(ushort) ((1U << (lane == Lane.floating ? fpCount : gpCount)) - 1);
+    }
+
+    private void interfere(ushort a, ushort b) {
+        if (a == none || b == none || a == b || !values[a].allocated || !values[b].allocated
+                || isFloat(a) != isFloat(b) && (values[a].home == none
+                    || values[a].home != values[b].home) || _interference[a].has(b))
+            return;
+        _interference[a].add(b);
+        _interference[b].add(a);
+        if (_active[a] && _active[b] && isFloat(a) == isFloat(b)) {
+            ++_degree[a];
+            ++_degree[b];
+        }
+    }
+
+    private bool isFloat(ushort id) const {
+        return values[id].lane == Lane.floating;
+    }
+
+    private ushort group(ushort id) const {
+        while (_parent[id] != id)
+            id = _parent[id];
+        return id;
+    }
+
+    private void coalesce(bool aggressive) {
+        foreach_reverse (ubyte weight; [cast(ubyte) 1, cast(ubyte) 8, cast(ubyte) 64]) {
+            foreach (ref const block; blocks[0 .. blockCount]) {
+                if (block.weight != weight)
+                    continue;
+                foreach (successor; [block.next, block.target]) {
+                    if (successor == none)
                         continue;
-                    }
-                    foreach (index, assigned; bank) {
-                        ref other = values[assigned];
-                        if (canSpill(other) && (v.color < 0
-                                || values[bank[v.color]].last < other.last))
-                            v.color = cast(byte) index;
-                    }
-                    if (v.color < 0)
-                        return false;
-                    ref other = values[bank[v.color]];
-                    other.spilled = true;
-                    other.color = -1;
+                    foreach (home, id; blocks[successor].incoming[0 .. ranges.program.slotCount])
+                        join(id, block.outgoing[home], aggressive);
                 }
-                bank[v.color] = cast(ushort) id;
-                if (v.home != none && hints[v.home] < 0)
-                    hints[v.home] = v.color;
             }
         }
+        foreach (ref const node; nodes[0 .. nodeCount]) {
+            if (!node.used || node.action != Action.operation)
+                continue;
+            const kind = ranges.resolved[node.pc].kind;
+            if (kind == Kind.floating || kind == Kind.integer)
+                join(node.output, node.left, false);
+        }
+    }
+
+    private void join(ushort a, ushort b, bool aggressive) {
+        import core.bitop: popcnt;
+
+        if (a == none || b == none || !values[a].allocated || !values[b].allocated)
+            return;
+        a = group(a);
+        b = group(b);
+        if (a == b || !_active[a] || !_active[b] || isFloat(a) != isFloat(b)
+                || _interference[a].has(b))
+            return;
+        const allowed = cast(ushort) (_allowed[a] & _allowed[b]);
+        if (!allowed)
+            return;
+        Live neighbors = _interference[a];
+        neighbors.include(_interference[b]);
+        const capacity = popcnt(allowed);
+        if (!aggressive) {
+            uint constrained;
+            foreach (id; neighbors) {
+                if (_active[id] && isFloat(id) == isFloat(a) && (_allowed[id] & allowed)
+                        && (_degree[id] >= popcnt(_allowed[id]) || popcnt(_allowed[id]) == 1))
+                    ++constrained;
+            }
+            if (constrained >= capacity)
+                return;
+        }
+        _parent[b] = a;
+        _allowed[a] = allowed;
+        _active[b] = false;
+        _cost[a] += _cost[b];
+        _degree[a] = 0;
+        _interference[a] = neighbors;
+        foreach (id; neighbors) {
+            const both = _interference[id].has(a) && _interference[id].has(b);
+            _interference[id].remove(b);
+            _interference[id].add(a);
+            if (_active[id] && isFloat(id) == isFloat(a)) {
+                ++_degree[a];
+                _degree[id] -= both;
+            }
+        }
+    }
+
+    private ushort color() {
+        import core.bitop: bsf, popcnt;
+
+        _assigned[0 .. valueCount] = -1;
+        size_t count;
+        while (true) {
+            ushort next = none;
+            foreach (id; 0 .. valueCount) {
+                if (!_active[id])
+                    continue;
+                if (_degree[id] < popcnt(_allowed[id])) {
+                    next = cast(ushort) id;
+                    break;
+                }
+                if (next == none || _cost[id] * (_degree[next] + 1)
+                        < _cost[next] * (_degree[id] + 1))
+                    next = cast(ushort) id;
+            }
+            if (next == none)
+                break;
+            _order[count++] = next;
+            _active[next] = false;
+            foreach (id; _interference[next])
+                if (_active[id] && isFloat(id) == isFloat(next))
+                    --_degree[id];
+        }
+        foreach_reverse (id; _order[0 .. count]) {
+            auto available = _allowed[id];
+            foreach (other; _interference[id])
+                if (_assigned[other] >= 0 && isFloat(id) == isFloat(other))
+                    available &= cast(ushort) ~(1U << _assigned[other]);
+            if (!available)
+                return id;
+            _assigned[id] = cast(byte) bsf(available);
+        }
+        return none;
+    }
+
+    private bool canSpill(ushort id) const {
+        ref const value = values[id];
+        if (!value.used || !value.allocated || value.spilled || value.home == none
+                || value.home == r0Slot || value.home == fp0Slot || canonical.has(value.home)
+                || ranges.program.slots[value.home].isTemporary)
+            return false;
+        // Span guards separate these bytes from indirect observers in the
+        // region. Two concurrent definitions cannot share them.
+        foreach (other; _interference[id])
+            if (values[other].spilled && values[other].home == value.home)
+                return false;
         return true;
     }
 
-    private bool canSpill(in Value value) const {
-        return value.home != none && value.home != r0Slot && value.home != fp0Slot
-            && !ranges.program.slots[value.home].isTemporary
-            && value.last < value.overwrite;
+    private void recordScratch() {
+        foreach (ref const block; blocks[0 .. blockCount]) {
+            Live live = block.liveOut;
+            foreach_reverse (ref node; nodes[block.firstNode .. block.endNode]) {
+                if (!node.used)
+                    continue;
+                if (node.output != none)
+                    live.add(node.output);
+                foreach (id; inputs(node))
+                    if (id != none && values[id].allocated)
+                        live.add(id);
+                node.availableGp = bankMask(Lane.integer);
+                node.availableFp = bankMask(Lane.floating);
+                foreach (id; live) {
+                    const color = values[id].color;
+                    if (color < 0)
+                        continue;
+                    if (isFloat(id))
+                        node.availableFp &= cast(ushort) ~(1U << color);
+                    else
+                        node.availableGp &= cast(ushort) ~(1U << color);
+                }
+                if (node.output != none)
+                    live.remove(node.output);
+            }
+        }
     }
 }

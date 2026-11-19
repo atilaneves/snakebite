@@ -1851,10 +1851,9 @@ private struct ScalarEmitter {
     alias Node = Flow.Node;
     alias Origin = Flow.Origin;
     enum none = Flow.none;
-    private static immutable ubyte[Flow.gpCount] _gp = [R9, R10, R11, SC2];
-    enum firstFp = 3;
+    private static immutable ubyte[Flow.gpCount] _gp = [RAX, R9, R10, R11, SC2, ACTIVE, REG0];
 
-    private enum LocationKind : ubyte { none, integer, floating, frame, literal, address }
+    private enum LocationKind : ubyte { none, integer, floating, frame, literal, address, memory }
 
     private static struct Location {
         LocationKind kind;
@@ -1883,6 +1882,10 @@ private struct ScalarEmitter {
     size_t[Plan.slotLimit * 6 + 1] misses;
     size_t missCount;
     Move[Plan.slotLimit] moveScratch;
+    ushort[Plan.instructionLimit] redirects;
+    ushort[Plan.instructionLimit] order;
+    ushort freeGp;
+    ushort freeFp;
     bool inlineReturn;
     bool failed;
 
@@ -1891,35 +1894,90 @@ private struct ScalarEmitter {
     bool emit() {
         guards;
         entry;
-        foreach (i, ref const block; flow.blocks[0 .. flow.blockCount]) {
+        const count = layout;
+        foreach (position, i; order[0 .. count]) {
             if (!space(Gen.handlerJumpBytes + 128))
                 return false;
+            ref const block = flow.blocks[i];
             offsets[i] = a.n;
             foreach (ref const node; flow.nodes[block.firstNode .. block.endNode]) {
                 if (node.used && !emitNode(node))
                     return false;
             }
-            if (!finish(block, cast(ushort) i))
+            const following = position + 1 == count ? none : order[position + 1];
+            if (!finish(block, i, following))
                 return false;
         }
 
         foreach (ref const branch; branches[0 .. branchCount]) {
             ref const target = flow.blocks[branch.target];
+            const offset = offsets[redirects[branch.target]];
             if (branch.block != none && movesNeeded(flow.blocks[branch.block], target)) {
                 foreach (patch; branch.patches[0 .. branch.count])
                     gen.patchHere(patch);
                 edge(flow.blocks[branch.block], target);
                 if (!space(8))
                     return false;
-                gen.jmpLocalTo(offsets[branch.target]);
+                gen.jmpLocalTo(offset);
             } else {
                 foreach (patch; branch.patches[0 .. branch.count])
-                    gen.patchTo(patch, offsets[branch.target]);
+                    gen.patchTo(patch, offset);
             }
         }
         foreach (miss; misses[0 .. missCount])
             gen.patchHere(miss);
         return !failed;
+    }
+
+    private ushort layout() {
+        foreach (id; 0 .. flow.blockCount) {
+            auto target = cast(ushort) id;
+            foreach (step; 0 .. flow.blockCount) {
+                const next = emptySuccessor(target);
+                if (next == none)
+                    break;
+                target = next;
+                if (step + 1 == flow.blockCount)
+                    target = cast(ushort) id;
+            }
+            redirects[id] = target;
+        }
+        Flow.Set placed;
+        ushort count;
+        foreach (start; 0 .. flow.blockCount) {
+            auto id = redirects[start];
+            while (!placed.has(id)) {
+                placed.add(id);
+                order[count++] = id;
+                ref const block = flow.blocks[id];
+                ushort next = none;
+                foreach (successor; [block.next, block.target]) {
+                    if (successor == none)
+                        continue;
+                    const target = redirects[successor];
+                    if (placed.has(target))
+                        continue;
+                    if (next == none || flow.blocks[target].weight > flow.blocks[next].weight)
+                        next = target;
+                }
+                if (next == none)
+                    break;
+                id = next;
+            }
+        }
+        return count;
+    }
+
+    private ushort emptySuccessor(ushort id) {
+        ref const block = flow.blocks[id];
+        const next = block.next == none ? block.target : block.next;
+        if (next == none || block.next != none && block.target != none
+                || movesNeeded(block, flow.blocks[next]))
+            return none;
+        foreach (ref const node; flow.nodes[block.firstNode .. block.endNode])
+            if (node.used)
+                return none;
+        return next;
     }
 
     private bool space(size_t bytes) {
@@ -1972,6 +2030,8 @@ private struct ScalarEmitter {
 
     private void entry() {
         ref const block = flow.blocks[0];
+        freeGp = cast(ushort) (Flow.bankMask(Lane.integer) & ~(1U << Flow.gpResult));
+        freeFp = cast(ushort) (Flow.bankMask(Lane.floating) & ~1U);
         foreach (home, id; block.incoming[0 .. flow.ranges.program.slotCount]) {
             if (id != none && flow.values[id].used)
                 move(homeLocation(cast(ushort) home), location(id));
@@ -1981,6 +2041,8 @@ private struct ScalarEmitter {
     private bool emitNode(in Node node) {
         if (!space(120))
             return false;
+        freeGp = node.availableGp;
+        freeFp = node.availableFp;
         const out_ = location(node.output);
         const left = location(node.left);
         const right = location(node.right);
@@ -1990,7 +2052,7 @@ private struct ScalarEmitter {
             if (out_.kind == LocationKind.floating)
                 a.sse(prefix(node.width), loadOpcode, cast(int) out_.bits, memory);
             else {
-                const dest = out_.kind == LocationKind.integer ? cast(int) out_.bits : RAX;
+                const dest = out_.kind == LocationKind.integer ? cast(int) out_.bits : takeGp;
                 a.ldzx(node.width, dest, memory);
                 saveInteger(dest, out_);
             }
@@ -2008,18 +2070,12 @@ private struct ScalarEmitter {
                 const memory = memoryOf(node);
                 a.st(node.width, memory, cast(int) left.bits);
             } else {
-                assignInteger(left, RAX);
-                const base = location(node.address);
-                if (base.kind == LocationKind.integer)
-                    a.st(node.width, Mem(cast(ubyte) base.bits, cast(int) node.offset), RAX);
-                else {
-                    // Preserve the raw bits while resolving a spilled address.
-                    a.integerToXmm(XMM2, RAX);
-                    const memory = memoryOf(node);
-                    if (node.width != 4 && node.width != 8)
-                        return false;
-                    a.sse(prefix(node.width), storeOpcode, XMM2, memory);
-                }
+                const memory = memoryOf(node);
+                int immediate;
+                if (left.kind == LocationKind.literal && Gen.immOf(node.width, left.bits, immediate))
+                    a.stI(node.width, memory, immediate);
+                else
+                    a.st(node.width, memory, integer(left));
             }
             break;
         }
@@ -2032,8 +2088,17 @@ private struct ScalarEmitter {
     private Mem memoryOf(in Node node) {
         if (node.address == none)
             return Mem(FRAME, cast(int) node.offset);
-        const base = integer(location(node.address), RAX);
+        const base = integer(location(node.address));
         return Mem(cast(ubyte) base, cast(int) node.offset);
+    }
+
+    private static bool memoryOperand(in Location value) {
+        return value.kind == LocationKind.frame || value.kind == LocationKind.memory;
+    }
+
+    private Mem operandMemory(in Location value) {
+        return value.kind == LocationKind.frame ? Frame(value)
+            : memoryOf(flow.nodes[value.bits]);
     }
 
     private bool emitOperation(in Node node, in Location dest,
@@ -2047,30 +2112,23 @@ private struct ScalarEmitter {
         case index:
             return emitIndex(step.stride, dest, left, right);
         case floating, sqrt: {
-            const fp = dest.kind == LocationKind.floating ? cast(int) dest.bits : XMM1;
+            const fp = dest.kind == LocationKind.floating ? cast(int) dest.bits : takeFp;
             const prefix = prefix(w);
             if (step.kind == sqrt) {
                 enum sqrtOpcode = 0x51;
-                if (left.kind == LocationKind.frame)
-                    a.sse(prefix, sqrtOpcode, fp, Frame(left));
+                if (memoryOperand(left))
+                    a.sse(prefix, sqrtOpcode, fp, operandMemory(left));
                 else
                     a.sseRR(prefix, sqrtOpcode, fp, this.floating(left, fp));
             } else {
                 const opcode = _floatOpcodes[step.floating];
-                if (right.kind == LocationKind.frame || right.kind == LocationKind.literal) {
-                    assignFloat(left, fp);
-                    if (right.kind == LocationKind.frame)
-                        a.sse(prefix, opcode, fp, Frame(right));
-                    else
-                        literalSse(prefix, opcode, fp, right.bits);
-                } else {
-                    const b = this.floating(right, XMM2);
-                    const accumulator = b == fp && left != right ? XMM1 : fp;
-                    assignFloat(left, accumulator);
-                    a.sseRR(prefix, opcode, accumulator, b);
-                    if (accumulator != fp)
-                        a.sseRR(noPrefix, moveAlignedOpcode, fp, accumulator);
-                }
+                assignFloat(left, fp);
+                if (memoryOperand(right))
+                    a.sse(prefix, opcode, fp, operandMemory(right));
+                else if (right.kind == LocationKind.literal)
+                    literalSse(prefix, opcode, fp, right.bits);
+                else
+                    a.sseRR(prefix, opcode, fp, this.floating(right));
             }
             if (dest.kind == LocationKind.frame)
                 a.sse(prefix, storeOpcode, fp, Frame(dest));
@@ -2098,66 +2156,53 @@ private struct ScalarEmitter {
     private bool emitInteger(JitOp.IntOperation operation, int w, in Location dest,
         in Location left, in Location right)
     {
-        auto accumulator = dest.kind == LocationKind.integer && dest != right
-            ? cast(int) dest.bits : RAX;
-        if (dest.kind == LocationKind.integer && left == right)
-            accumulator = cast(int) dest.bits;
-        assignInteger(left, accumulator);
         int immediate;
         const fits = right.kind == LocationKind.literal && Gen.immOf(w, right.bits, immediate);
+        const accumulator = dest.kind == LocationKind.integer ? cast(int) dest.bits : takeGp;
+        if (fits && operation == JitOp.IntOperation.multiply && w == 8) {
+            a.imulRI(accumulator, integer(left, accumulator), immediate);
+            saveInteger(accumulator, dest);
+            return true;
+        }
+        assignInteger(left, accumulator);
         if (operation == JitOp.IntOperation.multiply) {
             if (w != 8 && w != 4)
                 return false;
-            if (fits && w == 8)
-                a.imulRI(accumulator, accumulator, immediate);
-            else if (right.kind == LocationKind.frame)
-                a.imulM(w, accumulator, Frame(right));
-            else if (right.kind == LocationKind.integer)
-                a.imulRR(w, accumulator, cast(int) right.bits);
-            else if (accumulator != RAX)
-                a.imulRR(w, accumulator, integer(right, RAX));
+            if (memoryOperand(right))
+                a.imulM(w, accumulator, operandMemory(right));
             else
-                return false;
+                a.imulRR(w, accumulator, integer(right));
         } else {
             const opcode = Gen.aluOf(operation);
             if (fits)
                 a.aluRI(opcode, w, accumulator, immediate);
-            else if (right.kind == LocationKind.frame)
-                a.alu(opcode, w, accumulator, Frame(right));
-            else if (right.kind == LocationKind.integer)
-                a.aluRR(opcode, w, accumulator, cast(int) right.bits);
-            else if (accumulator != RAX)
-                a.aluRR(opcode, w, accumulator, integer(right, RAX));
+            else if (memoryOperand(right))
+                a.alu(opcode, w, accumulator, operandMemory(right));
             else
-                return false;
+                a.aluRR(opcode, w, accumulator, integer(right));
         }
         saveInteger(accumulator, dest);
         return true;
     }
 
     private bool emitIndex(int stride, in Location dest, in Location left, in Location right) {
-        int accumulator = dest.kind == LocationKind.integer ? cast(int) dest.bits : RAX;
-        const scaled = stride == 1 || stride == 2 || stride == 4 || stride == 8;
+        const accumulator = dest.kind == LocationKind.integer ? cast(int) dest.bits : takeGp;
         if (right.kind == LocationKind.literal && right.bits <= int.max / stride) {
             const base = integer(left, accumulator);
             a.lea(accumulator, Mem(cast(ubyte) base, cast(int) (right.bits * stride)));
-        } else if (scaled && right.kind == LocationKind.integer) {
-            const index = cast(int) right.bits;
-            const base = integer(left, index == accumulator ? RAX : accumulator);
+        } else if (Flow.scaled(stride)) {
+            const index = integer(right);
+            const base = integer(left);
             a.lea(accumulator, Mem(cast(ubyte) base, 0, index, cast(ubyte) stride));
         } else {
-            if (dest == left)
-                accumulator = RAX;
             const index = integer(right, accumulator);
             a.imulRI(accumulator, index, stride);
             if (left.kind == LocationKind.frame)
                 a.alu(Alu.add, 8, accumulator, Frame(left));
             else if (left.kind == LocationKind.integer)
                 a.aluRR(Alu.add, 8, accumulator, cast(int) left.bits);
-            else if (accumulator != RAX)
-                a.aluRR(Alu.add, 8, accumulator, integer(left, RAX));
             else
-                return false;
+                a.aluRR(Alu.add, 8, accumulator, integer(left));
         }
         saveInteger(accumulator, dest);
         return true;
@@ -2171,13 +2216,13 @@ private struct ScalarEmitter {
                 || step.comparison == Comparison.lessOrEqual;
             const a = reverse ? bOp : aOp;
             const b = reverse ? aOp : bOp;
-            const left = floating(a, XMM1);
+            const left = floating(a);
             if (b.kind == LocationKind.frame)
                 this.a.sse(ccPrefix, compareOpcode, left, Frame(b));
             else if (b.kind == LocationKind.literal)
                 literalSse(ccPrefix, compareOpcode, left, b.bits);
             else
-                this.a.sseRR(ccPrefix, compareOpcode, left, floating(b, XMM2));
+                this.a.sseRR(ccPrefix, compareOpcode, left, floating(b));
             return true;
         }
         int immediate;
@@ -2186,17 +2231,13 @@ private struct ScalarEmitter {
             a.aluMI(Alu.cmp, w, Frame(aOp), immediate);
             return true;
         }
-        const left = integer(aOp, RAX);
+        const left = integer(aOp);
         if (fits)
             a.aluRI(Alu.cmp, w, left, immediate);
         else if (bOp.kind == LocationKind.frame)
             a.alu(Alu.cmp, w, left, Frame(bOp));
-        else if (bOp.kind == LocationKind.integer)
-            a.aluRR(Alu.cmp, w, left, cast(int) bOp.bits);
-        else if (left != RAX)
-            a.aluRR(Alu.cmp, w, left, integer(bOp, RAX));
         else
-            return false;
+            a.aluRR(Alu.cmp, w, left, integer(bOp));
         return true;
     }
 
@@ -2233,7 +2274,7 @@ private struct ScalarEmitter {
         return branch;
     }
 
-    private bool finish(in Block block, ushort id) {
+    private bool finish(in Block block, ushort id, ushort following) {
         import snakebite.backends.bytecode.vm: jitFallback;
 
         const pc = block.end - 1;
@@ -2241,15 +2282,16 @@ private struct ScalarEmitter {
         if (step.kind == Kind.exit || step.kind == Kind.returnValue || step.kind == Kind.returnVoid) {
             const canonical = step.kind != Kind.returnVoid;
             size_t count;
-            foreach (home, value; block.outgoing[0 .. flow.ranges.program.slotCount]) {
-                if (value == none || !flow.modified.has(home))
-                    continue;
-                if (canonical || home == flow.fp0Slot || home == flow.r0Slot)
+            foreach (home, value; block.outgoing[0 .. flow.ranges.program.slotCount])
+                if (value != none && (home == flow.fp0Slot || home == flow.r0Slot
+                        || canonical && flow.modified.has(home)))
                     moveScratch[count++] = Move(location(value), homeLocation(cast(ushort) home));
-            }
             parallelMoves(moveScratch[0 .. count]);
             if (!space(192))
                 return false;
+            // Chained dispatch retains the real activation in the state.
+            // An inline window changes FRAME but leaves that activation current.
+            a.ld(8, ACTIVE, Mem(STATE, DispatchState.current.offsetof));
             if (step.kind == Kind.returnVoid) {
                 if (gen.inlineCaller !is null) {
                     inlineReturn = true;
@@ -2268,16 +2310,23 @@ private struct ScalarEmitter {
             return true;
         }
 
+        ushort target = block.next == none ? block.target : block.next;
         if (step.kind == Kind.branch && block.target != block.next) {
-            branches[branchCount++] = conditional(step, id, block.target);
+            if (redirects[block.target] == following && redirects[block.next] != following) {
+                Plan.Operation inverse = step;
+                inverse.jumpWhen = !inverse.jumpWhen;
+                branches[branchCount++] = conditional(inverse, id, block.next);
+                target = block.target;
+            } else {
+                branches[branchCount++] = conditional(step, id, block.target);
+            }
         }
-        const target = block.next == none ? block.target : block.next;
         if (target == none)
             return false;
         edge(block, flow.blocks[target]);
         if (!space(8))
             return false;
-        if (target != id + 1) {
+        if (redirects[target] != following) {
             a.b(0xE9);
             const patch = a.n;
             a.d32(0);
@@ -2289,7 +2338,7 @@ private struct ScalarEmitter {
 
     private bool movesNeeded(in Block from, in Block to) {
         foreach (home, id; to.incoming[0 .. flow.ranges.program.slotCount]) {
-            if (id != none && flow.values[id].used
+            if (id != none && flow.values[id].used && !flow.frameResident(id)
                     && location(id) != location(from.outgoing[home]))
                 return true;
         }
@@ -2299,14 +2348,32 @@ private struct ScalarEmitter {
     private void edge(in Block from, in Block to) {
         size_t count;
         foreach (home, id; to.incoming[0 .. flow.ranges.program.slotCount]) {
-            if (id != none && flow.values[id].used)
+            if (id != none && flow.values[id].used && !flow.frameResident(id))
                 moveScratch[count++] = Move(location(from.outgoing[home]), location(id));
         }
         parallelMoves(moveScratch[0 .. count]);
     }
 
     private void parallelMoves(Move[] moves) {
+        freeGp = Flow.bankMask(Lane.integer);
+        freeFp = Flow.bankMask(Lane.floating);
+        foreach (i, ref const transfer; moves) {
+            protect(transfer.from);
+            protect(transfer.to);
+            foreach (ref const earlier; moves[0 .. i]) {
+                if (samePlace(earlier.to, transfer.to) && earlier.from != transfer.from) {
+                    failed = true;
+                    return;
+                }
+            }
+        }
+        const availableGp = freeGp;
+        const availableFp = freeFp;
         while (moves.length) {
+            freeGp = availableGp;
+            freeFp = availableFp;
+            foreach (ref const waiting; moves)
+                protect(waiting.from);
             bool progress;
             foreach (i, ref const transfer; moves) {
                 bool occupied;
@@ -2321,16 +2388,53 @@ private struct ScalarEmitter {
                 }
             }
             if (!progress) {
-                const saved = moves[0].from;
-                const scratch = Location(LocationKind.floating, XMM2, saved.width);
-                move(saved, scratch);
-                foreach (ref transfer; moves)
-                    if (samePlace(transfer.from, saved))
-                        transfer.from = scratch;
+                if (!space(32))
+                    return;
+                const transfer = moves[0];
+                if (transfer.from.kind == transfer.to.kind
+                        && transfer.from.kind == LocationKind.integer) {
+                    a.rrOp(8, false, cast(int) transfer.from.bits,
+                        cast(int) transfer.to.bits, 0x87);
+                } else if (transfer.from.kind == transfer.to.kind
+                        && transfer.from.kind == LocationKind.floating) {
+                    const left = cast(int) transfer.from.bits;
+                    const right = cast(int) transfer.to.bits;
+                    enum xorPacked = 0x57;
+                    a.sseRR(noPrefix, xorPacked, left, right);
+                    a.sseRR(noPrefix, xorPacked, right, left);
+                    a.sseRR(noPrefix, xorPacked, left, right);
+                } else {
+                    const width = transfer.from.width;
+                    const scratch = !freeGp && (width == 4 || width == 8)
+                        ? Location(LocationKind.floating, takeFp, width)
+                        : Location(LocationKind.integer, takeGp, width);
+                    if (failed)
+                        return;
+                    move(transfer.from, scratch);
+                    foreach (ref waiting; moves)
+                        if (samePlace(waiting.from, transfer.from))
+                            waiting.from = scratch;
+                    continue;
+                }
+                moves = moves[1 .. $];
+                foreach (ref waiting; moves)
+                    if (samePlace(waiting.from, transfer.to))
+                        waiting.from = transfer.from;
+                    else if (samePlace(waiting.from, transfer.from))
+                        waiting.from = transfer.to;
             }
             if (failed)
                 return;
         }
+    }
+
+    private void protect(in Location value) {
+        if (value.kind == LocationKind.floating)
+            freeFp &= cast(ushort) ~(1U << value.bits);
+        else if (value.kind == LocationKind.integer)
+            foreach (i, reg; _gp)
+                if (value.bits == reg)
+                    freeGp &= cast(ushort) ~(1U << i);
     }
 
     private static bool samePlace(in Location a, in Location b) {
@@ -2355,14 +2459,15 @@ private struct ScalarEmitter {
         final switch (value.origin) with (Origin) {
         case literal: return Location(LocationKind.literal, value.bits, value.width);
         case address: return Location(LocationKind.address, value.bits, value.width);
-        case entry: return homeLocation(value.home);
         case phi, produced:
+            if (value.folded)
+                return Location(LocationKind.memory, value.first, value.width);
             if (value.spilled)
                 return homeLocation(value.home);
             if (!value.used)
                 return Location.init;
             if (value.lane == Lane.floating)
-                return Location(LocationKind.floating, firstFp + value.color, value.width);
+                return Location(LocationKind.floating, value.color, value.width);
             return Location(LocationKind.integer, _gp[value.color], value.width);
         }
     }
@@ -2371,7 +2476,7 @@ private struct ScalarEmitter {
         if (source == dest || !space(32))
             return;
         final switch (dest.kind) with (LocationKind) {
-        case none, literal, address:
+        case none, literal, address, memory:
             return;
         case integer:
             assignInteger(source, cast(int) dest.bits);
@@ -2383,20 +2488,45 @@ private struct ScalarEmitter {
             if (source.kind == floating && (dest.width == 4 || dest.width == 8)) {
                 a.sse(prefix(dest.width), storeOpcode, cast(int) source.bits, Frame(dest));
             } else if (source.kind == literal) {
-                gen.storeConstant(dest.width, Frame(dest), source.bits);
+                int immediate;
+                if (Gen.immOf(dest.width, source.bits, immediate))
+                    a.stI(dest.width, Frame(dest), immediate);
+                else
+                    a.st(dest.width, Frame(dest), this.integer(source));
             } else {
-                const reg = this.integer(source, RAX);
+                const reg = this.integer(source);
                 a.st(dest.width, Frame(dest), reg);
             }
             return;
         }
     }
 
-    private int integer(in Location value, int scratch) {
+    private int takeGp() {
+        return _gp[take(freeGp)];
+    }
+
+    private int takeFp() {
+        return take(freeFp);
+    }
+
+    private int take(ref ushort available) {
+        import core.bitop: bsf;
+
+        if (!available) {
+            failed = true;
+            return 0;
+        }
+        const first = bsf(available);
+        available &= available - 1;
+        return first;
+    }
+
+    private int integer(in Location value, int scratch = -1) {
         if (value.kind == LocationKind.integer)
             return cast(int) value.bits;
-        assignInteger(value, scratch);
-        return scratch;
+        const reg = scratch >= 0 ? scratch : takeGp;
+        assignInteger(value, reg);
+        return reg;
     }
 
     private void assignInteger(in Location value, int reg) {
@@ -2410,6 +2540,9 @@ private struct ScalarEmitter {
             break;
         case frame:
             a.ldzx(value.width, reg, Frame(value));
+            break;
+        case memory:
+            a.ldzx(value.width, reg, operandMemory(value));
             break;
         case literal:
             a.movI(reg, value.bits);
@@ -2433,11 +2566,12 @@ private struct ScalarEmitter {
             a.integerToXmm(cast(int) dest.bits, source);
     }
 
-    private int floating(in Location value, int scratch) {
+    private int floating(in Location value, int scratch = -1) {
         if (value.kind == LocationKind.floating)
             return cast(int) value.bits;
-        assignFloat(value, scratch);
-        return scratch;
+        const reg = scratch >= 0 ? scratch : takeFp;
+        assignFloat(value, reg);
+        return reg;
     }
 
     private void assignFloat(in Location value, int reg) {
@@ -2446,17 +2580,17 @@ private struct ScalarEmitter {
             if (reg != value.bits)
                 a.sseRR(noPrefix, moveAlignedOpcode, reg, cast(int) value.bits);
             break;
-        case frame:
+        case frame, memory:
             if (value.width == 4 || value.width == 8)
-                a.sse(prefix(value.width), loadOpcode, reg, Frame(value));
+                a.sse(prefix(value.width), loadOpcode, reg, operandMemory(value));
             else
-                a.integerToXmm(reg, this.integer(value, RAX));
+                a.integerToXmm(reg, this.integer(value));
             break;
         case literal:
             literalSse(prefix(value.width), loadOpcode, reg, value.bits);
             break;
         case integer, address:
-            a.integerToXmm(reg, this.integer(value, RAX));
+            a.integerToXmm(reg, this.integer(value));
             break;
         case none:
             failed = true;
