@@ -3928,6 +3928,7 @@ private struct Gen {
         Operand[2 * ObservedEdge.limit + 1] references;
         Operand[Program.slotLimit] scalar;
         Operation[Program.instructionLimit] conditions;
+        bool[Program.instructionLimit] entryOnly;
         Operation[Program.slotLimit] snapshot;
         ScalarFlow.Set storedOnExit;
         size_t conditionCount;
@@ -4001,10 +4002,34 @@ private struct Gen {
             conditions[conditionCount++] = test;
         }
 
+        void findInvariants(scope const(Operation)[] body) {
+            bool[Program.slotLimit] changes;
+            bool varying(in Operand input) {
+                if (input.mode == Mode.temporary)
+                    return changes[input.word];
+                if (input.mode != Mode.frame)
+                    return false;
+                foreach (ref const step; body) {
+                    const output = step.output;
+                    if (output.mode == Mode.frame && output.word < input.word + input.width
+                            && input.word < output.word + output.width)
+                        return true;
+                }
+                return false;
+            }
+            foreach (i, ref const step; conditions[0 .. conditionCount]) {
+                const variant = varying(step.left) || varying(step.right);
+                entryOnly[i] = !variant;
+                if (step.output.mode == Mode.temporary)
+                    changes[step.output.word] = variant;
+            }
+        }
+
         ushort checkedEntry(ushort body, ushort entry, size_t heatAddress, bool resume) {
             const first = program.length;
-            foreach (test; conditions[0 .. conditionCount])
-                append(test);
+            foreach (i, ref const test; conditions[0 .. conditionCount])
+                if (!resume || !entryOnly[i])
+                    append(test);
             if (heatStep) {
                 const heat = temp(size_t.sizeof);
                 append(Operation(Kind.move, output: heat, left: literal(heatAddress, size_t.sizeof)));
@@ -4083,6 +4108,7 @@ private struct Gen {
         const body = trace.program.length;
         if (!lowerRecordedIteration(path, ops, scratch, plan))
             return false;
+        trace.findInvariants(trace.program.operations[body .. trace.program.length]);
         const firstBackedge = trace.append(P.Operation(P.Kind.jump));
         const repeat = trace.program.length;
         foreach (pc; body .. firstBackedge)
