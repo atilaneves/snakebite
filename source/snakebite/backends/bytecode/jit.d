@@ -494,6 +494,7 @@ package struct JitState {
         const branchOnly = g.proveBranchOnly(ops, branchOnlyCandidates, branchOnlyEntries);
         bool inlineReturn;
         const scalarEntry = g.emitScalarEntry(ops, originals, inlineReturn);
+        const hasChecked = g.hasCheckedAccess(ops);
         foreach (i; 0 .. instructions.length) {
             if (i < branchOnlyEnd)
                 continue;
@@ -501,6 +502,13 @@ package struct JitState {
             if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
                 return Emitted.full;
             g.labels[i] = g.a.n;
+            if (hasChecked && i && !g.checkedLoop.update && !g.fpLoop.backedge
+                    && !g.intLoop.backedge && i >= intRegionEnd && i >= fpRegionEnd
+                    && g.emitScalarEntry(ops, originals, inlineReturn, i)) {
+                g.known = Gen.KnownConstant.init;
+                g.intSlots = IntSlots.init;
+                g.fpSlots = FpSlots.init;
+            }
             if (path.length != 0 && i == path[0].pc) {
                 g.a.b(0xE9);
                 pathJump = g.a.n;
@@ -1942,6 +1950,8 @@ private struct ScalarEmitter {
             }
             redirects[id] = target;
         }
+        if (flow.ranges.hasChecked)
+            return layoutTraces();
         Flow.Set placed;
         ushort count;
         foreach (start; 0 .. flow.blockCount) {
@@ -1965,6 +1975,117 @@ private struct ScalarEmitter {
                 id = next;
             }
         }
+        return count;
+    }
+
+    private ushort layoutTraces() {
+        enum scale = 100;
+        enum likely = 90;
+        enum unlikely = scale - likely;
+
+        struct Edge {
+            ushort from;
+            ushort to;
+            uint probability;
+            ulong weight;
+        }
+
+        Edge[Plan.instructionLimit * 2] edges;
+        size_t edgeCount;
+        foreach (id, ref const block; flow.blocks[0 .. flow.blockCount]) {
+            if (redirects[id] != id)
+                continue;
+            const conditional = block.next != none && block.target != none;
+            const step = flow.ranges.resolved[block.end - 1];
+            uint taken = scale;
+            if (conditional) {
+                taken = scale / 2;
+                if (block.loopExit != none)
+                    taken = block.loopExit == block.target ? unlikely : likely;
+                else if (flow.blocks[block.target].pc <= block.pc)
+                    taken = likely;
+                else if (step.comparison == Comparison.equal
+                        || step.comparison == Comparison.notEqual)
+                    taken = (step.comparison == Comparison.notEqual) == step.jumpWhen
+                        ? likely : unlikely;
+            }
+            if (block.target != none)
+                edges[edgeCount++] = Edge(cast(ushort) id, redirects[block.target], taken);
+            if (block.next != none)
+                edges[edgeCount++] = Edge(cast(ushort) id, redirects[block.next],
+                    conditional ? scale - taken : scale);
+        }
+
+        uint[Plan.instructionLimit] arrivals, pending, total;
+        // Propagate the static probabilities through the graph. A bounded
+        // number of visits also handles loops with no estimated exit.
+        enum initialWeight = 1 << 16;
+        arrivals[redirects[0]] = initialWeight;
+        foreach (visit; 0 .. 64) {
+            foreach (id; 0 .. flow.blockCount)
+                total[id] += arrivals[id];
+            pending[] = 0;
+            foreach (ref const edge; edges[0 .. edgeCount])
+                pending[edge.to] += arrivals[edge.from] * edge.probability / scale;
+            arrivals[] = pending[];
+        }
+        foreach (ref edge; edges[0 .. edgeCount])
+            edge.weight = cast(ulong) total[edge.from] * edge.probability;
+
+        ushort[Plan.instructionLimit] next, prev;
+        next[] = prev[] = none;
+        foreach (pass; 0 .. edgeCount) {
+            size_t best = edgeCount;
+            foreach (i, ref const edge; edges[0 .. edgeCount])
+                if (edge.weight && (best == edgeCount || edge.weight > edges[best].weight))
+                    best = i;
+            if (best == edgeCount)
+                break;
+            ref edge = edges[best];
+            edge.weight = 0;
+            const from = edge.from;
+            const to = edge.to;
+            if (from == to || next[from] != none || prev[to] != none || to == redirects[0])
+                continue;
+            ushort head = from;
+            while (prev[head] != none)
+                head = prev[head];
+            if (head == to) {
+                // This edge closes a trace. Keep the conditional as its
+                // last instruction so the loop needs no extra jump.
+                ushort tail = from;
+                while (tail != none && (flow.blocks[tail].next == none
+                        || flow.blocks[tail].target == none))
+                    tail = prev[tail];
+                if (tail == none || tail == from)
+                    continue;
+                prev[next[tail]] = none;
+                next[tail] = none;
+            }
+            next[from] = to;
+            prev[to] = from;
+        }
+
+        ushort count;
+        for (auto head = redirects[0]; head != none;) {
+            for (auto id = head; id != none; id = next[id]) {
+                order[count++] = id;
+                total[id] = 0;
+            }
+            head = none;
+            foreach (id, freq; total[0 .. flow.blockCount])
+                if (redirects[id] == id && prev[id] == none && freq
+                        && (head == none || freq > total[head]))
+                    head = cast(ushort) id;
+        }
+
+        // Integer rounding can leave a rare reachable trace with no weight.
+        Flow.Set placed;
+        foreach (id; order[0 .. count])
+            placed.add(id);
+        foreach (id; 0 .. flow.blockCount)
+            if (redirects[id] == id && !placed.has(id))
+                order[count++] = cast(ushort) id;
         return count;
     }
 
@@ -2003,6 +2124,32 @@ private struct ScalarEmitter {
             guard(CC_NE);
         }
         const frameSize = flow.ranges.program.frameSize;
+        foreach (i, ref const slice; flow.ranges.slices[0 .. flow.ranges.program.slotCount]) {
+            if (!slice.required)
+                continue;
+            if (!space(96))
+                return;
+            const pointer = flow.ranges.program.slots[slice.pointer].offset;
+            const length = flow.ranges.program.slots[i].offset;
+            a.ld(8, R10, Mem(FRAME, pointer));
+            a.ld(8, R11, Mem(FRAME, length));
+            if (slice.required <= int.max) {
+                a.aluRI(Alu.cmp, 8, R11, cast(int) slice.required);
+            } else {
+                a.movI(RAX, slice.required);
+                a.aluRR(Alu.cmp, 8, R11, RAX);
+            }
+            guard(CC_B);
+
+            a.aluRR(Alu.add, 8, R11, R10);
+            guard(CC_B);
+            a.lea(RAX, Mem(FRAME, frameSize));
+            a.aluRR(Alu.cmp, 8, R10, RAX);
+            const above = gen.jccLocal(CC_AE);
+            a.aluRR(Alu.cmp, 8, R11, FRAME);
+            guard(CC_A);
+            gen.patchHere(above);
+        }
         foreach (i, ref const span; flow.ranges.spans[0 .. flow.ranges.program.slotCount]) {
             if (!span.end)
                 continue;
@@ -2089,6 +2236,8 @@ private struct ScalarEmitter {
         if (node.address == none)
             return Mem(FRAME, cast(int) node.offset);
         const base = integer(location(node.address));
+        if (node.indexed)
+            return Mem(cast(ubyte) base, cast(int) node.offset, integer(location(node.right)));
         return Mem(cast(ubyte) base, cast(int) node.offset);
     }
 
@@ -2148,7 +2297,7 @@ private struct ScalarEmitter {
             return true;
         case branch:
             return this.compare(step, left, right);
-        case exit, jump, move, returnVoid, returnValue:
+        case exit, jump, move, returnVoid, returnValue, checked, arrayLoad, arrayStore:
             return false;
         }
     }
@@ -4127,15 +4276,24 @@ private struct Gen {
     private enum inlineDepthLimit = 3;
     private enum inlineCodeLimit = 8 * 1024;
 
+    bool hasCheckedAccess(const(JitOp)[] ops) const {
+        if (ops.length > ScalarFlow.Program.instructionLimit)
+            return false;
+        foreach (ref const op; ops)
+            if (op.kind == JitOp.Kind.checked)
+                return true;
+        return false;
+    }
+
     bool emitScalarEntry(const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals, ref bool inlineReturn)
+        const(Instruction.Handler)[] originals, ref bool inlineReturn, size_t entry = 0)
     {
         static if (!chainedDispatch)
             return false;
         if (scalarScratch is null)
             return false;
         auto flow = scalarScratch.reserve(1);
-        if (flow is null || !flow.prepare(function_, snapshot, ops))
+        if (flow is null || !flow.prepare(function_, snapshot, ops, cast(ushort) entry))
             return false;
 
         const start = a.n;
@@ -4247,6 +4405,7 @@ private struct Gen {
         bool returned;
         if (function_.jitHandlers !is null)
             emitScalarEntry(ops, originals, returned);
+        const hasChecked = function_.jitHandlers !is null && hasCheckedAccess(ops);
         foreach (i, ref const op; ops) {
             if (a.n + literalBytes + maximumBytesPerInstruction > codeLimit)
                 return false;
@@ -4254,6 +4413,8 @@ private struct Gen {
             // Either edge of a branch can enter with different registers.
             intSlots = IntSlots.init;
             fpSlots = FpSlots.init;
+            if (hasChecked && i)
+                emitScalarEntry(ops, originals, returned, i);
             const original = originals[i];
             if (original is null) {
                 a.ud2();
