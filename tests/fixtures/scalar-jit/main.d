@@ -166,6 +166,15 @@ long retainScaling(ref long current, const(long)* factor, int count) {
     return current;
 }
 
+int sumMaskedReadings(int reading, int firstBit, int count, int adjustment) {
+    int total;
+    for (int sample = 0; sample < count; ++sample) {
+        const marker = 1 << (firstBit + (sample & 3));
+        total += (reading ^ marker) + adjustment;
+    }
+    return total;
+}
+
 int main() {
     const channel = ChannelSpan(0, 0.5, 4.0, 2.0);
     auto calibrate = &calibratedTotal;
@@ -278,6 +287,12 @@ int main() {
     current = 2;
     assert(scale(current, &current, 3) == 256);
     assert(current == 256);
+
+    auto sumMasked = &sumMaskedReadings;
+    assert(sumMasked(171, 5, 301, 3) == 64_342);
+    assert(sumMasked(9_216, 6, 305, -17) == 2_878_719);
+    assert(sumMasked(171, 5, 0, 3) == 0);
+    assert(sumMasked(-128, 4, 1, -5) == -117);
 
     return 0;
 }
