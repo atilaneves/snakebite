@@ -94,3 +94,4 @@ jobs:
         uses: codecov/codecov-action@v5.1.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/ldc-bytecode.info
