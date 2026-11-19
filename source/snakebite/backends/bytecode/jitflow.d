@@ -1319,8 +1319,17 @@ package struct ScalarFlow {
         if (failed)
             return false;
         connect;
+        if (failed)
+            return false;
+        Set[Program.instructionLimit] predecessors;
+        foreach (i, ref const block; blocks[0 .. blockCount])
+            foreach (successor; [block.next, block.target])
+                if (successor != none)
+                    predecessors[successor].add(i);
+        if (reuseJoinInputs(predecessors[0 .. blockCount]))
+            connect;
         selectOperands;
-        measureEdges;
+        measureEdges(predecessors[0 .. blockCount]);
         if (ranges.hasChecked && !hasCheckedLoop)
             return false;
         scheduleBlocks;
@@ -1935,6 +1944,92 @@ package struct ScalarFlow {
         } while (changed);
     }
 
+    private bool reuseJoinInputs(scope const(Set)[] predecessors) {
+        ushort[valueLimit] aliases;
+        foreach (id, ref alias_; aliases[0 .. valueCount])
+            alias_ = cast(ushort) id;
+        const slots = ranges.program.slotCount;
+        bool changed;
+        bool replaced;
+        do {
+            changed = false;
+            // The first block imports values from the caller, including on
+            // entry to a guarded region. Its inputs retain their identity.
+            foreach (i; 1 .. blockCount) {
+                foreach (home, id; blocks[i].incoming[0 .. slots]) {
+                    if (id == none || aliases[id] != id)
+                        continue;
+                    ushort source = none;
+                    foreach (pred; predecessors[i]) {
+                        const input = representative(aliases[], blocks[pred].outgoing[home]);
+                        if (input == id)
+                            continue;
+                        if (source != none && source != input) {
+                            source = none;
+                            break;
+                        }
+                        source = input;
+                    }
+                    if (source == none)
+                        continue;
+                    ref const join = values[id];
+                    ref const input = values[source];
+                    if (join.home == input.home && join.width == input.width
+                            && join.lane == input.lane) {
+                        aliases[id] = source;
+                        changed = true;
+                    }
+                }
+            }
+            replaced |= changed;
+        } while (changed);
+        if (!replaced)
+            return false;
+
+        // Keep one record per surviving definition, in original block order.
+        // Incoming references also carry liveness across an edge with no move.
+        ushort[valueLimit] renumbered;
+        ushort remaining;
+        foreach (ref block; blocks[0 .. blockCount]) {
+            const first = block.firstValue;
+            block.firstValue = remaining;
+            foreach (id; first .. block.endValue) {
+                if (aliases[id] != id)
+                    continue;
+                renumbered[id] = remaining;
+                values[remaining++] = values[id];
+            }
+            block.endValue = remaining;
+        }
+        foreach (id; 0 .. valueCount)
+            if (aliases[id] != id)
+                renumbered[id] = renumbered[representative(aliases[], cast(ushort) id)];
+        void substitute(ref ushort id) {
+            if (id != none)
+                id = renumbered[id];
+        }
+        foreach (ref block; blocks[0 .. blockCount]) {
+            foreach (ref id; block.incoming[0 .. slots])
+                substitute(id);
+            foreach (ref id; block.outgoing[0 .. slots])
+                substitute(id);
+        }
+        foreach (ref node; nodes[0 .. nodeCount]) {
+            substitute(node.output);
+            substitute(node.left);
+            substitute(node.right);
+            substitute(node.address);
+        }
+        valueCount = remaining;
+        return true;
+    }
+
+    private static ushort representative(scope const(ushort)[] aliases, ushort id) {
+        while (aliases[id] != id)
+            id = aliases[id];
+        return id;
+    }
+
     private void markLiveNodes() {
         foreach_reverse (ref node; nodes[0 .. nodeCount]) {
             if (node.output != none && values[node.output].folded)
@@ -1997,7 +2092,8 @@ package struct ScalarFlow {
         if (value.origin != Origin.produced)
             return;
         ref source = nodes[value.first];
-        if (source.action != Action.load || source.indexed || source.width != value.width)
+        if (source.action != Action.load || source.indexed || source.width != value.width
+                || value.first >= index || whichBlock[source.pc] != whichBlock[nodes[index].pc])
             return;
         foreach (ref const between; nodes[value.first + 1 .. index])
             if (between.used && (between.indexed || between.action == Action.store
@@ -2026,16 +2122,11 @@ package struct ScalarFlow {
         }
     }
 
-    private void measureEdges() {
-        Set[Program.instructionLimit] predecessors;
+    private void measureEdges(scope const(Set)[] predecessors) {
         Set[Program.instructionLimit] dominators;
         Set all;
-        foreach (i, ref const block; blocks[0 .. blockCount]) {
+        foreach (i; 0 .. blockCount)
             all.add(i);
-            foreach (successor; [block.next, block.target])
-                if (successor != none)
-                    predecessors[successor].add(i);
-        }
         dominators[0].add(0);
         dominators[1 .. blockCount] = all;
         bool changed;
@@ -2155,9 +2246,11 @@ package struct ScalarFlow {
         int fpPressure;
         foreach (id; block.liveOut)
             ++schedule.uses[id];
-        foreach (id; block.firstValue .. block.endValue) {
+        foreach (id; block.incoming[0 .. ranges.program.slotCount]) {
+            if (id == none)
+                continue;
             ref const value = values[id];
-            if (value.used && value.origin == Origin.phi) {
+            if (value.used && value.allocated) {
                 if (value.lane == Lane.floating)
                     ++fpPressure;
                 else
@@ -2171,8 +2264,15 @@ package struct ScalarFlow {
                 if (id == none || !values[id].allocated)
                     continue;
                 ++schedule.uses[id];
-                if (values[id].origin == Origin.produced)
-                    schedule.depends[now][values[id].first - block.firstNode] = true;
+                const producer = values[id].first;
+                if (values[id].origin == Origin.produced
+                        && producer >= block.firstNode && producer < block.endNode) {
+                    if (producer - block.firstNode >= now) {
+                        failed = true;
+                        return;
+                    }
+                    schedule.depends[now][producer - block.firstNode] = true;
+                }
             }
             foreach (prior, ref const earlier; work[0 .. now]) {
                 if (!earlier.used)
