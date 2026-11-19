@@ -168,6 +168,41 @@ static foreach (backend; Matrix!()) {
         }, ["work"]);
     }
 
+    @("jit.mixedArithmeticKeepsValuesAcrossBackedges." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            double packetWeights(int count, int shift, double offset) {
+                double sum = 0;
+                for (; count > 0; --count)
+                    sum += 2.0 * cast(double) (count << shift) + offset;
+                return sum;
+            }
+
+            double lastReading(long reading, uint count) {
+                double last = 0;
+                for (uint i = 0; i < count; ++i) {
+                    last = cast(double) reading;
+                    ++reading;
+                }
+                return last;
+            }
+
+            int main() {
+                auto weight = &packetWeights;
+                foreach (_; 0 .. 2)
+                    assert(weight(512, 1, -1.5) == 524_544.0);
+                assert(weight(3, 0, -2.0) == 6.0);
+                assert(weight(136, 24, 0) == 235_283_677_184.0);
+                assert(weight(0, 1, -1.5) == 0.0);
+                auto last = &lastReading;
+                foreach (_; 0 .. 2)
+                    assert(last(9_007_199_254_740_994, 257) == 9_007_199_254_741_250.0);
+                return 0;
+            }
+        }, ["packetWeights", "lastReading"]);
+    }
+
     @("jit.floatingLiteralsKeepTheirValues." ~ backend.stringof)
     @Tags(is(backend == Bytecode) || is(backend == LoadedBytecode)
         ? [backend.stringof, "requires-jit-code"] : [backend.stringof])
