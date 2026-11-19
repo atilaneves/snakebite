@@ -711,6 +711,84 @@ static foreach (backend; Matrix!(
     }
 }
 
+private enum sampleLabels = q{
+    enum storeLine = __LINE__ + 12;
+    int labelSamples(ubyte[] samples, ubyte[] labels, bool resume) {
+        enum last = 300;
+        int index = last;
+        int count = 0;
+        if (resume)
+            goto sample;
+        assert(samples.length != 0);
+        for (index = 1; index <= last; ++index) {
+        sample:
+            if (!samples[index - 1])
+                continue;
+            labels[index - 1] = 9;
+            ++count;
+        }
+        return count;
+    }
+};
+
+static foreach (backend; Matrix!()) {
+    @("jit.checkedByteLoopKeepsItsEntryState." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, sampleLabels ~ q{
+            int main() {
+                auto samples = new ubyte[300];
+                auto labels = new ubyte[300];
+                samples[0] = 2;
+                samples[$ - 1] = 3;
+                assert(labelSamples(samples, labels, false) == 2);
+                assert(labels[0] == 9 && labels[$ - 1] == 9);
+
+                labels[] = 0;
+                assert(labelSamples(samples, labels, true) == 1);
+                assert(labels[0] == 0 && labels[$ - 1] == 9);
+
+                labels[] = 0;
+                assert(labelSamples(samples, labels, false) == 2);
+                assert(labels[0] == 9 && labels[1 .. $ - 1] == samples[1 .. $ - 1]);
+                assert(labels[$ - 1] == 9);
+                return 0;
+            }
+        }, ["labelSamples"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("jit.checkedByteLoopKeepsWritesBeforeABoundsError." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, sampleLabels ~ q{
+            import core.exception: ArrayIndexError;
+
+            int main() {
+                auto samples = new ubyte[300];
+                auto labels = new ubyte[300];
+                samples[0 .. 2] = 1;
+                assert(labelSamples(samples, labels, false) == 2);
+                labels[] = 0;
+                try {
+                    labelSamples(samples, labels[0 .. 1], false);
+                    return 1;
+                } catch (ArrayIndexError error) {
+                    assert(error.file == __FILE__);
+                    assert(error.line == storeLine);
+                    assert(error.index == 1 && error.length == 1);
+                    assert(labels[0] == 9 && labels[1] == 0);
+                }
+                return 0;
+            }
+        }, ["labelSamples"]);
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot reinterpret overlapped union fields"),

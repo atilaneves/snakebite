@@ -493,8 +493,8 @@ package struct JitState {
         size_t intRegionEnd;
         const branchOnly = g.proveBranchOnly(ops, branchOnlyCandidates, branchOnlyEntries);
         bool inlineReturn;
-        const scalarEntry = g.emitScalarEntry(ops, originals, inlineReturn);
         const hasChecked = g.hasCheckedAccess(ops);
+        const scalarEntry = g.emitScalarEntry(ops, originals, inlineReturn, hasChecked);
         foreach (i; 0 .. instructions.length) {
             if (i < branchOnlyEnd)
                 continue;
@@ -504,7 +504,7 @@ package struct JitState {
             g.labels[i] = g.a.n;
             if (hasChecked && i && !g.checkedLoop.update && !g.fpLoop.backedge
                     && !g.intLoop.backedge && i >= intRegionEnd && i >= fpRegionEnd
-                    && g.emitScalarEntry(ops, originals, inlineReturn, i)) {
+                    && g.emitScalarEntry(ops, originals, inlineReturn, hasChecked, i)) {
                 g.known = Gen.KnownConstant.init;
                 g.intSlots = IntSlots.init;
                 g.fpSlots = FpSlots.init;
@@ -1887,7 +1887,7 @@ private struct ScalarEmitter {
     size_t[Plan.instructionLimit] offsets;
     Branch[Plan.instructionLimit * 2] branches;
     size_t branchCount;
-    size_t[Plan.slotLimit * 6 + 1] misses;
+    size_t[Plan.slotLimit * 7 + 1] misses;
     size_t missCount;
     Move[Plan.slotLimit] moveScratch;
     ushort[Plan.instructionLimit] redirects;
@@ -1950,35 +1950,6 @@ private struct ScalarEmitter {
             }
             redirects[id] = target;
         }
-        if (flow.ranges.hasChecked)
-            return layoutTraces();
-        Flow.Set placed;
-        ushort count;
-        foreach (start; 0 .. flow.blockCount) {
-            auto id = redirects[start];
-            while (!placed.has(id)) {
-                placed.add(id);
-                order[count++] = id;
-                ref const block = flow.blocks[id];
-                ushort next = none;
-                foreach (successor; [block.next, block.target]) {
-                    if (successor == none)
-                        continue;
-                    const target = redirects[successor];
-                    if (placed.has(target))
-                        continue;
-                    if (next == none || flow.blocks[target].weight > flow.blocks[next].weight)
-                        next = target;
-                }
-                if (next == none)
-                    break;
-                id = next;
-            }
-        }
-        return count;
-    }
-
-    private ushort layoutTraces() {
         enum scale = 100;
         enum likely = 90;
         enum unlikely = scale - likely;
@@ -4280,21 +4251,29 @@ private struct Gen {
         if (ops.length > ScalarFlow.Program.instructionLimit)
             return false;
         foreach (ref const op; ops)
-            if (op.kind == JitOp.Kind.checked)
+            if (ScalarFlow.Program.supportsChecked(op))
                 return true;
         return false;
     }
 
     bool emitScalarEntry(const(JitOp)[] ops,
-        const(Instruction.Handler)[] originals, ref bool inlineReturn, size_t entry = 0)
+        const(Instruction.Handler)[] originals, ref bool inlineReturn, bool versionSlices,
+        size_t entry = 0)
     {
         static if (!chainedDispatch)
             return false;
         if (scalarScratch is null)
             return false;
         auto flow = scalarScratch.reserve(1);
-        if (flow is null || !flow.prepare(function_, snapshot, ops, cast(ushort) entry))
+        if (flow is null
+                || !flow.prepare(function_, snapshot, ops, cast(ushort) entry, versionSlices))
             return false;
+
+        // A guard miss continues into the ordinary template for this PC.
+        const limit = codeLimit;
+        scope (exit) codeLimit = limit;
+        if (entry)
+            codeLimit -= maximumBytesPerInstruction;
 
         const start = a.n;
         const savedFixups = fixupCount;
@@ -4403,9 +4382,10 @@ private struct Gen {
         import snakebite.backends.bytecode.vm: jitCountsBranch, JitTier;
 
         bool returned;
-        if (function_.jitHandlers !is null)
-            emitScalarEntry(ops, originals, returned);
-        const hasChecked = function_.jitHandlers !is null && hasCheckedAccess(ops);
+        const published = function_.jitHandlers !is null;
+        const hasChecked = published && hasCheckedAccess(ops);
+        if (published)
+            emitScalarEntry(ops, originals, returned, hasChecked);
         foreach (i, ref const op; ops) {
             if (a.n + literalBytes + maximumBytesPerInstruction > codeLimit)
                 return false;
@@ -4414,7 +4394,7 @@ private struct Gen {
             intSlots = IntSlots.init;
             fpSlots = FpSlots.init;
             if (hasChecked && i)
-                emitScalarEntry(ops, originals, returned, i);
+                emitScalarEntry(ops, originals, returned, hasChecked, i);
             const original = originals[i];
             if (original is null) {
                 a.ud2();

@@ -90,6 +90,8 @@ package struct ScalarProgram {
                     if (pc + 1 == length)
                         return false;
                     step.next = cast(ushort) (pc + 1);
+                    if (step.kind == checked && step.target == step.next)
+                        step = Operation.init;
                 }
             }
             operations[pc] = step;
@@ -129,6 +131,15 @@ package struct ScalarProgram {
         const index = slotCount++;
         slots[index] = Slot(cast(ushort) offset, width);
         return index;
+    }
+
+    static bool supportsChecked(in JitOp op) {
+        if (op.kind != JitOp.Kind.checked)
+            return false;
+        const check = op.checked;
+        return !check.fixedLength && !check.sharedAccess && check.signed
+            && check.indexWidth == int.sizeof && op.width == ubyte.sizeof
+            && (check.access == CheckedAccess.load || check.access == CheckedAccess.store);
     }
 
     private static Operation decode(const(Function)* function_,
@@ -256,10 +267,9 @@ package struct ScalarProgram {
             }
             return Operation.init;
         case checked:
-            const check = op.checked;
-            if (check.fixedLength || check.sharedAccess || !check.signed
-                    || check.indexWidth != int.sizeof || op.width != ubyte.sizeof)
+            if (!supportsChecked(op))
                 return Operation.init;
+            const check = op.checked;
             step.kind = Kind.checked;
             step.slice = storage(ins.source, 2 * size_t.sizeof);
             if (step.slice.mode != Mode.frame)
@@ -273,12 +283,10 @@ package struct ScalarProgram {
                 step.output = storage(ins.destination, op.width);
                 if (step.output.mode != Mode.frame)
                     return Operation.init;
-            } else if (check.access == CheckedAccess.store) {
+            } else {
                 step.right = input(ins.destination, op.width, check.constantValue);
                 if (step.right.mode != Mode.frame && step.right.mode != Mode.literal)
                     return Operation.init;
-            } else {
-                return Operation.init;
             }
             return step;
         case branch:
@@ -1215,7 +1223,7 @@ package struct ScalarFlow {
     private bool _hasFrameExit;
 
     bool prepare(const(Function)* function_, const(Instruction)[] instructions,
-        const(JitOp)[] ops, ushort entry)
+        const(JitOp)[] ops, ushort entry, bool versionSlices)
     {
         if (entry && (Program.decode(function_, instructions[entry - 1], ops[entry - 1])
                 .kind != Kind.exit || Program.decode(function_, instructions[entry], ops[entry])
@@ -1223,13 +1231,13 @@ package struct ScalarFlow {
             return false;
         if (!ranges.program.read(function_, instructions, ops))
             return false;
-        if (!ranges.analyze(entry, entry != 0) || entry && !keepSliceRoots)
+        if (!ranges.analyze(entry, versionSlices) || ranges.hasChecked && !keepSliceRoots)
             return false;
         blockCount = valueCount = nodeCount = 0;
         failed = false;
         canonical = modified = Set.init;
         _hasFrameExit = false;
-        hoistLoads;
+        hoistLoads(entry);
         auto p = &ranges.program;
         fp0Slot = p.slotOf(Program.fp0, double.sizeof);
         r0Slot = p.slotOf(Program.r0, ulong.sizeof);
@@ -1264,10 +1272,23 @@ package struct ScalarFlow {
         connect;
         selectOperands;
         measureEdges;
+        if (ranges.hasChecked && !hasCheckedLoop)
+            return false;
         scheduleBlocks;
         return !failed && allocate;
     }
 
+
+    private bool hasCheckedLoop() const {
+        foreach (ref const block; blocks[0 .. blockCount]) {
+            if (block.weight == 1)
+                continue;
+            foreach (ref const step; ranges.resolved[block.pc .. block.end])
+                if (step.kind == Kind.arrayLoad || step.kind == Kind.arrayStore)
+                    return true;
+        }
+        return false;
+    }
 
     private alias Members = bool[Program.instructionLimit];
 
@@ -1303,12 +1324,12 @@ package struct ScalarFlow {
         ulong step;
     }
 
-    private void hoistLoads() {
+    private void hoistLoads(ushort entry) {
         foreach (header; 1 .. ranges.program.length) {
             if (!ranges.visited[header] || ranges.resolved[header].kind != Kind.branch)
                 continue;
             Members members;
-            if (!naturalLoop(cast(ushort) header, members))
+            if (!naturalLoop(cast(ushort) header, entry, members))
                 continue;
             const branch = ranges.resolved[header];
             if (members[branch.next] == members[branch.target])
@@ -1363,7 +1384,7 @@ package struct ScalarFlow {
         }
     }
 
-    private bool naturalLoop(ushort header, ref Members members) {
+    private bool naturalLoop(ushort header, ushort entry, ref Members members) {
         members[header] = true;
         bool found;
         foreach (pc; header + 1 .. ranges.program.length) {
@@ -1388,7 +1409,7 @@ package struct ScalarFlow {
                 }
             }
         } while (changed);
-        return !members[0];
+        return !members[entry];
     }
 
     private bool unchanged(size_t offset, ubyte width, in Members members) {
@@ -1408,8 +1429,9 @@ package struct ScalarFlow {
         if (source.root == none)
             return false;
         foreach (i, ref const step; ranges.resolved[0 .. ranges.length])
-            if (members[i] && step.output.mode == Mode.indirect
-                    && !source.disjoint(ranges.memoryOf(step.output, cast(ushort) i)))
+            if (members[i] && (step.kind == Kind.arrayStore
+                    || step.output.mode == Mode.indirect
+                        && !source.disjoint(ranges.memoryOf(step.output, cast(ushort) i))))
                 return false;
         return true;
     }
@@ -1925,8 +1947,8 @@ package struct ScalarFlow {
         if (source.action != Action.load || source.indexed || source.width != value.width)
             return;
         foreach (ref const between; nodes[value.first + 1 .. index])
-            if (between.used && between.action == Action.store
-                    && !between.memory.disjoint(source.memory))
+            if (between.used && (between.indexed || between.action == Action.store
+                    && !between.memory.disjoint(source.memory)))
                 return;
         source.used = false;
         value.folded = true;
