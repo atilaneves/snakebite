@@ -1373,3 +1373,133 @@ static foreach (backend; Matrix!(
         }, ["advance"]);
     }
 }
+
+// A fixed-length slice still aliases its source, and an empty slice
+// can point one element past the source.
+static foreach (backend; Matrix!()) {
+    @("jit.fixedSliceKeepsStorageAndEvaluationOrder." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Three {
+                ubyte[3] payload;
+            }
+
+            final class Cursor {
+                size_t index;
+
+                ubyte[] takeFixed(ubyte[] input) {
+                    assert(input.length > 0);
+                    return input[index .. index + 1];
+                }
+            }
+
+            void checkSpans(size_t index, ushort[] words, uint[] ints,
+                    ulong[] longs, Three[] triples) {
+                auto s = words[index .. index + 3];
+                assert(s.ptr is words.ptr + index && s.length == 3);
+                s[1] = 51;
+                assert(words[index + 1] == 51);
+
+                const t = ints[index .. index + 3];
+                assert(t.ptr is ints.ptr + index && t.length == 3);
+                const u = longs[index .. index + 3];
+                assert(u.ptr is longs.ptr + index && u.length == 3);
+                const v = triples[index .. index + 3];
+                assert(v.ptr is triples.ptr + index && v.length == 3);
+
+                size_t end = words.length;
+                auto empty = words[end .. end];
+                assert(empty.length == 0 && empty.ptr is words.ptr + end);
+            }
+
+            int main() {
+                auto cursor = new Cursor;
+                ubyte[] bytes = [1, 2, 3, 4, 5];
+                ushort[] words = [1, 2, 3, 4, 5];
+                uint[] ints = [1, 2, 3, 4, 5];
+                ulong[] longs = [1, 2, 3, 4, 5];
+                auto triples = new Three[5];
+
+                foreach (iteration; 0 .. 300) {
+                    size_t index = 1 + iteration % 2;
+                    cursor.index = index;
+                    auto one = cursor.takeFixed(bytes);
+                    assert(one.ptr is bytes.ptr + index && one.length == 1);
+                    checkSpans(index, words, ints, longs, triples);
+                }
+
+                size_t index;
+                ubyte[] source() {
+                    index = 1;
+                    return bytes;
+                }
+                const fromSource = source()[index .. index + 3];
+                assert(fromSource.ptr is bytes.ptr + 1 && fromSource.length == 3);
+
+                size_t nextBound() {
+                    ++index;
+                    return index;
+                }
+                const fromBounds = bytes[nextBound() .. index + 1];
+                assert(fromBounds.ptr is bytes.ptr + 2 && fromBounds.length == 1);
+                assert(fromBounds[0] == 3);
+
+                shared size_t sharedIndex;
+                sharedIndex = 1;
+                const fromShared = bytes[sharedIndex .. sharedIndex + 2];
+                assert(fromShared.ptr is bytes.ptr + 1 && fromShared.length == 2);
+                return 0;
+            }
+        }, ["checkSpans", "takeFixed"]);
+    }
+}
+
+// ArraySliceError reports the actual unsigned bound after addition wraps.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd CTFE reports an out-of-bounds slice as a compile-time error"),
+)) {
+    @("jit.fixedSliceReportsWrappedAndOutOfBoundsArguments." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            import core.exception: ArraySliceError;
+
+            bool spanIsValid(int[] values, size_t lower, size_t expectedUpper,
+                    bool oneElement) {
+                size_t line;
+                try {
+                    if (oneElement) {
+                        line = __LINE__ + 1;
+                        auto result = values[lower .. lower + 1];
+                        assert(result.length == 1);
+                    } else {
+                        line = __LINE__ + 1;
+                        auto result = values[lower .. lower + 3];
+                        assert(result.length == 3);
+                    }
+                    return true;
+                } catch (ArraySliceError error) {
+                    assert(error.file == __FILE__ && error.line == line);
+                    assert(error.lower == lower && error.upper == expectedUpper);
+                    assert(error.length == values.length);
+                    return false;
+                }
+            }
+
+            int main() {
+                int[] values = [1, 2, 3, 4, 5];
+                foreach (_; 0 .. 300) {
+                    assert(spanIsValid(values, 4, 5, true));
+                    assert(spanIsValid(values, 2, 5, false));
+                }
+                assert(!spanIsValid(values, 5, 6, true));
+                assert(!spanIsValid(values, 3, 6, false));
+                assert(!spanIsValid(values, size_t.max, 0, true));
+                assert(!spanIsValid(values, size_t.max, 2, false));
+                return 0;
+            }
+        }, ["spanIsValid"]);
+    }
+}

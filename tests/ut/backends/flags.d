@@ -615,6 +615,13 @@ private enum sliceBody = q{
     auto value = slice[0 .. 3];
 };
 
+private enum fixedSliceBody = q{
+    int[4] storage = [1, 2, 3, 4];
+    int[] slice = storage[0 .. 2];
+    size_t lower = 1;
+    auto value = slice[lower .. lower + 2];
+};
+
 private enum copyBody = q{
     int[4] target;
     int[4] source = [1, 2, 3, 4];
@@ -722,8 +729,9 @@ static foreach (backend; Compiled) {
     @("flags.boundsSlice." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        foreach (row; boundsRows(sliceBody, sliceError))
-            shouldRun!backend(row);
+        foreach (body_; [sliceBody, fixedSliceBody])
+            foreach (row; boundsRows(body_, sliceError))
+                shouldRun!backend(row);
     }
 }
 
@@ -819,6 +827,7 @@ static foreach (backend; Compiled) {
         foreach (row; [
             Row(haltFlags, unittestOf("@system", indexBody), Expect.halted),
             Row(haltFlags, unittestOf("@system", sliceBody), Expect.halted),
+            Row(haltFlags, unittestOf("@system", fixedSliceBody), Expect.halted),
             Row(haltFlags, unittestOf("@system", copyBody), Expect.halted),
             // A slice copy onto an overlapping slice is a bounds failure, as
             // a length mismatch is.
