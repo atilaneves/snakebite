@@ -1113,6 +1113,37 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("jit.byteBranchCanEnterAfterTheLoad." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            int readByte(ubyte[] values, size_t index, bool skip, ubyte value) {
+                assert(values.length != 0);
+                if (skip)
+                    goto test;
+                value = values[index];
+            test:
+                if (value)
+                    return 256 + value;
+                return 17;
+            }
+
+            int main() {
+                ubyte[] values = [0, 2, 255];
+                foreach (_; 0 .. 300) {
+                    assert(readByte(values, 0, false, 2) == 17);
+                    assert(readByte(values, 1, false, 0) == 258);
+                    assert(readByte(values, 2, false, 0) == 511);
+                    assert(readByte(values, 3, true, 2) == 258);
+                    assert(readByte(values, 3, true, 0) == 17);
+                }
+                return 0;
+            }
+        }, ["readByte"]);
+    }
+}
+
 static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible,
         "CTFE cannot slice a pointer to a scalar or catch a bounds failure"),

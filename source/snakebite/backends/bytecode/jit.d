@@ -6004,8 +6004,7 @@ private struct Gen {
                                     && success > load)
                                 emitForwardedLoad(target, load, ins, op, d, s, element);
                         }
-                        if (es == 1 && inlineCaller is null
-                                && !checkedLoop.update && !fpLoop.backedge
+                        if (es == 1 && !checkedLoop.update && !fpLoop.backedge
                                 && !intLoop.backedge)
                             threaded = emitByteOutcomes(target, ins.destination, ops);
                     }
@@ -6055,17 +6054,18 @@ private struct Gen {
                 || zero == size_t.max || nonzero == size_t.max)
             return false;
 
-        size_t budget = BranchOnly.limit - 1;
+        size_t budget = inlineCaller is null ? BranchOnly.limit - 1 : 0;
         const whenZero = planByteOutcome(zero, source, false, ops, budget);
         const whenNonzero = planByteOutcome(nonzero, source, true, ops, budget);
-        if (whenZero.next == zero && whenNonzero.next == nonzero)
-            return false;
-
         // Both edges carry the byte from the checked load. A test of the
         // byte establishes its truth value but does not normalize it.
         enum ubyte testByteOpcode = 0x84;
         a.rrOp(1, byteReg: true, R11, R11, testByteOpcode);
-        if (whenNonzero.count == 0) {
+        if (whenZero.next == zero && whenNonzero.next == nonzero) {
+            jccTo(op.branch.jumpIfNonzero ? CC_NE : CC_E,
+                op.branch.jumpIfNonzero ? nonzero : zero);
+            jmpTo(first + 1);
+        } else if (whenNonzero.count == 0) {
             jccTo(CC_NE, whenNonzero.next);
             emitByteOutcome(whenZero);
         } else if (whenZero.count == 0) {
