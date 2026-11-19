@@ -3594,14 +3594,15 @@ private struct Gen {
         }
     }
 
-    void storeConstant(int w, in Mem d, ulong value) {
+    bool storeConstant(int w, in Mem d, ulong value) {
         int imm;
-        if (immOf(w, value, imm))
+        if (immOf(w, value, imm)) {
             a.stI(w, d, imm);
-        else {
-            a.movI(RAX, value);
-            a.st(8, d, RAX);
+            return true;
         }
+        a.movI(RAX, value);
+        a.st(8, d, RAX);
+        return false;
     }
 
     static bool goodWidth(size_t w) {
@@ -4287,6 +4288,8 @@ private struct Gen {
         const usesInt = op.kind == JitOp.Kind.int3 || op.kind == JitOp.Kind.cmp3
             || op.kind == JitOp.Kind.castFixed || op.kind == JitOp.Kind.widen
             || op.kind == JitOp.Kind.jump || op.kind == JitOp.Kind.copy
+            || op.kind == JitOp.Kind.index || op.kind == JitOp.Kind.zero
+            || op.kind == JitOp.Kind.constant
             || (op.kind == JitOp.Kind.fused && !fpCompare);
         const inFpLoop = fpLoop.backedge != 0;
         if (!fpArithmetic && !fpCompare && !inFpLoop)
@@ -4377,8 +4380,9 @@ private struct Gen {
             const scalar = goodWidth(size) && (d.base == FRAME || copyRun);
             if (isLiteralCopy(ins, op, size)) {
                 const width = cast(int) size;
-                storeConstant(width, d, constantAt(ins.source, width));
-                finishCopy(d, width, carryCopy);
+                const immediate = storeConstant(width, d, constantAt(ins.source, width));
+                if (!immediate || !carryIndexToRegion(i, ops, d, width))
+                    finishCopy(d, width, carryCopy);
                 return true;
             }
             if (op.copy.staticSource) {
@@ -4430,7 +4434,9 @@ private struct Gen {
             Mem d;
             if (!opnd(ins.destination, R9, d))
                 return false;
-            storeConstant(cast(int) w, d, cast(ulong) constants[ins.source]);
+            const immediate = storeConstant(cast(int) w, d, cast(ulong) constants[ins.source]);
+            if (!immediate || !carryIndexToRegion(i, ops, d, cast(int) w))
+                intSlots = IntSlots.init;
             return true;
         }
 
@@ -4450,6 +4456,8 @@ private struct Gen {
                     off += c;
                 }
             }
+            if (!carryIndexToRegion(i, ops, d, cast(int) size))
+                intSlots = IntSlots.init;
             return true;
         }
 
@@ -4499,7 +4507,8 @@ private struct Gen {
                             int.sizeof, RAX);
                     const saved = a.n;
                     if (emitFused(header, test, t + 1,
-                            carriesIndex ? checkedEntry.afterLoad : 0))
+                            carriesIndex ? checkedEntry.afterLoad : 0,
+                            indexOps: ops, predecessor: i))
                         return true;
                     a.n = saved;
                     readIntSlot = false;
@@ -4535,7 +4544,8 @@ private struct Gen {
             return emitCmp3(ins, op);
         case fused: {
             size_t t;
-            return targetIndex(ins.sourceWidth, t) && emitFused(ins, op.fused, t);
+            return targetIndex(ins.sourceWidth, t)
+                && emitFused(ins, op.fused, t, indexOps: ops, predecessor: i);
         }
         case fp3:
             return emitFp3(ins, op);
@@ -4550,6 +4560,12 @@ private struct Gen {
             const es = ins.width;
             if (es > int.max)
                 return false;
+            int cached = -1;
+            if (d.base == FRAME && s.base == FRAME && r.base == FRAME)
+                cached = cachedInt(r, size_t.sizeof);
+            // The base load can overwrite the register holding the index.
+            if (cached >= 0 && cached != SC2)
+                a.movRR64(SC2, cached);
             final switch (op.index.base) {
                 case IndexBase.slice:
                     a.ld(8, RAX, Mem(s.base, s.disp + cast(int) arrayPointerOffset));
@@ -4560,14 +4576,15 @@ private struct Gen {
                 case IndexBase.pointer:
                     a.ld(8, RAX, s);
             }
-            a.ld(8, SC2, r);
+            if (cached < 0)
+                a.ld(8, SC2, r);
             if (es == 1 || es == 2 || es == 4 || es == 8)
                 a.lea(RAX, Mem(RAX, 0, SC2, cast(ubyte) es));
             else {
                 a.imulRI(SC2, SC2, cast(int) es);
                 a.aluRR(Alu.add, 8, RAX, SC2);
             }
-            a.st(8, d, RAX);
+            storeInt(d, size_t.sizeof, RAX);
             return true;
         }
 
@@ -5127,7 +5144,7 @@ private struct Gen {
         return true;
     }
 
-    void emitIntCompare(int w, in Mem l, in IntegerRight right, bool leftInR0) {
+    int emitIntCompare(int w, in Mem l, in IntegerRight right, bool leftInR0) {
         int left = leftInR0 ? REG0 : cachedInt(l, w);
         const rightReg = right.constant ? -1 : cachedInt(right.memory, w);
         if (left < 0) {
@@ -5138,6 +5155,7 @@ private struct Gen {
         emitIntegerCompare(w, left, right, rightReg, intScratch(left));
         if (!intLoop.contains(intLoopInstruction))
             intSlots = IntSlots.init;
+        return left;
     }
 
     void emitIntegerCompare(int w, int left, in IntegerRight right, int rightReg,
@@ -5167,7 +5185,8 @@ private struct Gen {
     bool emitFused(in Instruction ins, in JitOp.Fused p, size_t t,
         size_t localTarget = 0, size_t fallthrough = size_t.max,
         size_t pathNext = size_t.max, size_t* pathExit = null,
-        size_t* pathJump = null)
+        size_t* pathJump = null, const(JitOp)[] indexOps = null,
+        size_t predecessor = size_t.max)
     {
         const w = cast(int) ins.width;
         Mem l;
@@ -5182,11 +5201,22 @@ private struct Gen {
             IntegerRight right;
             if (!integerRight(ins.source, p.constantRight, w, R10, right))
                 return false;
-            emitIntCompare(w, l, right, p.leftInR0);
+            const left = emitIntCompare(w, l, right, p.leftInR0);
             const cc = integerBranchCc(p);
-            if (pathNext == size_t.max)
+            if (pathNext == size_t.max) {
+                if (indexOps.length && inlineCaller is null && !checkedLoop.update
+                        && !fpLoop.backedge && !intLoop.backedge && !p.leftInR0
+                        && w == size_t.sizeof && l.base == FRAME
+                        && (right.constant || right.memory.base == FRAME)) {
+                    const supplied = IntSlots(IntSlot(l.disp, w, left));
+                    if (!localTarget && t < predecessor && indexReads(t, indexOps, l))
+                        localTarget = indexBody(t, supplied);
+                    if (indexOps[predecessor].kind == JitOp.Kind.fused
+                            && indexReads(predecessor + 1, indexOps, l))
+                        intSlots = supplied;
+                }
                 jccIntLoop(cc, t, localTarget);
-            else {
+            } else {
                 if (pathNext == t) {
                     *pathExit = fallthrough;
                     *pathJump = jccLocal(cc ^ 1);
@@ -5255,14 +5285,62 @@ private struct Gen {
         return true;
     }
 
+    bool indexReads(size_t i, const(JitOp)[] ops, in Mem slot) const {
+        if (i >= ops.length || ops[i].kind != JitOp.Kind.index)
+            return false;
+        ref const ins = snapshot[i];
+        Mem frame;
+        return ins.sourceWidth == slot.disp && frameOperand(ins.source, frame)
+            && frameOperand(ins.destination, frame);
+    }
+
+    size_t indexBody(size_t target, in IntSlots supplied) const {
+        // Reload entries are recorded in bytecode order. The public label
+        // still holds the body address until the stubs are emitted.
+        size_t first, end = reloadEntryCount;
+        while (first < end) {
+            const middle = first + (end - first) / 2;
+            ref const entry = reloadEntryScratch.ptr[middle];
+            if (entry.index < target)
+                first = middle + 1;
+            else if (entry.index > target)
+                end = middle;
+            else
+                return entry.fpSlots.empty && entry.intSlots == supplied
+                    ? labels[target] : 0;
+        }
+        return 0;
+    }
+
+    bool carryIndexToRegion(size_t i, const(JitOp)[] ops, in Mem dest, int width) {
+        if (intSlots.empty || i == 0 || ops[i - 1].kind != JitOp.Kind.index
+                || dest.base != FRAME || intSlots.overlaps(dest, width))
+            return false;
+        Mem receiver;
+        if (!intRegionReceiver(i + 1, ops, receiver)
+                || intSlots.find(receiver, size_t.sizeof) < 0)
+            return false;
+        // Dispatch skips the index template that supplied the receiver.
+        readIntSlot = true;
+        return true;
+    }
+
+    bool intRegionReceiver(size_t first, const(JitOp)[] ops, out Mem pointerSlot) const {
+        if (first >= ops.length
+                || (ops[first].kind != JitOp.Kind.int3 && ops[first].kind != JitOp.Kind.copy)
+                || !(snapshot[first].destination & indirectBit))
+            return false;
+        Mem firstDest;
+        return storageOperand(snapshot[first].destination, IntRegion.pointer,
+            firstDest, pointerSlot) && pointerSlot.disp + size_t.sizeof <= frameSize;
+    }
+
     size_t emitIntRegion(size_t first, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals)
     {
-        if ((ops[first].kind != JitOp.Kind.int3 && ops[first].kind != JitOp.Kind.copy)
-                || !(snapshot[first].destination & indirectBit))
-            return first;
         IntRegion region;
-        if (!planIntRegion(first, ops, originals, region)
+        if (!intRegionReceiver(first, ops, region.writes.slot)
+                || !planIntRegion(first, ops, originals, region)
                 || codeLimit - a.n - literalBytes
                     < 64 * (region.length + 1) + maximumBytesPerInstruction)
             return first;
@@ -5270,12 +5348,19 @@ private struct Gen {
         // Both paths start with canonical frame state. The fallback can
         // enter after the guard has changed scratch registers.
         fpSlots = FpSlots.init;
-        intSlots = IntSlots.init;
         known = KnownConstant.init;
         const width = IntRegion.width;
         const pointer = IntRegion.pointer;
         const writes = region.writes;
-        a.ld(size_t.sizeof, pointer, writes.slot);
+        const cached = intSlots.find(writes.slot, size_t.sizeof);
+        if (cached < 0)
+            a.ld(size_t.sizeof, pointer, writes.slot);
+        else {
+            addReloadEntry(first, fpSlots, intSlots);
+            if (cached != pointer)
+                a.movRR64(pointer, cached);
+        }
+        intSlots = IntSlots.init;
         const overlap = receiverOverlap(pointer, writes,
             writes.slot.disp, size_t.sizeof);
         foreach (ref const step; region.steps[0 .. region.length]) {
@@ -5327,11 +5412,7 @@ private struct Gen {
         const(Instruction.Handler)[] originals, ref IntRegion region)
     {
         const width = IntRegion.width;
-        Mem firstDest, pointerSlot;
-        if (!storageOperand(snapshot[first].destination, IntRegion.pointer,
-                firstDest, pointerSlot) || pointerSlot.disp + size_t.sizeof > frameSize)
-            return false;
-        region.writes.slot = pointerSlot;
+        const pointerSlot = region.writes.slot;
         IntSlots slots;
         slots.base = IntRegion.pointer;
         int pointerLoads, fieldLoads, moves;

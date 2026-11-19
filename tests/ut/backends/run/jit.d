@@ -1297,6 +1297,65 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("jit.indexedFieldUpdatesUseTheCurrentElement." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            struct Cell {
+                int x;
+                int y;
+                int dx;
+                int dy;
+            }
+
+            int scan(bool maySkip)(Cell[] cells, size_t start, bool skip) {
+                int adjustedCount;
+                foreach (ref cell; cells[start .. $]) {
+                    bool adjusted = false;
+                    static if (maySkip) {
+                        if (skip) {
+                            skip = false;
+                            goto updateY;
+                        }
+                    }
+                    cell.x += cell.dx;
+                updateY:
+                    cell.y += cell.dy;
+                    if (cell.x < 0) {
+                        cell.x = 0;
+                        adjusted = true;
+                    }
+                    if (cell.y > 10) {
+                        cell.y = 10;
+                        adjusted = true;
+                    }
+                    if (adjusted)
+                        ++adjustedCount;
+                }
+                return adjustedCount;
+            }
+
+            int main() {
+                enum initial = [Cell(2, 8, 3, 3), Cell(1, 1, -3, 2),
+                    Cell(2, 6, 4, 1)];
+                foreach (round; 0 .. 300) {
+                    Cell[3] cells = initial;
+                    assert(scan!false(cells[], 0, false) == 2);
+                    assert(cells == [Cell(5, 10, 3, 3), Cell(0, 3, -3, 2),
+                        Cell(6, 7, 4, 1)]);
+
+                    cells = initial;
+                    assert(scan!true(cells[], 1, true) == 0);
+                    assert(cells == [Cell(2, 8, 3, 3), Cell(1, 3, -3, 2),
+                        Cell(6, 7, 4, 1)]);
+                }
+                return 0;
+            }
+        }, ["scan"]);
+    }
+}
+
 // Entering at the second update skips the first store. A branch after the
 // updates can read any field through the same aggregate or an overlapping field.
 static foreach (backend; Matrix!(
