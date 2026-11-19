@@ -340,12 +340,21 @@ package struct ScalarRanges {
     enum frame = none - 1;
     enum number = none - 2;
 
+    static struct Linear {
+        long factor;
+        long bias;
+        ushort home = none;
+        bool known;
+    }
+
     static struct Value {
         ulong low;
         ulong high;
         ushort root = none;
         bool localBits;
         uint multiple = 1;
+        Linear equation;
+        Linear upper;
 
         bool exact() const @nogc nothrow { return root == number && low == high; }
     }
@@ -391,15 +400,26 @@ package struct ScalarRanges {
     State[Program.instructionLimit] states;
     State working;
     State incomingEdge;
+    State priorJoin;
     Operation[Program.instructionLimit] resolved;
     Span[Program.slotLimit] spans;
     bool[Program.instructionLimit] visited;
     ushort[Program.instructionLimit] memoryOrigin;
+    ushort[Program.instructionLimit] predecessors;
     ushort length;
     bool hasFloats;
     bool hasLoop;
 
     bool analyze() {
+        predecessors[] = 0;
+        // The canonical entry supplies state independently of bytecode edges.
+        predecessors[0] = 1;
+        foreach (ref const step; program.operations[0 .. program.length]) {
+            if (step.next != none)
+                ++predecessors[step.next];
+            if (step.target != none && step.target != step.next)
+                ++predecessors[step.target];
+        }
         // A frame address can discover a new scalar component during the
         // first pass. Repeat with the full set so that all overlapping
         // writes are present before results are used.
@@ -440,8 +460,14 @@ package struct ScalarRanges {
             const pc = queue[head];
             auto step = program.operations[pc];
             working = states[pc];
-            if (!transfer(step, working, true))
+            if (!transfer(step, working, true)) {
                 step = Operation.init;
+            } else if (step.kind == Kind.jump) {
+                step.left = step.right = Operand.init;
+            } else {
+                foldRead(step.left, states[pc]);
+                foldRead(step.right, states[pc]);
+            }
             resolved[pc] = step;
             memoryOrigin[pc] = pc;
             hasFloats |= step.kind == Kind.floating || step.kind == Kind.sqrt
@@ -457,6 +483,14 @@ package struct ScalarRanges {
             }
         }
         return hasLoop;
+    }
+
+    private void foldRead(ref Operand operand, ref State state) {
+        if (operand.mode != Mode.frame || !scalarWidth(operand.width))
+            return;
+        const value = read(operand, state);
+        if (value.exact && !value.localBits)
+            operand = Operand(Mode.literal, operand.width, 0, value.low);
     }
 
     private bool transfer(ref Operation step, ref State state, bool record) {
@@ -499,6 +533,14 @@ package struct ScalarRanges {
             const scaled = arithmetic(JitOp.IntOperation.multiply, right,
                 Value(step.stride, step.stride, number), ulong.sizeof);
             result = arithmetic(JitOp.IntOperation.add, left, scaled, ulong.sizeof);
+            // A bound on the index can cancel the variable part of the
+            // base. The sub-slice pointer and length can depend on the same
+            // value even when neither offset nor index has a tight range.
+            const bound = addLinear(formOf(left), scaleLinear(right.upper, step.stride));
+            if (bound.known && bound.home == none && bound.bias >= 0
+                    && cast(ulong) bound.bias < result.high
+                    && cast(ulong) bound.bias >= result.low)
+                result.high = cast(ulong) bound.bias;
             break;
         case compare:
             result = compareValues(left, right, step.comparison, step.compareKind, width);
@@ -560,7 +602,10 @@ package struct ScalarRanges {
             const slot = program.slotOf(operand.word, operand.width);
             if (slot == none)
                 return unknown(operand.width);
-            return actual(state.values[slot], slot);
+            auto value = actual(state.values[slot], slot);
+            if (value.root == number && !value.exact && !value.equation.known)
+                value.equation = Linear(1, 0, slot, true);
+            return value;
         }
     }
 
@@ -570,18 +615,31 @@ package struct ScalarRanges {
         const slot = program.slotOf(operand.word, operand.width);
         if (slot == none)
             return false;
+        Value stored = value;
+        clearRelationships(stored, operand);
         foreach (other, ref const home; program.slots[0 .. program.slotCount]) {
-            if (other != slot && (operand.word == home.offset
-                    || (operand.word < Program.r0 && home.offset < Program.r0
-                    && operand.word < home.offset + home.width
-                    && home.offset < operand.word + operand.width))) {
+            clearRelationships(state.values[other], operand);
+            if (other != slot && overlaps(home, operand)) {
                 auto invalidated = unknown(home.width);
                 invalidated.localBits = value.localBits || state.values[other].localBits;
                 state.values[other] = invalidated;
             }
         }
-        state.values[slot] = value;
+        state.values[slot] = stored;
         return true;
+    }
+
+    private void clearRelationships(ref Value value, in Operand written) const {
+        if (value.equation.home != none && overlaps(program.slots[value.equation.home], written))
+            value.equation = Linear.init;
+        if (value.upper.home != none && overlaps(program.slots[value.upper.home], written))
+            value.upper = Linear.init;
+    }
+
+    private static bool overlaps(in Program.Slot home, in Operand operand) {
+        return operand.word == home.offset || (operand.word < Program.r0
+            && home.offset < Program.r0 && operand.word < home.offset + home.width
+            && home.offset < operand.word + operand.width);
     }
 
     private bool merge(size_t pc, ushort target, ref State state) {
@@ -591,14 +649,17 @@ package struct ScalarRanges {
         ref incoming = incomingEdge;
         incoming = state;
         const step = program.operations[pc];
-        if (step.kind == Kind.branch && !refine(step,
+        if (step.kind == Kind.branch && step.next != step.target && !refine(step,
                 (step.target == target) == step.jumpWhen, incoming))
             return false;
         incoming.backedgeChanges = 0;
-        if (!destination.reached) {
+        if (!destination.reached || predecessors[target] == 1) {
+            if (destination == incoming)
+                return false;
             destination = incoming;
             return true;
         }
+        priorJoin = destination;
         bool changed;
         foreach (slot; 0 .. program.slotCount) {
             ref current = destination.values[slot];
@@ -616,8 +677,17 @@ package struct ScalarRanges {
                 if (joined.high > a.high)
                     joined.high = maskOf(width);
             }
-            if (joined.root == a.root && joined.root == b.root)
+            if (joined.root == a.root && joined.root == b.root) {
                 joined.multiple = gcd(multipleOf(a), multipleOf(b));
+                if (a.equation == b.equation || satisfies(b, a.equation, incoming, false))
+                    joined.equation = a.equation;
+                else if (satisfies(a, b.equation, priorJoin, false))
+                    joined.equation = b.equation;
+                if (a.upper == b.upper || satisfies(b, a.upper, incoming, true))
+                    joined.upper = a.upper;
+                else if (satisfies(a, b.upper, priorJoin, true))
+                    joined.upper = b.upper;
+            }
             joined.localBits = a.localBits || b.localBits;
             if (joined != a) {
                 current = joined;
@@ -627,6 +697,32 @@ package struct ScalarRanges {
         if (changed && target <= pc && destination.backedgeChanges != ubyte.max)
             ++destination.backedgeChanges;
         return changed;
+    }
+
+    private bool satisfies(in Value value, in Linear relationship, in State state,
+        bool upperBound) const
+    {
+        import core.checkedint: adds, muls;
+
+        if (!relationship.known)
+            return false;
+        long limit = relationship.bias;
+        if (relationship.home != none) {
+            const atom = actual(state.values[relationship.home], relationship.home);
+            if (atom.root != number || atom.high > long.max
+                    || (!upperBound && !atom.exact))
+                return false;
+            const endpoint = relationship.factor < 0 ? atom.high : atom.low;
+            bool overflow;
+            const variable = muls(relationship.factor, cast(long) endpoint, overflow);
+            limit = adds(limit, variable, overflow);
+            if (overflow)
+                return false;
+        }
+        if (limit < 0)
+            return false;
+        return upperBound ? value.high <= cast(ulong) limit
+            : value.low == value.high && value.low == cast(ulong) limit;
     }
 
     private bool refine(in Operation op, bool whenTrue, ref State state) {
@@ -744,11 +840,51 @@ package struct ScalarRanges {
                 const product = cast(ulong) multipleOf(left) * multipleOf(right);
                 if (product <= uint.max)
                     result.multiple = cast(uint) product;
+                if (left.exact && left.low <= long.max)
+                    result.equation = scaleLinear(formOf(right), cast(long) left.low);
+                else if (right.exact && right.low <= long.max)
+                    result.equation = scaleLinear(formOf(left), cast(long) right.low);
             } else {
                 result.multiple = gcd(multipleOf(left), multipleOf(right));
+                const rightForm = formOf(right);
+                result.equation = addLinear(formOf(left),
+                    op == JitOp.IntOperation.subtract ? scaleLinear(rightForm, -1) : rightForm);
             }
         }
         return result;
+    }
+
+    private static Linear formOf(in Value value) {
+        if (value.low == value.high && value.low <= long.max)
+            return Linear(0, cast(long) value.low, none, true);
+        return value.equation;
+    }
+
+    private static Linear scaleLinear(in Linear value, long scale) {
+        import core.checkedint: muls;
+
+        if (!value.known)
+            return Linear.init;
+        bool overflow;
+        const factor = muls(value.factor, scale, overflow);
+        const bias = muls(value.bias, scale, overflow);
+        if (overflow)
+            return Linear.init;
+        return Linear(factor, bias, factor ? value.home : none, true);
+    }
+
+    private static Linear addLinear(in Linear a, in Linear b) {
+        import core.checkedint: adds;
+
+        if (!a.known || !b.known || (a.home != none && b.home != none && a.home != b.home))
+            return Linear.init;
+        bool overflow;
+        const factor = adds(a.factor, b.factor, overflow);
+        const bias = adds(a.bias, b.bias, overflow);
+        if (overflow)
+            return Linear.init;
+        const home = a.home == none ? b.home : a.home;
+        return Linear(factor, bias, factor ? home : none, true);
     }
 
     Memory memoryOf(in Operand operand, ushort pc) const {
@@ -838,6 +974,9 @@ package struct ScalarRanges {
             a.high = high;
         if (b.low < low)
             b.low = low;
+        const upper = addLinear(formOf(b), Linear(0, -cast(long) strict, none, true));
+        if (upper.known)
+            a.upper = upper;
         return true;
     }
 }
@@ -983,7 +1122,6 @@ package struct ScalarFlow {
         if (failed)
             return false;
         connect;
-        markLiveNodes;
         scheduleBlocks;
         return !failed && color;
     }
@@ -1393,10 +1531,20 @@ package struct ScalarFlow {
         case indirect: {
             const address = read(block, Operand(Mode.frame, ulong.sizeof, 0,
                 operand.word), Lane.integer, pc);
+            const memory = ranges.memoryOf(operand, pc);
+            foreach_reverse (ref const previous; nodes[block.firstNode .. nodeCount]) {
+                if (previous.action == Action.store && !memory.disjoint(previous.memory))
+                    break;
+                if (previous.action == Action.load && previous.address == address
+                        && previous.offset == operand.offset && previous.width == operand.width) {
+                    prefer(previous.output, lane);
+                    return previous.output;
+                }
+            }
             const result = value(Value(0, none, nodeCount, nodeCount, none, none,
                 operand.width, lane));
             append(Node(Action.load, pc, result, none, none, address,
-                operand.offset, operand.width, lane, false, ranges.memoryOf(operand, pc)));
+                operand.offset, operand.width, lane, false, memory));
             return result;
         }
         }
@@ -1474,6 +1622,7 @@ package struct ScalarFlow {
         // Phi operands are uses on the incoming edge. This distinguishes
         // definitions within the block from definitions at the join.
         bool changed;
+        size_t live;
         do {
             changed = false;
             foreach (ref block; blocks[0 .. blockCount]) {
@@ -1489,7 +1638,8 @@ package struct ScalarFlow {
                             failed = true;
                             return;
                         }
-                        use(from, block.endNode);
+                        if (values[id].used)
+                            use(from, block.endNode);
                         const source = values[from].lane;
                         const dest = values[id].lane;
                         if (source == Lane.either && dest != Lane.either) {
@@ -1514,6 +1664,12 @@ package struct ScalarFlow {
                         use(block.outgoing[r0Slot], block.endNode);
                 }
             }
+            markLiveNodes;
+            size_t current;
+            foreach (ref const value; values[0 .. valueCount])
+                current += value.used;
+            changed |= current != live;
+            live = current;
         } while (changed);
     }
 
@@ -1559,7 +1715,6 @@ package struct ScalarFlow {
             value.last = value.first;
         }
         connect;
-        markLiveNodes;
     }
 
     private void scheduleBlock(in Block block, size_t count) {
@@ -1701,9 +1856,9 @@ package struct ScalarFlow {
                 ++gpGrowth;
         }
         if (gpPressure >= gpCount - 1)
-            height -= 4 * gpGrowth;
+            height -= 36 * gpGrowth;
         if (fpPressure >= fpCount - 3)
-            height -= 6 * fpGrowth;
+            height -= 64 * fpGrowth;
         return height;
     }
 
