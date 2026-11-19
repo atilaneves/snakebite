@@ -1861,6 +1861,8 @@ private const(Instruction)* runCopy(Decoded)(
 }
 
 
+package enum frameCopyWidths = [1, 2, 4, 8, 16];
+
 // Constant lengths let the native compiler inline copies without requiring
 // aligned frame slots or typed pointer access.
 package alias opCopyFixed(size_t width, bool staticSource = false) =
@@ -6094,6 +6096,13 @@ static if (jitSupported) {
                 tables.jitTable[handler] = op;
         }
 
+        void putCopy(alias handler, bool fusesReturn = true)(JitOp op) {
+            put(&handler, op);
+            static if (chainedDispatch && fusesReturn)
+                // The producer falls through to the separate return.
+                put(&opThenReturn!handler, op);
+        }
+
         static if (chainedDispatch) {
             static foreach (destination; EnumMembers!Destination)
                 static foreach (counted; [false, true]) {
@@ -6207,16 +6216,14 @@ static if (jitSupported) {
             JitOp.SignedDivide(twoAddress: true)));
         put(&opModuloSigned32, JitOp.make!(Kind.signedDivide)(
             JitOp.SignedDivide(remainder: true, twoAddress: true)));
-        put(&opCopy, JitOp.plain(Kind.copy));
-        static foreach (width; 1 .. 17) {
-            put(&opCopyFixed!(width, true),
-                JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: true), width));
-            put(&opCopyFixed!width,
-                JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: false), width));
-        }
-        static if (chainedDispatch)
-            put(&opThenReturn!(opCopyFixed!(1, true)),
-                JitOp.make!(Kind.copy)(JitOp.Copy(staticSource: true), 1));
+        import std.algorithm.searching: canFind;
+
+        putCopy!opCopy(JitOp.plain(Kind.copy));
+        static foreach (width; 1 .. 17)
+            static foreach (staticSource; [false, true])
+                putCopy!(opCopyFixed!(width, staticSource),
+                    staticSource || frameCopyWidths.canFind(width))(
+                    JitOp.make!(Kind.copy)(JitOp.Copy(staticSource), width));
         put(&opConstant, JitOp.plain(Kind.constant));
         put(&opZero, JitOp.plain(Kind.zero));
         put(&opJump, JitOp.plain(Kind.jump));
