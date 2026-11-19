@@ -974,6 +974,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         opStaticAddress, opStaticArrayEqual, opStaticLoad, opStaticStore,
         opStoreBitfield, opStoreIndirect, opSubtract, opThrow, opZero, opColdThrow,
         opTlsAddress, opTlsLoad, opTlsStore;
+    import snakebite.language.checks: FailurePlan;
     import snakebite.frontend.typefacts: integerValue;
     import snakebite.frontend.typefacts: baseType;
     import snakebite.frontend.dmd.delegates:
@@ -10317,10 +10318,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     }
 
     private void compileBoundsFailure(
-        in imported!"snakebite.language.checks".FailurePlan plan,
+        in FailurePlan plan,
         in BoundsCheck check, scope Arg[] delegate() arguments, in Loc loc,
     ) {
-        import snakebite.language.checks: cAssertCallOf, cMessageOf, FailurePlan;
+        import snakebite.language.checks: cAssertCallOf, cMessageOf;
 
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
