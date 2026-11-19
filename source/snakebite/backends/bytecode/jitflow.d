@@ -8,8 +8,8 @@ static if (jitSupported):
 
 import snakebite.backends.bytecode.jit: JitOp;
 import snakebite.backends.bytecode.vm: addressSlotOf, CompareKind, Comparison,
-    Function, IndexBase, indirectBit, Instruction, opFloatSqrt;
-import snakebite.native.value: arrayPointerOffset;
+    CheckedAccess, Function, IndexBase, indirectBit, Instruction, opFloatSqrt;
+import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
 package struct ScalarProgram {
     @nogc nothrow:
@@ -22,7 +22,7 @@ package struct ScalarProgram {
 
     enum Kind : ubyte {
         exit, move, integer, floating, sqrt, index, compare, branch, jump,
-        returnValue, returnVoid,
+        returnValue, returnVoid, checked, arrayLoad, arrayStore,
     }
 
     enum Mode : ubyte { unused, frame, indirect, literal, address, register, temporary }
@@ -56,6 +56,8 @@ package struct ScalarProgram {
         Operand output;
         Operand left;
         Operand right;
+        Operand slice;
+        int bias;
     }
 
     static struct Slot {
@@ -88,6 +90,8 @@ package struct ScalarProgram {
                     if (pc + 1 == length)
                         return false;
                     step.next = cast(ushort) (pc + 1);
+                    if (step.kind == checked && step.target == step.next)
+                        step = Operation.init;
                 }
             }
             operations[pc] = step;
@@ -127,6 +131,15 @@ package struct ScalarProgram {
         const index = slotCount++;
         slots[index] = Slot(cast(ushort) offset, width);
         return index;
+    }
+
+    static bool supportsChecked(in JitOp op) {
+        if (op.kind != JitOp.Kind.checked)
+            return false;
+        const check = op.checked;
+        return !check.fixedLength && !check.sharedAccess && check.signed
+            && check.indexWidth == int.sizeof && op.width == ubyte.sizeof
+            && (check.access == CheckedAccess.load || check.access == CheckedAccess.store);
     }
 
     private static Operation decode(const(Function)* function_,
@@ -253,6 +266,29 @@ package struct ScalarProgram {
                 }
             }
             return Operation.init;
+        case checked:
+            if (!supportsChecked(op))
+                return Operation.init;
+            const check = op.checked;
+            step.kind = Kind.checked;
+            step.slice = storage(ins.source, 2 * size_t.sizeof);
+            if (step.slice.mode != Mode.frame)
+                return Operation.init;
+            step.left = storage(cast(uint) ins.width, int.sizeof);
+            step.bias = cast(int) (ins.width >> 32);
+            step.target = target(ins.sourceWidth);
+            if (step.left.mode != Mode.frame || step.target == none)
+                return Operation.init;
+            if (check.access == CheckedAccess.load) {
+                step.output = storage(ins.destination, op.width);
+                if (step.output.mode != Mode.frame)
+                    return Operation.init;
+            } else {
+                step.right = input(ins.destination, op.width, check.constantValue);
+                if (step.right.mode != Mode.frame && step.right.mode != Mode.literal)
+                    return Operation.init;
+            }
+            return step;
         case branch:
             if (!scalarWidth(width))
                 return Operation.init;
@@ -396,7 +432,13 @@ package struct ScalarRanges {
         ubyte backedgeChanges;
     }
 
+    static struct Slice {
+        ushort pointer = none;
+        uint required;
+    }
+
     Program program;
+    Slice[Program.slotLimit] slices;
     State[Program.instructionLimit] states;
     State working;
     State incomingEdge;
@@ -409,11 +451,14 @@ package struct ScalarRanges {
     ushort length;
     bool hasFloats;
     bool hasLoop;
+    bool hasChecked;
+    bool versionSlices;
 
-    bool analyze() {
+    bool analyze(ushort entry, bool versionSlices) {
+        this.versionSlices = versionSlices;
         predecessors[] = 0;
         // The canonical entry supplies state independently of bytecode edges.
-        predecessors[0] = 1;
+        predecessors[entry] = 1;
         foreach (ref const step; program.operations[0 .. program.length]) {
             if (step.next != none)
                 ++predecessors[step.next];
@@ -426,7 +471,7 @@ package struct ScalarRanges {
         while (true) {
             const slots = program.slotCount;
             states[0 .. program.length] = State.init;
-            states[0].reached = true;
+            states[entry].reached = true;
             bool changed;
             do {
                 changed = false;
@@ -437,7 +482,8 @@ package struct ScalarRanges {
                     auto step = program.operations[pc];
                     if (!transfer(step, working, false))
                         continue;
-                    changed |= merge(pc, step.next, working);
+                    changed |= merge(pc, step.next,
+                        step.kind == Kind.checked ? states[pc] : working);
                     changed |= merge(pc, step.target, working);
                 }
                 if (program.slotCount != slots)
@@ -449,12 +495,14 @@ package struct ScalarRanges {
 
         length = program.length;
         spans[] = Span.init;
+        slices[] = Slice.init;
+        hasChecked = false;
         visited[] = false;
         hasFloats = false;
         hasLoop = false;
         ushort[Program.instructionLimit] queue;
-        queue[0] = 0;
-        visited[0] = true;
+        queue[0] = entry;
+        visited[entry] = true;
         size_t pending = 1;
         for (size_t head; head < pending; ++head) {
             const pc = queue[head];
@@ -462,6 +510,18 @@ package struct ScalarRanges {
             working = states[pc];
             if (!transfer(step, working, true)) {
                 step = Operation.init;
+            } else if (step.kind == Kind.checked) {
+                if (!proveChecked(step, states[pc])) {
+                    step = Operation.init;
+                } else {
+                    step.kind = step.output.mode == Mode.unused ? Kind.arrayStore : Kind.arrayLoad;
+                    step.next = step.target;
+                    step.target = none;
+                    step.slice.width = size_t.sizeof;
+                    step.slice = step.slice.displaced(arrayPointerOffset);
+                    foldRead(step.right, states[pc]);
+                    hasChecked = true;
+                }
             } else if (step.kind == Kind.jump) {
                 step.left = step.right = Operand.init;
             } else {
@@ -475,6 +535,8 @@ package struct ScalarRanges {
             foreach (const target; [step.next, step.target]) {
                 if (target == none)
                     continue;
+                if (target < entry)
+                    return false;
                 hasLoop |= target <= pc;
                 if (!visited[target]) {
                     visited[target] = true;
@@ -482,7 +544,33 @@ package struct ScalarRanges {
                 }
             }
         }
-        return hasLoop;
+        return hasLoop && (!entry || hasChecked);
+    }
+
+    private bool proveChecked(in Operation step, ref State state) {
+        const index = read(step.left, state);
+        if (index.root != number || index.high > int.max)
+            return false;
+        const first = cast(long) index.low + step.bias;
+        const last = cast(long) index.high + step.bias;
+        if (first < 0 || last > int.max)
+            return false;
+        Operand descriptor = step.slice;
+        descriptor.width = size_t.sizeof;
+        const size = read(descriptor.displaced(arrayLengthOffset), state);
+        const pointer = read(descriptor.displaced(arrayPointerOffset), state);
+        if (size.root >= program.slotCount || size.low || size.high
+                || pointer.root >= program.slotCount || pointer.low || pointer.high
+                || size.localBits || pointer.localBits)
+            return false;
+        ref guard = slices[size.root];
+        if (guard.pointer != none && guard.pointer != pointer.root)
+            return false;
+        guard.pointer = pointer.root;
+        const required = cast(uint) (last + 1);
+        if (required > guard.required)
+            guard.required = required;
+        return true;
     }
 
     private void foldRead(ref Operand operand, ref State state) {
@@ -498,6 +586,21 @@ package struct ScalarRanges {
         // writing any field, just as the instruction decoder does.
         if (step.kind == Kind.exit)
             return false;
+        if (step.kind == Kind.checked) {
+            if (!versionSlices)
+                return false;
+            // The failing edge receives the incoming state. A load defines its
+            // result only on the successful edge.
+            auto descriptor = step.slice;
+            descriptor.width = size_t.sizeof;
+            read(descriptor.displaced(arrayLengthOffset), state);
+            read(descriptor.displaced(arrayPointerOffset), state);
+            read(step.left, state);
+            if (step.output.mode != Mode.unused)
+                return write(step.output, unknown(step.output.width), state);
+            read(step.right, state);
+            return true;
+        }
         if (!resolve(step.left, state, record) || !resolve(step.right, state, record)
                 || !resolve(step.output, state, record))
             return false;
@@ -519,7 +622,7 @@ package struct ScalarRanges {
         const width = step.left.width;
         auto result = unknown(step.output.width);
         final switch (step.kind) with (Kind) {
-        case exit, jump, returnVoid, returnValue:
+        case exit, jump, returnVoid, returnValue, checked, arrayLoad, arrayStore:
             break;
         case move:
             result = left;
@@ -674,8 +777,13 @@ package struct ScalarRanges {
             if (target <= pc && destination.backedgeChanges >= 4) {
                 if (joined.low < a.low)
                     joined.low = 0;
-                if (joined.high > a.high)
-                    joined.high = maskOf(width);
+                if (joined.high > a.high) {
+                    // Widen through the signed boundary before discarding it.
+                    // A later incoming value across this boundary widens again.
+                    const maximum = maskOf(width);
+                    joined.high = versionSlices && joined.high <= maximum / 2
+                        ? maximum / 2 : maximum;
+                }
             }
             if (joined.root == a.root && joined.root == b.root) {
                 joined.multiple = gcd(multipleOf(a), multipleOf(b));
@@ -1074,6 +1182,7 @@ package struct ScalarFlow {
         Lane lane;
         bool used;
         ScalarRanges.Memory memory;
+        bool indexed;
         ushort availableGp;
         ushort availableFp;
     }
@@ -1094,6 +1203,7 @@ package struct ScalarFlow {
         Set live;
         Live liveOut;
         ubyte weight = 1;
+        ushort loopExit = none;
     }
 
     ScalarRanges ranges;
@@ -1113,15 +1223,21 @@ package struct ScalarFlow {
     private bool _hasFrameExit;
 
     bool prepare(const(Function)* function_, const(Instruction)[] instructions,
-        const(JitOp)[] ops)
+        const(JitOp)[] ops, ushort entry, bool versionSlices)
     {
-        if (!ranges.program.read(function_, instructions, ops) || !ranges.analyze)
+        if (entry && (Program.decode(function_, instructions[entry - 1], ops[entry - 1])
+                .kind != Kind.exit || Program.decode(function_, instructions[entry], ops[entry])
+                    .kind == Kind.exit))
+            return false;
+        if (!ranges.program.read(function_, instructions, ops))
+            return false;
+        if (!ranges.analyze(entry, versionSlices) || ranges.hasChecked && !keepSliceRoots)
             return false;
         blockCount = valueCount = nodeCount = 0;
         failed = false;
         canonical = modified = Set.init;
         _hasFrameExit = false;
-        hoistLoads;
+        hoistLoads(entry);
         auto p = &ranges.program;
         fp0Slot = p.slotOf(Program.fp0, double.sizeof);
         r0Slot = p.slotOf(Program.r0, ulong.sizeof);
@@ -1143,7 +1259,7 @@ package struct ScalarFlow {
         }
         if (canonical.has(r0Slot) || canonical.has(fp0Slot))
             return false;
-        splitBlocks;
+        splitBlocks(entry);
         foreach (ref block; blocks[0 .. blockCount]) {
             const kind = ranges.resolved[terminalPc(block)].kind;
             _hasFrameExit |= kind == Kind.exit || kind == Kind.returnValue;
@@ -1156,12 +1272,47 @@ package struct ScalarFlow {
         connect;
         selectOperands;
         measureEdges;
+        if (ranges.hasChecked && !hasCheckedLoop)
+            return false;
         scheduleBlocks;
         return !failed && allocate;
     }
 
 
+    private bool hasCheckedLoop() const {
+        foreach (ref const block; blocks[0 .. blockCount]) {
+            if (block.weight == 1)
+                continue;
+            foreach (pc; _operationPcs[block.firstOperation .. block.endOperation]) {
+                const kind = ranges.resolved[pc].kind;
+                if (kind == Kind.arrayLoad || kind == Kind.arrayStore)
+                    return true;
+            }
+        }
+        return false;
+    }
+
     private alias Members = bool[Program.instructionLimit];
+
+    private bool keepSliceRoots() {
+        // An entry root must stay in the registered frame while its SSA
+        // copies are live. Reject direct or possible indirect overwrites.
+        foreach (home, ref const slice; ranges.slices[0 .. ranges.program.slotCount]) {
+            if (!slice.required)
+                continue;
+            const length = ranges.program.slots[home].offset;
+            const pointer = ranges.program.slots[slice.pointer].offset;
+            foreach (pc, ref const step; ranges.resolved[0 .. ranges.length]) {
+                if (!ranges.visited[pc])
+                    continue;
+                if (overlaps(step.output, length, size_t.sizeof)
+                        || overlaps(step.output, pointer, size_t.sizeof)
+                        || step.output.mode == Mode.indirect)
+                    return false;
+            }
+        }
+        return true;
+    }
 
     private static struct Hoist {
         Operand memory;
@@ -1175,12 +1326,12 @@ package struct ScalarFlow {
         ulong step;
     }
 
-    private void hoistLoads() {
+    private void hoistLoads(ushort entry) {
         foreach (header; 1 .. ranges.program.length) {
             if (!ranges.visited[header] || ranges.resolved[header].kind != Kind.branch)
                 continue;
             Members members;
-            if (!naturalLoop(cast(ushort) header, members))
+            if (!naturalLoop(cast(ushort) header, entry, members))
                 continue;
             const branch = ranges.resolved[header];
             if (members[branch.next] == members[branch.target])
@@ -1235,7 +1386,7 @@ package struct ScalarFlow {
         }
     }
 
-    private bool naturalLoop(ushort header, ref Members members) {
+    private bool naturalLoop(ushort header, ushort entry, ref Members members) {
         members[header] = true;
         bool found;
         foreach (pc; header + 1 .. ranges.program.length) {
@@ -1260,7 +1411,7 @@ package struct ScalarFlow {
                 }
             }
         } while (changed);
-        return !members[0];
+        return !members[entry];
     }
 
     private bool unchanged(size_t offset, ubyte width, in Members members) {
@@ -1280,8 +1431,9 @@ package struct ScalarFlow {
         if (source.root == none)
             return false;
         foreach (i, ref const step; ranges.resolved[0 .. ranges.length])
-            if (members[i] && step.output.mode == Mode.indirect
-                    && !source.disjoint(ranges.memoryOf(step.output, cast(ushort) i)))
+            if (members[i] && (step.kind == Kind.arrayStore
+                    || step.output.mode == Mode.indirect
+                        && !source.disjoint(ranges.memoryOf(step.output, cast(ushort) i))))
                 return false;
         return true;
     }
@@ -1382,13 +1534,14 @@ package struct ScalarFlow {
         return _operationPcs[block.endOperation - 1];
     }
 
-    private void splitBlocks() {
+    private void splitBlocks(ushort entry) {
         ushort[Program.instructionLimit] reachable;
+        reachable[0] = entry;
         size_t count = 1;
         Set reached;
         Set starts;
-        reached.add(0);
-        starts.add(0);
+        reached.add(entry);
+        starts.add(entry);
         for (size_t i; i < count; ++i) {
             ref const step = ranges.resolved[reachable[i]];
             foreach (successor; [step.next, step.target]) {
@@ -1439,6 +1592,7 @@ package struct ScalarFlow {
                 ref const step = ranges.resolved[pc];
                 mention(block, step.left, false);
                 mention(block, step.right, false);
+                mention(block, step.slice, false);
                 mention(block, step.output, true);
             }
             foreach (home, ref const slot; ranges.program.slots[0 .. ranges.program.slotCount])
@@ -1535,6 +1689,19 @@ package struct ScalarFlow {
             const index = cast(ushort) pc;
             const left = read(block, step.left, lane, index);
             const right = read(block, step.right, lane, index);
+            if (step.kind == Kind.arrayLoad || step.kind == Kind.arrayStore) {
+                const pointer = read(block, step.slice, Lane.integer, index);
+                if (step.kind == Kind.arrayStore) {
+                    append(Node(Action.store, index, none, right, left, pointer,
+                        cast(uint) step.bias, ubyte.sizeof, Lane.integer, indexed: true));
+                } else {
+                    const result = value(Value(0, none, nodeCount, ubyte.sizeof, Lane.integer));
+                    append(Node(Action.load, index, result, none, left, pointer,
+                        cast(uint) step.bias, ubyte.sizeof, Lane.integer, indexed: true));
+                    write(block, step.output, result, index);
+                }
+                continue;
+            }
             if (step.kind == Kind.move) {
                 write(block, step.output, left, index);
                 continue;
@@ -1725,9 +1892,11 @@ package struct ScalarFlow {
             const kind = ranges.resolved[node.pc].kind;
             node.used = (node.output == none && (node.action != Action.store
                     || node.address != none || frameStoreNeeded(node)))
-                || (node.output != none && values[node.output].used)
+                || (node.output != none && (values[node.output].used || node.indexed))
                 || (node.action == Action.operation && (kind == Kind.floating || kind == Kind.sqrt));
             if (node.used) {
+                if (node.indexed && node.output != none)
+                    use(node.output);
                 if (node.output != none && (kind == Kind.floating || kind == Kind.sqrt))
                     use(node.output);
                 use(node.left);
@@ -1777,11 +1946,11 @@ package struct ScalarFlow {
         if (value.origin != Origin.produced)
             return;
         ref source = nodes[value.first];
-        if (source.action != Action.load || source.width != value.width)
+        if (source.action != Action.load || source.indexed || source.width != value.width)
             return;
         foreach (ref const between; nodes[value.first + 1 .. index])
-            if (between.used && between.action == Action.store
-                    && !between.memory.disjoint(source.memory))
+            if (between.used && (between.indexed || between.action == Action.store
+                    && !between.memory.disjoint(source.memory)))
                 return;
         source.used = false;
         value.folded = true;
@@ -1849,9 +2018,17 @@ package struct ScalarFlow {
                 loop.include(added);
                 pending = added;
             }
-            foreach (i; loop)
-                if (blocks[i].weight < 64)
-                    blocks[i].weight *= 8;
+            foreach (i; loop) {
+                ref block = blocks[i];
+                if (block.weight < 64)
+                    block.weight *= 8;
+                if (block.next != none && block.target != none) {
+                    if (loop.has(block.next) && !loop.has(block.target))
+                        block.loopExit = block.target;
+                    else if (loop.has(block.target) && !loop.has(block.next))
+                        block.loopExit = block.next;
+                }
+            }
         }
     }
 
@@ -1879,6 +2056,9 @@ package struct ScalarFlow {
     }
 
     private bool orderedMemory(in Node a, in Node b) const {
+        if ((a.indexed || b.indexed)
+                && a.action != Action.operation && b.action != Action.operation)
+            return true;
         if (a.action == Action.store) {
             if (b.action == Action.store)
                 return true;
