@@ -9,7 +9,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 command -v kcov > /dev/null
 
 build/reggae.sh
-ninja bin/ut bin/bench
+ninja bin/ut bin/bench bin/sb-prof
 
 rm -rf coverage coverage-runs
 mkdir coverage-runs
@@ -22,6 +22,12 @@ trap 'rm -rf coverage-runs' EXIT
 # absolute paths because children can change their working directory.
 kcov --include-path="$PWD/source/snakebite,$PWD/bench" \
     "$PWD/coverage-runs/unit" bin/ut
+
+# The optimized LDC build can chain handlers and compile scalar regions.
+# Run the same guest program as the CLI tests with source lines for kcov.
+kcov --include-path="$PWD/source/snakebite,$PWD/bench" \
+    "$PWD/coverage-runs/scalar-jit" bin/sb-prof -b bytecode \
+    --no-optimise-image "$PWD/tests/fixtures/scalar-jit"
 
 while IFS= read -r benchmark; do
     name=${benchmark##*/}
