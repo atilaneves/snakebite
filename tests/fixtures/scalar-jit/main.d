@@ -36,21 +36,23 @@ double calibratedTotal(ChannelSpan channel, int count, int skipAt,
     return total;
 }
 
-int labelSamples(ubyte[] samples, ubyte[] labels, bool resume) {
-    const last = 300;
-    int index = last;
-    int count;
-    if (resume)
-        goto sample;
-    assert(samples.length != 0);
-    for (index = 1; index <= last; ++index) {
-    sample:
-        if (!samples[index - 1])
+enum byteCount = 600;
+enum ubyte replacement = 0xA5;
+
+int copyReadings(ubyte[] readings, ubyte[] destination, bool replaceLast) {
+    int position = byteCount - 2;
+    auto reading = replacement;
+    if (replaceLast)
+        goto writeReading;
+    assert(readings.length != 0);
+    for (position = 0; position < byteCount; position += 2) {
+        reading = readings[position];
+        if (reading == 0)
             continue;
-        labels[index - 1] = 9;
-        ++count;
+    writeReading:
+        destination[position] = reading;
     }
-    return count;
+    return position;
 }
 
 int rewriteByte(ubyte[] labels, bool pointsIntoFrame, bool skip) {
@@ -73,29 +75,38 @@ int main() {
     assert(calibrate(channel, 400, 3, 4, 7) == 81_405);
     assert(calibrate(channel, 0, -1, -1, 7) == 0);
 
-    auto samples = new ubyte[300];
-    auto labels = new ubyte[300];
-    samples[0 .. 2] = 1;
-    assert(labelSamples(samples, labels, false) == 2);
-    labels[] = 0;
-    assert(labelSamples(samples, labels, true) == 0);
-    assert(labels[0] == 0);
-    assert(labelSamples(samples, labels, false) == 2);
-    assert(labels[0 .. 3] == [9, 9, 0]);
+    auto readings = new ubyte[byteCount];
+    auto destination = new ubyte[byteCount];
+    readings[0] = 12;
+    readings[2] = 43;
+    readings[$ - 2] = 18;
+    assert(copyReadings(readings, destination, false) == byteCount);
+    assert(destination[0 .. 3] == [12, 0, 43]);
+    assert(destination[$ - 2] == 18);
 
-    labels[] = 0;
+    destination[] = 0;
+    assert(copyReadings(readings, destination, true) == byteCount);
+    assert(destination[0] == 0 && destination[$ - 2] == replacement);
+
     ArrayIndexError caught;
     try
-        labelSamples(samples, labels[0 .. 1], false);
+        copyReadings(readings, destination[0 .. 1], false);
     catch (ArrayIndexError error)
         caught = error;
     assert(caught !is null);
-    assert(caught.index == 1 && caught.length == 1);
-    assert(labels[0 .. 2] == [9, 0]);
+    assert(caught.index == 2 && caught.length == 1);
+    assert(destination[0 .. 3] == [12, 0, 0]);
+
+    auto overlapping = new ubyte[byteCount + 2];
+    overlapping[0] = 25;
+    assert(copyReadings(overlapping[0 .. byteCount], overlapping[2 .. $],
+        false) == byteCount);
+    foreach (position, value; overlapping)
+        assert(value == (position % 2 == 0 ? 25 : 0));
 
     foreach (_; 0 .. 300)
-        assert(rewriteByte(labels, false, false) == 3);
-    assert(rewriteByte(labels, true, false) == 2);
+        assert(rewriteByte(destination, false, false) == 3);
+    assert(rewriteByte(destination, true, false) == 2);
     auto wrappedSpan = (cast(ubyte*) (size_t.max - 1))[0 .. 4];
     assert(rewriteByte(wrappedSpan, false, true) == 17);
     return 0;
