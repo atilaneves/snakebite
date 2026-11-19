@@ -1967,13 +1967,14 @@ private struct ScalarEmitter {
             if (redirects[id] != id)
                 continue;
             const conditional = block.next != none && block.target != none;
-            const step = flow.ranges.resolved[block.end - 1];
+            const pc = flow.terminalPc(block);
+            const step = flow.ranges.resolved[pc];
             uint taken = scale;
             if (conditional) {
                 taken = scale / 2;
                 if (block.loopExit != none)
                     taken = block.loopExit == block.target ? unlikely : likely;
-                else if (flow.blocks[block.target].pc <= block.pc)
+                else if (step.target <= pc)
                     taken = likely;
                 else if (step.comparison == Comparison.equal
                         || step.comparison == Comparison.notEqual)

@@ -1283,9 +1283,11 @@ package struct ScalarFlow {
         foreach (ref const block; blocks[0 .. blockCount]) {
             if (block.weight == 1)
                 continue;
-            foreach (ref const step; ranges.resolved[block.pc .. block.end])
-                if (step.kind == Kind.arrayLoad || step.kind == Kind.arrayStore)
+            foreach (pc; _operationPcs[block.firstOperation .. block.endOperation]) {
+                const kind = ranges.resolved[pc].kind;
+                if (kind == Kind.arrayLoad || kind == Kind.arrayStore)
                     return true;
+            }
         }
         return false;
     }
