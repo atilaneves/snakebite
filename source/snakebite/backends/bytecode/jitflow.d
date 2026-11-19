@@ -7,8 +7,9 @@ import snakebite.backends.bytecode.jit: jitSupported;
 static if (jitSupported):
 
 import snakebite.backends.bytecode.jit: JitOp;
-import snakebite.backends.bytecode.vm: addressSlotOf, CompareKind, Comparison,
-    CheckedAccess, Function, IndexBase, indirectBit, Instruction, opFloatSqrt;
+import snakebite.backends.bytecode.vm: addressSlotOf, castSize, castUnsigned,
+    CompareKind, Comparison, CheckedAccess, Function, IndexBase, indirectBit,
+    Instruction, opFloatSqrt;
 import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
 package struct ScalarProgram {
@@ -22,7 +23,8 @@ package struct ScalarProgram {
 
     enum Kind : ubyte {
         exit, move, integer, floating, sqrt, index, compare, branch, jump,
-        returnValue, returnVoid, checked, arrayLoad, arrayStore,
+        returnValue, returnVoid, checked, arrayLoad, arrayStore, shift,
+        intToFloat, doubleFloat,
     }
 
     enum Mode : ubyte { unused, frame, indirect, literal, address, register, temporary }
@@ -58,6 +60,8 @@ package struct ScalarProgram {
         Operand right;
         Operand slice;
         int bias;
+        JitOp.ShiftKind shift;
+        bool sourceUnsigned;
     }
 
     static struct Slot {
@@ -73,7 +77,7 @@ package struct ScalarProgram {
     ushort frameSize;
 
     bool read(const(Function)* function_, const(Instruction)[] instructions,
-        const(JitOp)[] ops)
+        const(JitOp)[] ops, bool bmi2)
     {
         if (instructions.length == 0 || instructions.length > instructionLimit
                 || function_.frameSize >= r0 || function_.closureOffset != size_t.max
@@ -83,7 +87,7 @@ package struct ScalarProgram {
         frameSize = cast(ushort) function_.frameSize;
         slotCount = 0;
         foreach (pc; 0 .. length) {
-            auto step = decode(function_, instructions[pc], ops[pc]);
+            auto step = decode(function_, instructions[pc], ops[pc], bmi2);
             with (Kind) {
                 if (step.kind != exit && step.kind != jump
                         && step.kind != returnValue && step.kind != returnVoid) {
@@ -143,7 +147,7 @@ package struct ScalarProgram {
     }
 
     private static Operation decode(const(Function)* function_,
-        ref const Instruction ins, ref const JitOp op)
+        ref const Instruction ins, ref const JitOp op, bool bmi2)
     {
         const width = op.width ? op.width : ins.width;
         Operation step;
@@ -235,6 +239,29 @@ package struct ScalarProgram {
                 : storage(op.int3.twoAddress ? ins.destination : ins.source, width);
             step.right = input(op.int3.twoAddress ? ins.source : ins.sourceWidth,
                 width, op.int3.constantRight);
+            break;
+        case shift:
+            if (!scalarWidth(width) || (!op.shift.constantRight && !bmi2))
+                return Operation.init;
+            step.kind = Kind.shift;
+            step.shift = op.shift.kind;
+            step.output = storage(ins.destination, width);
+            step.left = storage(op.shift.twoAddress ? ins.destination : ins.source, width);
+            step.right = input(op.shift.twoAddress ? ins.source : ins.sourceWidth,
+                width, op.shift.constantRight);
+            break;
+        case intToFloat:
+            const sourceWidth = castSize(ins.sourceWidth);
+            // These conversions are exact for both signs. Wider inputs can
+            // round in the handler's `real` path and leave x87 status there.
+            if (!scalarWidth(sourceWidth)
+                    || !(width == float.sizeof && sourceWidth <= short.sizeof
+                      || width == double.sizeof && sourceWidth <= int.sizeof))
+                return Operation.init;
+            step.kind = Kind.intToFloat;
+            step.sourceUnsigned = castUnsigned(ins.sourceWidth);
+            step.output = storage(ins.destination, width);
+            step.left = storage(ins.source, sourceWidth);
             break;
         case cmp3:
             if (!scalarWidth(width))
@@ -337,13 +364,18 @@ private bool valid(in ScalarProgram.Operation op) @nogc nothrow {
             return false;
         if (op.kind != jump && op.left.mode == ScalarProgram.Mode.unused)
             return false;
-        if ((op.kind == integer || op.kind == index || op.kind == compare
+    if ((op.kind == integer || op.kind == index || op.kind == compare || op.kind == shift
                 || op.kind == floating || op.kind == branch)
                 && op.right.mode == ScalarProgram.Mode.unused)
             return false;
         return op.kind == jump || op.kind == branch || op.kind == returnValue
             || op.output.mode != ScalarProgram.Mode.unused;
     }
+}
+
+private bool performsFloatArithmetic(ScalarProgram.Kind kind) @nogc nothrow {
+    with (ScalarProgram.Kind)
+        return kind == floating || kind == sqrt || kind == doubleFloat;
 }
 
 private ScalarProgram.Operand literal(size_t address, size_t width) @nogc nothrow {
@@ -527,10 +559,20 @@ package struct ScalarRanges {
             } else {
                 foldRead(step.left, states[pc]);
                 foldRead(step.right, states[pc]);
+                if (step.kind == Kind.floating && step.floating == JitOp.FloatOperation.multiply) {
+                    if (isFloatTwo(step.left)) {
+                        step.left = step.right;
+                        step.kind = Kind.doubleFloat;
+                    } else if (isFloatTwo(step.right)) {
+                        step.kind = Kind.doubleFloat;
+                    }
+                    if (step.kind == Kind.doubleFloat)
+                        step.right = Operand.init;
+                }
             }
             resolved[pc] = step;
             memoryOrigin[pc] = pc;
-            hasFloats |= step.kind == Kind.floating || step.kind == Kind.sqrt
+            hasFloats |= performsFloatArithmetic(step.kind)
                 || (step.kind == Kind.branch && step.compareKind == CompareKind.floating);
             foreach (const target; [step.next, step.target]) {
                 if (target == none)
@@ -545,6 +587,13 @@ package struct ScalarRanges {
             }
         }
         return hasLoop && (!entry || hasChecked);
+    }
+
+    private static bool isFloatTwo(in Operand operand) {
+        enum uint floatTwo = 0x4000_0000;
+        enum ulong doubleTwo = 0x4000_0000_0000_0000;
+        return operand.mode == Mode.literal && operand.word
+            == (operand.width == float.sizeof ? floatTwo : doubleTwo);
     }
 
     private bool proveChecked(in Operation step, ref State state) {
@@ -630,7 +679,7 @@ package struct ScalarRanges {
         case integer:
             result = arithmetic(step.integer, left, right, step.right.width);
             break;
-        case floating, sqrt:
+        case floating, sqrt, doubleFloat, intToFloat, shift:
             break;
         case index:
             const scaled = arithmetic(JitOp.IntOperation.multiply, right,
@@ -1223,13 +1272,13 @@ package struct ScalarFlow {
     private bool _hasFrameExit;
 
     bool prepare(const(Function)* function_, const(Instruction)[] instructions,
-        const(JitOp)[] ops, ushort entry, bool versionSlices)
+        const(JitOp)[] ops, ushort entry, bool versionSlices, bool bmi2)
     {
-        if (entry && (Program.decode(function_, instructions[entry - 1], ops[entry - 1])
-                .kind != Kind.exit || Program.decode(function_, instructions[entry], ops[entry])
+        if (entry && (Program.decode(function_, instructions[entry - 1], ops[entry - 1], bmi2)
+                .kind != Kind.exit || Program.decode(function_, instructions[entry], ops[entry], bmi2)
                     .kind == Kind.exit))
             return false;
-        if (!ranges.program.read(function_, instructions, ops))
+        if (!ranges.program.read(function_, instructions, ops, bmi2))
             return false;
         if (!ranges.analyze(entry, versionSlices) || ranges.hasChecked && !keepSliceRoots)
             return false;
@@ -1683,7 +1732,7 @@ package struct ScalarFlow {
             if (step.kind == Kind.exit || step.kind == Kind.returnValue || step.kind == Kind.returnVoid
                     || step.kind == Kind.jump)
                 continue;
-            const lane = step.kind == Kind.floating || step.kind == Kind.sqrt
+            const lane = performsFloatArithmetic(step.kind)
                 || (step.kind == Kind.branch && step.compareKind == CompareKind.floating)
                 ? Lane.floating : step.kind == Kind.move ? Lane.either : Lane.integer;
             const index = cast(ushort) pc;
@@ -1711,7 +1760,8 @@ package struct ScalarFlow {
                 continue;
             }
             const destination = step.output;
-            const result = value(Value(0, none, nodeCount, destination.width, lane));
+            const resultLane = step.kind == Kind.intToFloat ? Lane.floating : lane;
+            const result = value(Value(0, none, nodeCount, destination.width, resultLane));
             append(Node(Action.operation, index, result, left, right));
             write(block, destination, result, index);
         }
@@ -1890,14 +1940,15 @@ package struct ScalarFlow {
             if (node.output != none && values[node.output].folded)
                 continue;
             const kind = ranges.resolved[node.pc].kind;
+            const floatArithmetic = performsFloatArithmetic(kind);
             node.used = (node.output == none && (node.action != Action.store
                     || node.address != none || frameStoreNeeded(node)))
                 || (node.output != none && (values[node.output].used || node.indexed))
-                || (node.action == Action.operation && (kind == Kind.floating || kind == Kind.sqrt));
+                || (node.action == Action.operation && floatArithmetic);
             if (node.used) {
                 if (node.indexed && node.output != none)
                     use(node.output);
-                if (node.output != none && (kind == Kind.floating || kind == Kind.sqrt))
+                if (node.output != none && floatArithmetic)
                     use(node.output);
                 use(node.left);
                 use(node.right);
@@ -1932,7 +1983,7 @@ package struct ScalarFlow {
             if (!node.used || node.action != Action.operation)
                 continue;
             const kind = ranges.resolved[node.pc].kind;
-            if (kind == Kind.floating || kind == Kind.sqrt)
+            if (performsFloatArithmetic(kind) || kind == Kind.intToFloat)
                 foldLoad(node.left, index, uses[]);
             if (kind == Kind.floating || kind == Kind.integer)
                 foldLoad(node.right, index, uses[]);
@@ -2235,6 +2286,8 @@ package struct ScalarFlow {
             return 13;
         if (op.kind == Kind.floating)
             return op.floating == JitOp.FloatOperation.divide ? 14 : 4;
+        if (op.kind == Kind.doubleFloat || op.kind == Kind.intToFloat)
+            return 4;
         if (op.kind == Kind.index || op.kind == Kind.integer
                 && op.integer == JitOp.IntOperation.multiply)
             return 3;
@@ -2389,7 +2442,8 @@ package struct ScalarFlow {
             if (!node.used || node.action != Action.operation)
                 continue;
             const kind = ranges.resolved[node.pc].kind;
-            if (kind == Kind.floating || kind == Kind.integer)
+            if (kind == Kind.floating || kind == Kind.doubleFloat
+                    || kind == Kind.integer || kind == Kind.shift)
                 join(node.output, node.left, false);
         }
     }
