@@ -168,6 +168,72 @@ static foreach (backend; Matrix!()) {
         }, ["work"]);
     }
 
+    @("jit.shiftKeepsLiveInputAcrossCountJoins." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            double reconcileChannels(int slots, int gain, int shift, int pivot, double bias) {
+                double score = 0;
+                for (; slots > 0; --slots) {
+                    const sample = slots + gain;
+                    int count = shift;
+                    if (slots > pivot)
+                        count += 2;
+                    const shifted = sample << count;
+                    const corrected = shifted ^ sample;
+                    score += 2.0 * cast(double) corrected + bias;
+                }
+                return score;
+            }
+
+            int main() {
+                auto reconcile = &reconcileChannels;
+                foreach (_; 0 .. 3) {
+                    assert(reconcile(512, -18, 4, 193, -2) == 14_198_752);
+                    assert(reconcile(513, 6, 8, 281, 3) == 213_121_553);
+                    assert(reconcile(0, -8, 1, 0, -3) == 0);
+                    assert(reconcile(1, -8, 1, 0, -3) == 95);
+                }
+                return 0;
+            }
+        }, ["reconcileChannels"]);
+    }
+
+    @("jit.mixedArithmeticKeepsValuesAcrossBackedges." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, q{
+            double packetWeights(int count, int shift, double offset) {
+                double sum = 0;
+                for (; count > 0; --count)
+                    sum += 2.0 * cast(double) (count << shift) + offset;
+                return sum;
+            }
+
+            double lastReading(long reading, uint count) {
+                double last = 0;
+                for (uint i = 0; i < count; ++i) {
+                    last = cast(double) reading;
+                    ++reading;
+                }
+                return last;
+            }
+
+            int main() {
+                auto weight = &packetWeights;
+                foreach (_; 0 .. 2)
+                    assert(weight(512, 1, -1.5) == 524_544.0);
+                assert(weight(3, 0, -2.0) == 6.0);
+                assert(weight(136, 24, 0) == 235_283_677_184.0);
+                assert(weight(0, 1, -1.5) == 0.0);
+                auto last = &lastReading;
+                foreach (_; 0 .. 2)
+                    assert(last(9_007_199_254_740_994, 257) == 9_007_199_254_741_250.0);
+                return 0;
+            }
+        }, ["packetWeights", "lastReading"]);
+    }
+
     @("jit.floatingLiteralsKeepTheirValues." ~ backend.stringof)
     @Tags(is(backend == Bytecode) || is(backend == LoadedBytecode)
         ? [backend.stringof, "requires-jit-code"] : [backend.stringof])

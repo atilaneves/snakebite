@@ -59,12 +59,27 @@ package struct JitOp {
         fpcmp3, index, checked, castFixed, sliceToPointer, widen, loadInd, storeInd,
         frameAddr, staticLoad, staticStore, staticAddr, boolOp, unary, shift,
         callWindow, returnValue, returnVoid, arrayEqual, signedDivide,
-        temporaryTransition, sliceFill,
+        temporaryTransition, sliceFill, intToFloat,
     }
 
     enum IntOperation : ubyte { add, or, and, subtract, xor, multiply }
     enum FloatOperation : ubyte { add, subtract, multiply, divide }
     enum ShiftKind : ubyte { left, logicalRight, arithmeticRight }
+
+    // Whether `value`, of width `w`, is an immediate of an ALU op.
+    static bool immediate(int w, ulong value, out int imm) @safe @nogc nothrow pure {
+        switch (w) {
+        case 1: imm = cast(byte) value; return true;
+        case 2: imm = cast(short) value; return true;
+        case 4: imm = cast(int) value; return true;
+        default:
+            if (cast(long) value >= int.min && cast(long) value <= int.max) {
+                imm = cast(int) value;
+                return true;
+            }
+            return false;
+        }
+    }
 
     // `source` is the address of a constant instead of an operand.
     static struct Copy {
@@ -1452,6 +1467,37 @@ private struct Asm {
             b(count);
     }
 
+    void shiftImmediate(JitOp.ShiftKind kind, int w, int reg, ubyte count) {
+        if (!count)
+            return;
+        ubyte group;
+        final switch (kind) with (JitOp.ShiftKind) {
+        case left: group = 4; break;
+        case logicalRight: group = 5; break;
+        case arithmeticRight: group = 7; break;
+        }
+        const byteReg = w == 1;
+        const opcode = count == 1 ? 0xD1 : 0xC1;
+        rrOp(w, byteReg, group, reg, opcode - byteReg);
+        if (count != 1)
+            b(count);
+    }
+
+    // BMI2 uses the 32- or 64-bit count mask of the integer shift handlers.
+    void shiftVariable(JitOp.ShiftKind kind, int w, int dest, int src, int count) {
+        ubyte prefix;
+        final switch (kind) with (JitOp.ShiftKind) {
+        case left: prefix = 1; break;
+        case logicalRight: prefix = 3; break;
+        case arithmeticRight: prefix = 2; break;
+        }
+        b(0xC4);
+        b(cast(ubyte) (0x42 | (dest < 8 ? 0x80 : 0) | (src < 8 ? 0x20 : 0)));
+        b(cast(ubyte) ((w == 8 ? 0x80 : 0) | ((~count & 15) << 3) | prefix));
+        b(0xF7);
+        b(cast(ubyte) (0xC0 | ((dest & 7) << 3) | (src & 7)));
+    }
+
     void movRR64(int dst, int src) {
         rrOp(8, byteReg: false, src, dst, 0x89);
     }
@@ -1846,6 +1892,7 @@ private struct InlineBody {
 private struct ScalarEmitter {
     import snakebite.backends.bytecode.vm: CallSite, CompareKind, Comparison, DispatchState,
         Instruction;
+    import snakebite.native.value: shiftCount;
     import snakebite.stack.frames: FrameStack;
 
     @nogc nothrow:
@@ -2204,10 +2251,10 @@ private struct ScalarEmitter {
         return true;
     }
 
-    private Mem memoryOf(in Node node) {
+    private Mem memoryOf(in Node node, int addressScratch = -1) {
         if (node.address == none)
             return Mem(FRAME, cast(int) node.offset);
-        const base = integer(location(node.address));
+        const base = integer(location(node.address), addressScratch);
         if (node.indexed)
             return Mem(cast(ubyte) base, cast(int) node.offset, integer(location(node.right)));
         return Mem(cast(ubyte) base, cast(int) node.offset);
@@ -2217,9 +2264,9 @@ private struct ScalarEmitter {
         return value.kind == LocationKind.frame || value.kind == LocationKind.memory;
     }
 
-    private Mem operandMemory(in Location value) {
+    private Mem operandMemory(in Location value, int addressScratch = -1) {
         return value.kind == LocationKind.frame ? Frame(value)
-            : memoryOf(flow.nodes[value.bits]);
+            : memoryOf(flow.nodes[value.bits], addressScratch);
     }
 
     private bool emitOperation(in Node node, in Location dest,
@@ -2228,11 +2275,14 @@ private struct ScalarEmitter {
         ref const step = flow.ranges.resolved[node.pc];
         const w = step.left.width;
         final switch (step.kind) with (Kind) {
-        case integer:
-            return emitInteger(step.integer, w, dest, left, right);
+        case integer, shift:
+            return emitInteger(step, node.integerOperands, dest, left, right);
+        case intToFloat:
+            emitIntToFloat(step.sourceUnsigned, w, dest, left);
+            return true;
         case index:
             return emitIndex(step.stride, dest, left, right);
-        case floating, sqrt: {
+        case floating, sqrt, doubleFloat: {
             const fp = dest.kind == LocationKind.floating ? cast(int) dest.bits : takeFp;
             const prefix = prefix(w);
             if (step.kind == sqrt) {
@@ -2241,6 +2291,9 @@ private struct ScalarEmitter {
                     a.sse(prefix, sqrtOpcode, fp, operandMemory(left));
                 else
                     a.sseRR(prefix, sqrtOpcode, fp, this.floating(left, fp));
+            } else if (step.kind == doubleFloat) {
+                assignFloat(left, fp);
+                a.sseRR(prefix, _floatOpcodes[JitOp.FloatOperation.add], fp, fp);
             } else {
                 const opcode = _floatOpcodes[step.floating];
                 assignFloat(left, fp);
@@ -2251,10 +2304,7 @@ private struct ScalarEmitter {
                 else
                     a.sseRR(prefix, opcode, fp, this.floating(right));
             }
-            if (dest.kind == LocationKind.frame)
-                a.sse(prefix, storeOpcode, fp, Frame(dest));
-            else if (dest.kind == LocationKind.integer)
-                a.xmmToInteger(cast(int) dest.bits, fp);
+            saveFloat(fp, dest);
             return true;
         }
         case compare:
@@ -2274,35 +2324,108 @@ private struct ScalarEmitter {
         }
     }
 
-    private bool emitInteger(JitOp.IntOperation operation, int w, in Location dest,
-        in Location left, in Location right)
+    private void emitIntToFloat(bool sourceUnsigned, int w, in Location dest,
+        in Location left)
     {
-        int immediate;
-        const fits = right.kind == LocationKind.literal && Gen.immOf(w, right.bits, immediate);
-        const accumulator = dest.kind == LocationKind.integer ? cast(int) dest.bits : takeGp;
-        if (fits && operation == JitOp.IntOperation.multiply && w == 8) {
-            a.imulRI(accumulator, integer(left, accumulator), immediate);
-            saveInteger(accumulator, dest);
-            return true;
-        }
-        assignInteger(left, accumulator);
-        if (operation == JitOp.IntOperation.multiply) {
-            if (w != 8 && w != 4)
-                return false;
-            if (memoryOperand(right))
-                a.imulM(w, accumulator, operandMemory(right));
-            else
-                a.imulRR(w, accumulator, integer(right));
+        enum convertOpcode = 0x0F2A;
+        const fp = dest.kind == LocationKind.floating ? cast(int) dest.bits : takeFp;
+        const p = prefix(dest.width);
+        if (w == int.sizeof && !sourceUnsigned && memoryOperand(left)) {
+            a.memOp(w, false, fp, operandMemory(left), convertOpcode, p);
         } else {
-            const opcode = Gen.aluOf(operation);
-            if (fits)
-                a.aluRI(opcode, w, accumulator, immediate);
-            else if (memoryOperand(right))
-                a.alu(opcode, w, accumulator, operandMemory(right));
-            else
-                a.aluRR(opcode, w, accumulator, integer(right));
+            auto source = w == int.sizeof && !sourceUnsigned ? integer(left) : takeGp;
+            if (w < int.sizeof || sourceUnsigned) {
+                assignInteger(left, source);
+                if (sourceUnsigned)
+                    a.movzxRR(w, source, source);
+                else
+                    a.movsxRR(w, source);
+            }
+            const encodedWidth = w == int.sizeof && sourceUnsigned ? long.sizeof : int.sizeof;
+            a.b(p);
+            a.rrOp(encodedWidth, false, fp, source, convertOpcode);
         }
-        saveInteger(accumulator, dest);
+        saveFloat(fp, dest);
+    }
+
+    private void saveFloat(int source, in Location dest) {
+        if (dest.kind == LocationKind.frame)
+            a.sse(prefix(dest.width), storeOpcode, source, Frame(dest));
+        else if (dest.kind == LocationKind.integer)
+            a.xmmToInteger(cast(int) dest.bits, source);
+    }
+
+    private bool emitInteger(in Plan.Operation step, in Flow.IntegerOperands operands,
+        in Location dest, in Location left, in Location right)
+    {
+        alias Reg = Flow.IntegerOperands.Register;
+        enum firstTemporary = Reg.firstTemporary;
+        int[firstTemporary + Flow.gpCount] physical;
+        physical[Reg.none] = -1;
+        physical[Reg.left] = cast(int) left.bits;
+        physical[Reg.right] = cast(int) right.bits;
+        physical[Reg.output] = cast(int) dest.bits;
+        foreach (ref reg; physical[firstTemporary .. firstTemporary + operands.temporaries])
+            reg = takeGp;
+        const result = physical[operands.result];
+        const w = step.left.width;
+        final switch (operands.form) with (Flow.IntegerOperands.Form) {
+        case frameImmediate:
+            a.aluMI(Gen.aluOf(step.integer), w, Frame(dest), operands.immediate);
+            return true;
+        case immediateShift:
+            assignInteger(left, result);
+            a.shiftImmediate(step.shift, w, result, cast(ubyte) shiftCount(right.bits, w));
+            break;
+        case variableShift: {
+            const count = integer(right, physical[operands.right]);
+            auto source = integer(left, physical[operands.left]);
+            if (operands.extension != Reg.none) {
+                const widened = physical[operands.extension];
+                if (step.shift == JitOp.ShiftKind.arithmeticRight) {
+                    if (widened != source)
+                        a.movRR64(widened, source);
+                    a.movsxRR(w, widened);
+                } else {
+                    a.movzxRR(w, widened, source);
+                }
+                source = widened;
+            }
+            a.shiftVariable(step.shift, w < int.sizeof ? int.sizeof : w, result, source, count);
+            break;
+        }
+        case immediate:
+            if (step.integer == JitOp.IntOperation.multiply)
+                a.imulRI(result, integer(left, result), operands.immediate);
+            else {
+                assignInteger(left, result);
+                a.aluRI(Gen.aluOf(step.integer), w, result, operands.immediate);
+            }
+            break;
+        case memory:
+            assignInteger(left, result);
+            if (step.integer == JitOp.IntOperation.multiply) {
+                if (w != long.sizeof && w != int.sizeof)
+                    return false;
+                a.imulM(w, result, operandMemory(right, physical[operands.address]));
+            } else {
+                a.alu(Gen.aluOf(step.integer), w, result,
+                    operandMemory(right, physical[operands.address]));
+            }
+            break;
+        case registers:
+            assignInteger(left, result);
+            const source = integer(right, physical[operands.right]);
+            if (step.integer == JitOp.IntOperation.multiply) {
+                if (w != long.sizeof && w != int.sizeof)
+                    return false;
+                a.imulRR(w, result, source);
+            } else {
+                a.aluRR(Gen.aluOf(step.integer), w, result, source);
+            }
+            break;
+        }
+        saveInteger(result, dest);
         return true;
     }
 
@@ -4267,7 +4390,7 @@ private struct Gen {
             return false;
         auto flow = scalarScratch.reserve(1);
         if (flow is null
-                || !flow.prepare(function_, snapshot, ops, cast(ushort) entry, versionSlices))
+                || !flow.prepare(function_, snapshot, ops, cast(ushort) entry, versionSlices, bmi2))
             return false;
 
         // A guard miss continues into the ordinary template for this PC.
@@ -4554,20 +4677,7 @@ private struct Gen {
         }
     }
 
-    // Whether `value`, of width `w`, is an immediate of an ALU op.
-    static bool immOf(int w, ulong value, out int imm) {
-        switch (w) {
-            case 1: imm = cast(byte) value; return true;
-            case 2: imm = cast(short) value; return true;
-            case 4: imm = cast(int) value; return true;
-            default:
-                if (cast(long) value >= int.min && cast(long) value <= int.max) {
-                    imm = cast(int) value;
-                    return true;
-                }
-                return false;
-        }
-    }
+    alias immOf = JitOp.immediate;
 
     bool storeConstant(int w, in Mem d, ulong value) {
         int imm;
@@ -5321,7 +5431,7 @@ private struct Gen {
     {
         const ins = snapshot[i];
         final switch (op.kind) with (JitOp.Kind) {
-        case none:
+        case none, intToFloat:
             return false;
 
         case callWindow:
@@ -7211,45 +7321,13 @@ private struct Gen {
         else
             a.ldzx(w, RAX, l);
         if (right.constant) {
-            const count = cast(ubyte) shiftCount(right.bits, w);
-            if (count) {
-                ubyte group;
-                final switch (p.kind) with (JitOp.ShiftKind) {
-                    case left: group = 4; break;
-                    case logicalRight: group = 5; break;
-                    case arithmeticRight: group = 7;
-                }
-                enum shiftByOne = 0xD1;
-                enum shiftByImmediate = 0xC1;
-                a.rrOp(8, byteReg: false, group, RAX,
-                    count == 1 ? shiftByOne : shiftByImmediate);
-                if (count != 1)
-                    a.b(count);
-            }
+            a.shiftImmediate(p.kind, 8, RAX, cast(ubyte) shiftCount(right.bits, w));
             a.st(w, d, RAX);
             return true;
         }
         a.ldzx(w, SC2, right.memory);
         a.aluRI(Alu.and, 4, SC2, cast(int) shiftCount(ulong.max, w));
-        // `shlx`, `shrx` or `sarx` rax, rax, SC2 (BMI2), VEX-encoded. The
-        // first byte after the escape holds W = 1, `vvvv` as the inverted
-        // second source register (SC2), L = 0 and the prefix `pp`.
-        enum ubyte vexEscape = 0xC4;
-        enum ubyte vexMap0F38 = 0xE2;
-        enum ubyte vexW = 0x80;
-        enum ubyte shiftOpcode = 0xF7;
-        enum ubyte raxRaxModrm = 0xC0;
-        ubyte pp;
-        final switch (p.kind) with (JitOp.ShiftKind) {
-            case left: pp = 1; break;
-            case logicalRight: pp = 3; break;
-            case arithmeticRight: pp = 2;
-        }
-        a.b(vexEscape);
-        a.b(vexMap0F38);
-        a.b(cast(ubyte) (vexW | ((~SC2 & 15) << 3) | pp));
-        a.b(shiftOpcode);
-        a.b(raxRaxModrm);
+        a.shiftVariable(p.kind, 8, RAX, RAX, SC2);
         a.st(w, d, RAX);
         return true;
     }

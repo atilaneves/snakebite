@@ -4535,11 +4535,11 @@ package size_t castSizeWithSignedness(
     return unsigned ? (size | (1UL << 63)) : size;
 }
 
-private size_t castSize(in size_t packed) @safe pure nothrow @nogc {
+package size_t castSize(in size_t packed) @safe pure nothrow @nogc {
     return packed & ~(1UL << 63);
 }
 
-private bool castUnsigned(in size_t packed) @safe pure nothrow @nogc {
+package bool castUnsigned(in size_t packed) @safe pure nothrow @nogc {
     return (packed & (1UL << 63)) != 0;
 }
 
@@ -6268,6 +6268,8 @@ static if (jitSupported) {
         put(&opCastWidenUnsigned,
             JitOp.make!(Kind.widen)(JitOp.Widen(zeroExtend: true)));
         put(&opCastAs!(CastKind.sliceToPointer), JitOp.plain(Kind.sliceToPointer));
+        static if (chainedDispatch)
+            put(&opCastAs!(CastKind.integralToFloat), JitOp.plain(Kind.intToFloat));
         static foreach (kind; AliasSeq!(CastKind.narrow, CastKind.widenSigned,
             CastKind.widenUnsigned))
             static foreach (destSize; [1, 2, 4, 8])

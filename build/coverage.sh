@@ -9,7 +9,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 command -v kcov > /dev/null
 
 build/reggae.sh
-ninja bin/ut bin/bench
+ninja bin/ut bin/bench bin/sb-prof
 
 rm -rf coverage coverage-runs
 mkdir coverage-runs
@@ -23,6 +23,13 @@ trap 'rm -rf coverage-runs' EXIT
 kcov --include-path="$PWD/source/snakebite,$PWD/bench" \
     "$PWD/coverage-runs/unit" bin/ut
 
+# The optimized LDC build can chain handlers and compile scalar regions.
+# Run the same guest program as the CLI tests with source lines for kcov.
+scalar_jit_fixture="$PWD/tests/fixtures/scalar-jit"
+kcov --include-path="$PWD/source/snakebite,$PWD/bench" \
+    "$PWD/coverage-runs/scalar-jit" bin/sb-prof -b bytecode \
+    --no-optimise-image "$scalar_jit_fixture"
+
 while IFS= read -r benchmark; do
     name=${benchmark##*/}
     kcov --include-path="$PWD/source/snakebite,$PWD/bench" \
@@ -30,3 +37,7 @@ while IFS= read -r benchmark; do
 done < <(find examples -mindepth 1 -maxdepth 1 -type d -print | sort)
 
 kcov --merge coverage coverage-runs/*
+
+# Source counters also report statements that ThinLTO omits from line tables.
+python3 build/bytecode_coverage.py "$scalar_jit_fixture" \
+    "$PWD/coverage/ldc-bytecode.info"

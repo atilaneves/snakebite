@@ -37,6 +37,19 @@ FILE_BACKENDS = ["bytecode", "interpreter"]
 PROGRAM_BACKENDS = ["native", *FILE_BACKENDS]
 
 
+# CTFE cannot produce the runtime ArrayIndexError in this program.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_scalar_regions_keep_values_at_loop_entries_and_exits(
+    tmp_path: Path, backend: str,
+) -> None:
+    fixture = Path(__file__).with_name("fixtures") / "scalar-jit"
+    shutil.copytree(fixture, tmp_path / "app")
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+
+
 @pytest.mark.parametrize(
     "backend, flags, mapped",
     [
