@@ -1079,8 +1079,8 @@ package struct ScalarFlow {
     }
 
     static struct Block {
-        ushort pc;
-        ushort end;
+        ushort firstOperation;
+        ushort endOperation;
         ushort firstNode;
         ushort endNode;
         ushort firstValue;
@@ -1101,6 +1101,7 @@ package struct ScalarFlow {
     Value[valueLimit] values;
     Node[nodeLimit] nodes;
     ushort[Program.instructionLimit] whichBlock;
+    private ushort[Program.instructionLimit] _operationPcs;
     ushort blockCount;
     ushort valueCount;
     ushort nodeCount;
@@ -1144,7 +1145,7 @@ package struct ScalarFlow {
             return false;
         splitBlocks;
         foreach (ref block; blocks[0 .. blockCount]) {
-            const kind = ranges.resolved[block.end - 1].kind;
+            const kind = ranges.resolved[terminalPc(block)].kind;
             _hasFrameExit |= kind == Kind.exit || kind == Kind.returnValue;
         }
         findLiveHomes;
@@ -1377,34 +1378,54 @@ package struct ScalarFlow {
         return pc;
     }
 
+    ushort terminalPc(in Block block) const {
+        return _operationPcs[block.endOperation - 1];
+    }
+
     private void splitBlocks() {
-        bool[Program.instructionLimit] starts;
-        const count = ranges.length;
-        starts[0] = true;
-        foreach (pc, ref const step; ranges.resolved[0 .. count]) {
-            if (!ranges.visited[pc])
-                continue;
-            if (step.target != none)
-                starts[step.target] = true;
-            if (step.next != none && (step.target != none || step.next != pc + 1))
-                starts[step.next] = true;
-            if (pc + 1 < count && (step.next != pc + 1 || step.target != none))
-                starts[pc + 1] = true;
-        }
-        ushort first;
-        foreach (pc; 0 .. count) {
-            if (!ranges.visited[pc])
-                continue;
-            if (starts[pc] || pc > 0 && !ranges.visited[pc - 1]) {
-                first = cast(ushort) pc;
-                blocks[blockCount] = Block.init;
-                blocks[blockCount++].pc = first;
+        ushort[Program.instructionLimit] reachable;
+        size_t count = 1;
+        Set reached;
+        Set starts;
+        reached.add(0);
+        starts.add(0);
+        for (size_t i; i < count; ++i) {
+            ref const step = ranges.resolved[reachable[i]];
+            foreach (successor; [step.next, step.target]) {
+                if (successor == none)
+                    continue;
+                if (reached.has(successor) || step.kind == Kind.branch)
+                    starts.add(successor);
+                if (!reached.has(successor)) {
+                    reached.add(successor);
+                    reachable[count++] = successor;
+                }
             }
-            whichBlock[pc] = cast(ushort) (blockCount - 1);
-            blocks[blockCount - 1].end = cast(ushort) (pc + 1);
         }
+
+        // A change of bytecode address does not require fresh definitions.
+        // Keep each private straight-line path in one block.
+        ushort operationCount;
+        foreach (start; reachable[0 .. count]) {
+            if (!starts.has(start))
+                continue;
+            const id = blockCount++;
+            ref block = blocks[id];
+            block = Block.init;
+            block.firstOperation = operationCount;
+            for (auto pc = start; ; ) {
+                _operationPcs[operationCount++] = pc;
+                whichBlock[pc] = id;
+                ref const step = ranges.resolved[pc];
+                pc = step.next == none ? step.target : step.next;
+                if (pc == none || starts.has(pc))
+                    break;
+            }
+            block.endOperation = operationCount;
+        }
+
         foreach (ref block; blocks[0 .. blockCount]) {
-            ref const last = ranges.resolved[block.end - 1];
+            ref const last = ranges.resolved[terminalPc(block)];
             if (last.next != none)
                 block.next = whichBlock[last.next];
             if (last.target != none)
@@ -1414,7 +1435,8 @@ package struct ScalarFlow {
 
     private void findLiveHomes() {
         foreach (ref block; blocks[0 .. blockCount]) {
-            foreach (ref const step; ranges.resolved[block.pc .. block.end]) {
+            foreach (pc; _operationPcs[block.firstOperation .. block.endOperation]) {
+                ref const step = ranges.resolved[pc];
                 mention(block, step.left, false);
                 mention(block, step.right, false);
                 mention(block, step.output, true);
@@ -1424,7 +1446,7 @@ package struct ScalarFlow {
                     modified.add(home);
         }
         foreach (ref block; blocks[0 .. blockCount]) {
-            const last = ranges.resolved[block.end - 1].kind;
+            const last = ranges.resolved[terminalPc(block)].kind;
             if (last == Kind.exit || last == Kind.returnValue) {
                 auto uses = modified;
                 uses.exclude(block.defs);
@@ -1492,7 +1514,7 @@ package struct ScalarFlow {
             const id = value(Value(0, cast(ushort) home, nodeCount, slot.width, lane, Origin.phi));
             block.incoming[home] = block.outgoing[home] = id;
         }
-        foreach (pc; block.pc .. block.end) {
+        foreach (pc; _operationPcs[block.firstOperation .. block.endOperation]) {
             ref const step = ranges.resolved[pc];
             if (step.kind == Kind.move && step.left.width == 16) {
                 Operand left = step.left;
@@ -1676,7 +1698,7 @@ package struct ScalarFlow {
                         }
                     }
                 }
-                const last = ranges.resolved[block.end - 1].kind;
+                const last = ranges.resolved[terminalPc(block)].kind;
                 if (last == Kind.exit || last == Kind.returnValue) {
                     foreach (home, id; block.outgoing[0 .. ranges.program.slotCount])
                         if (modified.has(home))
@@ -1773,7 +1795,7 @@ package struct ScalarFlow {
                 if (id != none && values[id].used && !frameResident(id))
                     visit(block.outgoing[home]);
         }
-        const kind = ranges.resolved[block.end - 1].kind;
+        const kind = ranges.resolved[terminalPc(block)].kind;
         if (kind == Kind.exit || kind == Kind.returnValue)
             foreach (home; modified)
                 if (block.outgoing[home] != none)

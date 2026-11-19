@@ -2277,7 +2277,7 @@ private struct ScalarEmitter {
     private bool finish(in Block block, ushort id, ushort following) {
         import snakebite.backends.bytecode.vm: jitFallback;
 
-        const pc = block.end - 1;
+        const pc = flow.terminalPc(block);
         ref const step = flow.ranges.resolved[pc];
         if (step.kind == Kind.exit || step.kind == Kind.returnValue || step.kind == Kind.returnVoid) {
             const canonical = step.kind != Kind.returnVoid;
