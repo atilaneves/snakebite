@@ -1486,7 +1486,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 deferred(() => bytecode.compileFunction(function_)), null, 0);
             foreach (range; _code.cold) {
                 instructions[range.first] = Instruction(
-                    &opColdThrow, 0, selfSite, range.first);
+                    &opColdThrow, 0, selfSite, range.first,
+                    coldMustThrow(range) ? Instruction.terminalError : 0);
                 foreach (i; range.first + 1 .. range.end)
                     instructions[i] = Instruction(&opJump, range.end, 0, 0);
             }
@@ -1500,6 +1501,42 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             instructions, _code.constants.dup, _tempSize, _tempAlignment,
             relocs, sites, _allocations.dup, _exposesFrame,
             _exposedFrames.dup);
+    }
+
+    private bool coldMustThrow(in ColdRange range) {
+        bool[96] terminal;
+        const count = range.end - range.first;
+        if (!count || count > terminal.length)
+            return false;
+        foreach_reverse (i; range.first .. range.end) {
+            auto instruction = _code.instructions[i];
+            const handler = instruction.handler;
+            const index = i - range.first;
+            if (handler is &opThrow || (handler is &opColdThrow
+                    && instruction.sourceWidth == Instruction.terminalError)) {
+                terminal[index] = true;
+                continue;
+            }
+            Operands roles;
+            // These handlers change cleanup state and then advance. They
+            // run in the original cold body, after its caller normalizes.
+            const cleanupTransition = handler is &opTemporarySuspend
+                || handler is &opTemporaryArm;
+            if (handler is null || handler is &opReturn || handler is &opReturnVoid
+                    || handler is &opColdThrow
+                    || (!cleanupTransition && !copyOperandsOf(handler, roles)))
+                continue;
+            const next = index + 1 < count && terminal[index + 1];
+            const target = branchTargetField(instruction);
+            if (target is null) {
+                terminal[index] = next;
+                continue;
+            }
+            terminal[index] = *target > i && *target < range.end
+                && terminal[*target - range.first]
+                && (handler is &opJump || next);
+        }
+        return terminal[0];
     }
 
     private bool isSelfWindow(in CallSite site) const {
@@ -10398,7 +10435,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         ] ~ extraArgs;
         _code.callSites ~= CallSite.native(plan, args, 0);
         ++_hookSites;
-        emit(&opCall, discardResult, _code.callSites.length - 1, 0);
+        emit(&opCall, discardResult, _code.callSites.length - 1, 0,
+            Instruction.terminalError);
     }
 
     // Fails through the druntime hook unless `smaller <= larger`, unsigned.

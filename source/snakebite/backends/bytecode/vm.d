@@ -928,6 +928,9 @@ public struct Instruction {
     // In a static load's sourceWidth, this distinguishes bytes owned by
     // the compiler from mutable data-segment storage.
     package enum size_t immutableSource = 1;
+    // In sourceWidth of a compiler-generated error transfer, the normal
+    // control flow of its checked region ends in a throw.
+    package enum size_t terminalError = 1;
 
     // A built function holds the distance (`hostCodeOffset`) until
     // `Program.complete` binds it. This holds for each `@hostCode` field:
@@ -6038,6 +6041,14 @@ static if (jitSupported) {
 
     package bool jitCountsBranch(Instruction.Handler handler) nothrow @nogc {
         return withoutBranchCounting(handler) !is handler;
+    }
+
+    package bool jitTerminalError(in Instruction instruction,
+        Instruction.Handler handler) nothrow @nogc
+    {
+        return handler is &opThrow || (instruction.sourceWidth == Instruction.terminalError
+            && (handler is &opColdThrow || handler is &callGeneral!true
+                || handler is &callGeneral!false));
     }
 
     // JIT branches do not count. Calls keep the handler that counts the callee.

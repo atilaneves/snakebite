@@ -155,6 +155,108 @@ def test_jit_perf_map(
             path.unlink(missing_ok=True)
 
 
+@pytest.mark.parametrize("stored", [False, True], ids=["source", "image"])
+def test_compiled_calls_preserve_frames_at_handler_boundaries(
+    tmp_path: Path, stored: bool,
+) -> None:
+    write(
+        tmp_path / "main.d",
+        r"""
+        module select_abi_checks;
+
+        import core.memory : GC;
+        import core.stdc.stdlib : alloca, qsort;
+        import core.thread.fiber : Fiber;
+        import core.stdc.stdio : puts;
+
+        int cleaned;
+        int sorted;
+
+
+        extern(C) int compare(scope const void* a, scope const void* b) {
+            assert(walk(8, false, false) == 80);
+            return *cast(const(int)*) a - *cast(const(int)*) b;
+        }
+
+        Exception makeError(bool shouldYield) {
+            if (shouldYield) {
+                int[2] values = [2, 1];
+                qsort(values.ptr, values.length, int.sizeof, &compare);
+                assert(values[0] == 1);
+                ++sorted;
+                Fiber.yield();
+                GC.collect();
+            }
+            return new Exception("at the bottom");
+        }
+
+        void check(bool shouldThrow, bool shouldYield) {
+            if (shouldThrow)
+                throw makeError(shouldYield);
+        }
+
+        int walk(int depth, bool shouldThrow, bool shouldYield) {
+            align(32) int[19] kept = void;
+            kept[0] = depth;
+            kept[$ - 1] = depth + 1;
+            if (depth == 0) {
+                check(shouldThrow, shouldYield);
+                return kept[0];
+            }
+            return walk(depth - 1, shouldThrow, shouldYield) + kept[0] + kept[$ - 1];
+        }
+
+        int caller(int depth, bool shouldThrow, bool shouldYield) {
+            auto reserved = cast(int*) alloca(32 * int.sizeof);
+            reserved[0] = 24;
+            reserved[31] = 18;
+            scope (exit) {
+                assert(reserved[0] + reserved[31] == 42);
+                ++cleaned;
+            }
+            try {
+                return walk(depth, shouldThrow, shouldYield);
+            } catch (Exception caught) {
+                assert(caught.msg == "at the bottom");
+                return -1;
+            }
+        }
+
+        void entry() {
+            assert(caller(37, true, true) == -1);
+        }
+
+        void main() {
+            foreach (i; 0 .. 400)
+                assert(caller(11, false, false) == 143);
+            const depth = 1600;
+            assert(caller(depth, false, false) == depth * (depth + 2));
+            assert(caller(37, true, false) == -1);
+
+            auto fiber = new Fiber(&entry);
+            fiber.call();
+            assert(fiber.state != Fiber.State.TERM);
+            GC.collect();
+            assert(caller(11, false, false) == 143);
+            fiber.call();
+            assert(fiber.state == Fiber.State.TERM && sorted == 1);
+            assert(cleaned == 404);
+            puts("selective ABI checks passed");
+        }
+        """,
+    )
+    args = ("-b", "bytecode")
+    if stored:
+        image = tmp_path / "main.sbx"
+        saved = run_sb(*args, f"--save={image}", str(tmp_path), cwd=tmp_path)
+        assert saved.returncode == 0, output(saved)
+        result = run_sb(*args, f"--load={image}", cwd=tmp_path)
+    else:
+        result = run_sb(*args, str(tmp_path), cwd=tmp_path)
+    assert result.returncode == 0, output(result)
+    assert "selective ABI checks passed" in result.stdout
+
+
 def test_jit_perf_map_after_fork(tmp_path: Path) -> None:
     write(
         tmp_path / "perf_map_fork.d",

@@ -269,6 +269,7 @@ private enum XMM2 = 2;
 // The operation field of the ALU instructions.
 private enum Alu : ubyte { add = 0, or = 1, and = 4, sub = 5, xor = 6, cmp = 7 }
 
+
 private struct Mem {
     ubyte base;
     int disp;
@@ -441,14 +442,16 @@ package struct JitState {
     Emitted emitFunction(Function* function_,
         const(Instruction)[] snapshot, const(JitOp)[] ops,
         const(Instruction.Handler)[] originals,
-        const(ObservedEdge)[] observed, bool expandWindows)
+        const(ObservedEdge)[] observed, bool expandWindows,
+        PrivatePass pass = PrivatePass.plan)
     {
         import core.atomic: atomicStore, MemoryOrder;
         import snakebite.backends.bytecode.vm: jitFallback;
+        import std.algorithm.searching: any;
 
         const instructions = function_.instructions;
         const start = region.chunkUsed;
-        const handlerBytes = originals.length * Instruction.Handler.sizeof;
+        const handlerBytes = (originals.length + 1) * Instruction.Handler.sizeof;
         if (region.chunkCapacity - start < handlerBytes)
             return Emitted.full;
         const cap = region.chunkCapacity - start - handlerBytes;
@@ -456,6 +459,13 @@ package struct JitState {
         g.function_ = function_;
         g.codeLimit = cap;
         g.expandWindows = expandWindows;
+        PrivateCallProof proof;
+        const examine = chainedDispatch && snapshot.length <= 384
+            && function_.windowSlot != size_t.max
+            && function_.exceptionHandlers.length == 0;
+        if (examine && pass != PrivatePass.canonical)
+            g.proof = &proof;
+        g.deferWindows = pass == PrivatePass.private_;
         g.a.buf = region.writeBase + start;
         g.fixupScratch = &fixups;
         g.literalScratch = &literals;
@@ -473,6 +483,14 @@ package struct JitState {
         g.labels = labelMemory[0 .. instructions.length + 1];
         g.fixups = fixups.ptr;
         g.fixupCap = fixups.cap;
+        if (g.deferWindows) {
+            if (cap < maximumPrivateBytesPerInstruction)
+                return Emitted.full;
+            g.normalizationEntry = g.a.n;
+            g.emitWindowNormalization;
+            while (g.a.n % codeAlignment)
+                g.a.b(0x90);
+        }
 
         const path = g.selectObservedPath(function_, ops, observed, paths);
         size_t pathJump;
@@ -486,7 +504,9 @@ package struct JitState {
             if (i < branchOnlyEnd)
                 continue;
             const original = jitFallback(function_, snapshot[i], originals[i]);
-            if (cap - g.a.n - g.literalBytes < maximumBytesPerInstruction)
+            const allowance = g.deferWindows
+                ? maximumPrivateBytesPerInstruction : maximumBytesPerInstruction;
+            if (cap - g.a.n - g.literalBytes < allowance)
                 return Emitted.full;
             g.labels[i] = g.a.n;
             if (path.length != 0 && i == path[0].pc) {
@@ -579,7 +599,7 @@ package struct JitState {
                 g.fpSlots = FpSlots.init;
             }
             if (!done) {
-                g.a.n = saved;
+                g.rewind(saved);
                 g.fixupCount = savedFixups;
                 g.literalCount = savedLiterals;
                 if (originals[i] is null)
@@ -608,8 +628,11 @@ package struct JitState {
                 // Dispatch and branches can enter here without the values
                 // that the preceding machine code supplies.
                 label = g.a.n;
+                const independent = g.proof !is null && !proof.isResume(i)
+                    && !g.fixups[0 .. g.fixupCount].any!(f => f.target == i);
                 g.jumpToHandler(i,
-                    jitFallback(function_, snapshot[i], originals[i]));
+                    jitFallback(function_, snapshot[i], originals[i]),
+                    independent);
                 if (--handlerEntryCount == 0)
                     break;
             }
@@ -629,6 +652,7 @@ package struct JitState {
             g.a.d32(cast(int) (body - (g.a.n + int.sizeof)));
         }
 
+        bool emittedPath;
         if (pathJump != 0) {
             const startOfPath = g.a.n;
             auto pathScratch = paths.ptr;
@@ -636,8 +660,9 @@ package struct JitState {
             const target = g.emitObservedPath(cap, function_, path, ops,
                 originals, *pathScratch, loopPlan)
                 ? startOfPath : pathJump + int.sizeof;
-            if (target != startOfPath)
-                g.a.n = startOfPath;
+            emittedPath = target == startOfPath;
+            if (!emittedPath)
+                g.rewind(startOfPath);
             g.patchTo(pathJump, target);
             if (function_.jitName.length && target == startOfPath)
                 perfMap.record(region.execBase + start + startOfPath,
@@ -648,12 +673,29 @@ package struct JitState {
             *cast(int*) (g.a.buf + f.position) = cast(int) (
                 g.labels[f.target] - (f.position + 4));
 
+        if (g.proof !is null) {
+            // A recorded edge alone is not a machine-code path. A path
+            // that survives emission can restore frames outside this proof.
+            const approved = !emittedPath && proof.approved;
+            if (pass == PrivatePass.plan && approved) {
+                const trial = emitFunction(function_, snapshot, ops, originals,
+                    observed, expandWindows, PrivatePass.private_);
+                if (trial == Emitted.done)
+                    return trial;
+                return emitFunction(function_, snapshot, ops, originals,
+                    observed, expandWindows, PrivatePass.canonical);
+            }
+            if (g.deferWindows && !approved)
+                return Emitted.failed;
+        }
+
         const handlerStart = (g.a.n + codeAlignment - 1)
             & ~(codeAlignment - 1UL);
         if (handlerStart > cap)
             return Emitted.full;
         auto identity = cast(Instruction.Handler*) (g.a.buf + handlerStart);
-        identity[0 .. originals.length] = originals[];
+        *cast(size_t*) identity = g.deferWindows ? 1 : 0;
+        identity[1 .. originals.length + 1] = originals[];
         const size = (handlerStart + handlerBytes + codeAlignment - 1)
             & ~(codeAlignment - 1UL);
         if (size > region.chunkCapacity - start)
@@ -664,7 +706,7 @@ package struct JitState {
 
         const code = region.execBase + start;
         function_.jitHandlers =
-            cast(const(Instruction.Handler)*) (code + handlerStart);
+            cast(const(Instruction.Handler)*) (code + handlerStart) + 1;
         if (function_.jitName.length)
             perfMap.record(code, g.a.n, function_.jitName);
         // One aligned 8-byte store with release order for each word, after
@@ -944,6 +986,7 @@ private enum codeAlignment = 16;
 // The most that the code of one instruction can need. Emission checks this much
 // room before each instruction.
 private enum maximumBytesPerInstruction = 1152;
+private enum maximumPrivateBytesPerInstruction = 1280;
 // Druntime and Phobos declare none of these: no `memfd_create`, no
 // `MFD_CLOEXEC`, no `MADV_POPULATE_*`, and `core.sys.linux.sys.mman` declares
 // `madvise` only when `_DEFAULT_SOURCE` is true, which it is not for glibc.
@@ -1820,6 +1863,57 @@ private struct InlineBody {
     size_t[Gen.inlineInstructionLimit + 1] labels;
 }
 
+// Records the boundary choices of an emitted function. Only records in
+// committed machine code constrain the proof.
+private struct PrivateCallProof {
+    @nogc nothrow:
+
+    private struct Boundary {
+        size_t end;
+        size_t resume;
+        bool safe;
+    }
+
+    private Boundary[256] _boundaries;
+    private size_t _used;
+    private size_t _overflow = size_t.max;
+
+    void record(size_t end, bool safe, size_t resume = size_t.max) {
+        if (_used == _boundaries.length) {
+            if (_overflow == size_t.max)
+                _overflow = end;
+            return;
+        }
+        _boundaries[_used++] = Boundary(end, resume, safe);
+    }
+
+    void rewind(size_t offset) {
+        if (_overflow > offset)
+            _overflow = size_t.max;
+        while (_used && _boundaries[_used - 1].end > offset)
+            --_used;
+    }
+
+    bool isResume(size_t index) const {
+        foreach (ref const boundary; _boundaries[0 .. _used])
+            if (boundary.resume == index)
+                return true;
+        return false;
+    }
+
+    bool approved() const {
+        if (_overflow != size_t.max)
+            return false;
+        bool hasPrivateCall;
+        foreach (ref const boundary; _boundaries[0 .. _used]) {
+            if (!boundary.safe)
+                return false;
+            hasPrivateCall |= boundary.resume != size_t.max;
+        }
+        return hasPrivateCall;
+    }
+}
+
 private struct Gen {
     import snakebite.backends.bytecode.vm: Activation, CallSite,
         chainedDispatch, CheckedAccess, CompareKind, Comparison, Destination,
@@ -1848,6 +1942,15 @@ private struct Gen {
     const(Function)* function_;
     size_t codeLimit;
     bool expandWindows;
+    PrivateCallProof* proof;
+
+    void rewind(size_t offset) {
+        if (proof !is null)
+            proof.rewind(offset);
+        a.n = offset;
+    }
+    bool deferWindows;
+    size_t normalizationEntry = size_t.max;
     const(ubyte)* refreshBase;
     size_t watchCalleeCall = size_t.max;
     size_t watchedCall = size_t.max;
@@ -2083,6 +2186,8 @@ private struct Gen {
         bool expandedWatchedCall;
         size_t grow;
         size_t tierUp;
+        bool provedCall;
+        bool privateCall;
 
         bool hasPlace() const pure nothrow @nogc @safe {
             return callee.returnPlace.offset != size_t.max;
@@ -2098,8 +2203,10 @@ private struct Gen {
     private enum handlerJumpBytes = 22;
     private enum lateDispatchBytes = 25 + handlerJumpBytes;
     private enum fpSeedBytes = 8 * FpSlots.count;
+    private enum normalizationBranchBytes = 18;
     static assert(CallSite.maxIndirectTargets * windowArmBytes
-        + handlerJumpBytes + lateDispatchBytes + fpSeedBytes <= maximumBytesPerInstruction);
+        + handlerJumpBytes + lateDispatchBytes + fpSeedBytes
+        + 3 * normalizationBranchBytes <= maximumPrivateBytesPerInstruction);
     static assert(Activation.sizeof <= byte.max + 1
         && Instruction.sizeof <= byte.max
         && FrameStack.fastEndOffset <= byte.max
@@ -2153,6 +2260,8 @@ private struct Gen {
                 return false;
         }
 
+        if (op.indirect && inlineCaller is null)
+            normalizeWindows;
         size_t end;
         foreach (ref arm; arms[0 .. count]) {
             const previous = a.n;
@@ -2188,12 +2297,20 @@ private struct Gen {
                 jumpToHandler(i, indirectWindowFallback!true(op.destination));
             }
         }
+        if (!op.indirect && arms[0].privateCall) {
+            // A deferred caller can reach the ordinary handler for either
+            // stack growth or a target whose code has not been published yet.
+            patchHere(arms[0].grow);
+            normalizeWindows;
+        }
         foreach (ref const arm; arms[0 .. end]) {
-            patchHere(arm.grow);
-            if (op.counted)
+            if (op.indirect || !arm.privateCall)
+                patchHere(arm.grow);
+            if (arm.tierUp)
                 patchHere(arm.tierUp);
         }
-        jumpToHandler(i, original);
+        jumpToHandler(i, original,
+            !op.indirect && arms[0].provedCall);
         return true;
     }
 
@@ -2246,12 +2363,12 @@ private struct Gen {
         guardWindow(op, arm);
     }
 
-    void guardWindow(in JitOp.CallWindow op, ref WindowArm arm) {
+    void guardWindow(in JitOp.CallWindow op, ref WindowArm arm, bool count = true) {
         a.lea(RAX, Mem(R11, cast(int) arm.fast.reachBytes));
         a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.fastEndOffset));
         arm.grow = jccLocal(CC_A);
 
-        if (op.counted) {
+        if (count && op.counted) {
             a.movI(PCREG, cast(size_t) arm.callee);
             const heat = Mem(PCREG, Function.jitHeat.offsetof);
             a.ld(4, RAX, heat);
@@ -2328,12 +2445,114 @@ private struct Gen {
     bool emitCallWindowArm(const(Instruction)* pc, in Instruction ins,
         in JitOp.CallWindow op, const(CallSite)* site, ref WindowArm arm)
     {
-        emitWindowChecks(op, site, arm);
+        import core.atomic: atomicLoad, MemoryOrder;
+        import snakebite.backends.bytecode.vm: JitTier;
+
+        const self = arm.callee is function_;
+        const published = !self && !op.indirect
+            && atomicLoad!(MemoryOrder.acq)(*cast(shared const(uint)*) &arm.callee.jitState)
+                == JitTier.compiled
+            && arm.callee.jitHandlers !is null
+            && cast(size_t) arm.callee.jitHandlers[-1] != 0;
+        arm.provedCall = !op.indirect && (self || published);
+        arm.privateCall = !op.indirect && (self ? deferWindows : published);
+        if (arm.privateCall) {
+            if (!emitDeferredCall(pc, ins, op, site, arm))
+                return false;
+        } else {
+            emitWindowChecks(op, site, arm);
+            if (!prepareWindow(ins, op, site, arm))
+                return false;
+            activateWindow(pc, arm.callee, arm.fast);
+            jumpToLive(arm.callee.instructions.ptr);
+        }
+
+        if (proof !is null && arm.provedCall)
+            proof.record(a.n, true, cast(size_t) (pc - instructions.ptr) + 1);
+        return true;
+    }
+
+    bool emitDeferredCall(const(Instruction)* pc, in Instruction ins,
+        in JitOp.CallWindow op, const(CallSite)* site, ref WindowArm arm)
+    {
+        import snakebite.backends.bytecode.vm: JitTier;
+
+        loadWindow(site);
+        guardWindow(op, arm, false);
+        a.movI(PCREG, cast(size_t) arm.callee);
+        if (arm.callee is function_) {
+            a.aluMI(Alu.cmp, 4, Mem(PCREG, Function.jitState.offsetof), JitTier.compiled);
+            arm.tierUp = jccLocal(CC_NE);
+        }
         if (!prepareWindow(ins, op, site, arm))
             return false;
-        activateWindow(pc, arm.callee, arm.fast);
-        jumpToLive(arm.callee.instructions.ptr);
+        a.st(8, Mem(R11, Activation.function_.offsetof), PCREG);
+        a.movI(PCREG, cast(size_t) pc);
+        a.st(8, Mem(ACTIVE, Activation.pc.offsetof), PCREG);
+        a.st(8, Mem(R11, Activation.parent.offsetof), ACTIVE);
+        a.st(8, Mem(R11, Activation.frame.offsetof), FRAME);
+        a.movRR64(ACTIVE, R11);
+        a.movI(PCREG, cast(size_t) arm.callee.instructions.ptr);
+        a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
         return true;
+    }
+
+    // Window entries align their value-frame end to the guest stack alignment.
+    // The canonical ancestor can have other live reservations above its frame.
+    void loadWindowTop(ubyte destination, ubyte activation) {
+        a.ld(8, destination, Mem(activation, Activation.function_.offsetof));
+        a.ld(8, destination, Mem(destination, Function.frameSize.offsetof));
+        a.alu(Alu.add, 8, destination, Mem(activation, Activation.frame.offsetof));
+        a.aluRI(Alu.add, 8, destination, FrameStack.topAlignment - 1);
+        a.aluRI(Alu.and, 8, destination, -cast(int) FrameStack.topAlignment);
+    }
+
+    void normalizeWindows() {
+        if (normalizationEntry == size_t.max)
+            return;
+        const current = Mem(STATE, DispatchState.current.offsetof);
+        a.alu(Alu.cmp, 8, ACTIVE, current);
+        const canonical = jccLocal(CC_E);
+
+        // Put the address after the following relative jump in the scratch
+        // PC register. The normalization code uses no native stack.
+        a.b(PCREG >= 8 ? 0x4C : 0x48);
+        a.b(0x8D);
+        a.b(cast(ubyte) (((PCREG & 7) << 3) | 5));
+        a.d32(5);
+        jmpLocalTo(normalizationEntry);
+        patchHere(canonical);
+    }
+
+    void emitWindowNormalization() {
+        const current = Mem(STATE, DispatchState.current.offsetof);
+        a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+        a.movRR64(R10, ACTIVE);
+        const next = a.n;
+        a.ld(8, R11, Mem(R10, Activation.parent.offsetof));
+        a.ld(8, RAX, Mem(R11, Activation.pc.offsetof));
+        a.lea(RAX, Mem(RAX, Instruction.sizeof));
+        a.st(8, Mem(R11, Activation.resume.offsetof), RAX);
+        a.ld(8, RAX, Mem(R9, FrameStack.cleanupMarkOffset));
+        a.st(8, Mem(R10, Activation.cleanupMark.offsetof), RAX);
+        a.alu(Alu.cmp, 8, R11, current);
+        const anchor = jccLocal(CC_E);
+        loadWindowTop(RAX, R11);
+        a.alu(Alu.sub, 8, RAX, Mem(R9, FrameStack.baseOffset));
+        a.st(8, Mem(R10, Activation.frameMark.offsetof), RAX);
+        a.movRR64(R10, R11);
+        jmpLocalTo(next);
+        patchHere(anchor);
+        a.ld(8, RAX, Mem(R9, FrameStack.topOffset));
+        a.alu(Alu.sub, 8, RAX, Mem(R9, FrameStack.baseOffset));
+        a.st(8, Mem(R10, Activation.frameMark.offsetof), RAX);
+        loadWindowTop(RAX, ACTIVE);
+        a.st(8, Mem(R9, FrameStack.topOffset), RAX);
+        a.st(8, current, ACTIVE);
+        static if (PCREG >= 8)
+            a.b(0x41);
+        a.b(0xFF);
+        a.b(cast(ubyte) (0xE0 | (PCREG & 7)));
     }
 
     private enum transferPathValues = true;
@@ -3300,6 +3519,7 @@ private struct Gen {
         if (pending < 0)
             return true;
 
+        normalizeWindows;
         a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
         int[pathDepth] chain = void;
         size_t count;
@@ -3358,7 +3578,7 @@ private struct Gen {
         emitWindowChecks(op, site, arm);
         a.st(8, Mem(R11, Activation.parent.offsetof), FRAME);
         if (!prepareWindow(ins, op, site, arm)) {
-            a.n = start;
+            rewind(start);
             return false;
         }
 
@@ -3388,6 +3608,8 @@ private struct Gen {
         child.inlineCall = i;
         child.inlineDepth = inlineDepth + 1;
         child.expandWindows = true;
+        child.proof = proof;
+        child.normalizationEntry = normalizationEntry;
         child.watchedCall = watchCalleeCall;
         child.inlineResultMayBeNull = op.destination == Destination.indirect;
         child.labels = level.labels[0 .. n + 1];
@@ -3397,7 +3619,7 @@ private struct Gen {
         fixups = fixupScratch.ptr;
         fixupCap = fixupScratch.cap;
         if (!done) {
-            a.n = start;
+            rewind(start);
             return false;
         }
 
@@ -3457,7 +3679,7 @@ private struct Gen {
             if (outOfMemory)
                 return false;
             if (!done) {
-                a.n = saved;
+                rewind(saved);
                 fixupCount = savedFixups;
                 literalCount = savedLiterals;
                 jumpToHandler(i, original);
@@ -3523,6 +3745,19 @@ private struct Gen {
             return false;
 
         a.ld(8, R10, Mem(ACTIVE, Activation.parent.offsetof));
+        if (deferWindows) {
+            a.alu(Alu.cmp, 8, ACTIVE, Mem(STATE, DispatchState.current.offsetof));
+            const canonical = jccLocal(CC_E);
+            if (hasValue && ins.width != 0 && !emitReturnValue(ins,
+                    Mem(ACTIVE, Activation.returnPlace.offsetof), true))
+                return false;
+            a.movRR64(ACTIVE, R10);
+            a.ld(8, FRAME, Mem(ACTIVE, Activation.frame.offsetof));
+            a.ld(8, PCREG, Mem(ACTIVE, Activation.pc.offsetof));
+            a.lea(PCREG, Mem(PCREG, Instruction.sizeof));
+            a.jmpM(Mem(PCREG, Instruction.handler.offsetof));
+            patchHere(canonical);
+        }
         a.aluRI(Alu.cmp, 8, R10, 0);
         const root = jccLocal(CC_E);
         a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
@@ -3545,7 +3780,7 @@ private struct Gen {
 
         patchHere(root);
         patchHere(cleanup);
-        jumpToHandler(i, original);
+        jumpToHandler(i, original, true);
         return true;
     }
 
@@ -3624,16 +3859,21 @@ private struct Gen {
         a.d32(cast(int) (offset - (a.n + 4)));
     }
 
-    void jumpToHandler(size_t i, Instruction.Handler handler) {
+    void jumpToHandler(size_t i, Instruction.Handler handler, bool qualified = false) {
+        import snakebite.backends.bytecode.vm: jitTerminalError;
+
         if (inlineCaller !is null) {
+            normalizeWindows;
             materialize(this);
             jumpToLive(&instructions[i]);
-            return;
-        }
-        jumpToOriginal(&instructions[i], handler);
+        } else
+            jumpToOriginal(&instructions[i], handler);
+        if (proof !is null)
+            proof.record(a.n, qualified || jitTerminalError(snapshot[i], snapshot[i].handler));
     }
 
     void jumpToOriginal(const(Instruction)* pc, Instruction.Handler handler) {
+        normalizeWindows;
         // The unchained dispatcher gets its register arguments from the state.
         static if (!chainedDispatch) {
             a.st(8, Mem(STATE, DispatchState.r0.offsetof), REG0);
@@ -4360,6 +4600,7 @@ private struct Gen {
             // Only a direct frame slot can skip receiver resolution.
             if (ins.source & indirectBit)
                 return false;
+            normalizeWindows;
             a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
             a.ld(8, RAX, Mem(R9, FrameStack.cleanupMarkOffset));
             a.alu(Alu.cmp, 8, RAX, Mem(ACTIVE, Activation.cleanupMark.offsetof));
@@ -4510,7 +4751,7 @@ private struct Gen {
                             carriesIndex ? checkedEntry.afterLoad : 0,
                             indexOps: ops, predecessor: i))
                         return true;
-                    a.n = saved;
+                    rewind(saved);
                     readIntSlot = false;
                 }
             }
@@ -6282,3 +6523,4 @@ private struct Gen {
 
 
 private enum Emitted { done, failed, full }
+private enum PrivatePass { plan, private_, canonical }
