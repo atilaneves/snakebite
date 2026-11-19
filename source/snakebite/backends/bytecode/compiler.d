@@ -5579,13 +5579,20 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         else
             evalOperandInto(expression.lwr, lowOffset, size_t.sizeof);
 
+        const plan = planSlice(expression);
+        size_t span;
+        if (plan.checkOrder && plan.checkUpper
+                && fixedSliceSpan(expression, span)
+                && compileFixedSlice(expression, span, lowOffset,
+                    sourceLengthOffset, sourcePointerOffset))
+            return;
+
         const highOffset = reserveTemp(pointerFacts);
         if (expression.upr is null)
             emit(&opCopy, highOffset, sourceLengthOffset, size_t.sizeof);
         else
             evalOperandInto(expression.upr, highOffset, size_t.sizeof);
 
-        const plan = planSlice(expression);
         Arg[3] boundsArgs = [
             Arg(lowOffset, 0, size_t.sizeof),
             Arg(highOffset, 0, size_t.sizeof),
@@ -5619,6 +5626,115 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opAdd, pointerOffset, byteOffsetOffset, size_t.sizeof);
         emit(&opCopy, _destination + arrayPointerOffset,
             pointerOffset, size_t.sizeof);
+    }
+
+    private bool fixedSliceSpan(SliceExp expression, out size_t span) {
+        if (expression.lwr is null || expression.upr is null
+                || !isSliceSizeWord(expression.upr))
+            return false;
+
+        auto upper = expression.upr;
+        if (upper.op == EXP.add) {
+            auto sum = upper.isBinExp;
+            auto count = sum.e2.isIntegerExp;
+            if (count is null || !isSliceSizeWord(count))
+                return false;
+            span = cast(size_t) count.integerValue;
+            upper = sum.e1;
+        }
+        return isSliceSizeWord(expression.lwr) && isSliceSizeWord(upper)
+            && sameSliceBoundRead(expression.lwr, upper);
+    }
+
+    private bool isSliceSizeWord(Expression expression) {
+        const facts = typeFacts(expression.type);
+        return !expression.type.isShared && !expression.type.baseType.isShared
+            && facts.isIntegral && facts.isUnsigned && facts.size == size_t.sizeof;
+    }
+
+    // Nothing runs between the two reads except the built-in addition. A
+    // method's own receiver cannot change between those reads.
+    private bool sameSliceBoundRead(Expression lower, Expression upper) {
+        import snakebite.frontend.ast: STC;
+
+        if (auto left = lower.isVarExp) {
+            auto right = upper.isVarExp;
+            return right !is null && left.var is right.var
+                && localSlot(lower) != size_t.max;
+        }
+
+        auto left = lower.isDotVarExp;
+        auto right = upper.isDotVarExp;
+        if (left is null || right is null || left.var !is right.var)
+            return false;
+        auto field = left.var.isVarDeclaration;
+        if (field is null || field.isDataseg || field.isBitFieldDeclaration !is null
+                || field.type.isShared || (field.storage_class & STC.ref_))
+            return false;
+        auto leftThis = left.e1.isThisExp;
+        auto rightThis = right.e1.isThisExp;
+        return leftThis !is null && rightThis !is null
+            && leftThis.var is rightThis.var
+            && !leftThis.type.isShared && !rightThis.type.isShared;
+    }
+
+    private bool compileFixedSlice(
+        SliceExp expression, in size_t span, in size_t low,
+        in size_t length, in size_t pointer,
+    ) {
+        import snakebite.language.checks: boundsPlanOf, FailurePlan;
+        import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
+
+        const failure = boundsPlanOf(_bytecode.checks, _function);
+        if (failure.kind == FailurePlan.Kind.ignore)
+            return false;
+
+        size_t high;
+        size_t wrappedBranch = size_t.max;
+        if (span > 1) {
+            high = reserveTemp(pointerFacts);
+            emitAddConstant(high, low, span);
+            wrappedBranch = _code.instructions.length;
+            emit(fusedBranchHandler(Comparison.lessThan, CompareKind.unsigned,
+                    true, false),
+                high, low, size_t.sizeof, 0);
+        }
+
+        // For a single element, i < length proves both i+1 >= i and
+        // i+1 <= length, including when length is size_t.max.
+        const successBranch = _code.instructions.length;
+        emit(fusedBranchHandler(span == 1 ? Comparison.lessThan
+                : Comparison.lessOrEqual, CompareKind.unsigned, true, false),
+            span > 1 ? high : low, length, size_t.sizeof, 0);
+        if (wrappedBranch != size_t.max)
+            patchTarget(wrappedBranch, _code.instructions.length);
+        compileBoundsFailure(failure, BoundsCheck.slice, {
+            if (span <= 1) {
+                high = low;
+                if (span != 0) {
+                    high = reserveTemp(pointerFacts);
+                    emitAddConstant(high, low, span);
+                }
+            }
+            return [
+                Arg(low, 0, size_t.sizeof),
+                Arg(high, 0, size_t.sizeof),
+                Arg(length, 0, size_t.sizeof),
+            ];
+        }, expression.loc);
+        patchTarget(successBranch, _code.instructions.length);
+
+        const elementSize = typeFacts(expression.e1.type.nextOf).size;
+        size_t byteOffset = low;
+        if (elementSize != 1) {
+            byteOffset = reserveTemp(pointerFacts);
+            emitMultiplyConstant(byteOffset, low, elementSize);
+        }
+        emit(&opAdd3, _destination + arrayPointerOffset, pointer,
+            size_t.sizeof, byteOffset);
+        emit(&opConstant, _destination + arrayLengthOffset,
+            addConstant(cast(long) span), size_t.sizeof);
+        return true;
     }
 
     // `arr[]`: dmd's own `foreach` lowering over an array takes a bare
@@ -10187,8 +10303,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         scope Arg delegate() lengthArgument,
         in Loc loc,
     ) {
-        import snakebite.language.checks:
-            boundsPlanOf, cAssertCallOf, cMessageOf, FailurePlan;
+        import snakebite.language.checks: boundsPlanOf, FailurePlan;
 
         const plan = boundsPlanOf(_bytecode.checks, _function);
         if (plan.kind == FailurePlan.Kind.ignore)
@@ -10196,6 +10311,17 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const branchIndex = _code.instructions.length;
         emitBranch();
+        compileBoundsFailure(plan, BoundsCheck.index,
+            () => [indexArgument(), lengthArgument()], loc);
+        patchTarget(branchIndex, _code.instructions.length);
+    }
+
+    private void compileBoundsFailure(
+        in imported!"snakebite.language.checks".FailurePlan plan,
+        in BoundsCheck check, scope Arg[] delegate() arguments, in Loc loc,
+    ) {
+        import snakebite.language.checks: cAssertCallOf, cMessageOf, FailurePlan;
+
         final switch (plan.kind) with (FailurePlan.Kind) {
             case ignore:
                 internalFailure();
@@ -10206,19 +10332,16 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 break;
             }
             case cAssert: {
-                const call = cAssertCallOf(
-                    cMessageOf(BoundsCheck.index).ptr, loc, _function);
+                const call = cAssertCallOf(cMessageOf(check).ptr, loc, _function);
                 compileCAssertCall(call, constantArgument(
                     _bytecode.adoptedString(call.assertion),
                     size_t.sizeof));
                 break;
             }
             case raise:
-                compileFileLineHookCall(hookOf(BoundsCheck.index),
-                    [indexArgument(), lengthArgument()], loc);
+                compileFileLineHookCall(hookOf(check), arguments(), loc);
                 break;
         }
-        patchTarget(branchIndex, _code.instructions.length);
     }
 
     // `-check=nullderef`: dmd's glue layer branches around druntime's
