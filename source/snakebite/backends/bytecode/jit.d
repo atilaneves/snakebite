@@ -2187,7 +2187,6 @@ private struct Gen {
         size_t grow;
         size_t tierUp;
         bool provedCall;
-        bool privateCall;
 
         bool hasPlace() const pure nothrow @nogc @safe {
             return callee.returnPlace.offset != size_t.max;
@@ -2297,15 +2296,10 @@ private struct Gen {
                 jumpToHandler(i, indirectWindowFallback!true(op.destination));
             }
         }
-        if (!op.indirect && arms[0].privateCall) {
-            // A deferred caller can reach the ordinary handler for either
-            // stack growth or a target whose code has not been published yet.
-            patchHere(arms[0].grow);
-            normalizeWindows;
-        }
+        // The ordinary handler transfer normalizes a deferred caller for
+        // both stack growth and tier-up.
         foreach (ref const arm; arms[0 .. end]) {
-            if (op.indirect || !arm.privateCall)
-                patchHere(arm.grow);
+            patchHere(arm.grow);
             if (arm.tierUp)
                 patchHere(arm.tierUp);
         }
@@ -2455,8 +2449,8 @@ private struct Gen {
             && arm.callee.jitHandlers !is null
             && cast(size_t) arm.callee.jitHandlers[-1] != 0;
         arm.provedCall = !op.indirect && (self || published);
-        arm.privateCall = !op.indirect && (self ? deferWindows : published);
-        if (arm.privateCall) {
+        const privateCall = !op.indirect && (self ? deferWindows : published);
+        if (privateCall) {
             if (!emitDeferredCall(pc, ins, op, site, arm))
                 return false;
         } else {
