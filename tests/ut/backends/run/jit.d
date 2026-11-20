@@ -1103,6 +1103,63 @@ static foreach (backend; Matrix!(
     }
 }
 
+static foreach (backend; Matrix!()) {
+    @("jit.recursiveAscendingLoopKeepsScalarEffects." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, import("gauge.d") ~ q{
+            void main() { checkGauge(); }
+        }, ["enter"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE forbids reinterpretation through an overlapping union field"),
+)) {
+    @("jit.recursiveBufferLoopKeepsEffectsAcrossAnAliasAndBoundsFailure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, import("survey.d") ~ q{
+            void main() { checkSurvey(); }
+        }, ["collect"]);
+    }
+}
+
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible, "CTFE rejects writes to an overlapping union field"),
+)) {
+    @("jit.scalarStoresKeepTheOtherHalfOfAFrameSlot." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, import("word.d") ~ q{
+            void main() { checkWord(); }
+        }, ["updateWord"]);
+    }
+}
+
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "an out-of-bounds index is a compile-time error in CTFE"),
+)) {
+    @("jit.recursiveRoutedCopyPreservesEffectsAtBoundsFailure." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, import("routing.d") ~ q{
+            void main() { checkRouteCopy(); }
+        }, ["collect"]);
+    }
+
+    @("jit.recursiveLookupUsesTheStoredIndex." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOfWithJitCode!(backend, import("routing.d") ~ q{
+            void main() { checkStoredRoute(); }
+        }, ["collect"]);
+    }
+}
+
 
 // The number of JIT code files that this process has open.
 private long openJitFiles() {

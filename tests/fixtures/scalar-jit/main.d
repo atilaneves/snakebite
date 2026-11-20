@@ -2,6 +2,10 @@ module main;
 
 import core.exception : ArrayIndexError;
 import core.math : sqrt;
+import gauge : checkGauge;
+import routing : checkRouteCopy, checkStoredRoute;
+import survey : checkSurvey;
+import word : checkWord;
 
 struct ChannelSpan {
     double base;
@@ -293,6 +297,12 @@ int main() {
     assert(sumMasked(9_216, 6, 305, -17) == 2_878_719);
     assert(sumMasked(171, 5, 0, 3) == 0);
     assert(sumMasked(-128, 4, 1, -5) == -117);
+
+    checkGauge();
+    checkSurvey();
+    checkRouteCopy();
+    checkStoredRoute();
+    checkWord();
 
     return 0;
 }

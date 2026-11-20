@@ -27,7 +27,9 @@ package struct ScalarProgram {
         intToFloat, doubleFloat,
     }
 
-    enum Mode : ubyte { unused, frame, indirect, literal, address, register, temporary }
+    enum Mode : ubyte {
+        unused, frame, indirect, literal, address, register, temporary, indirectTemporary,
+    }
 
     static struct Operand {
         Mode mode;
@@ -37,7 +39,7 @@ package struct ScalarProgram {
 
         Operand displaced(uint bytes) const @nogc nothrow {
             Operand result = this;
-            if (mode == Mode.indirect)
+            if (mode == Mode.indirect || mode == Mode.indirectTemporary)
                 result.offset += bytes;
             else
                 result.word += bytes;
@@ -68,6 +70,7 @@ package struct ScalarProgram {
         ushort offset;
         ubyte width;
         bool isTemporary;
+        bool spillHome;
     }
 
     Operation[instructionLimit] operations;
@@ -485,8 +488,10 @@ package struct ScalarRanges {
     bool hasLoop;
     bool hasChecked;
     bool versionSlices;
+    bool recorded;
 
     bool analyze(ushort entry, bool versionSlices) {
+        recorded = false;
         this.versionSlices = versionSlices;
         predecessors[] = 0;
         // The canonical entry supplies state independently of bytecode edges.
@@ -744,7 +749,7 @@ package struct ScalarRanges {
 
     private Value read(in Operand operand, ref State state) {
         final switch (operand.mode) with (Mode) {
-        case unused, indirect, temporary:
+        case unused, indirect, temporary, indirectTemporary:
             return unknown(operand.width);
         case literal:
             return Value(operand.word, operand.word, number);
@@ -1048,7 +1053,7 @@ package struct ScalarRanges {
         if (operand.mode == Mode.frame)
             return Memory(frame, cast(uint) operand.word,
                 cast(uint) operand.word + operand.width);
-        if (operand.mode != Mode.indirect)
+        if (operand.mode != Mode.indirect || recorded)
             return Memory.init;
         const home = program.findSlot(operand.word, ulong.sizeof);
         if (home == none)
@@ -1111,6 +1116,13 @@ package struct ScalarRanges {
         return Value(yes, !no, number);
     }
 
+    static bool testComparison(ulong left, ulong right, size_t width,
+        Comparison comparison, CompareKind kind)
+    {
+        return compareValues(Value(left, left, number), Value(right, right, number),
+            comparison, kind, width).low != 0;
+    }
+
     private static Comparison inverted(Comparison cmp) {
         final switch (cmp) with (Comparison) {
         case lessThan: return greaterOrEqual;
@@ -1142,6 +1154,7 @@ package struct ScalarFlow {
     @nogc nothrow:
 
     alias Program = ScalarProgram;
+    alias Ranges = ScalarRanges;
     alias Kind = Program.Kind;
     alias Operand = Program.Operand;
     alias Mode = Program.Mode;
@@ -1255,6 +1268,7 @@ package struct ScalarFlow {
         ushort availableGp;
         ushort availableFp;
         IntegerOperands integerOperands;
+        ubyte stride = 1;
     }
 
     static struct Block {
@@ -1303,11 +1317,29 @@ package struct ScalarFlow {
             return false;
         if (!ranges.analyze(entry, versionSlices) || ranges.hasChecked && !keepSliceRoots)
             return false;
+        hoistLoads(entry);
+        return prepareFlow(entry, Set.init);
+    }
+
+    bool prepareRecorded(in Set storesOnExit) {
+        ranges.recorded = true;
+        ranges.length = ranges.program.length;
+        ranges.resolved[0 .. ranges.length] = ranges.program.operations[0 .. ranges.length];
+        ranges.hasFloats = false;
+        ranges.hasChecked = false;
+        ranges.slices[] = ScalarRanges.Slice.init;
+        ranges.spans[] = ScalarRanges.Span.init;
+        foreach (pc; 0 .. ranges.length)
+            ranges.memoryOrigin[pc] = cast(ushort) pc;
+        return prepareFlow(0, storesOnExit);
+    }
+
+    private bool prepareFlow(ushort entry, in Set storesOnExit) {
         blockCount = valueCount = nodeCount = 0;
         failed = false;
-        canonical = modified = Set.init;
+        canonical = storesOnExit;
+        modified = Set.init;
         _hasFrameExit = false;
-        hoistLoads(entry);
         auto p = &ranges.program;
         fp0Slot = p.slotOf(Program.fp0, double.sizeof);
         r0Slot = p.slotOf(Program.r0, ulong.sizeof);
@@ -1711,8 +1743,9 @@ package struct ScalarFlow {
     }
 
     private void mention(ref Block block, Operand operand, bool write) {
-        if (operand.mode == Mode.indirect) {
-            operand = Operand(Mode.frame, ulong.sizeof, 0, operand.word);
+        if (operand.mode == Mode.indirect || operand.mode == Mode.indirectTemporary) {
+            operand = Operand(operand.mode == Mode.indirect ? Mode.frame : Mode.temporary,
+                ulong.sizeof, 0, operand.word);
             write = false;
         }
         if (operand.mode != Mode.frame && operand.mode != Mode.register
@@ -1772,11 +1805,13 @@ package struct ScalarFlow {
                 const pointer = read(block, step.slice, Lane.integer, index);
                 if (step.kind == Kind.arrayStore) {
                     append(Node(Action.store, index, none, right, left, pointer,
-                        cast(uint) step.bias, ubyte.sizeof, Lane.integer, indexed: true));
+                        cast(uint) step.bias, step.right.width, Lane.integer, indexed: true,
+                        stride: cast(ubyte) (step.stride ? step.stride : 1)));
                 } else {
-                    const result = value(Value(0, none, nodeCount, ubyte.sizeof, Lane.integer));
+                    const result = value(Value(0, none, nodeCount, step.output.width, Lane.integer));
                     append(Node(Action.load, index, result, none, left, pointer,
-                        cast(uint) step.bias, ubyte.sizeof, Lane.integer, indexed: true));
+                        cast(uint) step.bias, step.output.width, Lane.integer, indexed: true,
+                        stride: cast(ubyte) (step.stride ? step.stride : 1)));
                     write(block, step.output, result, index);
                 }
                 continue;
@@ -1826,14 +1861,15 @@ package struct ScalarFlow {
             prefer(id, lane);
             return id;
         }
-        case indirect: {
-            const address = read(block, Operand(Mode.frame, ulong.sizeof, 0,
+        case indirect, indirectTemporary: {
+            const address = read(block, Operand(operand.mode == indirect ? Mode.frame : Mode.temporary,
+                ulong.sizeof, 0,
                 operand.word), Lane.integer, pc);
             const memory = ranges.memoryOf(operand, pc);
             foreach_reverse (ref const previous; nodes[block.firstNode .. nodeCount]) {
                 if (previous.action == Action.store && !memory.disjoint(previous.memory))
                     break;
-                if (previous.action == Action.load && previous.address == address
+                if (previous.action == Action.load && !previous.indexed && previous.address == address
                         && previous.offset == operand.offset && previous.width == operand.width) {
                     prefer(previous.output, lane);
                     return previous.output;
@@ -1852,8 +1888,9 @@ package struct ScalarFlow {
             failed = true;
             return;
         }
-        if (operand.mode == Mode.indirect) {
-            const address = read(block, Operand(Mode.frame, ulong.sizeof, 0,
+        if (operand.mode == Mode.indirect || operand.mode == Mode.indirectTemporary) {
+            const address = read(block, Operand(
+                operand.mode == Mode.indirect ? Mode.frame : Mode.temporary, ulong.sizeof, 0,
                 operand.word), Lane.integer, pc);
             append(Node(Action.store, pc, none, id, none, address,
                 operand.offset, operand.width, Lane.either, false, ranges.memoryOf(operand, pc)));
@@ -2197,7 +2234,8 @@ package struct ScalarFlow {
 
     bool frameResident(ushort id) const {
         ref const value = values[id];
-        return value.spilled && value.origin == Origin.phi && !modified.has(value.home);
+        return value.spilled && value.origin == Origin.phi && !modified.has(value.home)
+            && !ranges.program.slots[value.home].isTemporary;
     }
 
     private void findEdgeUses() {
@@ -2694,14 +2732,20 @@ package struct ScalarFlow {
     private bool canSpill(ushort id) const {
         ref const value = values[id];
         if (!value.used || !value.allocated || value.spilled || value.home == none
-                || value.home == r0Slot || value.home == fp0Slot || canonical.has(value.home)
-                || ranges.program.slots[value.home].isTemporary)
+                || value.home == r0Slot || value.home == fp0Slot || canonical.has(value.home))
+            return false;
+        const slot = ranges.program.slots[value.home];
+        if (slot.isTemporary && !slot.spillHome)
             return false;
         // Span guards separate these bytes from indirect observers in the
         // region. Two concurrent definitions cannot share them.
         foreach (other; _interference[id])
-            if (values[other].spilled && values[other].home == value.home)
-                return false;
+            if (values[other].spilled) {
+                const occupied = ranges.program.slots[values[other].home];
+                if (occupied.offset < slot.offset + slot.width
+                        && slot.offset < occupied.offset + occupied.width)
+                    return false;
+            }
         return true;
     }
 
@@ -2738,20 +2782,43 @@ package struct ScalarFlow {
                     else
                         node.availableGp &= cast(ushort) ~(1U << color);
                 }
+                uint temporaries;
                 if (integer) {
                     node.integerOperands = constrainInteger(node, afterGp, leftDies);
-                    if (popcnt(node.availableGp) < node.integerOperands.temporaries) {
-                        foreach (id; live)
-                            if (gpValue(id))
-                                blockers.add(id);
-                        return false;
-                    }
+                    temporaries = node.integerOperands.temporaries;
+                } else if (ranges.recorded && node.action != Action.operation) {
+                    temporaries = memoryScratch(node);
+                }
+                if (popcnt(node.availableGp) < temporaries) {
+                    foreach (id; live)
+                        if (gpValue(id))
+                            blockers.add(id);
+                    return false;
                 }
                 if (node.output != none)
                     live.remove(node.output);
             }
         }
         return true;
+    }
+
+    private uint memoryScratch(in Node node) const {
+        uint count;
+        if (node.address != none && !gpValue(node.address))
+            ++count;
+        if (node.indexed && !gpValue(node.right))
+            ++count;
+        if (node.action == Action.load)
+            return count + values[node.output].spilled;
+        ref const source = values[node.left];
+        if (source.origin == Origin.literal) {
+            int immediate;
+            return count + !JitOp.immediate(node.width, source.bits, immediate);
+        }
+        if (source.spilled && node.address == none && source.width == node.width
+                && ranges.program.slots[source.home].offset == node.offset)
+            return count;
+        return count + !gpValue(node.left);
     }
 
     private bool gpValue(ushort id) const {

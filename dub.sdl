@@ -47,7 +47,8 @@ configuration "unittest" {
     sourcePaths "tests"
     sourcePaths "bench/source"
     excludedSourceFiles "bench/source/bench/main.d"
-    excludedSourceFiles "tests/fixtures/scalar-jit/main.d"
+    excludedSourceFiles "tests/fixtures/scalar-jit/*.d"
+    stringImportPaths "tests/fixtures/scalar-jit"
     importPaths "tests"
     importPaths "acceptance"
 
@@ -70,7 +71,8 @@ configuration "arena-validation" {
     mainSourceFile "validation/main.d"
     sourcePaths "validation" "tests" "bench/source"
     excludedSourceFiles "tests/main.d" "bench/source/bench/main.d"
-    excludedSourceFiles "tests/fixtures/scalar-jit/main.d"
+    excludedSourceFiles "tests/fixtures/scalar-jit/*.d"
+    stringImportPaths "tests/fixtures/scalar-jit"
     importPaths "validation" "tests" "acceptance"
 
     dependency "unit-threaded" version="*"

@@ -667,9 +667,11 @@ package struct JitState {
         if (pathJump != 0) {
             const startOfPath = g.a.n;
             auto pathScratch = paths.ptr;
-            const loopPlan = pathScratch.best.memory.saved ? &pathScratch.best : null;
-            const target = g.emitObservedPath(cap, function_, path, ops,
-                originals, *pathScratch, loopPlan)
+            const loopPlan = pathScratch.best.repeating ? &pathScratch.best : null;
+            const target = (loopPlan !is null && g.emitRecordedLoop(path, ops,
+                    originals, *pathScratch, *loopPlan)
+                || g.emitObservedPath(cap, function_, path, ops,
+                    originals, *pathScratch, loopPlan))
                 ? startOfPath : pathJump + int.sizeof;
             if (target != startOfPath)
                 g.a.n = startOfPath;
@@ -1931,6 +1933,7 @@ private struct ScalarEmitter {
     Gen* gen;
     Flow* flow;
     const(Instruction.Handler)[] originals;
+    ushort recordedEntry = none;
     size_t[Plan.instructionLimit] offsets;
     Branch[Plan.instructionLimit * 2] branches;
     size_t branchCount;
@@ -2256,7 +2259,8 @@ private struct ScalarEmitter {
             return Mem(FRAME, cast(int) node.offset);
         const base = integer(location(node.address), addressScratch);
         if (node.indexed)
-            return Mem(cast(ubyte) base, cast(int) node.offset, integer(location(node.right)));
+            return Mem(cast(ubyte) base, cast(int) node.offset, integer(location(node.right)),
+                node.stride);
         return Mem(cast(ubyte) base, cast(int) node.offset);
     }
 
@@ -2536,6 +2540,14 @@ private struct ScalarEmitter {
             // Chained dispatch retains the real activation in the state.
             // An inline window changes FRAME but leaves that activation current.
             a.ld(8, ACTIVE, Mem(STATE, DispatchState.current.offsetof));
+            if (recordedEntry != none) {
+                const target = cast(ushort) step.bias;
+                if (target == recordedEntry)
+                    gen.jumpToHandler(target, originals[target]);
+                else
+                    gen.jumpToPathExit(target);
+                return true;
+            }
             if (step.kind == Kind.returnVoid) {
                 if (gen.inlineCaller !is null) {
                     inlineReturn = true;
@@ -3475,16 +3487,22 @@ private struct Gen {
                 plan.actions[0 .. finished] = PathAction.init;
                 if (!analyzePath(candidate, ops, *scratch, false))
                     continue;
-                if (!plan.actions[plan.memory.first].checked.skipBounds
-                        || plan.memory.maximumIndex < 0)
-                    continue;
-                // Charge two instructions for each entry comparison and the
-                // range checks even when the cold exit will never be taken.
-                const guardCost = 36 + 2 * plan.guards.count;
-                const saved = plan.memory.saved;
-                if (saved <= guardCost)
-                    continue;
-                const loopScore = hits * (saved - guardCost);
+                size_t savings;
+                if (plan.memory.descriptor.width) {
+                    if (!plan.actions[plan.memory.first].checked.skipBounds
+                            || plan.memory.maximumIndex < 0)
+                        continue;
+                    const guardCost = 36 + 2 * plan.guards.count;
+                    if (plan.memory.saved <= guardCost)
+                        continue;
+                    savings = plan.memory.saved - guardCost;
+                } else {
+                    // A virtual call and return eliminate the frame
+                    // setup even on a path with no array accesses.
+                    enum frameTransferCost = 8;
+                    savings = completedReturns * frameTransferCost;
+                }
+                const loopScore = hits * savings;
                 if (loopScore > bestLoopScore) {
                     bestLoopScore = loopScore;
                     bestLoop = candidate;
@@ -3492,6 +3510,7 @@ private struct Gen {
                     scratch.best.guards.count = checks;
                     scratch.best.guards.guards[0 .. checks] = plan.guards.guards[0 .. checks];
                     scratch.best.memory = plan.memory;
+                    scratch.best.repeating = true;
                     scratch.best.actions[0 .. finished] = plan.actions[0 .. finished];
                 }
                 continue;
@@ -3507,7 +3526,7 @@ private struct Gen {
             return bestLoop;
         if (!best.length || storage.reserve(1) is null)
             return null;
-        storage.ptr.best.memory.saved = 0;
+        storage.ptr.best.repeating = false;
         return best;
     }
 
@@ -3676,9 +3695,12 @@ private struct Gen {
         PathGuard[pathDepth] guards = void;
         size_t count;
 
-        PathValue substitute(PathValue value) const {
+        PathValue substitute(PathValue value, const ref PathValues values) const {
+            PathPlace place;
+            if (!count || !values.entryPlace(value, place))
+                return value;
             foreach (ref const guard; guards[0 .. count])
-                if (guard.entry.identity == value.identity)
+                if (guard.place == place && guard.entry.width == value.width)
                     return PathValue(0, value.width, guard.required)
                         .shifted(value.bits);
             return value;
@@ -3766,9 +3788,9 @@ private struct Gen {
         if (!value.width)
             return false;
         if (copy !is null) {
-            const forwarded = guards.substitute(value);
+            const forwarded = guards.substitute(value, values);
             const previous = values.current(dest, cast(ubyte) width);
-            if (previous.width && guards.substitute(previous) == forwarded)
+            if (previous.width && guards.substitute(previous, values) == forwarded)
                 copy.kind = PathCopy.Kind.redundant;
             else if (!forwarded.identity) {
                 int immediate;
@@ -3779,7 +3801,7 @@ private struct Gen {
         return values.write(dest, value);
     }
 
-    bool trackPathInteger(in Instruction ins, in JitOp op, ref PathAddress scalar,
+    bool trackPathInteger(in Instruction ins, in JitOp op, ref PathMemory memory,
         ref PathValues values, const(PathCall)[] calls, int pending)
     {
         const arithmetic = op.int3;
@@ -3794,9 +3816,8 @@ private struct Gen {
                 return false;
             PathAddress address;
             if (!pathAddressOf(ins.destination, width, values, calls, pending, address)
-                    || (scalar.width && scalar != address))
+                    || !memory.noteScalar(address))
                 return false;
-            scalar = address;
             return true;
         }
         if (!pathPlace(leftRaw, calls, pending, left, width))
@@ -3835,12 +3856,28 @@ private struct Gen {
 
     private struct PathMemory {
         PathAddress descriptor;
-        PathAddress scalar;
+        PathAddress[ScalarFlow.Program.slotLimit] scalars;
+        size_t scalarCount;
         PathPlace receiver;
         int width;
         int maximumIndex = -1;
         size_t first = size_t.max;
         size_t saved;
+
+        bool noteScalar(in PathAddress address) @nogc nothrow {
+            foreach (ref const scalar; scalars[0 .. scalarCount]) {
+                if (scalar == address)
+                    return true;
+                if (scalar.base != address.base
+                        || (scalar.displacement < cast(ulong) address.displacement + address.width
+                            && address.displacement < cast(ulong) scalar.displacement + scalar.width))
+                    return false;
+            }
+            if (scalarCount == scalars.length)
+                return false;
+            scalars[scalarCount++] = address;
+            return true;
+        }
     }
 
     private struct PathCopy {
@@ -3858,6 +3895,7 @@ private struct Gen {
         PathGuards guards;
         PathMemory memory;
         PathAction[ObservedEdge.limit] actions;
+        bool repeating;
     }
 
     private struct PathMemoryFacts {
@@ -3873,7 +3911,563 @@ private struct Gen {
         PathValues values;
         PathMemoryFacts facts;
         PathCall[ObservedEdge.limit] calls;
-        PathExit[2 * ObservedEdge.limit + 16] exits;
+        PathExit[3 * ObservedEdge.limit + 16] exits;
+        RecordedLoop recorded;
+    }
+
+    private struct RecordedLoop {
+        @nogc nothrow:
+
+        alias Program = ScalarFlow.Program;
+        alias Operation = Program.Operation;
+        alias Operand = Program.Operand;
+        alias Mode = Program.Mode;
+        alias Kind = Program.Kind;
+        enum none = Program.none;
+
+        Operand[2 * ObservedEdge.limit + 1] references;
+        Operand[Program.slotLimit] scalar;
+        Operation[Program.instructionLimit] conditions;
+        bool[Program.instructionLimit] entryOnly;
+        Operation[Program.slotLimit] snapshot;
+        ScalarFlow.Set storedOnExit;
+        size_t conditionCount;
+        size_t snapshotCount;
+        uint heatStep;
+        size_t reach;
+        Program* program;
+        Operand length;
+        Operand pointer;
+        bool failed;
+
+        ushort append(Operation step) {
+            if (program.length == program.operations.length) {
+                failed = true;
+                return 0;
+            }
+            const pc = program.length++;
+            if (step.kind != Kind.exit)
+                step.next = cast(ushort) (pc + 1);
+            program.operations[pc] = step;
+            return pc;
+        }
+
+        Operand temp(ubyte width) {
+            const id = program.newTemporary(width);
+            failed |= id == none;
+            return Operand(Mode.temporary, width, 0, id);
+        }
+
+        static Operand literal(ulong bits, ubyte width) {
+            return Operand(Mode.literal, width, 0, bits);
+        }
+
+        static Operand home(in PathPlace place, ubyte width) {
+            return Operand(Mode.frame, width, 0, cast(size_t) place.offset);
+        }
+
+        Operand locate(PathValue value, const ref PathValues values, bool preflight = false) {
+            if (!value.identity)
+                return literal(value.bits, value.width);
+            auto operand = references[value.identity];
+            if (preflight || operand.mode == Mode.unused) {
+                PathPlace place;
+                if (!values.entryPlace(value, place)) {
+                    failed = true;
+                    return Operand.init;
+                }
+                operand = home(place, value.width);
+                references[value.identity] = operand;
+            }
+            if (!value.bits)
+                return operand;
+            const result = temp(value.width);
+            const add = Operation(Kind.integer, JitOp.IntOperation.add,
+                output: result, left: operand, right: literal(value.bits, value.width));
+            if (preflight)
+                condition(add);
+            else
+                append(add);
+            return result;
+        }
+
+        void condition(in Operation test) {
+            foreach (ref const earlier; conditions[0 .. conditionCount])
+                if (earlier == test)
+                    return;
+            if (conditionCount == conditions.length) {
+                failed = true;
+                return;
+            }
+            conditions[conditionCount++] = test;
+        }
+
+        void findInvariants(scope const(Operation)[] body) {
+            bool[Program.slotLimit] changes;
+            bool varying(in Operand input) {
+                if (input.mode == Mode.temporary)
+                    return changes[input.word];
+                if (input.mode != Mode.frame)
+                    return false;
+                foreach (ref const step; body) {
+                    const output = step.output;
+                    if (output.mode == Mode.frame && output.word < input.word + input.width
+                            && input.word < output.word + output.width)
+                        return true;
+                }
+                return false;
+            }
+            foreach (i, ref const step; conditions[0 .. conditionCount]) {
+                const variant = varying(step.left) || varying(step.right);
+                entryOnly[i] = !variant;
+                if (step.output.mode == Mode.temporary)
+                    changes[step.output.word] = variant;
+            }
+        }
+
+        ushort checkedEntry(ushort body, ushort entry, size_t heatAddress, bool resume) {
+            const first = program.length;
+            foreach (i, ref const test; conditions[0 .. conditionCount])
+                if (!resume || !entryOnly[i])
+                    append(test);
+            if (heatStep) {
+                const heat = temp(size_t.sizeof);
+                append(Operation(Kind.move, output: heat, left: literal(heatAddress, size_t.sizeof)));
+                const prior = temp(uint.sizeof);
+                const access = Operand(Mode.indirectTemporary, uint.sizeof, 0, heat.word);
+                append(Operation(Kind.move, output: prior, left: access));
+                append(Operation(Kind.branch, compareKind: CompareKind.unsigned,
+                    comparison: Comparison.greaterThan, jumpWhen: true, left: prior,
+                    right: literal(uint.max - heatStep, uint.sizeof)));
+                const updated = temp(uint.sizeof);
+                append(Operation(Kind.integer, JitOp.IntOperation.add,
+                    output: updated, left: prior, right: literal(heatStep, uint.sizeof)));
+                append(Operation(Kind.move, output: access, left: updated));
+            }
+            const jump = append(Operation(Kind.jump, target: body));
+            const failure = program.length;
+            if (resume)
+                foreach (ref const store; snapshot[0 .. snapshotCount])
+                    append(store);
+            append(Operation(Kind.exit, bias: entry));
+            if (failed)
+                return first;
+            foreach (ref step; program.operations[first .. jump])
+                if (step.kind == Kind.branch)
+                    step.target = failure;
+            program.operations[jump].next = none;
+            return first;
+        }
+    }
+
+    bool emitRecordedLoop(const(ObservedEdge)[] path, const(JitOp)[] ops,
+        const(Instruction.Handler)[] originals, ref PathScratch scratch,
+        ref const PathPlan plan)
+    {
+        static if (!chainedDispatch)
+            return false;
+        if (scalarScratch is null || function_.frameSize >= RecordedLoop.Program.r0
+                || function_.closureOffset != size_t.max || function_.exceptionHandlers.length)
+            return false;
+        auto flow = scalarScratch.reserve(1);
+        auto emitter = scalarEmitterScratch.reserve(1);
+        if (flow is null || emitter is null)
+            return false;
+
+        ref trace = scratch.recorded;
+        trace = RecordedLoop.init;
+        trace.program = &flow.ranges.program;
+        trace.program.length = trace.program.slotCount = 0;
+        trace.program.frameSize = cast(ushort) function_.frameSize;
+        alias P = RecordedLoop;
+        const receiver = P.home(plan.memory.receiver, size_t.sizeof);
+        P.Operand receiverField(uint offset, ubyte width) {
+            return P.Operand(P.Mode.indirect, width, offset, receiver.word);
+        }
+        const descriptor = plan.memory.descriptor.displacement;
+        if (plan.memory.descriptor.width) {
+            // The memory prefix can read the descriptor only after a branch
+            // that can bypass its first access has been checked.
+            foreach (edge; path[1 .. plan.memory.first])
+                if (ops[edge.pc].kind == JitOp.Kind.fused)
+                    return false;
+            trace.length = trace.temp(size_t.sizeof);
+            trace.pointer = trace.temp(size_t.sizeof);
+            trace.append(P.Operation(P.Kind.move, output: trace.length,
+                left: receiverField(cast(uint) (descriptor + arrayLengthOffset), size_t.sizeof)));
+            trace.append(P.Operation(P.Kind.move, output: trace.pointer,
+                left: receiverField(cast(uint) (descriptor + arrayPointerOffset), size_t.sizeof)));
+        }
+        const entryJump = trace.append(P.Operation(P.Kind.jump));
+        const first = trace.program.length;
+        foreach (i, ref const address; plan.memory.scalars[0 .. plan.memory.scalarCount]) {
+            trace.scalar[i] = trace.temp(address.width);
+            trace.append(P.Operation(P.Kind.move, output: trace.scalar[i],
+                left: receiverField(address.displacement, address.width)));
+        }
+        const body = trace.program.length;
+        if (!lowerRecordedIteration(path, ops, scratch, plan))
+            return false;
+        trace.findInvariants(trace.program.operations[body .. trace.program.length]);
+        const firstBackedge = trace.append(P.Operation(P.Kind.jump));
+        const repeat = trace.program.length;
+        foreach (pc; body .. firstBackedge)
+            trace.append(trace.program.operations[pc]);
+        const repeatBackedge = trace.append(P.Operation(P.Kind.jump));
+        const heat = cast(size_t) &function_.jitHeat;
+        const entry = trace.checkedEntry(first, path[0].pc, heat, false);
+        const reentry = trace.checkedEntry(repeat, path[0].pc, heat, true);
+        if (trace.failed)
+            return false;
+        trace.program.operations[entryJump].next = entry;
+        trace.program.operations[firstBackedge].next = reentry;
+        trace.program.operations[repeatBackedge].next = reentry;
+        if (!flow.prepareRecorded(trace.storedOnExit))
+            return false;
+
+        const start = a.n;
+        const savedLiterals = literalCount;
+        const savedFixups = fixupCount;
+        bool published;
+        scope (exit) if (!published) {
+            a.n = start;
+            literalCount = savedLiterals;
+            fixupCount = savedFixups;
+        }
+        auto exits = scratch.exits[];
+        size_t exitCount;
+        if (codeLimit - a.n < maximumBytesPerInstruction + 128 * plan.memory.scalarCount)
+            return false;
+        known = KnownConstant.init;
+        intSlots = IntSlots.init;
+        fpSlots = FpSlots.init;
+        const firstOp = ops[path[0].pc];
+        const firstIns = snapshot[path[0].pc];
+        size_t branchTarget, branchExit, branchJump;
+        if (firstOp.kind != JitOp.Kind.fused || !targetIndex(firstIns.sourceWidth, branchTarget)
+                || !emitFused(firstIns, firstOp.fused, branchTarget, 0, path[0].pc + 1,
+                    path[0].next, &branchExit, &branchJump))
+            return false;
+        exits[exitCount++] = PathExit(path[0].pc, branchJump);
+        foreach (ref const guard; plan.guards.guards[0 .. plan.guards.count]) {
+            a.ld(guard.entry.width, RAX, Mem(FRAME, guard.place.offset));
+            int immediate;
+            if (immOf(guard.entry.width, guard.required, immediate))
+                a.aluRI(Alu.cmp, guard.entry.width, RAX, immediate);
+            else {
+                a.movI(SC2, guard.required);
+                a.aluRR(Alu.cmp, guard.entry.width, RAX, SC2);
+            }
+            exits[exitCount++] = PathExit(path[0].pc, jccLocal(CC_NE));
+        }
+        if (trace.reach) {
+            a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+            a.ld(8, R10, Mem(FRAME, cast(int) function_.windowSlot));
+            a.lea(RAX, Mem(R10, cast(int) trace.reach));
+            a.alu(Alu.cmp, 8, RAX, Mem(R9, FrameStack.fastEndOffset));
+            exits[exitCount++] = PathExit(path[0].pc, jccLocal(CC_A));
+        }
+        if (plan.memory.descriptor.width)
+            guardPathMemory(plan.memory, path[0].pc, -1, exits, exitCount);
+        else if (plan.memory.scalarCount) {
+            a.ld(8, R9, Mem(STATE, DispatchState.frames.offsetof));
+            foreach (ref const scalar; plan.memory.scalars[0 .. plan.memory.scalarCount]) {
+                a.ld(8, R10, Mem(FRAME, plan.memory.receiver.offset));
+                a.aluRI(Alu.add, 8, R10, cast(int) scalar.displacement);
+                exits[exitCount++] = PathExit(path[0].pc, jccLocal(CC_B));
+                a.movRR64(SC2, R10);
+                a.aluRI(Alu.add, 8, SC2, scalar.width);
+                exits[exitCount++] = PathExit(path[0].pc, jccLocal(CC_B));
+                guardPathStack(path[0].pc, -1, exits, exitCount, R10, SC2);
+            }
+        }
+
+        *emitter = ScalarEmitter.init;
+        emitter.gen = &this;
+        emitter.flow = flow;
+        emitter.originals = originals;
+        emitter.recordedEntry = path[0].pc;
+        if (!emitter.emit || codeLimit - a.n < handlerJumpBytes)
+            return false;
+        foreach (exit; exits[0 .. exitCount])
+            patchHere(exit.firstJump);
+        jumpToHandler(path[0].pc, originals[path[0].pc]);
+        published = true;
+        return true;
+    }
+
+    bool lowerRecordedIteration(const(ObservedEdge)[] path, const(JitOp)[] ops,
+        ref PathScratch scratch, ref const PathPlan plan)
+    {
+        import std.algorithm.comparison: max;
+
+        alias P = RecordedLoop;
+        ref trace = scratch.recorded;
+        ref values = scratch.values;
+        values.count = 0;
+        values.nextIdentity = 1;
+        ref facts = scratch.facts;
+        facts.checks = facts.known = 0;
+        ref analysis = scratch.candidate;
+        analysis.memory = PathMemory.init;
+        analysis.guards = plan.guards;
+        analysis.actions[0 .. path.length] = PathAction.init;
+        PathCall[pathDepth] frames = void;
+        int pending = -1;
+        ulong[ScalarFlow.Program.slotLimit] effects;
+        foreach (position, edge; path) {
+            const ins = snapshot[edge.pc];
+            const op = ops[edge.pc];
+            const calls = frames[0 .. pending + 1];
+            with (JitOp.Kind) switch (op.kind) {
+            case callWindow: {
+                const arm = observedWindow(function_, edge.pc, op.callWindow);
+                const site = &callSites[ins.source];
+                int child;
+                if (!pathWindowFrame(site, arm, calls, pending, child))
+                    return false;
+                const reach = cast(size_t) child - arm.fast.frameOffset + arm.fast.reachBytes;
+                if (reach > int.max)
+                    return false;
+                trace.reach = max(trace.reach, reach);
+                if (op.callWindow.counted) {
+                    trace.heatStep += jitStep;
+                    if (trace.heatStep < jitStep)
+                        return false;
+                }
+                const parent = pending++;
+                frames[pending] = PathCall(edge.pc, parent, arm, child);
+                break;
+            }
+            case returnVoid:
+                --pending;
+                break;
+            case jump:
+                break;
+            case copy:
+                if (!trackPathCopy(ins, op, values, calls, pending, plan.guards, null))
+                    return false;
+                break;
+            case int3: {
+                const width = cast(ubyte) (op.width ? op.width : ins.width);
+                PathPlace dest;
+                if (pathPlace(ins.destination, calls, pending, dest, width)) {
+                    if (op.int3.operation != JitOp.IntOperation.add
+                            && op.int3.operation != JitOp.IntOperation.subtract)
+                        return false;
+                    if (!trackPathInteger(ins, op, analysis.memory, values, calls, pending))
+                        return false;
+                    break;
+                }
+                PathAddress address;
+                if (!pathAddressOf(ins.destination, width, values, calls, pending, address))
+                    return false;
+                PathPlace receiver;
+                if (!values.entryPlace(address.base, receiver) || receiver != plan.memory.receiver)
+                    return false;
+                bool found;
+                foreach (i, ref const scalar; plan.memory.scalars[0 .. plan.memory.scalarCount]) {
+                    if (scalar.displacement != address.displacement || scalar.width != address.width)
+                        continue;
+                    const right = constantAt(integerRightOperand(ins, op.int3.twoAddress), width);
+                    if (op.int3.operation == JitOp.IntOperation.add)
+                        effects[i] += right;
+                    else if (op.int3.operation == JitOp.IntOperation.subtract)
+                        effects[i] -= right;
+                    else
+                        return false;
+                    found = true;
+                    break;
+                }
+                if (!found)
+                    return false;
+                break;
+            }
+            case fused:
+                if (!recordedCondition(edge, ins, op.fused, calls, pending, values, plan.guards, trace))
+                    return false;
+                break;
+            case checked:
+                if (!trackPathChecked(position, ins, op, values, calls, pending,
+                        analysis, facts, false)
+                        || !recordedArray(ins, op, calls, pending, values, facts,
+                            analysis.actions[position].checked, plan.memory.maximumIndex,
+                            plan.guards, trace))
+                    return false;
+                break;
+            default:
+                return false;
+            }
+        }
+
+        foreach (ref const guard; plan.guards.guards[0 .. plan.guards.count]) {
+            const finalValue = plan.guards.substitute(
+                values.current(guard.place, guard.entry.width), values);
+            if (finalValue != PathValue(0, guard.entry.width, guard.required))
+                return false;
+        }
+
+        // A successful lap has returned all logical calls. Subsequent
+        // interpreter entry needs the actual caller slots.
+        const slots = values.slots[0 .. values.count];
+        foreach (ref const slot; slots) {
+            if (!slot.entry || slot.value == values.current(slot.place, slot.value.width)
+                    || !plan.guards.substitute(slot.value, values).identity)
+                continue;
+            const variable = P.home(slot.place, slot.value.width);
+            const saved = trace.temp(slot.value.width);
+            trace.append(P.Operation(P.Kind.move, output: saved, left: variable));
+            trace.references[slot.value.identity] = saved;
+        }
+        foreach (i, ref const slot; slots) {
+            if (slot.place.window || slot.entry)
+                continue;
+            bool overwritten;
+            foreach (ref const later; slots[i + 1 .. $]) {
+                if (!slot.place.overlaps(later.place, slot.value.width, later.value.width))
+                    continue;
+                if (slot.place != later.place || slot.value.width != later.value.width)
+                    return false;
+                overwritten = true;
+                break;
+            }
+            if (overwritten)
+                continue;
+            const home = P.home(slot.place, slot.value.width);
+            const value = trace.locate(plan.guards.substitute(slot.value, values), values);
+            const store = P.Operation(P.Kind.move, output: home, left: value);
+            bool loopInput;
+            bool overlapsInput;
+            foreach (ref const read; slots[0 .. i]) {
+                loopInput |= read.entry && read.place == slot.place && read.value.width == slot.value.width;
+                overlapsInput |= read.entry
+                    && read.place.overlaps(slot.place, read.value.width, slot.value.width);
+            }
+            if (loopInput) {
+                trace.append(store);
+            } else {
+                const canonical = trace.program.slotOf(home);
+                if (canonical == P.none || trace.snapshotCount == trace.snapshot.length)
+                    return false;
+                trace.storedOnExit.add(canonical);
+                trace.snapshot[trace.snapshotCount++] = store;
+                if (value.mode == P.Mode.temporary && !overlapsInput && value.width == home.width) {
+                    ref spill = trace.program.slots[value.word];
+                    if (!spill.spillHome) {
+                        spill.offset = cast(ushort) home.word;
+                        spill.spillHome = true;
+                    }
+                }
+            }
+        }
+        foreach (i, ref const scalar; plan.memory.scalars[0 .. plan.memory.scalarCount]) {
+            const delta = PathValue(0, scalar.width).shifted(effects[i]).bits;
+            if (!delta)
+                continue;
+            const value = trace.scalar[i];
+            trace.append(P.Operation(P.Kind.integer, JitOp.IntOperation.add,
+                output: value, left: value, right: P.literal(delta, scalar.width)));
+            trace.append(P.Operation(P.Kind.move,
+                output: P.Operand(P.Mode.indirect, scalar.width, scalar.displacement,
+                    cast(size_t) plan.memory.receiver.offset), left: value));
+        }
+        return !trace.failed;
+    }
+
+    bool recordedCondition(in ObservedEdge edge, in Instruction ins, in JitOp.Fused op,
+        const(PathCall)[] calls, int pending, ref PathValues values, ref const PathGuards guards,
+        ref RecordedLoop trace)
+    {
+        alias P = RecordedLoop;
+        PathPlace leftPlace, rightPlace;
+        size_t target;
+        const width = cast(ubyte) ins.width;
+        if (!targetIndex(ins.sourceWidth, target)
+                || !pathPlace(ins.destination, calls, pending, leftPlace, width)
+                || !op.constantRight && !pathPlace(ins.source, calls, pending, rightPlace, width))
+            return false;
+        const left = guards.substitute(values.lookup(leftPlace, width), values);
+        const right = op.constantRight ? PathValue(0, width, constantAt(ins.source, width))
+            : guards.substitute(values.lookup(rightPlace, width), values);
+        if (!left.width || !right.width)
+            return false;
+        const satisfies = (edge.next == target) == op.jumpWhen;
+        if (!left.identity && !right.identity)
+            return ScalarFlow.Ranges.testComparison(left.bits, right.bits, width,
+                op.comparison, op.kind) == satisfies;
+
+        trace.condition(P.Operation(P.Kind.branch, compareKind: op.kind,
+            comparison: op.comparison, jumpWhen: !satisfies,
+            left: trace.locate(left, values, true), right: trace.locate(right, values, true)));
+        return !trace.failed;
+    }
+
+    bool recordedArray(in Instruction ins, in JitOp op, const(PathCall)[] calls, int pending,
+        ref PathValues values, ref const PathMemoryFacts facts, in PathChecked action,
+        int maximumIndex, ref const PathGuards guards, ref RecordedLoop trace)
+    {
+        alias P = RecordedLoop;
+        alias Access = CheckedAccess;
+        const checked = op.checked;
+        PathPlace indexPlace;
+        if (!pathPlace(cast(uint) ins.width, calls, pending, indexPlace, checked.indexWidth))
+            return false;
+        const index = guards.substitute(values.lookup(indexPlace, checked.indexWidth)
+            .shifted(cast(long) cast(int) (ins.width >> 32)), values);
+        if (checked.access == Access.storeUnchecked) {
+            bool bounded = !index.identity && maximumIndex >= 0 && index.bits <= maximumIndex;
+            if (index.identity)
+                foreach (ref const bound; facts.bounded[0 .. facts.checks])
+                    bounded |= bound.value == index && bound.signed == checked.signed;
+            if (!bounded)
+                return false;
+        }
+        if (index.identity && !action.skipBounds && checked.access != Access.storeUnchecked) {
+            auto preflight = trace.locate(index, values, true);
+            if (index.width == int.sizeof && checked.signed)
+                trace.condition(P.Operation(P.Kind.branch, compareKind: CompareKind.signed,
+                    comparison: Comparison.lessThan, jumpWhen: true, left: preflight,
+                    right: P.literal(0, int.sizeof)));
+            if (preflight.mode == P.Mode.frame && index.width < size_t.sizeof) {
+                const narrow = trace.temp(index.width);
+                trace.condition(P.Operation(P.Kind.move, output: narrow, left: preflight));
+                preflight = narrow;
+            }
+            preflight.width = size_t.sizeof;
+            trace.condition(P.Operation(P.Kind.branch, compareKind: CompareKind.unsigned,
+                comparison: Comparison.greaterOrEqual, jumpWhen: true,
+                left: preflight, right: trace.length));
+        }
+        if (checked.access == Access.check || action.skipStore)
+            return !trace.failed;
+        PathPlace place;
+        if (!checked.constantValue && !pathPlace(ins.destination, calls, pending, place, op.width))
+            return false;
+        const load = checked.access == Access.load;
+        const value = checked.constantValue ? PathValue(0, op.width, constantAt(ins.destination, op.width))
+            : guards.substitute(values.current(place, op.width), values);
+        if (!value.width)
+            return false;
+        if (load && value.identity != values.nextIdentity - 1)
+            return true;
+        const operand = load ? trace.temp(op.width) : trace.locate(value, values);
+        if (load)
+            trace.references[value.identity] = operand;
+        if (!index.identity) {
+            const offset = index.bits * op.width;
+            if (offset > int.max)
+                return false;
+            const memory = P.Operand(P.Mode.indirectTemporary, op.width, cast(uint) offset,
+                trace.pointer.word);
+            trace.append(P.Operation(P.Kind.move, output: load ? operand : memory,
+                left: load ? memory : operand));
+        } else {
+            trace.append(P.Operation(load ? P.Kind.arrayLoad : P.Kind.arrayStore,
+                stride: op.width, output: load ? operand : P.Operand.init,
+                left: trace.locate(index, values), right: load ? P.Operand.init : operand,
+                slice: trace.pointer));
+        }
+        return !trace.failed;
     }
 
     bool trackPathChecked(size_t position, in Instruction ins, in JitOp op,
@@ -3897,7 +4491,7 @@ private struct Gen {
             memory.width = op.width;
         }
         if (memory.first == size_t.max) {
-            if (p.access != CheckedAccess.load || memory.scalar.width || pending >= 0
+            if (p.access == CheckedAccess.storeUnchecked || pending >= 0
                     || !values.entryPlace(descriptor.base, memory.receiver)
                     || values.current(memory.receiver, size_t.sizeof) != descriptor.base)
                 return false;
@@ -3911,7 +4505,7 @@ private struct Gen {
             return false;
         index = index.shifted(cast(long) cast(int) (ins.width >> 32));
         if (!gatherGuards)
-            index = plan.guards.substitute(index);
+            index = plan.guards.substitute(index, values);
         if (!index.identity)
             index = PathValue(0, size_t.sizeof, p.signed && index.width == int.sizeof
                 ? cast(ulong) cast(long) cast(int) index.bits : index.bits);
@@ -4039,7 +4633,7 @@ private struct Gen {
                         return false;
                     break;
                 case int3:
-                    if (!trackPathInteger(ins, op, plan.memory.scalar, values, calls, pending))
+                    if (!trackPathInteger(ins, op, plan.memory, values, calls, pending))
                         return false;
                     break;
                 case fused:
@@ -4057,11 +4651,19 @@ private struct Gen {
             }
         }
         auto memory = &plan.memory;
-        if (pending >= 0 || memory.first == size_t.max || memory.width == 0
+        if (pending >= 0)
+            return false;
+        if (!memory.descriptor.width) {
+            if (!memory.scalarCount)
+                return true;
+            const base = memory.scalars[0].base;
+            return values.entryPlace(base, memory.receiver)
+                && values.current(memory.receiver, size_t.sizeof) == base;
+        }
+        if (memory.width == 0
                 || values.current(memory.receiver, size_t.sizeof) != memory.descriptor.base)
             return false;
-        if (memory.scalar.width) {
-            const scalar = memory.scalar;
+        foreach (ref const scalar; memory.scalars[0 .. memory.scalarCount]) {
             const descriptor = memory.descriptor;
             if (scalar.base != descriptor.base
                     || (scalar.displacement < cast(ulong) descriptor.displacement + descriptor.width
@@ -4109,13 +4711,17 @@ private struct Gen {
         exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
         guardPathStack(pc, pending, exits, count, R11, RAX);
         guardPathOverlap(pc, pending, exits, count, memory.descriptor.width);
-        if (memory.scalar.width) {
-            const delta = cast(int) (memory.scalar.displacement
+        foreach (index, ref const scalar; memory.scalars[0 .. memory.scalarCount]) {
+            const delta = cast(int) (scalar.displacement
                 - memory.descriptor.displacement);
             a.aluRI(delta < 0 ? Alu.sub : Alu.add, 8, R10, delta < 0 ? -delta : delta);
             exits[count++] = PathExit(pc, jccLocal(CC_B), 0, pending);
-            guardPathOverlap(pc, pending, exits, count, memory.scalar.width);
+            guardPathOverlap(pc, pending, exits, count, scalar.width);
             guardPathStack(pc, pending, exits, count, R10, SC2);
+            if (index + 1 < memory.scalarCount) {
+                a.ld(8, R10, Mem(FRAME, memory.receiver.offset));
+                a.aluRI(Alu.add, 8, R10, cast(int) memory.descriptor.displacement);
+            }
         }
     }
 
@@ -4148,7 +4754,7 @@ private struct Gen {
         ref PathScratch scratch, const(PathPlan)* plan)
     {
         auto calls = scratch.calls[0 .. path.length];
-        auto exits = scratch.exits[0 .. 2 * path.length + 16];
+        auto exits = scratch.exits[0 .. 3 * path.length + 16];
         size_t callCount;
         size_t exitCount;
         int pending = -1;
