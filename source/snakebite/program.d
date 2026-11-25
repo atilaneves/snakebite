@@ -38,8 +38,8 @@ public struct Program {
     bool startsAsProject;
     TestHooks testHooks;
 
-    // The entry point is found the way a compiled build finds it: the first
-    // root module declaring a module-level `main`.
+    // The entry point is the module-level `main` of the root modules, which
+    // can be one at most.
     this(Module[] rootModules) {
         this(rootModules, "");
     }
@@ -61,7 +61,10 @@ public struct Program {
         in HostActions actions = HostActions(),
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
-        import snakebite.frontend.dmd.functions: findFunction;
+        import snakebite.frontend.dmd.functions: findFunction, prettyNameOf;
+        import std.conv: text;
+        import std.exception: enforce;
+        import std.string: fromStringz;
 
         this.rootModules = rootModules;
         this.name = name;
@@ -75,12 +78,20 @@ public struct Program {
                 _rootModuleSet[module_] = true;
             }
 
+            Module mainModule;
             foreach (module_; rootModules) {
                 auto found = findFunction(module_, "main");
-                if (found !is null) {
-                    main = Main(found);
-                    break;
-                }
+                if (found is null)
+                    continue;
+                // As a compiler does, two `main` functions are an error.
+                enforce(
+                    mainModule is null,
+                    text("only one entry point `main` is allowed: found in `",
+                         prettyNameOf(mainModule).fromStringz, "` and `",
+                         prettyNameOf(module_).fromStringz, "`"),
+                );
+                mainModule = module_;
+                main = Main(found);
             }
         });
     }

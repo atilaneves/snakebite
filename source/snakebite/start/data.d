@@ -114,9 +114,8 @@ public struct StartData {
     public ModuleStart*[] modules;
     public const(ModuleInfo*)[] dependencyModules;
 
-    // The `main` of the program: the one of the first module that has one.
-    // A native linker reports several as an error; this takes the first, as
-    // `Program` does.
+    // The `main` of the program. `Program` rejects more than one, so the
+    // modules have one at most.
     public Nullable!MainStart main() {
         foreach (module_; modules)
             if (!module_.main.isNull)
