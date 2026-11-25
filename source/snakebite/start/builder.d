@@ -21,12 +21,12 @@ alias ModuleStorage =
 
 
 // Reads the frontend one time and builds the start data of `program`: one
-// record for each root module, each made from its module alone. The
+// `ModuleStart` for each root module, each made from its module alone. The
 // functions in it are the ones `compiledFunction` names; it compiles them
 // when it likes. `staticStorage` gives the bytes of a static variable.
-// `moduleStorage` gives the storage of the record of a root module; the
+// `moduleStorage` gives the storage of the `ModuleStart` of a root module; the
 // builder overwrites it. A failure throws before the caller has a value to
-// keep, and can leave records half filled.
+// keep, and can leave `ModuleStart`s half filled.
 public StartData buildStartData(
     Program program,
     CompiledFunction compiledFunction,
@@ -48,8 +48,8 @@ public StartData buildStartData(
 }
 
 
-// The start record of `module_`, from that module alone. Under `-betterC`
-// dmd makes no `ModuleInfo`: the record has the name and `main` only.
+// The `ModuleStart` of `module_`, from that module alone. Under `-betterC`
+// dmd makes no `ModuleInfo`: it has the name and `main` only.
 private ModuleStart startOf(
     imported!"snakebite.frontend.ast".Module module_,
     in bool betterC,

@@ -1236,7 +1236,7 @@ private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) 
 private void transferModule(
     ref Archive archive, ref Program program, ref Module module_,
 ) {
-    // The fields of `Module`: the start record, the blocks and the functions.
+    // The fields of `Module`: the `ModuleStart`, the blocks and the functions.
     static assert(FieldNameTuple!Module == AliasSeq!("start", "blocks", "_functions"));
     // `blocks` is set by `transferBlocks`, before the functions.
     archive.transfer(module_.start);
