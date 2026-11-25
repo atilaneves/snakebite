@@ -1290,15 +1290,15 @@ private void driveSharedSemantic(
         rootModules ~= discoverRootOwnedImports(modules, rootImportPaths);
 
     foreach (m; rootModules) m.importAll(null);
-    demoteKeptImports(rootModules[0]);
+    demoteKeptImports(rootModules);
     foreach (m; rootModules) m.dsymbolSemantic(null);
     runDeferredSemantic;
-    demoteKeptImports(rootModules[0]);
+    demoteKeptImports(rootModules);
     foreach (m; rootModules) m.semantic2(null);
     runDeferredSemantic2;
     foreach (m; rootModules) m.semantic3(null);
     runDeferredSemantic3;
-    demoteKeptImports(rootModules[0]);
+    demoteKeptImports(rootModules);
     if (rootImportPaths.length)
         rootModules ~= analyseLoadedRootOwnedImports(rootImportPaths);
 
@@ -1415,12 +1415,13 @@ private void dropUnitTestsOutsideTemplates(
 // Makes each module that `keepUnitTestsOfModules` loaded as a root an import
 // again, as dmd makes the first root that imports it its `importedFrom`. It
 // ends the promotion: the call comes after the loads of the imports.
-private void demoteKeptImports(imported!"dmd.dmodule".Module root) {
+private void demoteKeptImports(imported!"dmd.dmodule".Module[] roots) {
     import dmd.compiler: compiledImports, includeImports;
     import dmd.dmodule: Module;
 
-    if (!includeImports)
+    if (!includeImports || roots.length == 0)
         return;
+    auto root = roots[0];
     // A module that a later phase loads, such as one that a template
     // imports in a `mixin`, is an import as dmd has it.
     includeImports = false;
