@@ -4,11 +4,18 @@ module snakebite.start.data;
 private:
 
 
-// What the start of a guest program needs, with no frontend data in it: the
-// modules, their phases and the order of their imports, the gate storage,
-// the `crt_constructor` and `crt_destructor` functions, and `main` with the
-// way to call it. A backend builds it (`buildStartData`); `GuestModules` and
-// `runMain` run on it only.
+import std.typecons: Nullable;
+
+
+// The start data of a guest program: what a backend gives to the runner
+// (`snakebite.run`) to start the program, with no frontend data in it. A
+// `ModuleStart` holds what one root module contributes: its constructors,
+// destructors, unit tests and `main`, and the names of the modules that it
+// imports. A backend makes each one from its module alone. `StartData` holds
+// them for the root modules of the program, and what follows from them for
+// the whole program: which `main` runs, and whether it is the C entry point.
+// A backend builds it (`buildStartData`); `GuestModules` and `runMain` run on
+// it only. See "Start data" in `CONTEXT.md`.
 
 // What a backend gives out to name a function. It means nothing outside the
 // backend that made it, and that backend decides when the function is
@@ -36,11 +43,8 @@ public struct ModuleStart {
     // Whether druntime orders the module: false when it has nothing to
     // construct or destruct.
     public bool standalone;
-    // The positions in `StartData.modules` of the modules this module imports
-    // that have a record.
-    public size_t[] imports;
-    // The names of every module this module imports, for the records of a
-    // dependency image. Empty when the program has no dependency image.
+    // The names of the modules this module imports, in the order of its
+    // imports.
     public string[] importNames;
     public FunctionHandle[] independentConstructors;
     public FunctionHandle[] sharedConstructors;
@@ -48,19 +52,25 @@ public struct ModuleStart {
     public FunctionHandle[] sharedDestructors;
     public FunctionHandle[] threadDestructors;
     public FunctionHandle[] unitTests;
+    public FunctionHandle[] crtConstructors;
+    public FunctionHandle[] crtDestructors;
     // dmd's glue layer increments the gate of each destructor of a template
     // instance while it runs the constructors of the module: the destructor
     // body returns early unless it brings the gate back to zero.
     public GateStorage[] sharedGates;
     public GateStorage[] threadGates;
+    // The module-level `main` of the module, if it declares one.
+    public Nullable!MainStart main;
 
     // Calls `visit` with each function handle of the module.
     public void eachHandle(scope void delegate(FunctionHandle) visit) {
         foreach (handles; [independentConstructors, sharedConstructors,
                 threadConstructors, sharedDestructors, threadDestructors,
-                unitTests])
+                unitTests, crtConstructors, crtDestructors])
             foreach (handle; handles)
                 visit(handle);
+        if (!main.isNull)
+            visit(main.get.function_);
     }
 
     // Whether the module has a constructor or a destructor.
@@ -75,8 +85,11 @@ public struct ModuleStart {
 
 
 public struct MainStart {
-    // Whether the program has a `main`.
-    public bool present;
+    // A C-linkage `main` is the entry of the process, as the C runtime
+    // calls it: druntime does not start, so a build with unit tests runs
+    // none of them and no module constructor, and the program is only
+    // that function.
+    public bool cLinkage;
     public bool returnsVoid;
     // The number of parameters `main` declares.
     public size_t parameterCount;
@@ -94,27 +107,32 @@ public const(ModuleInfo*)[] dependencyModulesOf(
 
 public struct StartData {
     public string programName;
-    // A C-linkage `main` is the entry of the process, as the C runtime
-    // calls it.
-    public bool hasCEntryPoint;
     public bool betterC;
-    // One record for each root module, in the order of the constructors. A
-    // backend decides where each record lives (see `buildStartData`).
+    // The `ModuleStart` of each root module, in the order of the root
+    // modules. A backend decides where each one lives (see
+    // `buildStartData`).
     public ModuleStart*[] modules;
-    // In the order of the modules, which is the order of the constructors.
-    public FunctionHandle[] crtConstructors;
-    public FunctionHandle[] crtDestructors;
     public const(ModuleInfo*)[] dependencyModules;
-    public MainStart main;
+
+    // The `main` of the program. `Program` rejects more than one, so the
+    // modules have one at most.
+    public Nullable!MainStart main() @safe pure nothrow @nogc {
+        foreach (module_; modules)
+            if (!module_.main.isNull)
+                return module_.main;
+        return Nullable!MainStart.init;
+    }
+
+    // Whether the `main` of the program is the C entry point (see
+    // `MainStart.cLinkage`).
+    public bool hasCEntryPoint() @safe pure nothrow @nogc {
+        const main_ = main;
+        return !main_.isNull && main_.get.cLinkage;
+    }
 
     // Calls `visit` with each function handle of the program.
     public void eachHandle(scope void delegate(FunctionHandle) visit) {
         foreach (module_; modules)
             module_.eachHandle(visit);
-        foreach (handles; [crtConstructors, crtDestructors])
-            foreach (handle; handles)
-                visit(handle);
-        if (main.present)
-            visit(main.function_);
     }
 }

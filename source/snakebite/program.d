@@ -38,8 +38,8 @@ public struct Program {
     bool startsAsProject;
     TestHooks testHooks;
 
-    // The entry point is found the way a compiled build finds it: the first
-    // root module declaring a module-level `main`.
+    // The entry point is the module-level `main` of the root modules, which
+    // can be one at most.
     this(Module[] rootModules) {
         this(rootModules, "");
     }
@@ -61,7 +61,9 @@ public struct Program {
         in HostActions actions = HostActions(),
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
-        import snakebite.frontend.dmd.functions: findFunction;
+        import snakebite.frontend.dmd.functions: findFunction, prettyNameOf;
+        import std.conv: text;
+        import snakebite.failure.report: SnakebiteException;
 
         this.rootModules = rootModules;
         this.name = name;
@@ -75,12 +77,19 @@ public struct Program {
                 _rootModuleSet[module_] = true;
             }
 
+            Module mainModule;
             foreach (module_; rootModules) {
                 auto found = findFunction(module_, "main");
-                if (found !is null) {
-                    main = Main(found);
-                    break;
-                }
+                if (found is null)
+                    continue;
+                // As a compiler does, two `main` functions are an error.
+                if (mainModule !is null)
+                    throw new SnakebiteException(text(
+                        "only one entry point `main` is allowed: found in `",
+                        prettyNameOf(mainModule), "` and `",
+                        prettyNameOf(module_), "`"));
+                mainModule = module_;
+                main = Main(found);
             }
         });
     }
@@ -118,15 +127,13 @@ public struct Program {
         return _links.definitionOf(variable);
     }
 
-    // A C-linkage `main` is the entry of the process, as the C runtime
-    // calls it: druntime does not start, so a build with unit tests runs
-    // none of them and no module constructor, and the program is only
-    // that function.
+    // Whether the `main` of the program is the C entry point. The choice of
+    // the dependency image needs the answer before any compile, so before the
+    // start data (see "Start data" in `CONTEXT.md`) exists.
     public bool hasCEntryPoint() const {
-        import snakebite.frontend.ast: LINK;
+        import snakebite.frontend.dmd.functions: hasCLinkage;
 
-        return main.func !is null
-            && (cast() main.func).resolvedLinkage == LINK.c;
+        return main.func !is null && hasCLinkage(cast() main.func);
     }
 
     public bool isInterpreted(

@@ -66,6 +66,26 @@ unittest {
 }
 
 
+// A compiler reports two `main` functions in one program as an error that
+// names both (dmd: "only one entry point `main` is allowed").
+@("program.twoRootModulesWithMainAreRefused")
+unittest {
+    auto modules = parseSnippets([
+        q{
+            module first;
+            void main() {}
+        },
+        q{
+            module second;
+            void main() {}
+        },
+    ]);
+
+    Program(modules).shouldThrowWithMessage!SnakebiteException(
+        "only one entry point `main` is allowed: found in `first` and `second`");
+}
+
+
 @("bytecode.compilationStatistics.countsLazyCacheMisses")
 @Tags(Bytecode.stringof)
 unittest {

@@ -21,6 +21,13 @@ public imported!"dmd.func".FuncDeclaration findFunction(
     return findFunction(struct_.members, name);
 }
 
+// Whether `function_` has C linkage.
+public bool hasCLinkage(imported!"dmd.func".FuncDeclaration function_) {
+    import dmd.astenums: LINK;
+
+    return function_.resolvedLinkage == LINK.c;
+}
+
 // The module-level struct called `name`, or null if there is none.
 public imported!"dmd.dstruct".StructDeclaration findStruct(
     imported!"dmd.dmodule".Module module_,
@@ -153,18 +160,19 @@ public imported!"dmd.dmodule".Module moduleOf(
 
 // The pretty name `toPrettyChars` gives, walking the parent chain under the
 // query lock once. The result outlives the lock; a thread keeps it for the
-// declaration's lifetime.
-public const(char)* prettyNameOf(
+// declaration's lifetime. The string is a copy that the caller can keep.
+public string prettyNameOf(
     imported!"dmd.dsymbol".Dsymbol declaration,
 ) {
     import snakebite.frontend.lock: withCompilerQuery;
+    import std.string: fromStringz;
 
     if (auto found = declaration in metadata.prettyNames)
         return *found;
 
-    const(char)* result;
+    string result;
     withCompilerQuery({
-        result = declaration.toPrettyChars;
+        result = declaration.toPrettyChars.fromStringz.idup;
         metadata.prettyNames[declaration] = result;
     });
     return result;
@@ -260,7 +268,7 @@ private struct ThreadMetadata {
     size_t generation;
     imported!"dmd.dmodule".Module[imported!"dmd.dsymbol".Dsymbol] modules;
     FunctionContext[imported!"dmd.func".FuncDeclaration] contexts;
-    const(char)*[imported!"dmd.dsymbol".Dsymbol] prettyNames;
+    string[imported!"dmd.dsymbol".Dsymbol] prettyNames;
     bool[imported!"dmd.func".FuncDeclaration] executed;
 }
 

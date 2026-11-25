@@ -346,7 +346,7 @@ unittest {
             "int main() { int sum = 0; foreach (i; 0 .. 10) sum += i; ",
             "return sum + ", round, "; }"))], "snakebite");
         auto backend = ownedBackend!Bytecode(program);
-        FunctionHandle handle = backend.startData.main.function_;
+        FunctionHandle handle = backend.startData.main.get.function_;
 
         shared size_t ready = 0;
         shared bool go = false;

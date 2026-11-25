@@ -148,8 +148,8 @@ public abstract class Backend {
     // declaration in this and in `staticStorage`, and nowhere else.
     public abstract FunctionHandle compiledFunction(FuncDeclaration function_);
 
-    // The storage of the start record of `module_`. The record must stay at
-    // its address for the life of the backend. The default is a heap block.
+    // The storage of the `ModuleStart` of `module_`. It must stay at its
+    // address for the life of the backend. The default is a heap block.
     protected ModuleStart* moduleStartStorage(
         DModule module_,
     ) {
@@ -167,9 +167,9 @@ public abstract class Backend {
                 if (atomicLoad(_startBuilt))
                     return;
 
-                // `buildStartData` writes each record in place, so a failure
-                // can leave records half filled. The next call builds again
-                // and resets them.
+                // `buildStartData` writes each `ModuleStart` in place, so a
+                // failure can leave them half filled. The next call builds
+                // again and resets them.
                 startDataStorage = buildStartData(
                     cast(Program) _program, &compiledFunction, &staticStorage,
                     &moduleStartStorage);

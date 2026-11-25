@@ -38,6 +38,7 @@ import snakebite.start.data:
 import std.conv: text;
 import std.meta: AliasSeq;
 import std.traits: FieldNameTuple, Unqual;
+import std.typecons: Nullable;
 
 
 // What precedes the program in a file.
@@ -681,8 +682,39 @@ private enum holdsAddress(F) = is(F == U*, U) || is(F == delegate)
     || is(F == class) || is(F == interface);
 
 
+// The dependency image has the module information of the dependencies, not
+// the file.
+private void transfer(
+    ref Archive archive, ref const(ModuleInfo*)[] modules,
+) {
+    if (!archive.isWriting)
+        modules = dependencyModulesOf(archive._image);
+}
+
+
+private enum isNullable(T) = is(T == Nullable!U, U);
+
+
+private void transfer(T)(ref Archive archive, ref T value)
+if (isNullable!T) {
+    alias U = typeof(value.get());
+    bool present = !value.isNull;
+    archive.scalar(present);
+    if (!present)
+        return;
+    if (archive.isWriting)
+        archive.transfer(value.get);
+    else {
+        U payload;
+        archive.transfer(payload);
+        value = payload;
+    }
+}
+
+
 // The one walk. It writes `value` to the file, or reads the file into it.
-private void transfer(T)(ref Archive archive, ref T value) {
+private void transfer(T)(ref Archive archive, ref T value)
+if (!isNullable!T) {
     static if (is(T == enum)) {
         archive.scalar(value);
     } else static if (is(T : real) || is(T == bool) || is(T : dchar)) {
@@ -714,8 +746,12 @@ private void transfer(T)(ref Archive archive, ref T value) {
             || is(Unqual!T == CallSite) || isClassified!(Unqual!T)) {
         transferClassified(archive, value);
     } else static if (is(T == struct)) {
-        static assert(isPureData!(Unqual!T), T.stringof ~ " is neither a type of the "
-            ~ "VM nor data without an address");
+        // The start data have addresses; each field goes through the branch
+        // of its type.
+        static assert(is(Unqual!T == StartData) || is(Unqual!T == ModuleStart)
+            || is(Unqual!T == MainStart) || isPureData!(Unqual!T),
+            T.stringof ~ " is neither a type of the VM, start data nor data "
+            ~ "without an address");
         static foreach (index, name; FieldNameTuple!T)
             archive.transfer(value.tupleof[index]);
     } else
@@ -979,7 +1015,7 @@ private void transferBody(
         } else
             program._modules[m].newFunctions(program.memory, functionCount);
     }
-    transferStartData(archive, program);
+    archive.transfer(program.startData);
     transferPlans(archive, program);
     transferSignatures(archive, program);
     // All data before any function: a function can point into any module.
@@ -1207,10 +1243,10 @@ private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) 
 private void transferModule(
     ref Archive archive, ref Program program, ref Module module_,
 ) {
-    // The fields of `Module`: the start record, the blocks and the functions.
+    // The fields of `Module`: the `ModuleStart`, the blocks and the functions.
     static assert(FieldNameTuple!Module == AliasSeq!("start", "blocks", "_functions"));
     // `blocks` is set by `transferBlocks`, before the functions.
-    transferStart(archive, module_.start);
+    archive.transfer(module_.start);
     foreach (function_; module_._functions) {
         if (archive.isWriting) {
             auto prepared = prepareToWrite(archive, *function_);
@@ -1239,115 +1275,55 @@ private void transferModule(
 }
 
 
-private void transferStartData(ref Archive archive, ref Program program) {
-    static assert(FieldNameTuple!StartData == AliasSeq!("programName",
-        "hasCEntryPoint", "betterC", "modules", "crtConstructors",
-        "crtDestructors", "dependencyModules", "main"));
-    static assert(FieldNameTuple!MainStart == AliasSeq!("present",
-        "returnsVoid", "parameterCount", "function_"));
-
-    ref start = program.startData;
-    archive.transfer(start.programName);
-    archive.transfer(start.hasCEntryPoint);
-    archive.transfer(start.betterC);
-    const count = archive.length(start.modules.length);
-    if (archive.isWriting)
-        archive.need!(ModuleStart*)(count);
-    else
-        start.modules = archive.newArray!(ModuleStart*)(count);
-    foreach (i, ref record; start.modules) {
-        size_t position;
-        if (archive.isWriting) {
-            const found = record in archive._moduleOfStart;
-            if (found is null)
-                internalFailure("a module record belongs to no module");
-            position = *found;
-        }
-        archive.scalar(position);
-        if (!archive.isWriting) {
-            if (position >= program._modules.length)
-                throw new SnakebiteException(
-                    "the program file names a module that it does not hold");
-            record = &program._modules[position].start;
-        }
+// The `ModuleStart` of a module is in the module: the file holds its
+// position in the program.
+private void transfer(
+    ref Archive archive, ref ModuleStart* start,
+) {
+    size_t position;
+    if (archive.isWriting) {
+        const found = start in archive._moduleOfStart;
+        if (found is null)
+            internalFailure("a module start belongs to no module");
+        position = *found;
     }
-    transferHandles(archive, start.crtConstructors);
-    transferHandles(archive, start.crtDestructors);
-    if (!archive.isWriting)
-        start.dependencyModules = dependencyModulesOf(archive._image);
-    archive.transfer(start.main.present);
-    archive.transfer(start.main.returnsVoid);
-    archive.transfer(start.main.parameterCount);
-    if (start.main.present)
-        transferHandle(archive, start.main.function_);
-}
-
-
-private void transferStart(ref Archive archive, ref ModuleStart record) {
-    static assert(FieldNameTuple!ModuleStart == AliasSeq!("name", "standalone",
-        "imports", "importNames", "independentConstructors",
-        "sharedConstructors", "threadConstructors", "sharedDestructors",
-        "threadDestructors", "unitTests", "sharedGates", "threadGates"));
-
-    archive.transfer(record.name);
-    archive.transfer(record.standalone);
-    archive.transfer(record.imports);
-    archive.transfer(record.importNames);
-    transferHandles(archive, record.independentConstructors);
-    transferHandles(archive, record.sharedConstructors);
-    transferHandles(archive, record.threadConstructors);
-    transferHandles(archive, record.sharedDestructors);
-    transferHandles(archive, record.threadDestructors);
-    transferHandles(archive, record.unitTests);
-    transferGates(archive, record.sharedGates);
-    transferGates(archive, record.threadGates);
+    archive.scalar(position);
+    if (!archive.isWriting) {
+        if (position >= archive._program._modules.length)
+            throw new SnakebiteException(
+                "the program file names a module that it does not hold");
+        start = &archive._program._modules[position].start;
+    }
 }
 
 // A gate is the storage of a variable: a target and a length.
-private void transferGates(ref Archive archive, ref GateStorage[] gates) {
-    const count = archive.length(gates.length);
-    if (archive.isWriting)
-        archive.need!GateStorage(count);
-    else
-        gates = archive.newArray!GateStorage(count);
-    foreach (ref gate; gates) {
-        Target.Kind kind;
-        size_t[3] reference;
-        size_t length;
-        if (archive.isWriting) {
-            length = gate.length;
-            kind = archive.gateTarget(gate, reference);
-        }
-        archive.transfer(kind);
-        archive.scalar(reference);
-        archive.scalar(length);
-        if (!archive.isWriting) {
-            // The gate is ready to run once it is read, as after a compile
-            // to RAM.
-            const target = targetOf(archive, kind, reference);
-            gate.bytes = (cast(ubyte*) (isName(kind)
-                ? archive._program.plans.wordOfName(target)
-                : target.address))[0 .. length];
-            if (kind == Target.Kind.staticData)
-                gate.where = DatumRef(archive.blocksAt(reference[0]),
-                    reference[1], reference[2]);
-        }
+private void transfer(ref Archive archive, ref GateStorage gate) {
+    Target.Kind kind;
+    size_t[3] reference;
+    size_t length;
+    if (archive.isWriting) {
+        length = gate.length;
+        kind = archive.gateTarget(gate, reference);
+    }
+    archive.transfer(kind);
+    archive.scalar(reference);
+    archive.scalar(length);
+    if (!archive.isWriting) {
+        // The gate is ready to run once it is read, as after a compile
+        // to RAM.
+        const target = targetOf(archive, kind, reference);
+        gate.bytes = (cast(ubyte*) (isName(kind)
+            ? archive._program.plans.wordOfName(target)
+            : target.address))[0 .. length];
+        if (kind == Target.Kind.staticData)
+            gate.where = DatumRef(archive.blocksAt(reference[0]),
+                reference[1], reference[2]);
     }
 }
 
 
-private void transferHandles(ref Archive archive, ref FunctionHandle[] handles) {
-    const count = archive.length(handles.length);
-    if (archive.isWriting)
-        archive.need!FunctionHandle(count);
-    else
-        handles = archive.newArray!FunctionHandle(count);
-    foreach (ref handle; handles)
-        transferHandle(archive, handle);
-}
-
 // A handle is a compiled function of the program, named by its place.
-private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
+private void transfer(ref Archive archive, ref FunctionHandle handle) {
     size_t[2] position;
     if (archive.isWriting) {
         const compiled = cast(const(Function)*) handle.compiledCode;
