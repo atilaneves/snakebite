@@ -8,10 +8,29 @@ jobs:
       matrix:
         os:
           - ubuntu-24.04
+        dc:
+          - dmd-2.113.0
 
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # Before the matrix compiler: setup-dlang's $DC follows whichever
+      # install ran last, and build/ci.sh relies on $DC being the matrix
+      # dmd. Preserve LDC's absolute path for build/bench.sh before the
+      # second setup changes the active compiler environment.
+      - name: Install ldc (for the bench)
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Record ldc path
+        run: echo "LDC=$DC" >> "$GITHUB_ENV"
+
+      - name: Install D compiler
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ${{ matrix.dc }}
 
       - name: Set up uv
         if: matrix.os == 'ubuntu-24.04'

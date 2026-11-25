@@ -7,28 +7,17 @@ import reggae.rules.dub.runtime: dubBuild;
 import reggae.types: CompilerFlags;
 import std.algorithm: canFind, endsWith, filter, map, sort, startsWith;
 import std.array: array, join;
-import std.process: environment, escapeShellCommand;
+import std.process: environment, executeShell, escapeShellCommand;
 import std.exception: enforce;
-import std.path: baseName, buildPath, dirName, isAbsolute, stripExtension;
+import std.path: baseName, buildPath, dirName, stripExtension;
 import std.string: chomp, split, stripRight;
 
-// The LDC release that build/compilers.sh gives. It is stated here because
-// ninja regenerates the build when this file changes and cannot see a change
-// of build/compilers.sh.
-enum ldcVersion = "1.43.0";
-
-// The path of a program that build/compilers.sh gives for dmd and for LDC, never
-// the one on PATH. The one mechanism for both compilers; the `--dc` option
-// of reggae is only the compiler that builds this file.
-string pinned(string program) {
-    import std.process: Config, execute;
-    static string[string] known;
-    if (auto path = program in known)
-        return *path;
-    const result = execute([buildPath(options.projectPath, "build", "compilers.sh"), program],
-        null, Config.stderrPassThrough);
-    enforce(result.status == 0, "build/compilers.sh " ~ program ~ " failed: " ~ result.output);
-    return known[program] = result.output.chomp;
+string ldcPath() {
+    version (Windows)
+        auto result = executeShell("where ldc2");
+    else
+        auto result = executeShell("command -v ldc2");
+    return result.output.chomp;
 }
 
 // Native sources built by the system C compiler, not
@@ -406,7 +395,9 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     auto buildOptions = options.dup;
     buildOptions.dubObjsDir = "$builddir/.reggae/objs/bin/"
         ~ objectSet ~ ".objs";
-    buildOptions.dCompiler = pinned(compiler == "dmd" ? "dmd" : "ldc2");
+    buildOptions.dCompiler = compiler == "dmd"
+        ? options.dCompiler
+        : environment.get("LDC", ldcPath());
     if (compiler != "dmd")
         buildOptions.dubBuildType = "release";
 
@@ -439,15 +430,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
             info.packages[0].lflags ~= flags.value ~ "-gcc=clang";
     }
     // The executable and loaded D images must share one runtime.
-    // The executable finds that shared runtime next to its compiler: LDC's
-    // configuration gives the run path, dmd's does not.
-    if (compiler == "dmd")
-        enforce(buildOptions.dCompiler.isAbsolute,
-            "the dmd for the run path must be an absolute path, not " ~ buildOptions.dCompiler);
     info.packages[0].lflags ~= compiler == "dmd"
-        ? ["-defaultlib=libphobos2.so", "-L-rpath=" ~ buildPath(
-            buildOptions.dCompiler.dirName.dirName, "lib64")]
-        : ["-link-defaultlib-shared"];
+        ? "-defaultlib=libphobos2.so" : "-link-defaultlib-shared";
     info.options = buildOptions;
     info.packages[0].stringImportPaths ~=
         hostCompilerRecordDirectory(buildOptions.dCompiler, objectSet);

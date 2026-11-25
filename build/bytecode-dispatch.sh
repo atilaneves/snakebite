@@ -2,7 +2,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-compiler=$(build/compilers.sh ldc2)
+compiler=${LDC:-ldc2}
 output=bin/bytecode-dispatch
 mkdir -p bin
 "$compiler" -O3 -release -boundscheck=off -mcpu=native \

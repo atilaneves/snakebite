@@ -2,17 +2,9 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
-# The tests and bin/sb start dmd, ldc2 and dub by name: the compilers of
-# build/compilers.sh come first, so a local run and a CI run use the same ones.
-PATH=$(build/compilers.sh path):$PATH
-export PATH
-# The programs that dmd builds for the tests link libphobos2.so of that dmd.
-LD_LIBRARY_PATH=$(build/compilers.sh lib)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-export LD_LIBRARY_PATH
-
 # The VM, its runner and the bytecode program must compile with no DMD
 # frontend import paths.
-"$(build/compilers.sh dmd)" -o- -i -Isource source/snakebite/backends/bytecode/vm.d \
+"${DMD:-dmd}" -o- -i -Isource source/snakebite/backends/bytecode/vm.d \
     source/snakebite/backends/bytecode/runner.d \
     source/snakebite/backends/bytecode/program.d \
     source/snakebite/backends/bytecode/file.d
