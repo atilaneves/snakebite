@@ -17,6 +17,11 @@
   LHS type only if `auto` fails (comment why). Explicit types are fine
   for uninitialised declarations.
 * No `synchronized`.
+* Prefer RAII for a resource that an object owns: the destructor of the
+  owner releases it and the use site has `scope`. A release call under
+  `scope(exit)` is a sign to check if the owner needs a destructor.
+  `scope(exit)` is allowed where a new type is not worth it, such as a C
+  API, and for locks: `mutex.lock; scope(exit) mutex.unlock;`.
 * Omit empty parens: `doStuff;` not `doStuff();`.
 * Variables as close to their usage as possible.
 * Use `with` in `switch`/`final switch` with enums for more readability.
@@ -103,6 +108,10 @@ This means there is no need to marshall or unmarshall when doing FFI.
 - Do not mention quickbite implementation details in comments attached
   to tests.
 - Do not "intercept" D code by name to shortcut implementation.
+- Do not make an object only to give a function an argument. If code
+  needs a dummy of a type, the function asks for more than it uses:
+  change what the function takes. A parameter that only some
+  implementations of one interface use is allowed.
 - Never delete test code to make tests pass.
 - Do not comment code explaining *what* it does. If it's not clear what
   the code does, rewrite it, don't comment.
