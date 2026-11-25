@@ -38,6 +38,13 @@ globals duplicate.
 CI, and any packaging step, must ship or locate the `libdruntime` and
 `libphobos2` shared objects.
 
+The test programs that dmd builds (`bin/ut` and `bin/arena`) are test programs
+of this repository and are not shipped. The build stores the directory of the
+shared Phobos of the dmd that built them as a run path, so they start in a
+shell where the D installer's `activate` script was not sourced. The run path
+is an absolute path of the build machine. LDC stores its own library path in
+the programs that it builds.
+
 The executable export maps limit `--export-dynamic` to exact names.
 Production hosts (`bin/sb`, `bin/sb-repl`, and `bin/bench`) export only
 `rt_options`. This process-settings exception lets shared druntime use
