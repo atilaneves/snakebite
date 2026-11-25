@@ -2,6 +2,8 @@
 
 ## General
 
+* All code is a liability and must justify its existence. Code that
+  doesn't exist to make a test pass should probably be deleted.
 * One True Brace Style. For functions with many attributes, `{` on its
   own line is acceptable.
 * Use UFCS liberally.
