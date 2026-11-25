@@ -199,6 +199,18 @@ review must-fix.
 - Use `shouldThrowWithMessage`, not `shouldThrow`.
 - Use `.should ==`, not `.shouldEqual`.
 - Use `"...".should.be in foo`, not `.canFind("...").should == true`.
+- State an expectation with the assertion library of the test framework
+  (unit-threaded), on the values themselves: `x.should == y`,
+  `x.should.be in y`, `shouldThrowWithMessage`. Do not use plain `assert`,
+  and do not hand-write a check and wrap it in `.should == true`. Write
+  `name[0 .. expected.length].should == expected;`, not
+  `(name[0 .. expected.length] == expected).should == true;`, and
+  `"only one entry point `main` is allowed".should.be in thrown.msg;`, not
+  `assert(thrown.msg.canFind("..."))`.
+- A test does not import types of the dmd frontend and does not call an
+  internal helper. It states a behaviour through what the tests of that
+  area already use to compile and run a guest program. If a behaviour
+  cannot be reached that way, the test is at the wrong level.
 - The `ut` binary should be the first safety net; its dual mandate is
   to be fast and catch *most* things. It can't catch everything, and
   that's what the other tests are for.
