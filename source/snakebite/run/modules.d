@@ -645,8 +645,8 @@ private Run* newRun(
 ) {
     import core.memory: GC;
 
-    // dmd makes no `ModuleInfo` under `-betterC`: the records name `main`
-    // only, and druntime has no module to register.
+    // dmd makes no `ModuleInfo` under `-betterC`: the `ModuleStart`s name
+    // `main` only, and druntime has no module to register.
     if (start.betterC)
         return null;
 
@@ -654,9 +654,8 @@ private Run* newRun(
         && start.modules.length != 0;
     needed = needed || start.dependencyModules.length != 0;
     foreach (module_; start.modules)
-        needed = needed || module_.hasPhaseFunctions
-            || module_.crtConstructors.length != 0
-            || module_.crtDestructors.length != 0;
+        needed = needed || module_.hasPhaseFunctions;
+    needed = needed || crtFunctionsOf(start).any;
 
     if (!needed)
         return null;
@@ -795,6 +794,27 @@ private ModuleInfo*[] nativeRecordsOf(Run* run) {
 }
 
 
+// The `crt_constructor` and `crt_destructor` functions of all modules.
+private struct CrtFunctions {
+    FunctionHandle[] constructors;
+    FunctionHandle[] destructors;
+
+    bool any() const {
+        return constructors.length != 0 || destructors.length != 0;
+    }
+}
+
+
+private CrtFunctions crtFunctionsOf(StartData start) {
+    CrtFunctions functions;
+    foreach (module_; start.modules) {
+        functions.constructors ~= module_.crtConstructors;
+        functions.destructors ~= module_.crtDestructors;
+    }
+    return functions;
+}
+
+
 // Sets up the `crt_constructor` functions of all modules in `run`, and
 // returns the record of their `crt_destructor` functions, or null when there
 // are none. Without a constructor, the destructors have nothing to wait for.
@@ -802,12 +822,10 @@ private ModuleInfo*[] nativeRecordsOf(Run* run) {
 // The record is first and standalone, as druntime puts such a module first
 // among the ones that have a destructor, which makes its destructor the last.
 private ModuleInfo* crtRecordOf(Run* run, StartData start) {
-    FunctionHandle[] constructors;
-    FunctionHandle[] destructors;
-    foreach (module_; start.modules) {
-        constructors ~= module_.crtConstructors;
-        destructors ~= module_.crtDestructors;
-    }
+    auto functions = crtFunctionsOf(start);
+    // `auto`: a `Phase` takes mutable handles.
+    auto constructors = functions.constructors;
+    auto destructors = functions.destructors;
     if (constructors.length)
         run.crtConstructors = new Phase(
             run, Phase.Kind.constructor, constructors);

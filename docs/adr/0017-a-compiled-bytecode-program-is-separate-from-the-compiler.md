@@ -44,31 +44,30 @@ data that one D module defines. It owns:
 - its static data blocks (`blocks`): the variables of the D module and their
   initial bytes, the constants that its functions refer to, and the initial
   bytes of its fields,
-- its start record (`start`, a `ModuleStart`, in
+- its start data (`start`, a `ModuleStart`, in
   `source/snakebite/start/data.d`): the name, the flags and gates, the names
   of the modules it imports, and the constructors, destructors, unit tests,
   `crt_constructor` and `crt_destructor` functions and `main` as function
-  handles. The record is made from its D module alone.
+  handles. The `ModuleStart` is made from its D module alone.
 
 The rule: a `Module` owns the code and data that its D module defines. Data
 that it owns are not kept elsewhere with only a note in the `Module`. A
 reference to another module (an import) is a reference: the `Module` holds
-it as the name of the module. `StartData` finds the record of each name
-when the program starts. The owner of a template instance is the module that
-declares the template. ADR-0021 item 7 changes this for the `module` and
-`package` modes. A saved file is a list of modules.
+it as the name of the module. `StartData` finds the `ModuleStart` of each
+name when the program starts. The owner of a template instance is the module
+that declares the template. A saved file is a list of modules.
 
 The compiler makes a `Module` at the first function or datum of its D
-module. `buildStartData` asks the compiler for the storage of the record of
-each root module, and the bytecode backend makes the `Module` there, so that
+module. `buildStartData` asks the compiler for the storage of the `ModuleStart`
+of each root module, and the bytecode backend makes the `Module` there, so that
 every root module has one. `StartData.modules` is a list of pointers to the
-`ModuleStart` records, and the `Module` holds each record by value. The
-interpreter and the ctfe backend have no `Module`; they give a record on
+`ModuleStart`s, and the `Module` holds each one by value. The
+interpreter and the ctfe backend have no `Module`; they give a `ModuleStart` on
 the heap to `buildStartData`.
 
 A `Module` is a heap block that the `Program` keeps. Its address does not
 change: instructions point into its blocks, call sites point to its
-functions, and `StartData.modules` points to its record.
+functions, and `StartData.modules` points to its `ModuleStart`.
 
 ### What stays in the Program
 
@@ -90,9 +89,9 @@ process, and `Program` holds them:
   is only meaningful with others of the same `Program`.
 - The call plans, their symbol resolver and the callback bridge are in
   `CallPlanStore`.
-- The start data (`StartData`): the program name and the list of module
-  records. It takes `main`, the `crt_constructor` and `crt_destructor`
-  functions and the record of each import from the records.
+- The start data (`StartData`): the program name and the list of
+  `ModuleStart`s. It takes `main`, the `crt_constructor` and
+  `crt_destructor` functions and the `ModuleStart` of each import from them.
 - A datum that has no owner, or whose owner has no blocks, goes to the blocks
   of `Program.store` (`NativeData.reserve` with no owner). The file holds
   these blocks as it holds those of a `Module`.
@@ -158,8 +157,8 @@ Decided by the owner on 2026-11-18.
   to be in the file. A save compiles the whole program first and fills every
   start handle and every guest call site, so the file holds no delegate of
   the compiler.
-- The start record of a D module is in its `Module`. A start handle in a
+- The start data of a D module is in its `Module`. A start handle in a
   file holds a compiled function, so a loaded module carries its
   constructors, destructors and unit tests.
-- No cost is added to an instruction or a call. Reading the module records
+- No cost is added to an instruction or a call. Reading the `ModuleStart`s
   at start takes one more pointer step for each module.

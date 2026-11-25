@@ -116,7 +116,7 @@ public struct StartData {
 
     // The `main` of the program. `Program` rejects more than one, so the
     // modules have one at most.
-    public Nullable!MainStart main() {
+    public Nullable!MainStart main() @safe pure nothrow @nogc {
         foreach (module_; modules)
             if (!module_.main.isNull)
                 return module_.main;
@@ -125,7 +125,7 @@ public struct StartData {
 
     // Whether the `main` of the program is the C entry point (see
     // `MainStart.cLinkage`).
-    public bool hasCEntryPoint() {
+    public bool hasCEntryPoint() @safe pure nothrow @nogc {
         const main_ = main;
         return !main_.isNull && main_.get.cLinkage;
     }

@@ -63,7 +63,7 @@ public struct Program {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: findFunction, prettyNameOf;
         import std.conv: text;
-        import std.exception: enforce;
+        import snakebite.failure.report: SnakebiteException;
         import std.string: fromStringz;
 
         this.rootModules = rootModules;
@@ -84,12 +84,11 @@ public struct Program {
                 if (found is null)
                     continue;
                 // As a compiler does, two `main` functions are an error.
-                enforce(
-                    mainModule is null,
-                    text("only one entry point `main` is allowed: found in `",
-                         prettyNameOf(mainModule).fromStringz, "` and `",
-                         prettyNameOf(module_).fromStringz, "`"),
-                );
+                if (mainModule !is null)
+                    throw new SnakebiteException(text(
+                        "only one entry point `main` is allowed: found in `",
+                        prettyNameOf(mainModule).fromStringz, "` and `",
+                        prettyNameOf(module_).fromStringz, "`"));
                 mainModule = module_;
                 main = Main(found);
             }

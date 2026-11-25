@@ -66,6 +66,30 @@ unittest {
 }
 
 
+// A compiler reports two `main` functions in one program as an error that
+// names both (dmd: "only one entry point `main` is allowed").
+@("program.twoRootModulesWithMainAreRefused")
+unittest {
+    import std.algorithm: canFind;
+
+    auto modules = parseSnippets([
+        q{
+            module first;
+            void main() {}
+        },
+        q{
+            module second;
+            void main() {}
+        },
+    ]);
+
+    auto thrown = Program(modules).shouldThrow!SnakebiteException;
+
+    assert(thrown.msg.canFind("only one entry point `main` is allowed"), thrown.msg);
+    assert(thrown.msg.canFind("`first`") && thrown.msg.canFind("`second`"), thrown.msg);
+}
+
+
 @("bytecode.compilationStatistics.countsLazyCacheMisses")
 @Tags(Bytecode.stringof)
 unittest {

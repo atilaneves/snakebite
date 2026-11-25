@@ -282,23 +282,6 @@ def test_process_collector_choice(
     assert result.returncode == 0, output(result)
 
 
-# A compiler reports two `main` functions in one program as an error that
-# names both (dmd: "only one entry point `main` is allowed").
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_two_modules_with_main_are_an_error(
-    tmp_path: Path, backend: str,
-) -> None:
-    app = tmp_path / "app"
-    write(app / "dub.sdl", dub_project_recipe("two-mains"))
-    write(app / "source" / "first.d", "module first;\nvoid main() {}\n")
-    write(app / "source" / "second.d", "module second;\nvoid main() {}\n")
-
-    result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
-
-    assert result.returncode != 0, output(result)
-    assert "first" in result.stderr and "second" in result.stderr, output(result)
-
-
 # The DMD source declarations are @trusted; LDC exports @safe symbols.
 # Each call must reach the native definition of the declaration that the
 # frontend resolved, not a renamed host declaration (ADR-0009).

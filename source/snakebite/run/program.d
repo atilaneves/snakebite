@@ -45,6 +45,7 @@ package(snakebite) int runMain(
     StartData start,
     in string[] hostArguments,
 ) {
+    // `auto`: `FunctionHandle.call` is not `const`.
     auto found = start.main;
     if (found.isNull)
         return 0;

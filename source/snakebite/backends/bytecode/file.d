@@ -710,12 +710,6 @@ private void transfer(T)(ref Archive archive, ref T value) {
                 value = payload;
             }
         }
-    } else static if (is(Unqual!T == StartData) || is(Unqual!T == ModuleStart)
-            || is(Unqual!T == MainStart)) {
-        // Each field goes through the branch of its type. A field of a type
-        // with no branch stops the build.
-        static foreach (index, name; FieldNameTuple!T)
-            archive.transfer(value.tupleof[index]);
     } else static if (is(T == E[], E)) {
         // A load needs the relocations only while it runs: it applies them,
         // and `Program.complete` the ones of names (`transferModule`).
@@ -743,8 +737,12 @@ private void transfer(T)(ref Archive archive, ref T value) {
             || is(Unqual!T == CallSite) || isClassified!(Unqual!T)) {
         transferClassified(archive, value);
     } else static if (is(T == struct)) {
-        static assert(isPureData!(Unqual!T), T.stringof ~ " is neither a type of the "
-            ~ "VM nor data without an address");
+        // The start data have addresses; each field goes through the branch
+        // of its type.
+        static assert(is(Unqual!T == StartData) || is(Unqual!T == ModuleStart)
+            || is(Unqual!T == MainStart) || isPureData!(Unqual!T),
+            T.stringof ~ " is neither a type of the VM, start data nor data "
+            ~ "without an address");
         static foreach (index, name; FieldNameTuple!T)
             archive.transfer(value.tupleof[index]);
     } else

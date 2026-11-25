@@ -99,10 +99,11 @@ private MainStart mainStartOf(
 ) {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
     import snakebite.frontend.ast: nextOf, Tvoid;
+    import snakebite.frontend.typefacts: baseType;
 
     MainStart start;
     start.cLinkage = hasCLinkage(main_);
-    start.returnsVoid = main_.type.nextOf.ty == Tvoid;
+    start.returnsVoid = main_.type.nextOf.baseType.ty == Tvoid;
     start.parameterCount = typeFunctionOf(main_).parameterList.length;
     start.function_ = compiled(compiledFunction, main_);
     return start;
