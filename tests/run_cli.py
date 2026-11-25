@@ -3815,11 +3815,16 @@ def write_unit_project(
     write(app / "dub.sdl", recipe)
     write(app / "source" / "numbers" / "counter.d", """
         module numbers.counter;
+        import core.stdc.stdio: printf;
+        pragma(crt_constructor) void crtCounter() { printf("crt-ctor numbers.counter\\n"); }
+        pragma(crt_destructor) void crtCounterEnd() { printf("crt-dtor numbers.counter\\n"); }
         int counted(T)() { static int count; return ++count; }
         """)
     write(app / "source" / "animals" / "shapes.d", """
         module animals.shapes;
         import core.stdc.stdio: printf;
+        pragma(crt_constructor) void crtShapes() { printf("crt-ctor animals.shapes\\n"); }
+        pragma(crt_destructor) void crtShapesEnd() { printf("crt-dtor animals.shapes\\n"); }
         int twice(int value) { return value * 2; }
         int perThread = 3;
         __gshared int everywhere = 100;
@@ -3860,6 +3865,8 @@ def write_unit_project(
             module {module};
             import core.stdc.stdio: printf;
             shared static this() {{ printf("ctor {module}\\n"); }}
+            pragma(crt_constructor) void crt() {{ printf("crt-ctor {module}\\n"); }}
+            pragma(crt_destructor) void crtEnd() {{ printf("crt-dtor {module}\\n"); }}
             unittest {{ printf("test {module}\\n"); }}
             """)
     return app
@@ -3901,6 +3908,26 @@ def test_build_units_run_as_bin_sb(tmp_path: Path, build: str) -> None:
     for _ in range(2):
         built = run_sb(f"--build={build}", str(app), cwd=tmp_path)
         assert_runs_as_bin_sb(built, direct)
+
+
+# The `crt_constructor` and `crt_destructor` functions of modules whose files
+# are not next to each other run in the order of `bin/sb DIR`: the order of
+# the modules of the program, not of the units.
+@pytest.mark.parametrize("build", UNIT_BUILDS)
+def test_build_units_run_crt_functions_in_the_order_of_bin_sb(
+    tmp_path: Path, build: str,
+) -> None:
+    app = write_unit_project(tmp_path, f"build-{build}-crt")
+
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    built = run_sb(f"--build={build}", str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+    crt = [line for line in guest_lines(built) if line.startswith("crt-")]
+    modules = ["animals.shapes", "bee", "numbers.counter",
+               "numbers.sub.leaf", "zulu"]
+    assert crt == ([f"crt-ctor {name}" for name in modules]
+                   + [f"crt-dtor {name}" for name in reversed(modules)]), crt
 
 
 # After an edit to a module, the run compiles the unit of that module and

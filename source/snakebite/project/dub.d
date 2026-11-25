@@ -76,7 +76,7 @@ public struct SourceSet {
     public string[] otherUnitFiles;
     // With `isUnit`, the position of each of `files` among the root files of
     // the program.
-    public size_t[] filePositions;
+    public size_t[] rootPositions;
 }
 
 

@@ -43,7 +43,7 @@ public struct Program {
     bool startsAsProject;
     // The position of each root module among the root files of the whole
     // program, when `rootModules` are one unit of it. Empty otherwise.
-    size_t[] rootPositions;
+    private size_t[] _rootPositions;
     TestHooks testHooks;
 
     // The entry point is found the way a compiled build finds it: the first
@@ -71,11 +71,11 @@ public struct Program {
         Module[] otherUnitModules = null,
         size_t[] rootPositions = null,
     ) {
-        this.rootPositions = rootPositions;
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: findFunction;
 
         this.rootModules = rootModules;
+        _rootPositions = rootPositions;
         this.name = name;
         _checks = checks;
         _actions = actions;
@@ -100,6 +100,10 @@ public struct Program {
                 }
             }
         });
+    }
+
+    public const(size_t)[] rootPositions() const {
+        return _rootPositions;
     }
 
     public Checks checks() const {

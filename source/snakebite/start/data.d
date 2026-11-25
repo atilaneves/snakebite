@@ -115,6 +115,21 @@ public struct StartData {
 
     // The `crt_constructor` and `crt_destructor` functions of the program, in
     // the order of the modules, which is the order of the constructors.
+    public bool hasCrtConstructors() const {
+        foreach (module_; modules)
+            if (module_.crtConstructors.length)
+                return true;
+        return false;
+    }
+
+    public bool hasCrtDestructors() const {
+        foreach (module_; modules)
+            if (module_.crtDestructors.length)
+                return true;
+        return false;
+    }
+
+    // The array of the whole program, made once for the phase that runs it.
     public FunctionHandle[] crtConstructors() {
         FunctionHandle[] all;
         foreach (module_; modules)
@@ -122,10 +137,12 @@ public struct StartData {
         return all;
     }
 
-    public FunctionHandle[] crtDestructors() {
+    // The destructors in the reverse order of `crtConstructors`.
+    public FunctionHandle[] crtDestructorsReversed() {
         FunctionHandle[] all;
-        foreach (module_; modules)
-            all ~= module_.crtDestructors;
+        foreach_reverse (module_; modules)
+            foreach_reverse (function_; module_.crtDestructors)
+                all ~= function_;
         return all;
     }
 

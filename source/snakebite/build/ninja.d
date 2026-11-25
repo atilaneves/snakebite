@@ -143,7 +143,7 @@ private string buildFileText(
         "--program-name=" ~ directory.baseName,
         "--working-directory=" ~ workingDirectory,
         "--image-path=" ~ files.image,
-    ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null);
+    ];
     string compileStatement(
         in string output, in string[] imageSource, in string[] roots,
         in string[] unitOptions,

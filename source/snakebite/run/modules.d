@@ -648,8 +648,8 @@ private Run* newRun(
     bool needed = tests == GuestModules.Tests.yes
         && start.modules.length != 0;
     needed = needed || start.dependencyModules.length != 0
-        || start.crtConstructors.length != 0
-        || start.crtDestructors.length != 0;
+        || start.hasCrtConstructors
+        || start.hasCrtDestructors;
     foreach (module_; start.modules)
         needed = needed || module_.hasPhaseFunctions;
 
@@ -784,20 +784,20 @@ private ModuleInfo*[] nativeRecordsOf(Run* run) {
 // The record is first and standalone, as druntime puts such a module first
 // among the ones that have a destructor, which makes its destructor the last.
 private ModuleInfo* crtRecordOf(Run* run, StartData start) {
-    if (start.crtConstructors.length)
+    if (start.hasCrtConstructors)
         run.crtConstructors = new Phase(
-            run, Phase.Kind.constructor, start.crtConstructors.dup);
+            run, Phase.Kind.constructor, start.crtConstructors);
     else
         atomicStore(run.crtConstructed, true);
 
-    if (start.crtDestructors.length == 0)
+    if (!start.hasCrtDestructors)
         return null;
 
     Fields fields;
     fields.name = "snakebite_crt";
     fields.standalone = true;
     run.crtDestructors = run.phaseOf(
-        Phase.Kind.crtDestructor, reversed(start.crtDestructors));
+        Phase.Kind.crtDestructor, start.crtDestructorsReversed);
     fields.destructor = run.entryOf(run.crtDestructors);
     ModuleInfo** unused;
     return newRecord(fields, unused);
