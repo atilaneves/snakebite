@@ -31,7 +31,7 @@ inputs change: the dependency set from `dub describe`, the compiler,
 and the build settings. A second run costs nothing. snakebite never
 builds the image lazily, on first dependency symbol request. With the
 `--build` option, build statements build the image and ninja's rule
-decides when (ADR-0021 item 13).
+decides when (ADR-0021 item 14).
 
 The image links against the same shared druntime as the host
 (ADR-0008). Image build time gets its own row in the bench table. It
