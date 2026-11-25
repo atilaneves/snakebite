@@ -175,6 +175,10 @@ Review subagents get either the branch or PR number and nothing else.
 Do not bias them by giving them more information; the point of a
 separate subagent to do code review is a fresh context window.
 
+A review subagent runs the `code-review` skill on the branch or PR that
+it gets. The coding standards that the skill checks are `ai/CODING.md` and
+this file.
+
 ## Agent skills
 
 ### Issue tracker
