@@ -39,16 +39,17 @@ Do work in a git worktree in .worktrees unless instructed otherwise.
 
 ## Testing
 
-Run tests after every edit made to D code.
+Build and run the focussed tests when a change is complete, before a commit or
+a report. Do not build and test after each edit. For a set of small edits,
+make all the edits first, then build and test one time. Run only the focussed
+tests for the code that changed, while you work and when the change is
+complete: pass the relevant test names to `bin/ut`.
 
 By default, write unit tests, put them in `bin/ut`, and run them in
 parallel. The separate `bin/arena` validates ownership across the shared
 frontend arena. Its scans need stable process state and hold the frontend
 lock. See `docs/adr/0015-frontend-memory-uses-an-arena.md` before adding
 checks to that runner.
-
-Prefer to run focussed tests instead of the whole test suite by passing
-the relevant test names to `bin/ut`.
 
 To build `bin/ut`, run `build/reggae.sh` if `build.ninja` does not
 exist, then `ninja bin/ut`. Do not assume you can run `bin/ut`. It
@@ -58,8 +59,8 @@ so fast it doesn't matter.
 If the sandbox blocks these commands, request escalation for the same
 command instead of trying alternate test runners.
 
-Run `build/ci.sh` before creating a PR. It must pass before the PR is
-created or merged.
+Do not run the full test suite or `build/ci.sh` on your machine: they take
+too long. CI runs them. A PR is merged only when its CI run passes.
 
 Test behaviours, not implementations.
 
@@ -144,6 +145,17 @@ All backends use native layout in memory as normal compiled D would.
 For instance, a dynamic array is `struct { size_t length; T* ptr; }`:
 length at offset 0, pointer at offset 8 (on 64-bit).
 This means there is no need to marshall or unmarshall when doing FFI.
+
+`bin/sb` does what native code does: the compiler, the linker and the D
+runtime decide the behaviour.
+
+A rule of behaviour in the code that native code does not have, or that gives
+a different result from native code, needs its reason in a decision record
+(`docs/adr/`). With no such record it is a defect.
+
+Before a fix for a difference between two ways of running a program, find
+what native code and the D specification do in that case. That decides which
+one is wrong.
 
 # Do
 
