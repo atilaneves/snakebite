@@ -3866,6 +3866,13 @@ def compiled_modules(result: subprocess.CompletedProcess[str]) -> set[str]:
             if line.startswith("compiled ")}
 
 
+# The lines of the program, without the lines that the frontend prints: ninja
+# gives the output of each compile of a unit on its own output.
+def program_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
+    return [line for line in guest_lines(result)
+            if not line.startswith("compiled ")]
+
+
 # `--build=module` gives the result of `bin/sb DIR`: on the first run and on
 # a run with no change.
 def test_build_module_runs_as_bin_sb(tmp_path: Path) -> None:
@@ -3893,8 +3900,8 @@ def test_build_module_compiles_only_the_changed_module(tmp_path: Path) -> None:
     assert compiled_modules(built) == {"tally"}, output(built)
     direct = run_sb(str(app), cwd=tmp_path)
     assert direct.returncode == 0, output(direct)
-    assert guest_lines(built) == guest_lines(direct), output(built)
-    assert any(line.startswith("tally 8 ") for line in guest_lines(built)), \
+    assert program_lines(built) == program_lines(direct), output(built)
+    assert any(line.startswith("tally 8 ") for line in program_lines(built)), \
         output(built)
 
 
@@ -3913,8 +3920,8 @@ def test_build_module_compiles_the_importer_of_a_changed_module(
     assert compiled_modules(built) == {"shapes", "zoo"}, output(built)
     direct = run_sb(str(app), cwd=tmp_path)
     assert direct.returncode == 0, output(direct)
-    assert guest_lines(built) == guest_lines(direct), output(built)
-    assert any(line.startswith("zoo 63 ") for line in guest_lines(built)), \
+    assert program_lines(built) == program_lines(direct), output(built)
+    assert any(line.startswith("zoo 63 ") for line in program_lines(built)), \
         output(built)
 
 
