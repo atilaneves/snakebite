@@ -39,11 +39,11 @@ Do work in a git worktree in .worktrees unless instructed otherwise.
 
 ## Testing
 
-Build and run the tests when a change is complete, before a commit or a
-report. Do not build and test after each edit. For a set of small edits, make
-all the edits first, then build and test one time. While you work, run only
-the focussed tests for the code that changed: pass the relevant test names to
-`bin/ut`.
+Build and run the focussed tests when a change is complete, before a commit or
+a report. Do not build and test after each edit. For a set of small edits,
+make all the edits first, then build and test one time. Run only the focussed
+tests for the code that changed, while you work and when the change is
+complete: pass the relevant test names to `bin/ut`.
 
 By default, write unit tests, put them in `bin/ut`, and run them in
 parallel. The separate `bin/arena` validates ownership across the shared
@@ -59,8 +59,8 @@ so fast it doesn't matter.
 If the sandbox blocks these commands, request escalation for the same
 command instead of trying alternate test runners.
 
-Run the full test suite and `build/ci.sh` one time before creating a PR.
-`build/ci.sh` must pass before the PR is created or merged.
+Do not run the full test suite or `build/ci.sh` on your machine: they take
+too long. CI runs them. A PR is merged only when its CI run passes.
 
 Test behaviours, not implementations.
 
