@@ -62,6 +62,7 @@ public void saveProgram(
     import std.file: remove, rename, write;
 
     auto body_ = Archive.writing(program);
+    body_._marked = reachableData(program);
     transferBody(body_, program, null);
 
     auto file = Archive.writing(program);
@@ -523,6 +524,23 @@ private struct Archive {
     // Reading: the number of strings of the program before those of the
     // file.
     private size_t _stringBase;
+    // Writing: for each module of the program, and for the process store
+    // after them, whether each of its data is one that the program refers to.
+    // A datum that nothing refers to has no bytes in the file
+    // (`reachableData`). Null when the archive holds every datum.
+    private bool[][] _marked;
+    // Writing: whether the archive only finds the data that the program
+    // refers to. `_pending` holds the data that it found and has not yet
+    // followed.
+    private bool _marking;
+    private size_t[2][] _pending;
+    // The data that nothing refers to, as their numbers among all the data
+    // of the file, in order, and the count of the data and of the dropped
+    // data that the archive has gone past. Reading and writing alike go
+    // through the data in the order of the file.
+    private uint[] _dropped;
+    private size_t _datumsPast;
+    private size_t _droppedPast;
 
     bool isLinking() const @safe pure nothrow @nogc {
         return _linker !is null;
@@ -746,9 +764,57 @@ private struct Archive {
     ) {
         if (set !is null)
             foreach (m; 0 .. _program._modules.length + 1)
-                if (blocksAt(m) is set)
+                if (blocksAt(m) is set) {
+                    if (_marking)
+                        markDatum(m, block, offset);
                     return [m, block, offset];
+                }
         internalFailure("a word points at data that the program does not hold");
+    }
+
+    // Whether the next datum of the file is one with no bytes in the file.
+    // Called once for each datum, in the order of the file.
+    bool takeDropped() {
+        const dropped = _droppedPast < _dropped.length
+            && _dropped[_droppedPast] == _datumsPast;
+        _droppedPast += dropped;
+        ++_datumsPast;
+        return dropped;
+    }
+
+    // Whether the datum `index` of module `module_`, or of the process store,
+    // is in the file with its bytes.
+    bool isKept(in size_t module_, in size_t index) const {
+        return _marked is null || _marked[module_][index];
+    }
+
+    // The data at `offset` in block `block` of the blocks of `module_` are
+    // referred to. A place at the end of a datum is the end of that datum
+    // and the start of the next one: both are referred to.
+    private void markDatum(
+        in size_t module_, in size_t block, in size_t offset,
+    ) {
+        const data = blocksAt(module_).data;
+        size_t low, high = data.length;
+        while (low < high) {
+            const middle = (low + high) / 2;
+            if (data[middle].block < block
+                    || (data[middle].block == block
+                        && data[middle].offset <= offset))
+                low = middle + 1;
+            else
+                high = middle;
+        }
+        // `low - 1` is the last datum that starts at or before the place.
+        foreach (index; (low >= 2 ? low - 2 : 0) .. low) {
+            const datum = data[index];
+            if (datum.block == block && offset >= datum.offset
+                    && offset <= datum.offset + datum.size
+                    && !_marked[module_][index]) {
+                _marked[module_][index] = true;
+                _pending ~= [module_, index];
+            }
+        }
     }
 
     // What a gate (storage of a variable of the program, as `GateStorage`
@@ -1254,12 +1320,27 @@ private void transferBody(
             program._modules[m].blocks.addLoadNeed(archive._need);
         program.store.addLoadNeed(archive._need);
     }
-    foreach (m; 0 .. moduleCount + 1)
-        transferBlocks(archive, m);
-    transferStrings(archive, program.store);
+    // A pass that only finds the data that the program refers to has no use
+    // for the data themselves.
+    if (!archive._marking) {
+        if (archive.isWriting) {
+            size_t number;
+            foreach (m; 0 .. moduleCount + 1)
+                foreach (d; 0 .. archive.blocksAt(m).data.length) {
+                    if (!archive.isKept(m, d))
+                        archive._dropped ~= cast(uint) number;
+                    ++number;
+                }
+        }
+        transferTemporary(archive, archive._dropped);
+        foreach (m; 0 .. moduleCount + 1)
+            transferBlocks(archive, m);
+        transferStrings(archive, program.store);
+    }
     transferOwnCopies(archive, program);
-    foreach (m; 0 .. moduleCount + 1)
-        transferAddresses(archive, m);
+    if (!archive._marking)
+        foreach (m; 0 .. moduleCount + 1)
+            transferAddresses(archive, m);
     // A word of an interface of a class information reads the class
     // information, which can be the program's own copy: it is read once
     // every other word of the data is ready.
@@ -1268,6 +1349,30 @@ private void transferBody(
             archive._program.plans.wordOfName(word.target));
     foreach (m; 0 .. moduleCount)
         transferModule(archive, m);
+}
+
+
+// For each module of `program`, and for the process store after them,
+// whether each of its data is one that the program refers to: from a
+// function, from the start data, from the own copy of a name, or from a datum
+// that the program refers to. The data that a unit defines for a symbol that
+// other units define too are not: a link keeps one own copy of a name, and
+// the others hold bytes that nothing uses. A datum that nothing refers to is
+// in the file with no bytes, so that a load puts each datum where the
+// program has it.
+private bool[][] reachableData(ref Program program) {
+    auto marker = Archive.writing(program);
+    marker._marking = true;
+    foreach (m; 0 .. program._modules.length + 1)
+        marker._marked ~= new bool[marker.blocksAt(m).data.length];
+    transferBody(marker, program, null);
+    while (marker._pending.length) {
+        const place = marker._pending[$ - 1];
+        marker._pending = marker._pending[0 .. $ - 1];
+        foreach (link; marker.blocksAt(place[0]).data[place[1]].links)
+            linkReference(marker, link);
+    }
+    return marker._marked;
 }
 
 
@@ -1342,6 +1447,7 @@ private void transferBlocks(ref Archive archive, in size_t index) {
     foreach (d; 0 .. count) {
         StaticBlocks.Datum datum;
         ubyte[] contents;
+        const dropped = archive.takeDropped;
         if (archive.isWriting) {
             const source = blocks.data[d];
             datum.block = source.block;
@@ -1349,10 +1455,12 @@ private void transferBlocks(ref Archive archive, in size_t index) {
             datum.size = source.size;
             datum.alignment = source.alignment;
             datum.canHoldAddress = source.canHoldAddress;
-            contents = cast(ubyte[]) blocks.bytesOf(source).dup;
-            foreach (link; source.links)
-                contents[link.wordOffset
-                    .. link.wordOffset + size_t.sizeof] = 0;
+            if (!dropped) {
+                contents = cast(ubyte[]) blocks.bytesOf(source).dup;
+                foreach (link; source.links)
+                    contents[link.wordOffset
+                        .. link.wordOffset + size_t.sizeof] = 0;
+            }
         }
         archive.scalar(datum.block);
         archive.scalar(datum.offset);
@@ -1360,7 +1468,8 @@ private void transferBlocks(ref Archive archive, in size_t index) {
         archive.scalar(datum.alignment);
         archive.scalar(datum.canHoldAddress);
         if (archive.isWriting) {
-            archive.bytes(contents);
+            if (!dropped)
+                archive.bytes(contents);
             continue;
         }
         TypeFacts facts;
@@ -1376,7 +1485,8 @@ private void transferBlocks(ref Archive archive, in size_t index) {
         if (placed.block != datum.block + base || placed.offset != datum.offset)
             throw new SnakebiteException(
                 "the program file does not fit the memory of this process");
-        archive.bytes(bytes);
+        if (!dropped)
+            archive.bytes(bytes);
     }
 }
 
@@ -1433,7 +1543,8 @@ private void transferOwnCopies(ref Archive archive, ref Program program) {
 private void transferAddresses(ref Archive archive, in size_t module_) {
     auto blocks = archive.blocksAt(module_);
     foreach (index; archive._dataBases[module_] .. blocks.data.length) {
-        auto links = archive.isWriting ? blocks.data[index].links.dup : null;
+        auto links = archive.isWriting && archive.isKept(module_, index)
+            ? blocks.data[index].links.dup : null;
         const count = archive.length(links.length);
         foreach (linkIndex; 0 .. count) {
             StaticBlocks.Link link;
@@ -1520,7 +1631,8 @@ private void transferModule(ref Archive archive, in size_t index) {
     foreach (function_; archive._fileFunctions[index]) {
         if (archive.isWriting) {
             auto prepared = prepareToWrite(archive, *function_);
-            archive.transfer(prepared);
+            if (!archive._marking)
+                archive.transfer(prepared);
         } else if (archive.isLinking) {
             // The link keeps each relocation, as a compile for a save does.
             Function copy;
