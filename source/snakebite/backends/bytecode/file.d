@@ -1241,14 +1241,10 @@ private void transferModule(
 
 private void transferStartData(ref Archive archive, ref Program program) {
     static assert(FieldNameTuple!StartData == AliasSeq!("programName",
-        "hasCEntryPoint", "betterC", "modules", "crtConstructors",
-        "crtDestructors", "dependencyModules", "main"));
-    static assert(FieldNameTuple!MainStart == AliasSeq!("present",
-        "returnsVoid", "parameterCount", "function_"));
+        "betterC", "modules", "dependencyModules"));
 
     ref start = program.startData;
     archive.transfer(start.programName);
-    archive.transfer(start.hasCEntryPoint);
     archive.transfer(start.betterC);
     const count = archive.length(start.modules.length);
     if (archive.isWriting)
@@ -1271,27 +1267,22 @@ private void transferStartData(ref Archive archive, ref Program program) {
             record = &program._modules[position].start;
         }
     }
-    transferHandles(archive, start.crtConstructors);
-    transferHandles(archive, start.crtDestructors);
     if (!archive.isWriting)
         start.dependencyModules = dependencyModulesOf(archive._image);
-    archive.transfer(start.main.present);
-    archive.transfer(start.main.returnsVoid);
-    archive.transfer(start.main.parameterCount);
-    if (start.main.present)
-        transferHandle(archive, start.main.function_);
 }
 
 
 private void transferStart(ref Archive archive, ref ModuleStart record) {
     static assert(FieldNameTuple!ModuleStart == AliasSeq!("name", "standalone",
-        "imports", "importNames", "independentConstructors",
-        "sharedConstructors", "threadConstructors", "sharedDestructors",
-        "threadDestructors", "unitTests", "sharedGates", "threadGates"));
+        "importNames", "independentConstructors", "sharedConstructors",
+        "threadConstructors", "sharedDestructors", "threadDestructors",
+        "unitTests", "crtConstructors", "crtDestructors", "sharedGates",
+        "threadGates", "main"));
+    static assert(FieldNameTuple!MainStart == AliasSeq!("present",
+        "cLinkage", "returnsVoid", "parameterCount", "function_"));
 
     archive.transfer(record.name);
     archive.transfer(record.standalone);
-    archive.transfer(record.imports);
     archive.transfer(record.importNames);
     transferHandles(archive, record.independentConstructors);
     transferHandles(archive, record.sharedConstructors);
@@ -1299,8 +1290,16 @@ private void transferStart(ref Archive archive, ref ModuleStart record) {
     transferHandles(archive, record.sharedDestructors);
     transferHandles(archive, record.threadDestructors);
     transferHandles(archive, record.unitTests);
+    transferHandles(archive, record.crtConstructors);
+    transferHandles(archive, record.crtDestructors);
     transferGates(archive, record.sharedGates);
     transferGates(archive, record.threadGates);
+    archive.transfer(record.main.present);
+    archive.transfer(record.main.cLinkage);
+    archive.transfer(record.main.returnsVoid);
+    archive.transfer(record.main.parameterCount);
+    if (record.main.present)
+        transferHandle(archive, record.main.function_);
 }
 
 // A gate is the storage of a variable: a target and a length.

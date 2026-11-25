@@ -144,9 +144,9 @@ public struct Program {
 public struct Module {
     @disable this(this);
 
-    // The start record of the D module: its phases and unit tests, and its
-    // imports as positions in `StartData.modules`. The start data points
-    // here. It is filled when the start data is built.
+    // The start record of the D module: its phases and unit tests, its
+    // `main`, and its imports by name. The start data points here. It is
+    // filled when the start data is built.
     @plain public ModuleStart start;
 
     // The static data that the D module defines: its variables and their

@@ -45,15 +45,16 @@ data that one D module defines. It owns:
   initial bytes, the constants that its functions refer to, and the initial
   bytes of its fields,
 - its start record (`start`, a `ModuleStart`, in
-  `source/snakebite/start/data.d`): the name, the flags and gates, the
-  imports, and the constructors, destructors and unit tests as function
-  handles.
+  `source/snakebite/start/data.d`): the name, the flags and gates, the names
+  of the modules it imports, and the constructors, destructors, unit tests,
+  `crt_constructor` and `crt_destructor` functions and `main` as function
+  handles. The record is made from its D module alone.
 
 The rule: a `Module` owns the code and data that its D module defines. Data
 that it owns are not kept elsewhere with only a note in the `Module`. A
 reference to another module (an import) is a reference: the `Module` holds
-it as a position in the list of modules of the program, with the module
-names beside it. The owner of a template instance is the module that
+it as the name of the module. `StartData` finds the record of each name
+when the program starts. The owner of a template instance is the module that
 declares the template. ADR-0021 item 9 changes this for the `module` and
 `package` modes. A saved file is a list of modules.
 
@@ -89,9 +90,9 @@ process, and `Program` holds them:
   is only meaningful with others of the same `Program`.
 - The call plans, their symbol resolver and the callback bridge are in
   `CallPlanStore`.
-- The start data (`StartData`): the program name, `main`, the
-  `crt_constructor` and `crt_destructor` functions, and the list of module
-  records.
+- The start data (`StartData`): the program name and the list of module
+  records. It takes `main`, the `crt_constructor` and `crt_destructor`
+  functions and the record of each import from the records.
 - A datum that has no owner, or whose owner has no blocks, goes to the blocks
   of `Program.store` (`NativeData.reserve` with no owner). The file holds
   these blocks as it holds those of a `Module`.

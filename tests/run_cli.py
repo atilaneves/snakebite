@@ -1232,6 +1232,50 @@ def test_module_destructors_run_in_reverse_import_order(
     ]
 
 
+# An imported module's constructors run first, and its destructors last, also
+# when the module that imports it comes first in the list of root modules.
+# CTFE cannot call the C function `puts`.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+def test_import_orders_constructors_against_the_root_module_order(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "app" / "a_main.d", IMPORTING_MAIN)
+    write(tmp_path / "app" / "b_library.d", IMPORTED_LIBRARY)
+
+    result = run_app(tmp_path, backend)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result) == [
+        "library constructor", "main constructor", "main",
+        "main destructor", "library destructor",
+    ]
+
+
+# As above, for a program that is saved and then loaded.
+def test_saved_program_orders_constructors_by_import(tmp_path: Path) -> None:
+    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
+        "a_main.d": IMPORTING_MAIN,
+        "b_library.d": IMPORTED_LIBRARY,
+    })
+
+
+IMPORTING_MAIN = """
+    module a_main;
+    import b_library;
+    import core.stdc.stdio: puts;
+    shared static this() { puts("main constructor"); }
+    shared static ~this() { puts("main destructor"); }
+    void main() { puts("main"); }
+    """
+
+IMPORTED_LIBRARY = """
+    module b_library;
+    import core.stdc.stdio: puts;
+    shared static this() { puts("library constructor"); }
+    shared static ~this() { puts("library destructor"); }
+    """
+
+
 @pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_module_destructor_runs_after_main_throws(
     tmp_path: Path, backend: str,

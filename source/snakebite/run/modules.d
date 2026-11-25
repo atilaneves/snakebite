@@ -647,11 +647,11 @@ private Run* newRun(
 
     bool needed = tests == GuestModules.Tests.yes
         && start.modules.length != 0;
-    needed = needed || start.dependencyModules.length != 0
-        || start.crtConstructors.length != 0
-        || start.crtDestructors.length != 0;
+    needed = needed || start.dependencyModules.length != 0;
     foreach (module_; start.modules)
-        needed = needed || module_.hasPhaseFunctions;
+        needed = needed || module_.hasPhaseFunctions
+            || module_.crtConstructors.length != 0
+            || module_.crtDestructors.length != 0;
 
     if (!needed)
         return null;
@@ -684,6 +684,7 @@ private ModuleInfo*[] recordsOf(
                 if (auto record = name in nativeByName)
                     nativeImports[i] ~= *record;
     auto crtRecord = crtRecordOf(run, start);
+    const imports = start.importPositions;
     auto importSlots = new ModuleInfo**[start.modules.length];
     foreach (i, module_; start.modules) {
         Fields fields;
@@ -691,7 +692,7 @@ private ModuleInfo*[] recordsOf(
         // druntime orders no module that has nothing to construct or
         // destruct, and no import of one: dmd marks it the same way.
         fields.standalone = module_.standalone;
-        fields.importCount = module_.imports.length + nativeImports[i].length;
+        fields.importCount = imports[i].length + nativeImports[i].length;
         // Every module with a destructor also gets a constructor entry, so
         // that `finish` learns where druntime put it in the order.
         auto sharedDestructor = run.phaseOf(
@@ -722,10 +723,10 @@ private ModuleInfo*[] recordsOf(
     }
 
     foreach (i, slots; importSlots) {
-        foreach (j, index; start.modules[i].imports)
+        foreach (j, index; imports[i])
             slots[j] = records[index];
         foreach (j, record; nativeImports[i])
-            slots[start.modules[i].imports.length + j] = record;
+            slots[imports[i].length + j] = record;
     }
     auto roots = crtRecord is null ? records : crtRecord ~ records; // Registration takes mutable records.
     return nativeRecords.length ? roots ~ nativeRecords : roots;
@@ -784,20 +785,22 @@ private ModuleInfo*[] nativeRecordsOf(Run* run) {
 // The record is first and standalone, as druntime puts such a module first
 // among the ones that have a destructor, which makes its destructor the last.
 private ModuleInfo* crtRecordOf(Run* run, StartData start) {
-    if (start.crtConstructors.length)
+    auto constructors = start.crtConstructors; // A phase calls the handles: not const.
+    if (constructors.length)
         run.crtConstructors = new Phase(
-            run, Phase.Kind.constructor, start.crtConstructors.dup);
+            run, Phase.Kind.constructor, constructors);
     else
         atomicStore(run.crtConstructed, true);
 
-    if (start.crtDestructors.length == 0)
+    auto destructors = start.crtDestructors; // As `constructors`.
+    if (destructors.length == 0)
         return null;
 
     Fields fields;
     fields.name = "snakebite_crt";
     fields.standalone = true;
     run.crtDestructors = run.phaseOf(
-        Phase.Kind.crtDestructor, reversed(start.crtDestructors));
+        Phase.Kind.crtDestructor, reversed(destructors));
     fields.destructor = run.entryOf(run.crtDestructors);
     ModuleInfo** unused;
     return newRecord(fields, unused);
