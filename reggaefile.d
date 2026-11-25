@@ -7,16 +7,17 @@ import reggae.rules.dub.runtime: dubBuild;
 import reggae.types: CompilerFlags;
 import std.algorithm: canFind, endsWith, filter, map, sort, startsWith;
 import std.array: array, join;
-import std.process: environment, executeShell, escapeShellCommand;
+import std.process: environment, escapeShellCommand;
 import std.exception: enforce;
 import std.path: baseName, buildPath, dirName, stripExtension;
 import std.string: chomp, split, stripRight;
 
+// The LDC that build/compilers.sh states, never the one on PATH.
 string ldcPath() {
-    version (Windows)
-        auto result = executeShell("where ldc2");
-    else
-        auto result = executeShell("command -v ldc2");
+    import std.process: Config, execute;
+    const result = execute([buildPath(options.projectPath, "build", "compilers.sh"), "ldc2"],
+        null, Config.stderrPassThrough);
+    enforce(result.status == 0, "build/compilers.sh ldc2 failed: " ~ result.output);
     return result.output.chomp;
 }
 
@@ -397,7 +398,7 @@ Target[] dubTarget(string compiler, string config, string objectSet,
         ~ objectSet ~ ".objs";
     buildOptions.dCompiler = compiler == "dmd"
         ? options.dCompiler
-        : environment.get("LDC", ldcPath());
+        : ldcPath();
     if (compiler != "dmd")
         buildOptions.dubBuildType = "release";
 
