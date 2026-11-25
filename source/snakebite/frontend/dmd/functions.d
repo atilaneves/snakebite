@@ -160,7 +160,8 @@ public imported!"dmd.dmodule".Module moduleOf(
 
 // The pretty name `toPrettyChars` gives, walking the parent chain under the
 // query lock once. The result outlives the lock; a thread keeps it for the
-// declaration's lifetime.
+// declaration's lifetime. The string is a view of the C string, so `.ptr` of
+// it ends with a zero byte.
 public string prettyNameOf(
     imported!"dmd.dsymbol".Dsymbol declaration,
 ) {
@@ -172,7 +173,7 @@ public string prettyNameOf(
 
     string result;
     withCompilerQuery({
-        result = declaration.toPrettyChars.fromStringz.idup;
+        result = cast(string) declaration.toPrettyChars.fromStringz;
         metadata.prettyNames[declaration] = result;
     });
     return result;

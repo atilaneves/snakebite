@@ -3131,6 +3131,22 @@ unittest {
 }
 
 
+@("cAssertCallOf.functionNameIsACString")
+unittest {
+    import snakebite.frontend.ast: Loc;
+    import snakebite.frontend.dmd.functions: prettyNameOf;
+    import snakebite.language.checks: cAssertCallOf;
+    import std.string: fromStringz;
+
+    readWhileGlobalScopeIsSetUp((function_) {
+        const name = cAssertCallOf("x", Loc.initial, function_).function_;
+        const expected = prettyNameOf(function_);
+        (name[0 .. expected.length] == expected).should == true;
+        (name[expected.length] == '\0').should == true;
+    });
+}
+
+
 // A repeated `nativeTarget` call must not take the frontend lock: the
 // answer is cached, and a finalizer scope that cannot lock asks it.
 @("nativeTarget.repeatedQueryTakesNoLock")
