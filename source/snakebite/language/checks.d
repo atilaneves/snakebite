@@ -236,7 +236,7 @@ public CAssertCall cAssertCallOf(
         assertion,
         loc.filename,
         cast(uint) loc.linnum,
-        function_ is null ? "" : prettyNameOf(function_),
+        function_ is null ? "" : prettyNameOf(function_).ptr,
     );
 }
 

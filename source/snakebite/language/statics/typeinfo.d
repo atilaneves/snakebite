@@ -558,7 +558,7 @@ public struct RuntimeTypes {
         import snakebite.frontend.ast: toDString;
         import snakebite.frontend.dmd.functions: prettyNameOf;
         auto info = _data.newObject!TypeInfo_Enum(declaration);
-        _data.storeString(&info.name, prettyNameOf(declaration).toDString);
+        _data.storeString(&info.name, prettyNameOf(declaration));
         reference(&info.base, get(declaration.memtype));
         _data.storeSlice(&info.m_init, _data.initialValue(
             declaration.type, declaration.loc).bytes);

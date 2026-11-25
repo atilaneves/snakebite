@@ -153,18 +153,20 @@ public imported!"dmd.dmodule".Module moduleOf(
 
 // The pretty name `toPrettyChars` gives, walking the parent chain under the
 // query lock once. The result outlives the lock; a thread keeps it for the
-// declaration's lifetime.
-public const(char)* prettyNameOf(
+// declaration's lifetime. The text ends with a zero after its last character.
+public string prettyNameOf(
     imported!"dmd.dsymbol".Dsymbol declaration,
 ) {
+    import core.stdc.string: strlen;
     import snakebite.frontend.lock: withCompilerQuery;
 
     if (auto found = declaration in metadata.prettyNames)
         return *found;
 
-    const(char)* result;
+    string result;
     withCompilerQuery({
-        result = declaration.toPrettyChars;
+        const chars = declaration.toPrettyChars;
+        result = cast(string) chars[0 .. strlen(chars)];
         metadata.prettyNames[declaration] = result;
     });
     return result;
@@ -260,7 +262,7 @@ private struct ThreadMetadata {
     size_t generation;
     imported!"dmd.dmodule".Module[imported!"dmd.dsymbol".Dsymbol] modules;
     FunctionContext[imported!"dmd.func".FuncDeclaration] contexts;
-    const(char)*[imported!"dmd.dsymbol".Dsymbol] prettyNames;
+    string[imported!"dmd.dsymbol".Dsymbol] prettyNames;
     bool[imported!"dmd.func".FuncDeclaration] executed;
 }
 

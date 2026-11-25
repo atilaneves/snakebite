@@ -3259,7 +3259,12 @@ def assert_runs_as_bin_sb(
 ) -> None:
     assert built.returncode == direct.returncode, output(built)
     assert guest_lines(built) == guest_lines(direct), output(built)
-    assert built.stderr == direct.stderr, output(built)
+    assert timing_free(built.stderr) == timing_free(direct.stderr), output(built)
+
+
+# `text` without the lines of the report of a run.
+def timing_free(text: str) -> list[str]:
+    return [line for line in text.splitlines() if not is_timing_line(line)]
 
 
 # `--build=project` gives the result of `bin/sb DIR`: on the first run, on a
@@ -3871,8 +3876,21 @@ def compiled_modules(result: subprocess.CompletedProcess[str]) -> set[str]:
 # that imports it, as a native build of each unit does.
 def program_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
     return guest_lines(result) + [
-        line for line in result.stderr.splitlines()
+        line for line in timing_free(result.stderr)
         if not line.startswith("compiled ")]
+
+
+# The link reports its time as a line of the report of a run, on the first run
+# and not on a run that starts no link.
+def test_build_module_reports_the_time_of_the_link(tmp_path: Path) -> None:
+    app = write_module_project(tmp_path, "build-module-link-time")
+    first = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+    assert any(line.startswith("link:") and is_timing_line(line)
+               for line in first.stderr.splitlines()), output(first)
+    again = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert not any(line.startswith("link:")
+                   for line in again.stderr.splitlines()), output(again)
 
 
 # `--build=module` gives the result of `bin/sb DIR`: on the first run and on
@@ -3982,7 +4000,11 @@ def assert_module_build_runs_as_bin_sb(
 
 
 # An `extern(C)` prototype in one unit is the function that another unit
-# defines.
+# defines. Not corrected yet: a prototype can also name a function of the
+# process, and only the link knows which, so the call needs a fallback that
+# the unit and the link agree on (a decision of the owner, in the report of
+# the fix of the review of PR #1067).
+@pytest.mark.xfail(strict=True, reason="needs a design decision")
 def test_build_module_links_an_extern_c_function_of_another_unit(
     tmp_path: Path,
 ) -> None:

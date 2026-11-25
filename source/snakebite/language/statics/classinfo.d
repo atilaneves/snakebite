@@ -184,7 +184,7 @@ public Linked!TypeInfo_Class classRuntimeInfo(
                 info.m_flags |= isAbstract;
         }
     }
-    data.storeString(&info.name, prettyNameOf(declaration).toDString);
+    data.storeString(&info.name, prettyNameOf(declaration));
     info.nameSig = *cast(uint[4]*) blake3(
         cast(const(ubyte)[]) info.name,
     )[0 .. 16].ptr;

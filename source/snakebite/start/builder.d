@@ -63,7 +63,6 @@ private void addModules(
     import snakebite.frontend.ast: Module;
     import snakebite.frontend.dmd.functions:
         findModuleFunctions, prettyNameOf;
-    import std.string: fromStringz;
 
     size_t[Module] indexOf;
     foreach (i, module_; program.rootModules)
@@ -74,14 +73,14 @@ private void addModules(
         // `auto`: the code writes through the pointer, so it cannot be const.
         auto start = moduleStorage(module_);
         *start = ModuleStart.init;
-        start.name = prettyNameOf(module_).fromStringz.idup;
+        start.name = prettyNameOf(module_).idup;
         start.standalone = !module_.needmoduleinfo;
         bool[size_t] seen;
         foreach (imported; module_.aimports) {
             // A link finds the imports of a unit among the modules of the
             // other units by name.
             if (data.dependencyModules.length != 0 || program.isUnit)
-                start.importNames ~= prettyNameOf(imported).fromStringz.idup;
+                start.importNames ~= prettyNameOf(imported).idup;
             if (!imported.needmoduleinfo || imported is module_)
                 continue;
 

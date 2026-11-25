@@ -875,11 +875,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             return *found;
 
         import snakebite.frontend.dmd.functions: prettyNameOf;
-        import std.string: fromStringz;
 
         auto created = compiledProgram.newModule();
         // A link joins the modules of the files of the units by name.
-        created.start.name = prettyNameOf(owner).fromStringz.idup;
+        created.start.name = prettyNameOf(owner).idup;
         _modules[owner] = created;
         return created;
     }
