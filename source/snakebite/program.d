@@ -62,6 +62,7 @@ public struct Program {
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: findFunction;
+        import snakebite.start.data: firstMain;
 
         this.rootModules = rootModules;
         this.name = name;
@@ -75,13 +76,10 @@ public struct Program {
                 _rootModuleSet[module_] = true;
             }
 
-            foreach (module_; rootModules) {
-                auto found = findFunction(module_, "main");
-                if (found !is null) {
-                    main = Main(found);
-                    break;
-                }
-            }
+            auto found = firstMain!(module_ => findFunction(module_, "main"))(
+                rootModules);
+            if (found !is null)
+                main = Main(found);
         });
     }
 
@@ -118,15 +116,11 @@ public struct Program {
         return _links.definitionOf(variable);
     }
 
-    // A C-linkage `main` is the entry of the process, as the C runtime
-    // calls it: druntime does not start, so a build with unit tests runs
-    // none of them and no module constructor, and the program is only
-    // that function.
     public bool hasCEntryPoint() const {
-        import snakebite.frontend.ast: LINK;
+        import snakebite.start.data: isCEntryPoint;
 
-        return main.func !is null
-            && (cast() main.func).resolvedLinkage == LINK.c;
+        return isCEntryPoint(main.func !is null,
+            hasCLinkage(cast() main.func));
     }
 
     public bool isInterpreted(
@@ -163,4 +157,12 @@ public struct Program {
 
         return frontendIsDefinedElsewhere(declaration, _rootModuleSet);
     }
+}
+
+
+// Whether `function_` has C linkage.
+public bool hasCLinkage(imported!"snakebite.frontend.ast".FuncDeclaration function_) {
+    import snakebite.frontend.ast: LINK;
+
+    return function_.resolvedLinkage == LINK.c;
 }

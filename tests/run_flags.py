@@ -728,9 +728,11 @@ extern(C) int callback(int function() next) { return next(); }
         }],
     }), encoding="utf-8")
     linkage = "" if entry == "d" else "extern(C) "
-    startup = "" if entry == "betterc" else """\
+    constructors = "" if entry == "betterc" else """\
 shared static this() { fputs("ROOT_CTOR\\n", stderr); }
 static this() { fputs("ROOT_TLS_CTOR\\n", stderr); }
+"""
+    startup = constructors + """\
 unittest {
     fputs("UNITTEST\\n", stderr);
     assert(ordinary() == 2);

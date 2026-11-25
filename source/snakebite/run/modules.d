@@ -645,6 +645,11 @@ private Run* newRun(
 ) {
     import core.memory: GC;
 
+    // dmd makes no `ModuleInfo` under `-betterC`: the records name `main`
+    // only, and druntime has no module to register.
+    if (start.betterC)
+        return null;
+
     bool needed = tests == GuestModules.Tests.yes
         && start.modules.length != 0;
     needed = needed || start.dependencyModules.length != 0;

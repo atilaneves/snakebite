@@ -1196,84 +1196,54 @@ def test_module_destructors_run_in_reverse_order(
     ]
 
 
+IMPORT_ORDERS = [("a_library", "b_main"), ("b_library", "a_main")]
+
+IMPORT_ORDER_LINES = [
+    "library constructor", "main constructor", "main",
+    "main destructor", "library destructor",
+]
+
+
+def import_order_sources(library: str, main: str) -> dict[str, str]:
+    return {
+        f"{library}.d": f"""
+            module {library};
+            import std.stdio: writeln;
+            shared static this() {{ writeln("library constructor"); }}
+            shared static ~this() {{ writeln("library destructor"); }}
+            """,
+        f"{main}.d": f"""
+            module {main};
+            import {library};
+            import std.stdio: writeln;
+            shared static this() {{ writeln("main constructor"); }}
+            shared static ~this() {{ writeln("main destructor"); }}
+            void main() {{ writeln("main"); }}
+            """,
+    }
+
+
 # A module's destructors run after those of every module that imports it:
-# the reverse of the order its constructors ran.
+# the reverse of the order its constructors ran. The module names set the
+# order of the root modules, so the import decides in both cases.
 @pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
+@pytest.mark.parametrize("library, main", IMPORT_ORDERS)
 def test_module_destructors_run_in_reverse_import_order(
-    tmp_path: Path, backend: str,
+    tmp_path: Path, backend: str, library: str, main: str,
 ) -> None:
-    write(
-        tmp_path / "app" / "a_library.d",
-        """
-        module a_library;
-        import std.stdio: writeln;
-        shared static this() { writeln("library constructor"); }
-        shared static ~this() { writeln("library destructor"); }
-        """,
-    )
-    write(
-        tmp_path / "app" / "b_main.d",
-        """
-        module b_main;
-        import a_library;
-        import std.stdio: writeln;
-        shared static this() { writeln("main constructor"); }
-        shared static ~this() { writeln("main destructor"); }
-        void main() { writeln("main"); }
-        """,
-    )
+    for name, source in import_order_sources(library, main).items():
+        write(tmp_path / "app" / name, source)
 
     result = run_app(tmp_path, backend)
 
     assert result.returncode == 0, output(result)
-    assert guest_lines(result) == [
-        "library constructor", "main constructor", "main",
-        "main destructor", "library destructor",
-    ]
-
-
-# An imported module's constructors run first, and its destructors last, also
-# when the module that imports it comes first in the list of root modules.
-# CTFE cannot call the C function `puts`.
-@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
-def test_import_orders_constructors_against_the_root_module_order(
-    tmp_path: Path, backend: str,
-) -> None:
-    write(tmp_path / "app" / "a_main.d", IMPORTING_MAIN)
-    write(tmp_path / "app" / "b_library.d", IMPORTED_LIBRARY)
-
-    result = run_app(tmp_path, backend)
-
-    assert result.returncode == 0, output(result)
-    assert guest_lines(result) == [
-        "library constructor", "main constructor", "main",
-        "main destructor", "library destructor",
-    ]
+    assert guest_lines(result) == IMPORT_ORDER_LINES
 
 
 # As above, for a program that is saved and then loaded.
 def test_saved_program_orders_constructors_by_import(tmp_path: Path) -> None:
-    assert_saved_program_runs_as_the_compiled_program(tmp_path, {
-        "a_main.d": IMPORTING_MAIN,
-        "b_library.d": IMPORTED_LIBRARY,
-    })
-
-
-IMPORTING_MAIN = """
-    module a_main;
-    import b_library;
-    import core.stdc.stdio: puts;
-    shared static this() { puts("main constructor"); }
-    shared static ~this() { puts("main destructor"); }
-    void main() { puts("main"); }
-    """
-
-IMPORTED_LIBRARY = """
-    module b_library;
-    import core.stdc.stdio: puts;
-    shared static this() { puts("library constructor"); }
-    shared static ~this() { puts("library destructor"); }
-    """
+    assert_saved_program_runs_as_the_compiled_program(
+        tmp_path, import_order_sources("b_library", "a_main"))
 
 
 @pytest.mark.parametrize("backend", PROGRAM_BACKENDS)

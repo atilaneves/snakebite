@@ -79,7 +79,7 @@ public struct ModuleStart {
 
 
 public struct MainStart {
-    // Whether the program has a `main`.
+    // Whether the module declares a `main`.
     public bool present;
     // A C-linkage `main` is the entry of the process, as the C runtime
     // calls it.
@@ -88,6 +88,33 @@ public struct MainStart {
     // The number of parameters `main` declares.
     public size_t parameterCount;
     public FunctionHandle function_;
+
+    // Whether the module declares a `main`.
+    public bool opCast(T : bool)() const {
+        return present;
+    }
+}
+
+
+// The rule for the `main` of a program: the one of the first module that
+// has one. `mainOf` gives the `main` of a module as a value that is false
+// when the module has none. Gives that type's `init` when no module has one.
+public auto firstMain(alias mainOf, Modules)(Modules modules) {
+    foreach (module_; modules) {
+        auto found = mainOf(module_);
+        if (found)
+            return found;
+    }
+    return typeof(mainOf(modules[0])).init;
+}
+
+
+// The rule for the C entry point: a C-linkage `main` is the entry of the
+// process, as the C runtime calls it. druntime does not start, so a build
+// with unit tests runs none of them and no module constructor, and the
+// program is only that function.
+public bool isCEntryPoint(in bool hasMain, lazy bool cLinkage) {
+    return hasMain && cLinkage;
 }
 
 
@@ -109,17 +136,12 @@ public struct StartData {
 
     // The `main` of the program: the one of the first record that has one.
     public MainStart main() {
-        foreach (module_; modules)
-            if (module_.main.present)
-                return module_.main;
-        return MainStart.init;
+        return firstMain!(module_ => module_.main)(modules);
     }
 
-    // A C-linkage `main` is the entry of the process, as the C runtime
-    // calls it: druntime does not start.
     public bool hasCEntryPoint() {
         const main_ = main;
-        return main_.present && main_.cLinkage;
+        return isCEntryPoint(main_.present, main_.cLinkage);
     }
 
     // In the order of the records, which is the order of the constructors.
@@ -170,4 +192,3 @@ public struct StartData {
             module_.eachHandle(visit);
     }
 }
-

@@ -4,7 +4,7 @@ module snakebite.start.builder;
 private:
 
 
-import snakebite.program: Program;
+import snakebite.program: hasCLinkage, Program;
 import snakebite.start.data:
     dependencyModulesOf, FunctionHandle, GateStorage, MainStart, ModuleStart,
     StartData;
@@ -97,11 +97,11 @@ private MainStart mainStartOf(
     CompiledFunction compiledFunction,
 ) {
     import snakebite.frontend.dmd.functions: typeFunctionOf;
-    import snakebite.frontend.ast: LINK, nextOf, Tvoid;
+    import snakebite.frontend.ast: nextOf, Tvoid;
 
     MainStart start;
     start.present = true;
-    start.cLinkage = main_.resolvedLinkage == LINK.c;
+    start.cLinkage = hasCLinkage(main_);
     start.returnsVoid = main_.type.nextOf.ty == Tvoid;
     start.parameterCount = typeFunctionOf(main_).parameterList.length;
     start.function_ = compiled(compiledFunction, main_);
