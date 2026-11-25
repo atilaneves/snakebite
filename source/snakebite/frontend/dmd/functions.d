@@ -21,6 +21,13 @@ public imported!"dmd.func".FuncDeclaration findFunction(
     return findFunction(struct_.members, name);
 }
 
+// Whether `function_` has C linkage.
+public bool hasCLinkage(imported!"dmd.func".FuncDeclaration function_) {
+    import dmd.astenums: LINK;
+
+    return function_.resolvedLinkage == LINK.c;
+}
+
 // The module-level struct called `name`, or null if there is none.
 public imported!"dmd.dstruct".StructDeclaration findStruct(
     imported!"dmd.dmodule".Module module_,

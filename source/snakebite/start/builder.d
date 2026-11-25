@@ -4,7 +4,8 @@ module snakebite.start.builder;
 private:
 
 
-import snakebite.program: hasCLinkage, Program;
+import snakebite.frontend.dmd.functions: hasCLinkage;
+import snakebite.program: Program;
 import snakebite.start.data:
     dependencyModulesOf, FunctionHandle, GateStorage, MainStart, ModuleStart,
     StartData;

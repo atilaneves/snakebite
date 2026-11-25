@@ -117,6 +117,7 @@ public struct Program {
     }
 
     public bool hasCEntryPoint() const {
+        import snakebite.frontend.dmd.functions: hasCLinkage;
         import snakebite.start.data: isCEntryPoint;
 
         return isCEntryPoint(main.func !is null,
@@ -157,12 +158,4 @@ public struct Program {
 
         return frontendIsDefinedElsewhere(declaration, _rootModuleSet);
     }
-}
-
-
-// Whether `function_` has C linkage.
-public bool hasCLinkage(imported!"snakebite.frontend.ast".FuncDeclaration function_) {
-    import snakebite.frontend.ast: LINK;
-
-    return function_.resolvedLinkage == LINK.c;
 }

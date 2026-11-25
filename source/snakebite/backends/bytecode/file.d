@@ -1240,6 +1240,8 @@ private void transferModule(
 
 
 private void transferStartData(ref Archive archive, ref Program program) {
+    // The file holds the fields that this function lists. The build stops
+    // when a field is added, so that no program file silently loses it.
     static assert(FieldNameTuple!StartData == AliasSeq!("programName",
         "betterC", "modules", "dependencyModules"));
 
@@ -1273,6 +1275,7 @@ private void transferStartData(ref Archive archive, ref Program program) {
 
 
 private void transferStart(ref Archive archive, ref ModuleStart record) {
+    // As in `transferStartData`: a new field must be listed and transferred.
     static assert(FieldNameTuple!ModuleStart == AliasSeq!("name", "standalone",
         "importNames", "independentConstructors", "sharedConstructors",
         "threadConstructors", "sharedDestructors", "threadDestructors",
