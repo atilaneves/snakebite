@@ -430,7 +430,7 @@ Target[] dubTarget(string compiler, string config, string objectSet,
             info.packages[0].lflags ~= flags.value ~ "-gcc=clang";
         // The loader applies the relative relocations of the executable at
         // each start (issue #966); packed, they take less time. Needs glibc
-        // 2.36 or newer, and is not given to the dmd-built test binaries.
+        // 2.36 or newer.
         info.packages[0].lflags ~= "-L-zpack-relative-relocs";
     }
     // The executable and loaded D images must share one runtime.
