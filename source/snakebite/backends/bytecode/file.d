@@ -28,7 +28,7 @@ import snakebite.image.dependency: DependencyImage;
 import snakebite.memory.program: bytesFor, MemoryNeed, pageAlignment,
     ProgramMemory;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
-import snakebite.ffi.names: Name;
+import snakebite.ffi.names: FileName, Name;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
@@ -142,6 +142,70 @@ public struct ProgramReader {
 }
 
 
+// Joins the files `inputs` of the units of one program, which saves of the
+// compiles of the units wrote, into one program, and saves it to `output`
+// as `saveProgram` does. Returns the header of the files. As an object file
+// does, the file of a unit holds a function of another unit by its name,
+// with no body, and a datum of another unit by its name
+// (`snakebite.ffi.names`). The link reads the files as a load does, but
+// leaves the program in the form that a compile for a save leaves it: it
+// puts the modules of the same name together, keeps one function of each
+// name (one with a body) and one own copy of each name, and joins the
+// imports of the modules by name. A function that no unit defines is an
+// error.
+public LinkedProgram linkPrograms(in string[] inputs, in string output) {
+    import core.memory: GC;
+    import snakebite.backends.bytecode.runner: wire;
+    import snakebite.image.preparation: generatorKey;
+    import std.file: read;
+
+    auto program = new Program(null, true);
+    auto runner = cast(Runner*) GC.calloc(Runner.sizeof);
+    wire(*program, *runner, JitSetting.init);
+    scope(exit) runner.end;
+    Linker linker = Linker(program);
+    Header header;
+    foreach (index, input; inputs) {
+        auto bytes = cast(const(ubyte)[]) read(input);
+        bool given;
+        const(ubyte)[] next() {
+            if (given)
+                return null;
+            given = true;
+            return bytes;
+        }
+
+        auto file = Archive.reading(&next, bytes.length);
+        file.expectText!magic;
+        Header read_;
+        transferHeader(file, read_);
+        if (read_.buildKey != generatorKey)
+            throw new SnakebiteException(input
+                ~ " was written by another build of snakebite");
+        if (index == 0)
+            header = read_;
+        else if (read_ != header)
+            throw new SnakebiteException(input
+                ~ " is of another program than " ~ inputs[0]);
+        file._linker = &linker;
+        loadProgram(file, *program, *runner, null);
+    }
+    linker.finish;
+    saveProgram(*program, header, output);
+    return LinkedProgram(header, program.startData.hasCEntryPoint,
+        program.startData.betterC);
+}
+
+
+// What a link (`linkPrograms`) tells of the program that it wrote.
+public struct LinkedProgram {
+    public Header header;
+    // As `StartData` has them.
+    public bool hasCEntryPoint;
+    public bool betterC;
+}
+
+
 private void loadProgram(
     ref Archive file, ref Program program, ref Runner runner,
     in DependencyImage* image,
@@ -149,7 +213,6 @@ private void loadProgram(
     file._image = image;
     file._program = &program;
     file._runner = &runner;
-    file._memory = &program.memory;
     MemoryNeed need;
     file.scalar(need.data);
     file.scalar(need.scanned);
@@ -159,8 +222,12 @@ private void loadProgram(
             + need.scanned / maxLoadBytesPerFileByte > file.unreadLength)
         throw new SnakebiteException(
             "the program file ends before the program does");
-    program.memory.reserve(need, &program);
-    program.store.takeFrom(&program.memory);
+    // A link adds the file to a program that grows as a compile does.
+    if (!file.isLinking) {
+        file._memory = &program.memory;
+        program.memory.reserve(need, &program);
+        program.store.takeFrom(&program.memory);
+    }
     const signatureCount = file.length(0);
     // The load needs the signatures of the file only while it runs.
     file._signatures = new const(Signature)*[signatureCount];
@@ -173,6 +240,8 @@ private void loadProgram(
     transferTemporary(file, file._symbols);
     transferNames(file, file);
     transferBody(file, program, &runner);
+    if (file.isLinking)
+        return;
 
     program.eachFunction((function_) {
         if (const reason = Program.complete(function_, program.plans,
@@ -246,27 +315,50 @@ private void transferNames(ref Archive archive, ref Archive source) {
         throw new SnakebiteException(
             "the program file holds names that do not match");
     size_t declarationStart, signature;
-    archive._names = archive._program.plans.names.fromFile(count,
-        (index, ref made) {
-            const end = declarationEnds[index];
-            if (end < declarationStart || end > declarations.length)
+    void make(in size_t index, ref FileName made) {
+        const end = declarationEnds[index];
+        if (end < declarationStart || end > declarations.length)
+            throw new SnakebiteException(
+                "the program file holds names that do not match");
+        if (!adjusted[index]) {
+            made.symbol = archive.symbolNameAt(targets[index]);
+            made.distance = cast(ptrdiff_t) distances[index];
+            made.declaredBy = declarations[declarationStart .. end];
+        } else {
+            if (signature >= signatures.length)
                 throw new SnakebiteException(
                     "the program file holds names that do not match");
-            if (!adjusted[index]) {
-                made.symbol = archive.symbolNameAt(targets[index]);
-                made.distance = cast(ptrdiff_t) distances[index];
-                made.declaredBy = declarations[declarationStart .. end];
-            } else {
-                if (signature >= signatures.length)
-                    throw new SnakebiteException(
-                        "the program file holds names that do not match");
-                made.isAdjusted = true;
-                made.code = targets[index];
-                made.distance = cast(ptrdiff_t) distances[index];
-                made.signature = signatures[signature++];
-            }
-            declarationStart = end;
-        });
+            made.isAdjusted = true;
+            made.code = targets[index];
+            made.distance = cast(ptrdiff_t) distances[index];
+            made.signature = signatures[signature++];
+        }
+        declarationStart = end;
+    }
+
+    auto names = &archive._program.plans.names;
+    archive._names = new Name*[count];
+    if (!archive.isLinking) {
+        foreach (index, ref name; names.fromFile(count, &make))
+            archive._names[index] = &name;
+        return;
+    }
+    // A link joins the names of all the files: the same symbol is one name.
+    foreach (index, ref name; archive._names) {
+        FileName made;
+        make(index, made);
+        if (!made.isAdjusted) {
+            name = names.named(made.symbol, cast(size_t) made.distance,
+                made.declaredBy);
+            continue;
+        }
+        if (made.code >= index)
+            throw new SnakebiteException("the program file names the code "
+                ~ "of an entry before the code itself");
+        const entrySignature = made.signature;
+        name = names.adjusted(archive._names[made.code], made.distance,
+            () => cast() entrySignature);
+    }
 }
 
 
@@ -282,6 +374,77 @@ private void transferHeader(ref Archive archive, ref Header header) {
 private struct InterfaceWord {
     ubyte* place;
     Target target;
+}
+
+
+// What a link (`linkPrograms`) keeps from file to file: the program that it
+// makes, its modules by name and its functions by mangled name.
+private struct Linker {
+    Program* program;
+    Module*[string] modules;
+    Function*[string] functions;
+
+    // The module of the program of the name `name`. An empty name names no
+    // module: each is a new one.
+    Module* moduleNamed(string name) {
+        if (name.length)
+            if (auto found = name in modules)
+                return *found;
+        auto made = program.newModule;
+        made.start.name = name;
+        if (name.length)
+            modules[name] = made;
+        return made;
+    }
+
+    // The function of the program of the mangled name `symbol`, which a new
+    // one in `module_` is when the program has none. An empty name names no
+    // function: each is a new one.
+    Function* functionNamed(Module* module_, const(char)[] symbol) {
+        if (symbol.length)
+            if (auto found = symbol in functions)
+                return *found;
+        auto made = module_.newFunction;
+        made.mangledName = symbol;
+        if (symbol.length)
+            functions[cast(string) symbol] = made;
+        return made;
+    }
+
+    // What makes the program of the link complete once it has read the
+    // files: each function that a file refers to has a body, the imports of
+    // each module are positions in the start data, and no function keeps a
+    // name that a compile to RAM gives only for the perf map.
+    void finish() {
+        import std.algorithm.searching: canFind;
+
+        foreach (symbol, function_; functions)
+            if (!isDefined(function_))
+                throw new SnakebiteException(
+                    "the link finds no unit that defines `" ~ symbol ~ "`");
+        auto start = &program.startData;
+        size_t[string] position;
+        foreach (index, record; start.modules)
+            position[record.name] = index;
+        foreach (index, record; start.modules) {
+            record.imports = null;
+            foreach (name; record.importNames)
+                if (auto found = name in position)
+                    if (*found != index && !start.modules[*found].standalone
+                            && !record.imports.canFind(*found))
+                        record.imports ~= *found;
+        }
+        program.eachFunction((function_) {
+            function_.mangledName = null;
+        });
+    }
+}
+
+
+// Whether `function_` has a body: a file of a unit holds a function that
+// another unit defines with none (`linkPrograms`).
+private bool isDefined(const(Function)* function_) {
+    return function_.instructions.length != 0;
 }
 
 
@@ -327,17 +490,86 @@ private struct Archive {
     private size_t[] _declarationEnds;
     private string _declarations;
     private NativeSignature[] _adjustedSignatures;
-    private Name[] _names;
+    private Name*[] _names;
     // Reading: the words of the data that refer to an interface of a class
     // information, which `transferBody` makes ready last.
     private InterfaceWord[] _interfaceWords;
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
-    // Reading: the memory of the program, once there is a program.
+    // Reading: the memory of the program, once there is a program, or null
+    // for a link.
     private ProgramMemory* _memory;
     // Writing: the memory that a load of what this wrote takes.
     private MemoryNeed _need;
+    // Reading for a link (`linkPrograms`), which adds the file to the
+    // program that the files before it made; null for a load.
+    private Linker* _linker;
+    // The module of the program for each module of the file, and the
+    // functions of the program for its functions. Each is the same module or
+    // function, except in a link.
+    private Module*[] _fileModules;
+    private Function*[][] _fileFunctions;
+    // For each module of the file, and for the process store after them: the
+    // number of blocks and of data of the program before the blocks of the
+    // file. Zero except in a link.
+    private size_t[] _blockBases;
+    private size_t[] _dataBases;
+    // Reading: whether each module of the file has a start record, which a
+    // link keeps.
+    private bool[] _recorded;
+    // Reading: the number of strings of the program before those of the
+    // file.
+    private size_t _stringBase;
+
+    bool isLinking() const @safe pure nothrow @nogc {
+        return _linker !is null;
+    }
+
+    // Reading: the `count` modules of the file. A load makes them in the
+    // memory of the program.
+    void newFileModules(in size_t count) {
+        if (!isLinking) {
+            _program.newModules(count);
+            _fileModules = _program._modules;
+        } else
+            _fileModules = new Module*[count];
+        _fileFunctions = new Function*[][count];
+        _blockBases = new size_t[count + 1];
+        _dataBases = new size_t[count + 1];
+        _recorded = new bool[count];
+    }
+
+    // Reading: module `index` of the file, of the name `name`, with
+    // `functionCount` functions. A link puts it in the module of the program
+    // of the same name.
+    void newFileModule(
+        in size_t index, string name, in size_t functionCount,
+    ) {
+        if (!isLinking) {
+            auto module_ = _fileModules[index];
+            module_.start.name = name;
+            module_.newFunctions(*_memory, functionCount);
+            _fileFunctions[index] = module_._functions;
+            return;
+        }
+        _fileModules[index] = _linker.moduleNamed(name);
+        _fileFunctions[index] = new Function*[functionCount];
+    }
+
+    // Reading: the mangled name `symbol` of function `index` of module
+    // `module_` of the file. A link gives the function of the program of that
+    // name, and the files after it give their function of that name to it.
+    void nameFileFunction(
+        in size_t module_, in size_t index, const(char)[] symbol,
+    ) {
+        if (!isLinking) {
+            _fileFunctions[module_][index].mangledName = symbol;
+            return;
+        }
+        _fileFunctions[module_][index] =
+            _linker.functionNamed(_fileModules[module_], symbol);
+    }
 
     // `count` new elements, in the data of the memory of the program once
     // there is one. A writer counts them with `need`.
@@ -361,7 +593,11 @@ private struct Archive {
             archive._moduleOfStart[&module_.start] = m;
             foreach (f, function_; module_._functions)
                 archive._positionOf[function_] = [m, f];
+            archive._fileFunctions ~= module_._functions;
         }
+        archive._fileModules = program._modules;
+        archive._blockBases = new size_t[program._modules.length + 1];
+        archive._dataBases = new size_t[program._modules.length + 1];
         return archive;
     }
 
@@ -480,14 +716,25 @@ private struct Archive {
         internalFailure("a function points at a function that no module holds");
     }
 
-    // The blocks of module `index`, or the blocks of the process store for the
-    // index that follows the last module; null for any other.
+    // The blocks of module `index` of the file, or the blocks of the process
+    // store for the index that follows the last module; null for any other.
     StaticBlocks* blocksAt(in size_t index) {
-        if (index < _program._modules.length)
-            return &_program._modules[index].blocks;
-        if (index == _program._modules.length)
+        if (index < _fileModules.length)
+            return &_fileModules[index].blocks;
+        if (index == _fileModules.length)
             return _program.store.blocks;
         return null;
+    }
+
+    // The datum of the program at the place `position` of the file: its
+    // module, block and offset.
+    DatumRef datumAt(in size_t[3] position) {
+        auto blocks = blocksAt(position[0]);
+        if (blocks is null)
+            throw new SnakebiteException(
+                "the program file names data that it does not hold");
+        return DatumRef(blocks, position[1] + _blockBases[position[0]],
+            position[2]);
     }
 
     // The module, block and offset of a place in the blocks `set`, when the
@@ -517,7 +764,8 @@ private struct Archive {
 
     void* dataAt(in size_t[3] position) {
         if (auto blocks = blocksAt(position[0]))
-            if (auto address = blocks.addressOf(position[1], position[2]))
+            if (auto address = blocks.addressOf(
+                    position[1] + _blockBases[position[0]], position[2]))
                 return address;
         throw new SnakebiteException(
             "the program file names data that it does not hold");
@@ -533,7 +781,7 @@ private struct Archive {
 
     void* stringAt(in size_t[3] position) {
         if (auto address = _program.store.addressInString(
-                position[0], position[1]))
+                position[0] + _stringBase, position[1]))
             return address;
         throw new SnakebiteException(
             "the program file names a string that it does not hold");
@@ -576,7 +824,7 @@ private struct Archive {
         if (index >= _names.length)
             throw new SnakebiteException(
                 "the program file names a symbol that it does not hold");
-        return &_names[index];
+        return _names[index];
     }
 
     // The index of `name` in the table of the symbols of the names.
@@ -617,11 +865,11 @@ private struct Archive {
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
-        if (module_ >= _program._modules.length
-                || index >= _program._modules[module_]._functions.length)
+        if (module_ >= _fileFunctions.length
+                || index >= _fileFunctions[module_].length)
             throw new SnakebiteException(
                 "the program file names a function that it does not hold");
-        return _program._modules[module_]._functions[index];
+        return _fileFunctions[module_][index];
     }
 }
 
@@ -872,7 +1120,11 @@ private Target targetOf(
 ) {
     const isInterface = kind == Target.Kind.interfaceTable
         || kind == Target.Kind.interfaceRecord;
-    return Target(kind, addressOf(archive, kind, reference), DatumRef.init,
+    // A link keeps the datum of the target, as a compile for a save does.
+    const isData = kind == Target.Kind.staticData
+        || kind == Target.Kind.constantPool;
+    return Target(kind, addressOf(archive, kind, reference),
+        archive.isLinking && isData ? archive.datumAt(reference) : DatumRef.init,
         isInterface ? cast(uint) reference[1] : 0);
 }
 
@@ -961,15 +1213,18 @@ private void applyReloc(ref Function target, in Reloc reloc) {
 private void transferBody(
     ref Archive archive, ref Program program, Runner* runner,
 ) {
-    // The shape first, so that a function can refer to any other.
+    // The shape first, so that a function can refer to any other: the name
+    // of each module and the names of its functions.
     size_t moduleCount = archive.length(program._modules.length);
     if (archive.isWriting) {
         // As `Program.newModules` and `Module.newFunctions` take them.
         archive.need!(Module*)(moduleCount);
         archive._need.data += moduleCount * bytesFor(Module.sizeof);
     } else
-        program.newModules(moduleCount);
+        archive.newFileModules(moduleCount);
     foreach (m; 0 .. moduleCount) {
+        string name = archive.isWriting ? program._modules[m].start.name : null;
+        archive.transfer(name);
         size_t functionCount =
             archive.length(archive.isWriting
                 ? program._modules[m]._functions.length : 0);
@@ -977,7 +1232,14 @@ private void transferBody(
             archive.need!Function(functionCount);
             archive.need!(Function*)(functionCount);
         } else
-            program._modules[m].newFunctions(program.memory, functionCount);
+            archive.newFileModule(m, name, functionCount);
+        foreach (f; 0 .. functionCount) {
+            auto symbol = archive.isWriting
+                ? archive._fileFunctions[m][f].mangledName : null;
+            archive.transfer(symbol);
+            if (!archive.isWriting)
+                archive.nameFileFunction(m, f, symbol);
+        }
     }
     transferStartData(archive, program);
     transferPlans(archive, program);
@@ -990,14 +1252,12 @@ private void transferBody(
             program._modules[m].blocks.addLoadNeed(archive._need);
         program.store.addLoadNeed(archive._need);
     }
-    foreach (m; 0 .. moduleCount)
-        transferBlocks(archive, program._modules[m].blocks);
-    transferBlocks(archive, *program.store.blocks);
+    foreach (m; 0 .. moduleCount + 1)
+        transferBlocks(archive, m);
     transferStrings(archive, program.store);
     transferOwnCopies(archive, program);
-    foreach (m; 0 .. moduleCount)
-        transferAddresses(archive, program._modules[m].blocks);
-    transferAddresses(archive, *program.store.blocks);
+    foreach (m; 0 .. moduleCount + 1)
+        transferAddresses(archive, m);
     // A word of an interface of a class information reads the class
     // information, which can be the program's own copy: it is read once
     // every other word of the data is ready.
@@ -1005,7 +1265,7 @@ private void transferBody(
         writeWord(word.place,
             archive._program.plans.wordOfName(word.target));
     foreach (m; 0 .. moduleCount)
-        transferModule(archive, program, *program._modules[m]);
+        transferModule(archive, m);
 }
 
 
@@ -1047,7 +1307,8 @@ private void transferPlans(ref Archive archive, ref Program program) {
 // callback bridge, before any function is read: a word that refers to the entry
 // of a function needs the signature.
 private void transferSignatures(ref Archive archive, ref Program program) {
-    program.eachFunction((function_) {
+    foreach (functions; archive._fileFunctions)
+    foreach (function_; functions) {
         NativeSignature signature;
         if (archive.isWriting) {
             const registered =
@@ -1059,21 +1320,28 @@ private void transferSignatures(ref Archive archive, ref Program program) {
         archive.transfer(signature);
         if (!archive.isWriting)
             program.plans.callbacks.register(function_, signature);
-    });
+    }
 }
 
 
-// The data of a module, or of the process store, as bytes, with each word that
-// holds an address set to zero: `transferAddresses` has them. A load reserves
-// each datum through the same code as a compile, so the blocks come out the
-// same, and checks that.
-private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
+// The data of module `index` of the file, or of the process store after the
+// modules, as bytes, with each word that holds an address set to zero:
+// `transferAddresses` has them. A load reserves each datum through the same
+// code as a compile, so the blocks come out the same, and checks that. A link
+// puts the blocks of the file after those that the program has.
+private void transferBlocks(ref Archive archive, in size_t index) {
+    auto blocks = archive.blocksAt(index);
+    if (archive.isLinking) {
+        archive._blockBases[index] = blocks.blockCount;
+        archive._dataBases[index] = blocks.data.length;
+    }
+    const base = archive._blockBases[index];
     const count = archive.length(blocks.data.length);
-    foreach (index; 0 .. count) {
+    foreach (d; 0 .. count) {
         StaticBlocks.Datum datum;
         ubyte[] contents;
         if (archive.isWriting) {
-            const source = blocks.data[index];
+            const source = blocks.data[d];
             datum.block = source.block;
             datum.offset = source.offset;
             datum.size = source.size;
@@ -1097,9 +1365,13 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
         facts.size = datum.size;
         facts.alignment = datum.alignment;
         facts.canHoldAddress = datum.canHoldAddress;
+        // A datum of a new block starts one, also where a link put the data
+        // of another file before it.
+        if (datum.block + base == blocks.blockCount)
+            blocks.startBlock;
         auto bytes = blocks.reserve(facts).bytes;
         const placed = blocks.data[$ - 1];
-        if (placed.block != datum.block || placed.offset != datum.offset)
+        if (placed.block != datum.block + base || placed.offset != datum.offset)
             throw new SnakebiteException(
                 "the program file does not fit the memory of this process");
         archive.bytes(bytes);
@@ -1110,6 +1382,8 @@ private void transferBlocks(ref Archive archive, ref StaticBlocks blocks) {
 // The copies of string literals of the process store, in the order that a
 // compile made them.
 private void transferStrings(ref Archive archive, ref StaticStore store) {
+    if (!archive.isWriting)
+        archive._stringBase = store.strings.length;
     const count = archive.length(store.strings.length);
     foreach (index; 0 .. count) {
         const size = archive.length(
@@ -1144,16 +1418,19 @@ private void transferOwnCopies(ref Archive archive, ref Program program) {
     if (places.length != names.length)
         throw new SnakebiteException(
             "the program file holds own copies that do not match");
+    // A name keeps the first own copy that it gets.
     foreach (index, place; places)
         program.plans.names.defineOwn(archive.nameOfIndex(names[index]),
-            archive.dataAt(place), DatumRef(archive.blocksAt(place[0]),
-                place[1], place[2]));
+            archive.dataAt(place), archive.datumAt(place));
 }
 
 
-// The words of the data of `blocks` that hold an address, as links.
-private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
-    foreach (index; 0 .. blocks.data.length) {
+// The words of the data of module `index` of the file, or of the process
+// store after the modules, that hold an address, as links. A link keeps them
+// as links, as a compile for a save does.
+private void transferAddresses(ref Archive archive, in size_t module_) {
+    auto blocks = archive.blocksAt(module_);
+    foreach (index; archive._dataBases[module_] .. blocks.data.length) {
         auto links = archive.isWriting ? blocks.data[index].links.dup : null;
         const count = archive.length(links.length);
         foreach (linkIndex; 0 .. count) {
@@ -1173,9 +1450,13 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
                     || bytes.length - link.wordOffset < size_t.sizeof)
                 throw new SnakebiteException(
                     "the program file holds a relocation with no place");
+            const target = targetOf(archive, link.kind, reference);
+            if (archive.isLinking) {
+                blocks.addLink(index, linkTo(archive, link, target, reference));
+                continue;
+            }
             // A datum is ready to run once it is written, as after a compile
             // to RAM.
-            const target = targetOf(archive, link.kind, reference);
             auto place = &bytes[link.wordOffset];
             if (link.kind == Target.Kind.interfaceTable
                     || link.kind == Target.Kind.interfaceRecord) {
@@ -1196,6 +1477,26 @@ private void writeWord(ubyte* place, in size_t address) {
         (cast(const(ubyte)*) &address)[0 .. size_t.sizeof];
 }
 
+// The link of a word of the data of a link (`transferAddresses`): `read` with
+// its target in the program.
+private StaticBlocks.Link linkTo(
+    ref Archive archive, in StaticBlocks.Link read, in Target target,
+    in size_t[3] reference,
+) {
+    StaticBlocks.Link link;
+    link.wordOffset = read.wordOffset;
+    link.kind = read.kind;
+    link.index = target.index;
+    if (read.kind == Target.Kind.staticData) {
+        const datum = archive.datumAt(reference);
+        link.set = cast(const(StaticBlocks)*) datum.set;
+        link.block = datum.block;
+        link.offset = datum.offset;
+    } else
+        link.address = target.address;
+    return link;
+}
+
 private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) {
     if (link.kind != Target.Kind.staticData)
         return referenceOf(archive,
@@ -1204,17 +1505,24 @@ private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) 
 }
 
 
-private void transferModule(
-    ref Archive archive, ref Program program, ref Module module_,
-) {
+// Module `index` of the file. A link keeps the start record of a module from
+// the file that has the record, and the first function of a name with a body
+// (`Linker.functionNamed`): it reads the others, and drops them.
+private void transferModule(ref Archive archive, in size_t index) {
     // The fields of `Module`: the start record, the blocks and the functions.
     static assert(FieldNameTuple!Module == AliasSeq!("start", "blocks", "_functions"));
     // `blocks` is set by `transferBlocks`, before the functions.
-    transferStart(archive, module_.start);
-    foreach (function_; module_._functions) {
+    ModuleStart dropped;
+    transferStart(archive, archive.isLinking && !archive._recorded[index]
+        ? dropped : archive._fileModules[index].start);
+    foreach (function_; archive._fileFunctions[index]) {
         if (archive.isWriting) {
             auto prepared = prepareToWrite(archive, *function_);
             archive.transfer(prepared);
+        } else if (archive.isLinking) {
+            // The link keeps each relocation, as a compile for a save does.
+            Function copy;
+            archive.transfer(isDefined(function_) ? copy : *function_);
         } else {
             archive.transfer(*function_);
             // A name stays for `Program.complete`, which makes it ready to
@@ -1246,7 +1554,10 @@ private void transferStartData(ref Archive archive, ref Program program) {
     static assert(FieldNameTuple!MainStart == AliasSeq!("present",
         "returnsVoid", "parameterCount", "function_"));
 
-    ref start = program.startData;
+    // A link reads the start data of each file apart, and adds it to the
+    // start data of the program.
+    StartData fileStart;
+    auto start = archive.isLinking ? &fileStart : &program.startData;
     archive.transfer(start.programName);
     archive.transfer(start.hasCEntryPoint);
     archive.transfer(start.betterC);
@@ -1265,10 +1576,11 @@ private void transferStartData(ref Archive archive, ref Program program) {
         }
         archive.scalar(position);
         if (!archive.isWriting) {
-            if (position >= program._modules.length)
+            if (position >= archive._fileModules.length)
                 throw new SnakebiteException(
                     "the program file names a module that it does not hold");
-            record = &program._modules[position].start;
+            record = &archive._fileModules[position].start;
+            archive._recorded[position] = true;
         }
     }
     transferHandles(archive, start.crtConstructors);
@@ -1280,6 +1592,18 @@ private void transferStartData(ref Archive archive, ref Program program) {
     archive.transfer(start.main.parameterCount);
     if (start.main.present)
         transferHandle(archive, start.main.function_);
+    if (!archive.isLinking)
+        return;
+
+    auto linked = &program.startData;
+    linked.programName = fileStart.programName;
+    linked.hasCEntryPoint |= fileStart.hasCEntryPoint;
+    linked.betterC = fileStart.betterC;
+    linked.modules ~= fileStart.modules;
+    linked.crtConstructors ~= fileStart.crtConstructors;
+    linked.crtDestructors ~= fileStart.crtDestructors;
+    if (fileStart.main.present)
+        linked.main = fileStart.main;
 }
 
 
@@ -1289,7 +1613,7 @@ private void transferStart(ref Archive archive, ref ModuleStart record) {
         "sharedConstructors", "threadConstructors", "sharedDestructors",
         "threadDestructors", "unitTests", "sharedGates", "threadGates"));
 
-    archive.transfer(record.name);
+    // The name is in the shape of the file (`transferBody`).
     archive.transfer(record.standalone);
     archive.transfer(record.imports);
     archive.transfer(record.importNames);
@@ -1324,13 +1648,13 @@ private void transferGates(ref Archive archive, ref GateStorage[] gates) {
         if (!archive.isWriting) {
             // The gate is ready to run once it is read, as after a compile
             // to RAM.
+            // A link keeps a name, as a compile for a save does.
             const target = targetOf(archive, kind, reference);
-            gate.bytes = (cast(ubyte*) (isName(kind)
+            gate.bytes = (cast(ubyte*) (isName(kind) && !archive.isLinking
                 ? archive._program.plans.wordOfName(target)
                 : target.address))[0 .. length];
             if (kind == Target.Kind.staticData)
-                gate.where = DatumRef(archive.blocksAt(reference[0]),
-                    reference[1], reference[2]);
+                gate.where = archive.datumAt(reference);
         }
     }
 }
@@ -1359,7 +1683,10 @@ private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
             bytesFor(__traits(classInstanceSize, StartFunction));
     }
     archive.scalar(position);
-    if (!archive.isWriting)
-        handle = archive._memory.scanned.make!StartFunction(
-            archive._runner, archive.functionAt(position[0], position[1]));
+    if (archive.isWriting)
+        return;
+    auto function_ = archive.functionAt(position[0], position[1]);
+    handle = archive._memory is null
+        ? new StartFunction(archive._runner, function_)
+        : archive._memory.scanned.make!StartFunction(archive._runner, function_);
 }

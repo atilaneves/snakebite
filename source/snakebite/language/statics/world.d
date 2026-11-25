@@ -71,13 +71,13 @@ public struct StaticWorld {
         _backend = backend;
         plans = PlanCache(planStore);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        data = NativeData(store, &plans, &_program.isRootOwned,
+        data = NativeData(store, &plans, &_program.definesAlone,
             &_program.isDefinedElsewhere,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             &writeClassImage, (type) => types.get(type),
-            backend.blocksOf, &callableKind);
-        types = RuntimeTypes(&_program.isRootOwned,
+            backend.blocksOf, &callableKind, program.isUnit);
+        types = RuntimeTypes(&_program.definesAlone,
             &_program.isDefinedElsewhere,
             &callableAddress,
             &classRuntimeInfo, &data);

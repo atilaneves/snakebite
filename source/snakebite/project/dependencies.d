@@ -80,6 +80,15 @@ public string imageModule(imported!"snakebite.program".Program program) {
 }
 
 
+// The image module of a program that needs no code of the root package in
+// its image: the image of a link of units (ADR-0021, item 10).
+public string imageModuleWithoutRootCode(in bool deferStartup) {
+    import snakebite.image.preparation: imageModuleText;
+
+    return imageModuleText(moduleSource(""), deferStartup);
+}
+
+
 // Whether the image of a project entry defers the start of its modules.
 private bool defersStartup(imported!"snakebite.program".Program program) {
     return program.hasCEntryPoint && !program.checks.betterC;

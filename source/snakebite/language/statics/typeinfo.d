@@ -26,7 +26,7 @@ public struct RuntimeTypes {
     import snakebite.language.statics.data: NativeData;
     import snakebite.native.value: TypeFacts;
 
-    private bool delegate(Dsymbol) const _isRootOwned;
+    private bool delegate(Dsymbol) const _definesAlone;
     private bool delegate(Dsymbol) const _isDefinedElsewhere;
     private Linked!TypeInfo_Class _throwableInfo;
     private Linked!(void*) delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
@@ -55,19 +55,18 @@ public struct RuntimeTypes {
         return _data.planStore;
     }
 
-    // `isRootOwned` is the owning `Program`'s own decision
-    // (`Program.isRootOwned`), not a copy of its root module list: a
-    // guest class or struct's `TypeInfo` and a guest function's call
-    // target ask the one question "does this program itself declare
-    // `declaration`" the same way.
+    // `definesAlone` is the owning `Program`'s own decision
+    // (`Program.definesAlone`), not a copy of its root module list: a
+    // guest class or struct's `TypeInfo` and its static data ask the one
+    // question "does only this program define `declaration`" the same way.
     public this(
-        bool delegate(Dsymbol) const isRootOwned,
+        bool delegate(Dsymbol) const definesAlone,
         bool delegate(Dsymbol) const isDefinedElsewhere,
         Linked!(void*) delegate(FuncDeclaration, ptrdiff_t) methodAddress,
         Linked!TypeInfo_Class delegate(ClassDeclaration) classInfo,
         NativeData* data,
     ) {
-        _isRootOwned = isRootOwned;
+        _definesAlone = definesAlone;
         _isDefinedElsewhere = isDefinedElsewhere;
         enum throwable = "_D" ~ Throwable.mangleof[1 .. $] ~ "7__ClassZ";
         _methodAddress = methodAddress;
@@ -274,9 +273,9 @@ public struct RuntimeTypes {
         auto own = ownInfo(type);
         auto classType = type.isTypeClass;
         auto structType = type.isTypeStruct;
-        const rootOwned = classType !is null && isRootOwned(classType.sym)
-            || structType !is null && isRootOwned(structType.sym);
-        if (rootOwned || own.name !is null || type.vtinfo is null)
+        const alone = classType !is null && definesAlone(classType.sym)
+            || structType !is null && definesAlone(structType.sym);
+        if (alone || own.name !is null || type.vtinfo is null)
             return own;
         // dmd emits this type information in each object that needs it, so
         // the program and another object can both define it: its name, with
@@ -411,8 +410,8 @@ public struct RuntimeTypes {
         return Linked!TypeInfo.held(info);
     }
 
-    public bool isRootOwned(Dsymbol declaration) const {
-        return _isRootOwned(declaration);
+    public bool definesAlone(Dsymbol declaration) const {
+        return _definesAlone(declaration);
     }
 
     // The type information that druntime defines for the type whose mangled
@@ -550,7 +549,7 @@ public struct RuntimeTypes {
         if (_isDefinedElsewhere(declaration))
             return LinkedClass(Linked!TypeInfo_Class.named(plans.names.named(
                 classInfoSymbol(declaration), 0, declaration.toString)));
-        if (isRootOwned(declaration))
+        if (definesAlone(declaration))
             return LinkedClass.init;
         return LinkedClass(Linked!TypeInfo_Class.init, true);
     }

@@ -78,7 +78,9 @@ private void addModules(
         start.standalone = !module_.needmoduleinfo;
         bool[size_t] seen;
         foreach (imported; module_.aimports) {
-            if (data.dependencyModules.length != 0)
+            // A link finds the imports of a unit among the modules of the
+            // other units by name.
+            if (data.dependencyModules.length != 0 || program.isUnit)
                 start.importNames ~= prettyNameOf(imported).fromStringz.idup;
             if (!imported.needmoduleinfo || imported is module_)
                 continue;

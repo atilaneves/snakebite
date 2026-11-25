@@ -37,8 +37,11 @@ public struct NativeData {
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
-    private bool delegate(Dsymbol) const _isRootOwned;
+    private bool delegate(Dsymbol) const _definesAlone;
     private bool delegate(Dsymbol) const _isDefinedElsewhere;
+    // Whether the program is one unit of a larger program
+    // (`Program.isUnit`).
+    private bool _isUnit;
     private VarDeclaration delegate(VarDeclaration) _linkedVariable;
     // An `extern` variable's definition, found once for each variable.
     private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
@@ -93,7 +96,7 @@ public struct NativeData {
     public this(
         StaticStore* store,
         PlanCache* plans,
-        bool delegate(Dsymbol) const isRootOwned,
+        bool delegate(Dsymbol) const definesAlone,
         bool delegate(Dsymbol) const isDefinedElsewhere,
         VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
@@ -101,8 +104,10 @@ public struct NativeData {
         TypeInfoOf typeInfo,
         StaticBlocks* delegate(Module) blocksOf = null,
         FunctionKind functionKind = null,
+        bool isUnit = false,
     ) {
-        _isRootOwned = isRootOwned;
+        _isUnit = isUnit;
+        _definesAlone = definesAlone;
         _isDefinedElsewhere = isDefinedElsewhere;
         _linkedVariable = linkedVariable;
         _symbolAddress = symbolAddress;
@@ -699,10 +704,29 @@ public struct NativeData {
     }
 
     // The address of the descriptor of a thread-local variable, with what it
-    // points at.
-    public Address addressOfTlsDescriptor(VarDeclaration variable) {
+    // points at. Each thread has one copy of the variable for each
+    // descriptor (`TlsSlots.slotFor`), so the units of a program share the
+    // descriptor of a variable that the program and another object can both
+    // define: by a name, with the descriptor of a unit as its own copy, which
+    // the link keeps once.
+    public Address addressOfTlsDescriptor(VarDeclaration declaration) {
+        auto variable = definitionOf(declaration);
         auto placed = tlsDescriptorOf(variable);
+        if (_isUnit && storageKindOf(variable) == StorageKind.nativeIfPresent)
+            return Address(Target.Kind.hostSymbol,
+                planStore.names.namedWithOwn(descriptorSymbol(variable), 0,
+                    variable.toString, placed.ptr, placed.where));
         return Address(Target.Kind.staticData, placed.ptr, placed.where);
+    }
+
+    // The name of the descriptor of `variable` that the units of a program
+    // share (`addressOfTlsDescriptor`). No object defines the symbol: it is
+    // not a name that a compiler gives.
+    private static string descriptorSymbol(VarDeclaration variable) {
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
+
+        return "snakebite thread-local descriptor "
+            ~ nativeSymbolName(variable);
     }
 
     // The one variable that an `extern` declaration shares its storage
@@ -733,7 +757,7 @@ public struct NativeData {
     private StorageKind storageKindOf(VarDeclaration variable) const {
         if (_isDefinedElsewhere(variable))
             return StorageKind.native;
-        return _isRootOwned(variable)
+        return _definesAlone(variable)
             ? StorageKind.own : StorageKind.nativeIfPresent;
     }
 

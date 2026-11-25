@@ -40,7 +40,8 @@ public struct ModuleStart {
     // that have a record.
     public size_t[] imports;
     // The names of every module this module imports, for the records of a
-    // dependency image. Empty when the program has no dependency image.
+    // dependency image and for the link of units (ADR-0021). Empty when the
+    // program has neither.
     public string[] importNames;
     public FunctionHandle[] independentConstructors;
     public FunctionHandle[] sharedConstructors;

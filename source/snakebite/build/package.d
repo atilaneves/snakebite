@@ -1,5 +1,5 @@
 // The build of a project with ninja (ADR-0021): the `build.ninja` file, the
-// commands that ninja starts, and the ninja run. `bin/sb --build=project DIR`
+// commands that ninja starts, and the ninja run. `bin/sb --build=MODE DIR`
 // runs ninja (`buildProject`) and loads the program that the build wrote.
 module snakebite.build;
 
@@ -7,28 +7,36 @@ module snakebite.build;
 private:
 
 
-// What `--build` selects: no build, or one compile of the root package.
-public enum Build { off, project }
+// What `--build` selects: no build, one compile of the root package, or one
+// compile of each module of the root package and a link of their files.
+public enum Build { off, project, module_ }
+
+
+// The spelling of each mode on the command line.
+private immutable string[Build.max + 1] buildNames = ["off", "project", "module"];
 
 
 // Sets `build` to the mode that `name` spells, or returns false.
 public bool parseBuildName(in string name, out Build build) {
-    import std.traits: EnumMembers;
-    import std.conv: text;
-
-    foreach (member; EnumMembers!Build)
-        if (name == text(member)) {
-            build = member;
+    foreach (member, spelling; buildNames)
+        if (name == spelling) {
+            build = cast(Build) member;
             return true;
         }
     return false;
 }
 
 
-public enum validBuildNames = "off, project";
+public string buildName(in Build build) {
+    return buildNames[build];
+}
 
 
-// The files of the build of one project, in its project state directory.
+public enum validBuildNames = "off, project, module";
+
+
+// The files of the build of one project in one mode, in its project state
+// directory.
 public struct BuildFiles {
     public string directory;
 
@@ -39,6 +47,21 @@ public struct BuildFiles {
     // The saved Bytecode program.
     public string program() const {
         return file("project.sbc");
+    }
+
+    // The file of the unit of the root file `source`, which is in the project
+    // directory `project` or relative to it.
+    public string unit(in string project, in string source) const {
+        import std.algorithm.iteration: map;
+        import std.array: join;
+        import std.path: absolutePath, buildNormalizedPath, pathSplitter,
+            relativePath;
+
+        // A part `..` of the path would leave the directory of the units.
+        const relative = source.absolutePath(project).buildNormalizedPath
+            .relativePath(project).pathSplitter
+            .map!(part => part == ".." ? "^" : part).join("/");
+        return file("units/" ~ relative ~ ".sbu");
     }
 
     // What the dependency image needs from the root code, which the compile
@@ -65,13 +88,14 @@ public struct BuildFiles {
 
 
 // The project directory `directory` is absolute. The build files depend on
-// it and on the directory that `sb` started in, as the project state
-// directory does.
-public BuildFiles buildFiles(in string directory) {
+// it, on the mode and on the directory that `sb` started in, as the project
+// state directory does.
+public BuildFiles buildFiles(in string directory, in Build build) {
     import snakebite.project.state: projectStateDirectory;
     import std.path: buildPath;
 
-    return BuildFiles(projectStateDirectory(directory).buildPath("build"));
+    return BuildFiles(projectStateDirectory(directory).buildPath("build",
+        buildName(build)));
 }
 
 
@@ -127,18 +151,18 @@ private struct BuildLock {
 // starts the commands that make the program, if they must run. The run holds
 // the lock of the build from before it checks `build.ninja` until it has the
 // program file open, so no other run changes a build file in between.
-public NinjaRun buildProject(in string directory) {
+public NinjaRun buildProject(in string directory, in Build build) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.file: exists, mkdirRecurse;
     import std.process: spawnProcess, wait;
     import std.stdio: File, stderr, stdout;
 
-    const files = buildFiles(directory);
+    const files = buildFiles(directory, build);
     files.directory.mkdirRecurse;
     scope lock = BuildLock(files.lockFile);
     if (!files.ninjaFile.exists)
-        writeBuildFile(directory);
+        writeBuildFile(directory, build);
     stdout.flush;
     stderr.flush;
     auto stopWatch = StopWatch(AutoStart.yes);
@@ -160,7 +184,7 @@ public bool isCommand(in string[] args) {
     const options = separator < 0 ? args : args[0 .. separator];
     return options.any!(argument => argument == generateOption
         || argument == dubDependenciesOption
-        || argument.startsWith("--compile=", "--image="));
+        || argument.startsWith("--compile=", "--image=", "--link="));
 }
 
 
@@ -169,6 +193,7 @@ public int runCommand(string[] args) {
     import snakebite.build.compile: compile;
     import snakebite.build.dependencies: dependencies;
     import snakebite.build.image: image;
+    import snakebite.build.link: link;
     import std.algorithm.searching: canFind, startsWith;
 
     if (args.canFind(generateOption))
@@ -177,6 +202,8 @@ public int runCommand(string[] args) {
         return dependencies(args);
     if (args.canFind!(argument => argument.startsWith("--compile=")))
         return compile(args);
+    if (args.canFind!(argument => argument.startsWith("--link=")))
+        return link(args);
     return image(args);
 }
 
@@ -188,18 +215,19 @@ private enum generateOption = "--generate";
 public enum dubDependenciesOption = "--dub-dependencies";
 
 
-// `sb --build=project --generate DIR`: writes the `build.ninja`
-// of the project in the absolute directory `DIR` when its text changed.
+// `sb --build=MODE --generate DIR`: writes the `build.ninja` of the mode
+// for the project in the absolute directory `DIR` when its text changed.
 private int generate(string[] args) {
     import snakebite.build.ninja: writeBuildFile;
     import std.getopt: getopt;
 
-    Build build;
+    string name;
     bool generates;
-    getopt(args, "build", &build, "generate", &generates);
-    if (build != Build.project || args.length != 2)
-        throw new Exception("--generate takes --build=project and one directory");
-    writeBuildFile(args[1]);
+    getopt(args, "build", &name, "generate", &generates);
+    Build build;
+    if (!parseBuildName(name, build) || build == Build.off || args.length != 2)
+        throw new Exception("--generate takes a --build mode and one directory");
+    writeBuildFile(args[1], build);
     return 0;
 }
 

@@ -28,6 +28,7 @@ public Project loadProject(
     in string name = null,
 ) {
     import snakebite.program: Program;
+    import snakebite.failure.halt: HostActions;
     import snakebite.frontend.compiler:
         checksOf, FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
@@ -53,9 +54,45 @@ public Project loadProject(
         project.directory,
         project.sources.importedCFilesAreRoots,
     );
-    project.program = Program(parsed, project.name, checksOf(flags));
+    project.program = Program(parsed, project.name, checksOf(flags),
+        HostActions(), project.sources.isUnit,
+        importedModules(parsed, project.sources.otherUnitFiles));
 
     return project;
+}
+
+
+// The modules of `files` that `roots` import, directly or through other
+// modules.
+private imported!"snakebite.frontend.ast".Module[] importedModules(
+    imported!"snakebite.frontend.ast".Module[] roots, in string[] files,
+) {
+    import snakebite.frontend.ast: Module;
+    import snakebite.frontend.compiler: withCompilerLock;
+    import std.path: absolutePath, buildNormalizedPath;
+
+    if (files.length == 0)
+        return null;
+    bool[string] wanted;
+    foreach (file; files)
+        wanted[file.absolutePath.buildNormalizedPath] = true;
+    bool[Module] visited;
+    Module[] found;
+    void collect(Module module_) {
+        if (module_ in visited)
+            return;
+        visited[module_] = true;
+        if (module_.srcfile.toString.idup.absolutePath.buildNormalizedPath
+                in wanted)
+            found ~= module_;
+        foreach (imported; module_.aimports)
+            collect(imported);
+    }
+    withCompilerLock({
+        foreach (root; roots)
+            collect(root);
+    });
+    return found;
 }
 
 

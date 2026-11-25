@@ -727,6 +727,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 result = *found;
                 return;
             }
+            if (_program.isInOtherUnit(function_)) {
+                result = declaredFunction(function_);
+                return;
+            }
 
             import std.datetime.stopwatch: AutoStart, StopWatch;
 
@@ -809,7 +813,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 _inlineBodies[placeholder] = builtInlineBody;
             import snakebite.frontend.dmd.mangle: mangledNameOf;
 
-            if (_runner.jitSetting.perfMap)
+            // The file of a unit names each function, as an object file
+            // does: the link joins the functions of the units by name.
+            if (_runner.jitSetting.perfMap || _program.isUnit)
                 placeholder.mangledName = function_.mangledNameOf;
             // Branch targets, call site cleanup ranges and host code become
             // addresses only now: the passes of the compile read them as
@@ -833,6 +839,21 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return result;
     }
 
+    // The function of another unit of the program (`isInOtherUnit`): only
+    // its name, with no body, as an object file holds a symbol that another
+    // object defines. The link puts the function of the other unit in its
+    // place. Under the compiler lock.
+    private const(Function)* declaredFunction(FuncDeclaration function_) {
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+        auto declared = moduleFor(function_).newFunction;
+        declared.mangledName = function_.mangledNameOf;
+        _compiled[function_] = declared;
+        registerGuestWord(function_, declared);
+        _complete.insert(function_, declared);
+        return declared;
+    }
+
     // The module of `compiledProgram` for the D module that declares
     // `declaration`, made at its first use. Under the compiler lock.
     private Module* moduleFor(Declaration declaration) {
@@ -849,7 +870,12 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         if (auto found = owner in _modules)
             return *found;
 
+        import snakebite.frontend.dmd.functions: prettyNameOf;
+        import std.string: fromStringz;
+
         auto created = compiledProgram.newModule();
+        // A link joins the modules of the files of the units by name.
+        created.start.name = prettyNameOf(owner).fromStringz.idup;
         _modules[owner] = created;
         return created;
     }

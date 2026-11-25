@@ -25,6 +25,11 @@ public struct Program {
     // Built once from `rootModules`, for `isRootOwned`'s `O(1)` lookup; see
     // `snakebite.frontend.dmd.functions.isRootOwned`.
     private bool[Module] _rootModuleSet;
+    // Whether the root modules are one unit of a larger program (ADR-0021),
+    // and then the modules of that program that the frontend read, the root
+    // modules among them.
+    private bool _isUnit;
+    private bool[Module] _programModuleSet;
     // Built once from `rootModules`; see `linkedFunctionOf`.
     private LinkMap _links;
     Main main;
@@ -59,6 +64,8 @@ public struct Program {
         in string name,
         in Checks checks,
         in HostActions actions = HostActions(),
+        in bool isUnit = false,
+        Module[] otherUnitModules = null,
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: findFunction;
@@ -74,6 +81,11 @@ public struct Program {
             foreach (module_; rootModules) {
                 _rootModuleSet[module_] = true;
             }
+            _isUnit = isUnit;
+            // The modules of the program that the frontend read: the root
+            // modules, when they are the whole program.
+            foreach (module_; rootModules ~ otherUnitModules)
+                _programModuleSet[module_] = true;
 
             foreach (module_; rootModules) {
                 auto found = findFunction(module_, "main");
@@ -154,13 +166,50 @@ public struct Program {
 
     // Whether another object defines `declaration`: the one decision that
     // the call selection and the static data, TypeInfo and class information
-    // take for a declaration (`snakebite.frontend.dmd.functions`).
+    // take for a declaration (`snakebite.frontend.dmd.functions`). The units
+    // of a program (`isUnit`) are not other objects: a declaration of another
+    // unit is the program's, and the program and the other unit can both
+    // define its data, as for a template instance. Only a function of
+    // another unit has no body here (`isInOtherUnit`).
     public bool isDefinedElsewhere(
         Dsymbol declaration,
     ) const {
         import snakebite.frontend.dmd.functions:
             frontendIsDefinedElsewhere = isDefinedElsewhere;
 
-        return frontendIsDefinedElsewhere(declaration, _rootModuleSet);
+        return frontendIsDefinedElsewhere(declaration, _programModuleSet);
+    }
+
+    // Whether only this program defines `declaration`, so that no other
+    // object refers to it: a declaration of a root module, when the root
+    // modules are the whole program. A unit (`isUnit`) shares each of its
+    // definitions with the other units, as an object file exports a symbol:
+    // the program and another object can both define it.
+    public bool definesAlone(
+        Dsymbol declaration,
+    ) const {
+        return !isUnit && isRootOwned(declaration);
+    }
+
+    // Whether the root modules are one unit of a larger program, which a link
+    // makes from the files of its units (ADR-0021). The unit then names each
+    // datum that another unit can refer to, as an object file names a
+    // symbol.
+    public bool isUnit() const {
+        return _isUnit;
+    }
+
+    // Whether another unit of the program defines `declaration`: an object of
+    // the program that is not this unit, as a native build of the unit sees
+    // it.
+    public bool isInOtherUnit(
+        Dsymbol declaration,
+    ) const {
+        import snakebite.frontend.dmd.functions:
+            frontendIsDefinedElsewhere = isDefinedElsewhere;
+
+        return isUnit
+            && frontendIsDefinedElsewhere(declaration, _rootModuleSet)
+            && !frontendIsDefinedElsewhere(declaration, _programModuleSet);
     }
 }

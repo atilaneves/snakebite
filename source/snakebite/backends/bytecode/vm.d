@@ -1076,10 +1076,12 @@ public struct Function {
     @plain package imported!"snakebite.stack.frames".ReturnPlace returnPlace;
     // Where a host caller writes the arguments, fixed once compiled.
     @plain package HostCallLayout hostCall;
-    // The mangled name of the function, or empty. The compiler fills it only
-    // when the perf map is on, for a compile to RAM and for a save; the JIT
-    // names its code by it.
-    @plain package const(char)[] mangledName;
+    // The mangled name of the function, or empty. The compiler fills it when
+    // the perf map is on, for a compile to RAM and for a save, and for the
+    // compile of a unit (`Program.isUnit`); the JIT names its code by it, and
+    // a link joins the functions of the units by it. A file holds it with
+    // the list of the functions of a module.
+    @setBy("transferBody") package const(char)[] mangledName;
     // Every word of this function that holds a process address, except the
     // handler of each instruction. The compiler records them only when
     // the program records addresses (`Program.recordsAddresses`). A file holds the list; a load applies

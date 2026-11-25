@@ -3855,7 +3855,7 @@ def write_module_project(
 # The commands that ninja ran, as its log of the build has them: one line for
 # each output of each command that ran.
 def ninja_log_lines(tmp_path: Path) -> list[str]:
-    logs = list(tmp_path.glob(".snakebite/*/build/.ninja_log"))
+    logs = list(tmp_path.glob(".snakebite/*/build/module/.ninja_log"))
     assert len(logs) == 1, logs
     return logs[0].read_text().splitlines()
 

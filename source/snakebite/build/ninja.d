@@ -4,11 +4,13 @@ module snakebite.build.ninja;
 private:
 
 
-// Writes the `build.ninja` of the dub project in the absolute directory
-// `directory`, only when its text differs from the file. The build reads the
-// description of the dub project only here and in the command of the
-// dependencies statement, which runs dub's build.
-public void writeBuildFile(in string directory) {
+// Writes the `build.ninja` of the mode `build` for the dub project in the
+// absolute directory `directory`, only when its text differs from the file.
+// The build reads the description of the dub project only here and in the
+// command of the dependencies statement, which runs dub's build.
+public void writeBuildFile(
+    in string directory, in imported!"snakebite.build".Build build,
+) {
     import snakebite.build: buildFiles, writeChanged;
     import snakebite.project.dub: dubBuildInputs, dubDescribeProject, dubSources;
     import std.file: mkdirRecurse, setTimes;
@@ -16,8 +18,8 @@ public void writeBuildFile(in string directory) {
 
     auto description = dubDescribeProject(directory);
     const sources = dubSources(directory, description);
-    const files = buildFiles(directory);
-    const text = buildFileText(directory, sources,
+    const files = buildFiles(directory, build);
+    const text = buildFileText(directory, build, sources,
         dubBuildInputs(description, sources.files));
     files.directory.mkdirRecurse;
     if (writeChanged(files.ninjaFile, text))
@@ -43,15 +45,20 @@ private string[] configurationFiles(
 
 
 // The build statements: `build.ninja` itself, the libraries of the dub
-// dependencies, the compile of the root package to the program and the image
-// module, and the dependency image. `buildInputs` are the inputs of
-// `build.ninja`: the paths whose change can change `sources`.
+// dependencies, the compiles of the root package, and the dependency image.
+// With the mode `project` one compile writes the program and the image
+// module. With `module` there is one compile for each root file, which
+// writes the file of its unit, and a link of the files of the units writes
+// the program and the image module, as reggae builds an object file for each
+// module and links them. `buildInputs` are the inputs of `build.ninja`: the
+// paths whose change can change `sources`.
 private string buildFileText(
     in string directory,
+    in imported!"snakebite.build".Build build,
     in imported!"snakebite.project.dub".SourceSet sources,
     in string[] buildInputs,
 ) {
-    import snakebite.build: buildFiles, dubDependenciesOption;
+    import snakebite.build: Build, buildFiles, buildName, dubDependenciesOption;
     import snakebite.frontend.hostcompiler: compilerConfigurationFiles, hostCompiler,
         hostConfigurationFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
@@ -62,7 +69,7 @@ private string buildFileText(
     import std.file: exists, getcwd, thisExePath;
     import std.path: baseName;
 
-    const files = buildFiles(directory);
+    const files = buildFiles(directory, build);
     const sb = thisExePath;
     const start = getcwd;
     // The frontend of the compile reads the configuration of the compiler
@@ -89,18 +96,22 @@ private string buildFileText(
     string text = "builddir = " ~ files.directory.ninjaValue ~ "\n";
     text ~= rule("generate",
         plain(["cd", start]) ~ shell(["&&"])
-            ~ plain([sb, "--build=project", "--generate", directory]),
+            ~ plain([sb, "--build=" ~ buildName(build), "--generate", directory]),
         ["generator = 1", "restat = 1", "pool = console"]);
     text ~= rule("dependencies",
         plain(["cd", start]) ~ shell(["&&"])
             ~ plain([sb, dubDependenciesOption, directory]) ~ shell(["$out"]),
         ["restat = 1", "pool = console"]);
+    // ninja quotes the path of `$out` for the shell.
     text ~= rule("compile",
         plain(["cd", directory]) ~ shell(["&&"])
-            ~ plain([sb, "--compile=" ~ files.program])
+            ~ plain([sb]) ~ shell(["--compile=$out"])
             ~ shell(commandVariables),
-        ["depfile = " ~ files.program.ninjaValue ~ ".dep", "deps = gcc",
-            "restat = 1", "pool = console"]);
+        ["depfile = $out.dep", "deps = gcc", "restat = 1", "pool = console"]);
+    text ~= rule("link",
+        plain(["cd", directory]) ~ shell(["&&"])
+            ~ plain([sb]) ~ shell(["--link=$out", "$in"]),
+        ["restat = 1", "pool = console"]);
     // ninja quotes the path of `$out` for the shell.
     text ~= rule("image",
         plain(["cd", directory]) ~ shell(["&&"]) ~ plain(environmentOfBuild)
@@ -126,15 +137,36 @@ private string buildFileText(
     text ~= statement(sourceInputs, "phony", null, null);
     if (libraries.length)
         text ~= "\n" ~ statement(libraries, "dependencies", null, dependencyInputs);
-    text ~= "\n" ~ statement([files.program, files.imageSource], "compile",
-        sources.files, [sb] ~ frontendConfiguration);
-    foreach (name; compilerVariables)
-        text ~= statementVariable(name, variables[name]);
-    text ~= statementVariable("options", [
+    const options = [
         "--program-name=" ~ directory.baseName,
         "--working-directory=" ~ workingDirectory,
         "--image-path=" ~ files.image,
-    ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null));
+    ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null);
+    string compileStatement(
+        in string output, in string[] imageSource, in string[] roots,
+        in string[] unitOptions,
+    ) {
+        string text = "\n" ~ statement([output], "compile", roots,
+            [sb] ~ frontendConfiguration, imageSource);
+        foreach (name; compilerVariables)
+            text ~= statementVariable(name, variables[name]);
+        return text ~ statementVariable("options", options ~ unitOptions);
+    }
+
+    if (build == Build.project)
+        text ~= compileStatement(files.program, [files.imageSource],
+            sources.files, null);
+    else {
+        string[] units;
+        foreach (root; sources.files) {
+            units ~= files.unit(directory, root);
+            text ~= compileStatement(units[$ - 1], null, [root],
+                ["--unit"] ~ sources.files.filter!(file => file != root)
+                    .map!(file => "--other-unit=" ~ file).array);
+        }
+        text ~= "\n" ~ statement([files.program], "link", units, [sb],
+            [files.imageSource]);
+    }
     text ~= "\n" ~ statement([files.image], "image",
         [files.imageSource] ~ sources.linkerFiles, [sb, compiler] ~ compilerConfiguration);
     foreach (name; compilerVariables)
@@ -226,11 +258,16 @@ private string statement(
     in string rule,
     in string[] inputs,
     in string[] implicitInputs,
+    in string[] implicitOutputs = null,
 ) {
     import std.algorithm.iteration: map;
     import std.array: join;
 
-    return "build " ~ outputs.map!ninjaPath.join(" ") ~ ": " ~ rule
+    return "build " ~ outputs.map!ninjaPath.join(" ")
+        ~ (implicitOutputs.length
+            ? " |" ~ implicitOutputs.map!(output => " " ~ output.ninjaPath).join
+            : "")
+        ~ ": " ~ rule
         ~ inputs.map!(input => " " ~ input.ninjaPath).join
         ~ (implicitInputs.length
             ? " |" ~ implicitInputs.map!(input => " " ~ input.ninjaPath).join

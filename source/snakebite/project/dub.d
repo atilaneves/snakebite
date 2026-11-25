@@ -69,6 +69,11 @@ public struct SourceSet {
     // module that a D module imports. A dub recipe names its C files in
     // `sourceFiles`, and dub does not compile one that it does not name.
     public bool importedCFilesAreRoots;
+    // Whether `files` are one unit of the program (ADR-0021), and then the
+    // files of the other units. The frontend reads one of them only when a
+    // root file imports it.
+    public bool isUnit;
+    public string[] otherUnitFiles;
 }
 
 

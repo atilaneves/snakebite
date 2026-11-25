@@ -209,6 +209,27 @@ public struct StaticBlocks {
         return _blocks.length == 0;
     }
 
+    // The number of blocks.
+    public size_t blockCount() const @safe pure nothrow @nogc {
+        return _blocks.length;
+    }
+
+    // The next datum starts a new block: a link adds the data of a file after
+    // the data of the files before it, block by block, so that each datum
+    // keeps its place in its block (`reserve`), and a load of the program of
+    // a link starts each block where the link did.
+    public void startBlock() @safe pure nothrow @nogc {
+        _available = null;
+    }
+
+    // Records that the word at `wordOffset` in datum `index` holds `link`, as
+    // `recordAddress` does for the word at an address.
+    public void addLink(in size_t index, Link link) @safe pure nothrow {
+        if (_memory !is null)
+            loadedProgramGrows;
+        _data[index].links ~= link;
+    }
+
     // The caller holds the compiler lock.
     public Placed reserve(in TypeFacts facts) @trusted pure nothrow {
         // Slots cannot move: constants can hold addresses of other slots.

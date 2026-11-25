@@ -73,10 +73,11 @@ public int run(string[] args) {
         string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
-        if (parsed.options.build == Build.project) {
+        if (parsed.options.build != Build.off) {
             // Mutable: the report keeps its duration.
             auto ninja = buildProject(
-                projectDirectory.absolutePath.buildNormalizedPath);
+                projectDirectory.absolutePath.buildNormalizedPath,
+                parsed.options.build);
             if (ninja.status != 0)
                 return 1;
             const report = executeLoaded(
@@ -302,27 +303,28 @@ public CliResult parseArgs(string[] args) {
 // values of a compile come from the dub recipe (ADR-0021).
 private string buildConflict(in Options options) {
     import snakebite.backends: BackendName;
-    import snakebite.build: Build;
+    import snakebite.build: Build, buildName;
     import snakebite.project.loading: isDubProject;
     import std.file: exists, isDir;
 
     if (options.build == Build.off)
         return null;
+    const option = "--build=" ~ buildName(options.build);
     if (options.save.length || options.load.length)
-        return "--build=project cannot be used with --save or --load";
+        return option ~ " cannot be used with --save or --load";
     if (options.lowmem)
-        return "--build=project cannot be used with --lowmem: the values of "
+        return option ~ " cannot be used with --lowmem: the values of "
             ~ "a build are fixed when build.ninja is made";
     if (options.backend != BackendName.bytecode)
-        return "--build=project works with the bytecode backend only";
+        return option ~ " works with the bytecode backend only";
     if (options.importPaths.length || options.stringImportPaths.length
             || options.versions.length || options.noOptimiseImage
             || options.jitPerfMap)
-        return "--build=project takes none of the options that change the "
+        return option ~ " takes none of the options that change the "
             ~ "compile: they come from the dub recipe";
     const directory = options.projectDirectory;
     if (directory.exists && directory.isDir && !isDubProject(directory))
-        return "--build=project needs a dub project: " ~ directory
+        return option ~ " needs a dub project: " ~ directory
             ~ " has no dub recipe";
     return null;
 }
@@ -355,8 +357,9 @@ private string optionConflict(in Options options, in size_t argumentCount) {
 
 private enum saveHelp = "Compile the program and write it to FILE; do not run it.";
 private enum loadHelp = "Run the program that FILE holds; no project directory.";
-private enum buildHelp = "off (default), or project: ninja compiles the dub project"
-    ~ " when a file changed, and sb loads the program.";
+private enum buildHelp = "off (default), project or module: ninja compiles the"
+    ~ " dub project, or each module of it, when a file changed, and sb loads the"
+    ~ " program.";
 
 private enum jitPerfMapHelp = "Write JIT symbols to /tmp/perf-<pid>.map.";
 
@@ -379,7 +382,8 @@ private enum helpText =
     "                            optimisation (faster build, slower run)\n" ~
     "  --save=FILE               " ~ saveHelp ~ "\n" ~
     "  --load=FILE               " ~ loadHelp ~ "\n" ~
-    "  --build=off|project       " ~ buildHelp ~ "\n" ~
+    "  --build=off|project|module\n" ~
+    "                            " ~ buildHelp ~ "\n" ~
     "  --lowmem                  "
         ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~
     "  --no-jit                  "
