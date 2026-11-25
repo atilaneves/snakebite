@@ -162,8 +162,7 @@ public LinkedProgram linkPrograms(
 
     auto program = new Program(null, true);
     // A link runs no guest code: the runner is only what the load of a
-    // function needs to point to. With no JIT, and no execution state ever
-    // made, it holds nothing to end.
+    // function needs to point to. The JIT is off.
     Runner runner = void;
     wire(*program, runner, JitSetting(enabled: false));
     Linker linker = Linker(program);
@@ -426,6 +425,21 @@ private struct Linker {
                 throw new SnakebiteException(
                     "the link finds no unit that defines `" ~ symbol ~ "`");
         auto start = &program.startData;
+        // A unit test in a template instance is in each unit that makes the
+        // instance, and the link gives them one function: it runs once, as
+        // in the one module that has it in a compile to RAM.
+        bool[const(void)*] ran;
+        foreach (record; start.modules) {
+            FunctionHandle[] kept;
+            foreach (handle; record.unitTests) {
+                const code = handle.compiledCode;
+                if (code !in ran) {
+                    ran[code] = true;
+                    kept ~= handle;
+                }
+            }
+            record.unitTests = kept;
+        }
         size_t[string] position;
         foreach (index, record; start.modules)
             position[record.name] = index;

@@ -53,6 +53,7 @@ public Project loadProject(
         project.sources.sourceOverrides,
         project.directory,
         project.sources.importedCFilesAreRoots,
+        project.sources.otherUnitFiles,
     );
     project.program = Program(parsed, project.name, checksOf(flags),
         HostActions(), project.sources.isUnit,

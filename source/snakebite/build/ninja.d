@@ -62,7 +62,8 @@ private string buildFileText(
     in imported!"snakebite.project.dub".SourceSet sources,
     in string[] buildInputs,
 ) {
-    import snakebite.build: Build, buildFiles, buildName, dubDependenciesOption;
+    import snakebite.build: Build, buildFiles, buildName, dubDependenciesOption,
+        errorDescriptorVariable;
     import snakebite.frontend.hostcompiler: compilerConfigurationFiles, hostCompiler,
         hostConfigurationFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
@@ -106,11 +107,16 @@ private string buildFileText(
         plain(["cd", start]) ~ shell(["&&"])
             ~ plain([sb, dubDependenciesOption, directory]) ~ shell(["$out"]),
         ["restat = 1", "pool = console"]);
-    // ninja quotes the path of `$out` for the shell.
+    // ninja quotes the path of `$out` for the shell. The compiles of the
+    // units run in parallel, and ninja writes the output of each to its own
+    // standard output. The standard error of a unit goes to the descriptor
+    // that the run of ninja gives (`buildProject`), as the one compile of
+    // `--build=project` has the terminal.
     text ~= rule("compile",
         plain(["cd", directory]) ~ shell(["&&"])
             ~ plain([sb]) ~ shell(["--compile=$out"])
-            ~ shell(commandVariables),
+            ~ shell(commandVariables)
+            ~ (build == Build.project ? null : shell(["2>&$${" ~ errorDescriptorVariable ~ ":-2}"])),
         ["depfile = $out.dep", "deps = gcc", "restat = 1"]);
     text ~= rule("link",
         plain(["cd", directory]) ~ shell(["&&"])

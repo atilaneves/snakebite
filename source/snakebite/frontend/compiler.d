@@ -57,6 +57,7 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
     in string[string] sourceOverrides = null,
     in string rootDirectory = null,
     in bool importedCFilesAreRoots = false,
+    in string[] otherUnitFiles = null,
 ) {
     return compiler.parseRootModules(
         filePaths,
@@ -66,6 +67,7 @@ public imported!"dmd.dmodule".Module[] parseRootModules(
         rootDirectory,
         importedCFilesAreRoots,
         dependencyImage,
+        otherUnitFiles,
     );
 }
 
@@ -894,6 +896,7 @@ final class Compiler {
         in string rootDirectory,
         in bool importedCFilesAreRoots,
         in bool dependencyImage,
+        in string[] otherUnitFiles,
     ) {
         return inside(() => parseRootModulesLocked(
             filePaths,
@@ -903,6 +906,7 @@ final class Compiler {
             rootDirectory,
             importedCFilesAreRoots,
             dependencyImage,
+            owned(otherUnitFiles),
         ));
     }
 
@@ -914,6 +918,7 @@ final class Compiler {
         in string rootDirectory,
         in bool importedCFilesAreRoots,
         in bool dependencyImage,
+        in string[] otherUnitFiles,
     ) {
         import dmd.dmodule: Module;
         import dmd.frontend: addImport, dmdParseModule = parseModule;
@@ -921,6 +926,8 @@ final class Compiler {
         import std.file: readText;
 
         requireInitialized;
+        keepUnitTestsOfModules(
+            moduleNamesOfFiles(otherUnitFiles, importPaths, rootDirectory));
 
         const originalPathLength = global.path.length;
         scope(exit) global.path.setDim(originalPathLength);
@@ -1283,17 +1290,91 @@ private void driveSharedSemantic(
         rootModules ~= discoverRootOwnedImports(modules, rootImportPaths);
 
     foreach (m; rootModules) m.importAll(null);
+    demoteKeptImports(rootModules[0]);
     foreach (m; rootModules) m.dsymbolSemantic(null);
     runDeferredSemantic;
+    demoteKeptImports(rootModules[0]);
     foreach (m; rootModules) m.semantic2(null);
     runDeferredSemantic2;
     foreach (m; rootModules) m.semantic3(null);
     runDeferredSemantic3;
+    demoteKeptImports(rootModules[0]);
     if (rootImportPaths.length)
         rootModules ~= analyseLoadedRootOwnedImports(rootImportPaths);
 
     if (global.errors == 0)
         reportInlineAsmDiagnostics(rootModules, dependencyImage);
+}
+
+// A unit of a program (ADR-0021) reads the modules of the other units
+// through `import`, and dmd keeps no unittest body of a module that is not a
+// root. A unit test in a template instance that this unit makes, such as a
+// unit test of a struct template, then has no body, and no unit runs it. The
+// frontend of `bin/sb DIR` has every module as a root. The option `-i` of dmd
+// makes a module a root when its parser knows the name of the module, and
+// the parser then keeps its unittest bodies: the modules `names` are loaded
+// this way, and `demoteKeptImports` makes them imports again once the
+// imports are loaded. A name that no file has changes nothing.
+private void keepUnitTestsOfModules(in string[] names) {
+    import dmd.compiler: includeImports, includeModulePatterns;
+    import std.string: toStringz;
+
+    if (names.length == 0)
+        return;
+    includeImports = true;
+    foreach (name; names)
+        includeModulePatterns.push(name.toStringz);
+}
+
+// The names of the modules that the files `files` have, from the paths of
+// the files under the import paths `importPaths`, as a native build of the
+// files names them. A file that is under no import path has no name.
+private string[] moduleNamesOfFiles(
+    in string[] files, in string[] importPaths, in string rootDirectory,
+) {
+    import std.algorithm.searching: endsWith, startsWith;
+    import std.array: replace;
+    import std.path: absolutePath, baseName, buildNormalizedPath, dirName,
+        relativePath, stripExtension;
+
+    string[] names;
+    foreach (file; files) {
+        const path = file.absolutePath(rootDirectory.absolutePath)
+            .buildNormalizedPath;
+        foreach (importPath; importPaths) {
+            const base = importPath.absolutePath(rootDirectory.absolutePath)
+                .buildNormalizedPath;
+            const relative = path.relativePath(base);
+            if (relative.startsWith("..") || !relative.endsWith(".d"))
+                continue;
+            auto name = relative.stripExtension;
+            if (name.baseName == "package")
+                name = name.dirName;
+            if (name != ".")
+                names ~= name.replace("/", ".");
+            break;
+        }
+    }
+    return names;
+}
+
+// Makes each module that `keepUnitTestsOfModules` loaded as a root an import
+// again, as dmd makes the first root that imports it its `importedFrom`.
+private void demoteKeptImports(imported!"dmd.dmodule".Module root) {
+    import dmd.compiler: compiledImports, includeImports;
+    import dmd.dmodule: Module;
+
+    if (!includeImports || compiledImports.length == 0)
+        return;
+    bool[Module] demoted;
+    foreach (module_; compiledImports[])
+        demoted[module_] = true;
+    foreach (module_; Module.amodules)
+        if (module_ in demoted
+                || (module_.importedFrom !is null
+                    && module_.importedFrom in demoted))
+            module_.importedFrom = root;
+    compiledImports.setDim(0);
 }
 
 // Every module under `rootImportPaths` that the phases above loaded and

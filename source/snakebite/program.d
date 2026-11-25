@@ -240,6 +240,7 @@ public struct Program {
             frontendIsRootOwned = isRootOwned;
 
         return isUnit && declaration.isUnitTestDeclaration !is null
+            && declaration.isInstantiated is null
             && frontendIsRootOwned(declaration, _programModuleSet)
             && !frontendIsRootOwned(declaration, _rootModuleSet);
     }

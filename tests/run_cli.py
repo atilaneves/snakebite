@@ -3784,7 +3784,8 @@ def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
     assert direct.returncode == 1, output(direct)
     assert built.returncode == 1, output(built)
     assert "undefinedName" in direct.stderr, output(direct)
-    assert direct.stderr in built.stderr, output(built)
+    assert built.stderr == direct.stderr, output(built)
+    assert "undefinedName" not in built.stdout, output(built)
 
     root = app / "source" / "calc.d"
     root.write_text(root.read_text().replace("undefinedName", "3"))
@@ -3887,10 +3888,10 @@ def test_build_module_reports_the_time_of_the_link(tmp_path: Path) -> None:
     first = run_sb("--build=module", str(app), cwd=tmp_path)
     assert first.returncode == 0, output(first)
     assert any(line.startswith("link:") and is_timing_line(line)
-               for line in first.stderr.splitlines()), output(first)
+               for line in first.stdout.splitlines()), output(first)
     again = run_sb("--build=module", str(app), cwd=tmp_path)
     assert not any(line.startswith("link:")
-                   for line in again.stderr.splitlines()), output(again)
+                   for line in again.stdout.splitlines()), output(again)
 
 
 # `--build=module` gives the result of `bin/sb DIR`: on the first run and on
@@ -4000,11 +4001,13 @@ def assert_module_build_runs_as_bin_sb(
 
 
 # An `extern(C)` prototype in one unit is the function that another unit
-# defines. Not corrected yet: a prototype can also name a function of the
-# process, and only the link knows which, so the call needs a fallback that
-# the unit and the link agree on (a decision of the owner, in the report of
-# the fix of the review of PR #1067).
-@pytest.mark.xfail(strict=True, reason="needs a design decision")
+# defines. Not corrected yet: the definition of a function that one module
+# declares with no body is known only when the unit files are put together.
+# Issue #1070 corrects it.
+@pytest.mark.xfail(
+    strict=True,
+    reason="the definition of a function declared with no body is known only"
+           " when the unit files are put together (issue #1070)")
 def test_build_module_links_an_extern_c_function_of_another_unit(
     tmp_path: Path,
 ) -> None:
@@ -4064,7 +4067,13 @@ def test_build_module_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
     assert direct.returncode == 1, output(direct)
     assert built.returncode == 1, output(built)
     assert "undefinedName" in direct.stderr, output(direct)
+    # The error text of the frontend is on the standard error, and only it:
+    # each unit that has the error reports it, and ninja writes its own
+    # lines to the standard output, as in the mode `project`.
     assert direct.stderr in built.stderr, output(built)
+    direct_lines = set(direct.stderr.splitlines())
+    assert all(line in direct_lines for line in built.stderr.splitlines()), (
+        output(built))
     assert "undefinedName" not in built.stdout, output(built)
 
     shapes.write_text(shapes.read_text().replace("undefinedName", "3"))
@@ -4150,6 +4159,55 @@ def test_build_module_calls_the_unit_test_of_another_unit(
     assert direct.returncode == 0, output(direct)
     assert guest_lines(direct).count("tested") == 2, output(direct)
     built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+
+
+# A unit test in a template instance runs once, as in `bin/sb DIR`, also when
+# no unit has the module of the template as a root of the instance: the module
+# `t` makes no instance, the modules `a` and `b` make the same one.
+@pytest.mark.parametrize("users", [["a"], ["a", "b"]])
+def test_build_module_runs_the_unit_test_of_a_template_instance(
+    tmp_path: Path, users: list[str],
+) -> None:
+    app = write_modules(tmp_path, "build-module-template-test", {
+        "t": """
+            import core.stdc.stdio: printf;
+            struct Reg(T) { unittest { printf("template unittest\\n"); } }
+            """,
+        **{user: "import t;\nReg!int r;\n" for user in users},
+    })
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    assert guest_lines(direct).count("template unittest") == 1, output(direct)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert built.returncode == 0, output(built)
+    assert guest_lines(built).count("template unittest") == 1, output(built)
+    assert_runs_as_bin_sb(built, direct)
+
+
+# A mixin template of a user that is named `_d_cmain` is a mixin of the
+# module, as in the mode `project`: only the entry point of druntime is left
+# out.
+@pytest.mark.parametrize("mode", ["project", "module"])
+def test_build_mode_defines_the_functions_of_a_user_mixin_template_named_d_cmain(
+    tmp_path: Path, mode: str,
+) -> None:
+    app = write_modules(tmp_path, "build-cmain-" + mode, {
+        "mixed": """
+            mixin template _d_cmain() {
+                int given() { return 41; }
+            }
+            mixin _d_cmain;
+            """,
+        "taker": """
+            import core.stdc.stdio: printf;
+            import mixed;
+            unittest { printf("cmain %d\\n", given() + 1); }
+            """,
+    })
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert "cmain 42" in guest_lines(direct), output(direct)
+    built = run_sb(f"--build={mode}", str(app), cwd=tmp_path)
     assert_runs_as_bin_sb(built, direct)
 
 

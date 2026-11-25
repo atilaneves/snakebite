@@ -103,10 +103,11 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     // `SemanticTimeTransitiveVisitor` visits only its arguments.
     // The C entry point that dmd mixes into the module of a D `main`
     // (`_d_cmain`) starts druntime, which calls the D `main`; sb starts the
-    // program itself.
+    // program itself. It is the template that druntime declares in
+    // `core.internal.entrypoint`: a template of a user with the same name is
+    // a mixin like any other.
     override void visit(TemplateMixin mixin_) {
-        if (mixin_.tempdecl !is null
-                && mixin_.tempdecl.ident.toString == "_d_cmain")
+        if (mixin_.tempdecl !is null && isEntryPointTemplate(mixin_.tempdecl))
             return;
         if (mixin_.members !is null)
             foreach (member; *mixin_.members)
@@ -199,4 +200,19 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     override void visit(FuncExp expression) {
         expression.fd.accept(this);
     }
+}
+
+
+// Whether `tempdecl` is the template of the C entry point of druntime.
+private bool isEntryPointTemplate(imported!"dmd.dsymbol".Dsymbol tempdecl) {
+    auto declaration = tempdecl.isTemplateDeclaration;
+    if (declaration is null || declaration.ident.toString != "_d_cmain")
+        return false;
+    auto module_ = declaration.getModule;
+    if (module_ is null || module_.md is null)
+        return false;
+    const name = module_.md;
+    return name.id.toString == "entrypoint" && name.packages.length == 2
+        && name.packages[0].toString == "core"
+        && name.packages[1].toString == "internal";
 }

@@ -32,6 +32,11 @@ public string buildName(in Build build) {
 }
 
 
+// The environment variable that holds the descriptor to which the compile of
+// a unit writes its standard error.
+public enum errorDescriptorVariable = "SB_ERROR_FD";
+
+
 public enum validBuildNames = "off, project, module";
 
 
@@ -66,9 +71,9 @@ public struct BuildFiles {
 
     // The root files, one on each line, for the compile of each unit. The
     // compile reads the file to know which of the modules that it imports
-    // are in other units. No statement has the file as an input: a compile
-    // needs a root file that it does not import no more than a native
-    // compile of a module needs the object files of the others.
+    // are in other units. Each unit compile has the file as an order-only
+    // input (`ninja.d`): a change of the file starts no compile, and a
+    // compile of a unit does not start before the file exists.
     public string unitFiles() const {
         return file("units.list");
     }
@@ -176,11 +181,30 @@ public NinjaRun buildProject(in string directory, in Build build) {
     stderr.flush;
     auto stopWatch = StopWatch(AutoStart.yes);
     // ninja makes `build.ninja` again only when it gets its absolute path.
-    // ninja writes the output of a command that ran in parallel, and its own
-    // messages, to its standard output. They are messages of the frontend,
-    // which `bin/sb DIR` writes to the standard error.
-    const status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile],
-        stdin, stderr).wait;
+    // In the mode `module` the compiles of the units run in parallel, and
+    // ninja holds the output of each. Each writes its standard error to the
+    // descriptor that the variable `errorDescriptorVariable` names, a copy of
+    // the standard error of this run: the messages of the frontend are on
+    // the standard error, as `bin/sb DIR` has them. ninja's own messages are
+    // on the standard output, as in the mode `project`.
+    int status;
+    if (build == Build.module_) {
+        import core.sys.posix.fcntl: F_DUPFD, fcntl;
+        import core.sys.posix.unistd: closeDescriptor = close;
+        import std.conv: to;
+        import std.exception: errnoEnforce;
+        import std.process: Config;
+
+        // Above the descriptors that other code can have at a fixed number.
+        const copy = fcntl(stderr.fileno, F_DUPFD, 10);
+        errnoEnforce(copy >= 0, "cannot copy the standard error");
+        scope(exit) closeDescriptor(copy);
+        status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile],
+            stdin, stdout, stderr, [errorDescriptorVariable: copy.to!string],
+            Config.inheritFDs).wait;
+    } else
+        status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile])
+            .wait;
     const duration = stopWatch.peek;
     return NinjaRun(status, duration,
         status == 0 ? File(files.program, "rb") : File.init);
