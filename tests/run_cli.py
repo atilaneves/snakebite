@@ -3797,8 +3797,12 @@ UNIT_BUILDS = ["module", "package"]
 # class, and reads and writes its thread-local and its shared variable in a
 # module constructor. `animals.zoo` and `numbers.tally` instantiate the
 # template of `numbers.counter`, which has a static variable and no
-# dependency. Each module but `counter` has a unit test. With `dependency`,
-# `tally` uses the dub package of `write_dependency` too.
+# dependency. Each module but `counter` has a unit test. `numbers.sub.leaf`
+# is in a sub-package, and `bee` and `zulu` are in the source directory: the
+# root files of `numbers` and of the source directory are not next to each
+# other in the list of root files. Each of these three has a module
+# constructor and a unit test that print, to show the order of the modules.
+# With `dependency`, `tally` uses the dub package of `write_dependency` too.
 def write_unit_project(
     tmp_path: Path, name: str, dependency: bool = False,
 ) -> Path:
@@ -3850,6 +3854,14 @@ def write_unit_project(
         unittest {{ printf("tally %d %d\\n", answer(), counted!int()); }}
         {uses}
         """)
+    for module, path in [("numbers.sub.leaf", "numbers/sub/leaf"),
+                         ("bee", "bee"), ("zulu", "zulu")]:
+        write(app / "source" / f"{path}.d", f"""
+            module {module};
+            import core.stdc.stdio: printf;
+            shared static this() {{ printf("ctor {module}\\n"); }}
+            unittest {{ printf("test {module}\\n"); }}
+            """)
     return app
 
 

@@ -418,13 +418,18 @@ private struct Linker {
     // each module are positions in the start data, and no function keeps a
     // name that a compile to RAM gives only for the perf map.
     void finish() {
+        import std.algorithm.mutation: SwapStrategy;
         import std.algorithm.searching: canFind;
+        import std.algorithm.sorting: sort;
 
         foreach (symbol, function_; functions)
             if (!isDefined(function_))
                 throw new SnakebiteException(
                     "the link finds no unit that defines `" ~ symbol ~ "`");
         auto start = &program.startData;
+        // The modules are in the order of the units; the program has them in
+        // the order of the root files.
+        start.modules.sort!((a, b) => a.order < b.order, SwapStrategy.stable);
         size_t[string] position;
         foreach (index, record; start.modules)
             position[record.name] = index;
@@ -1551,8 +1556,7 @@ private void transferModule(ref Archive archive, in size_t index) {
 
 private void transferStartData(ref Archive archive, ref Program program) {
     static assert(FieldNameTuple!StartData == AliasSeq!("programName",
-        "hasCEntryPoint", "betterC", "modules", "crtConstructors",
-        "crtDestructors", "dependencyModules", "main"));
+        "hasCEntryPoint", "betterC", "modules", "dependencyModules", "main"));
     static assert(FieldNameTuple!MainStart == AliasSeq!("present",
         "returnsVoid", "parameterCount", "function_"));
 
@@ -1585,8 +1589,6 @@ private void transferStartData(ref Archive archive, ref Program program) {
             archive._recorded[position] = true;
         }
     }
-    transferHandles(archive, start.crtConstructors);
-    transferHandles(archive, start.crtDestructors);
     if (!archive.isWriting)
         start.dependencyModules = dependencyModulesOf(archive._image);
     archive.transfer(start.main.present);
@@ -1602,20 +1604,20 @@ private void transferStartData(ref Archive archive, ref Program program) {
     linked.hasCEntryPoint |= fileStart.hasCEntryPoint;
     linked.betterC = fileStart.betterC;
     linked.modules ~= fileStart.modules;
-    linked.crtConstructors ~= fileStart.crtConstructors;
-    linked.crtDestructors ~= fileStart.crtDestructors;
     if (fileStart.main.present)
         linked.main = fileStart.main;
 }
 
 
 private void transferStart(ref Archive archive, ref ModuleStart record) {
-    static assert(FieldNameTuple!ModuleStart == AliasSeq!("name", "standalone",
-        "imports", "importNames", "independentConstructors",
+    static assert(FieldNameTuple!ModuleStart == AliasSeq!("name", "order",
+        "standalone", "imports", "importNames", "independentConstructors",
         "sharedConstructors", "threadConstructors", "sharedDestructors",
-        "threadDestructors", "unitTests", "sharedGates", "threadGates"));
+        "threadDestructors", "unitTests", "crtConstructors",
+        "crtDestructors", "sharedGates", "threadGates"));
 
     // The name is in the shape of the file (`transferBody`).
+    archive.transfer(record.order);
     archive.transfer(record.standalone);
     archive.transfer(record.imports);
     archive.transfer(record.importNames);
@@ -1625,6 +1627,8 @@ private void transferStart(ref Archive archive, ref ModuleStart record) {
     transferHandles(archive, record.sharedDestructors);
     transferHandles(archive, record.threadDestructors);
     transferHandles(archive, record.unitTests);
+    transferHandles(archive, record.crtConstructors);
+    transferHandles(archive, record.crtDestructors);
     transferGates(archive, record.sharedGates);
     transferGates(archive, record.threadGates);
 }

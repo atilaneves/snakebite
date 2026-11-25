@@ -33,6 +33,11 @@ public alias GateStorage = imported!"snakebite.native.staticstore".Placed;
 
 public struct ModuleStart {
     public string name;
+    // The position of the module among the modules of the program, which is
+    // the position of its root file. A compile of one unit (ADR-0021) holds
+    // some modules of the program, and the link puts the modules in this
+    // order, whatever the grouping of the files into units.
+    public size_t order;
     // Whether druntime orders the module: false when it has nothing to
     // construct or destruct.
     public bool standalone;
@@ -49,6 +54,9 @@ public struct ModuleStart {
     public FunctionHandle[] sharedDestructors;
     public FunctionHandle[] threadDestructors;
     public FunctionHandle[] unitTests;
+    // The `crt_constructor` and `crt_destructor` functions of the module.
+    public FunctionHandle[] crtConstructors;
+    public FunctionHandle[] crtDestructors;
     // dmd's glue layer increments the gate of each destructor of a template
     // instance while it runs the constructors of the module: the destructor
     // body returns early unless it brings the gate back to zero.
@@ -59,7 +67,7 @@ public struct ModuleStart {
     public void eachHandle(scope void delegate(FunctionHandle) visit) {
         foreach (handles; [independentConstructors, sharedConstructors,
                 threadConstructors, sharedDestructors, threadDestructors,
-                unitTests])
+                unitTests, crtConstructors, crtDestructors])
             foreach (handle; handles)
                 visit(handle);
     }
@@ -102,19 +110,29 @@ public struct StartData {
     // One record for each root module, in the order of the constructors. A
     // backend decides where each record lives (see `buildStartData`).
     public ModuleStart*[] modules;
-    // In the order of the modules, which is the order of the constructors.
-    public FunctionHandle[] crtConstructors;
-    public FunctionHandle[] crtDestructors;
     public const(ModuleInfo*)[] dependencyModules;
     public MainStart main;
+
+    // The `crt_constructor` and `crt_destructor` functions of the program, in
+    // the order of the modules, which is the order of the constructors.
+    public FunctionHandle[] crtConstructors() {
+        FunctionHandle[] all;
+        foreach (module_; modules)
+            all ~= module_.crtConstructors;
+        return all;
+    }
+
+    public FunctionHandle[] crtDestructors() {
+        FunctionHandle[] all;
+        foreach (module_; modules)
+            all ~= module_.crtDestructors;
+        return all;
+    }
 
     // Calls `visit` with each function handle of the program.
     public void eachHandle(scope void delegate(FunctionHandle) visit) {
         foreach (module_; modules)
             module_.eachHandle(visit);
-        foreach (handles; [crtConstructors, crtDestructors])
-            foreach (handle; handles)
-                visit(handle);
         if (main.present)
             visit(main.function_);
     }

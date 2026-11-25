@@ -34,7 +34,7 @@ public string buildName(in Build build) {
 }
 
 
-public enum validBuildNames = "off, project, module, package";
+public enum validBuildNames = imported!"std.array".join(buildNames[], ", ");
 
 
 // The files of the build of one project in one mode, in its project state

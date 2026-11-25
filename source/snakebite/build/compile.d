@@ -8,13 +8,14 @@ private:
 //
 //   sb --compile=FILE [--dflag=ARGUMENT]... [-IPATH]... [-JPATH]...
 //      --program-name=NAME --working-directory=DIRECTORY --image-path=IMAGE
-//      [--c-imports-are-roots] [--unit [--other-unit=FILE]...] ROOT-FILE...
+//      [--c-imports-are-roots] [--unit [--other-unit=FILE]... [--file-position=N]...] ROOT-FILE...
 //
 // It runs in the project directory. It runs the frontend on the root files,
 // loads no dependency image, and writes the program to FILE with the save of
 // `--save`, and `FILE.dep`: the files that the frontend read. With `--unit`
 // the root files are one unit of the program and the files `--other-unit`
-// are the other units: FILE is the file of the unit, which a link joins to
+// are the other units, and each `--file-position` is the position of a root
+// file among the root files of the program: FILE is the file of the unit, which a link joins to
 // the files of the other units (`link`). Without it, beside FILE it writes
 // what the image needs from the root code (`BuildFiles.imageSource`), only
 // when that changed. With `--unit` the image needs nothing from the root
@@ -41,6 +42,7 @@ public int compile(string[] args) {
     bool cImportsAreRoots;
     bool isUnit;
     string[] otherUnitFiles;
+    size_t[] filePositions;
     getopt(
         args,
         "compile", &output,
@@ -53,6 +55,7 @@ public int compile(string[] args) {
         "c-imports-are-roots", &cImportsAreRoots,
         "unit", &isUnit,
         "other-unit", &otherUnitFiles,
+        "file-position", &filePositions,
     );
 
     SourceSet sources;
@@ -64,6 +67,7 @@ public int compile(string[] args) {
     sources.importedCFilesAreRoots = cImportsAreRoots;
     sources.isUnit = isUnit;
     sources.otherUnitFiles = otherUnitFiles;
+    sources.filePositions = filePositions;
     const directory = getcwd;
     // The image that the load uses exists, so the frontend accepts what only
     // the image runs.

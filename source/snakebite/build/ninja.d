@@ -68,6 +68,7 @@ private string buildFileText(
     import std.algorithm.searching: canFind;
     import std.algorithm.sorting: sort;
     import std.array: array, join;
+    import std.conv: to;
     import std.file: exists, getcwd, thisExePath;
     import std.path: baseName;
 
@@ -168,7 +169,10 @@ private string buildFileText(
         foreach (unit; unitsOf(build, sources.files)) {
             units ~= files.unit(directory, unit.name);
             text ~= compileStatement(units[$ - 1], null, unit.roots,
-                ["--unit"] ~ sources.files
+                ["--unit"]
+                    ~ unit.positions.map!(position =>
+                        "--file-position=" ~ position.to!string).array
+                    ~ sources.files
                     .filter!(file => !unit.roots.canFind(file))
                     .map!(file => "--other-unit=" ~ file).array);
         }
@@ -191,6 +195,8 @@ private string buildFileText(
 private struct Unit {
     string name;
     string[] roots;
+    // The position of each root among the root files of the program.
+    size_t[] positions;
 }
 
 
@@ -205,13 +211,14 @@ private Unit[] unitsOf(
 
     Unit[] units;
     size_t[string] indexOf;
-    foreach (file; files) {
+    foreach (position, file; files) {
         const name = build == Build.package_ ? file.dirName : file;
-        if (auto index = name in indexOf)
+        if (auto index = name in indexOf) {
             units[*index].roots ~= file;
-        else {
+            units[*index].positions ~= position;
+        } else {
             indexOf[name] = units.length;
-            units ~= Unit(name, [file]);
+            units ~= Unit(name, [file], [position]);
         }
     }
     return units;

@@ -74,6 +74,8 @@ private void addModules(
         // `auto`: the code writes through the pointer, so it cannot be const.
         auto start = moduleStorage(module_);
         *start = ModuleStart.init;
+        start.order = program.rootPositions.length
+            ? program.rootPositions[i] : i;
         start.name = prettyNameOf(module_).fromStringz.idup;
         start.standalone = !module_.needmoduleinfo;
         bool[size_t] seen;
@@ -108,9 +110,9 @@ private void addModules(
             gatesOf(staticStorage, functions.threadDestructors);
         start.unitTests = compiled(compiledFunction, functions.unittests);
 
-        data.crtConstructors ~=
+        start.crtConstructors =
             compiled(compiledFunction, functions.crtConstructors);
-        data.crtDestructors ~=
+        start.crtDestructors =
             compiled(compiledFunction, functions.crtDestructors);
         data.modules ~= start;
     }

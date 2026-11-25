@@ -56,7 +56,8 @@ public Project loadProject(
     );
     project.program = Program(parsed, project.name, checksOf(flags),
         HostActions(), project.sources.isUnit,
-        importedModules(parsed, project.sources.otherUnitFiles));
+        importedModules(parsed, project.sources.otherUnitFiles),
+        project.sources.filePositions);
 
     return project;
 }
