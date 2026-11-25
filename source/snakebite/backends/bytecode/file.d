@@ -682,34 +682,43 @@ private enum holdsAddress(F) = is(F == U*, U) || is(F == delegate)
     || is(F == class) || is(F == interface);
 
 
+// The dependency image has the module information of the dependencies, not
+// the file.
+private void transfer(
+    ref Archive archive, ref const(ModuleInfo*)[] modules,
+) {
+    if (!archive.isWriting)
+        modules = dependencyModulesOf(archive._image);
+}
+
+
+private enum isNullable(T) = is(T == Nullable!U, U);
+
+
+private void transfer(T)(ref Archive archive, ref T value)
+if (isNullable!T) {
+    alias U = typeof(value.get());
+    bool present = !value.isNull;
+    archive.scalar(present);
+    if (!present)
+        return;
+    if (archive.isWriting)
+        archive.transfer(value.get);
+    else {
+        U payload;
+        archive.transfer(payload);
+        value = payload;
+    }
+}
+
+
 // The one walk. It writes `value` to the file, or reads the file into it.
-private void transfer(T)(ref Archive archive, ref T value) {
+private void transfer(T)(ref Archive archive, ref T value)
+if (!isNullable!T) {
     static if (is(T == enum)) {
         archive.scalar(value);
     } else static if (is(T : real) || is(T == bool) || is(T : dchar)) {
         archive.scalar(value);
-    } else static if (is(T == FunctionHandle)) {
-        transferHandle(archive, value);
-    } else static if (is(Unqual!T == GateStorage)) {
-        transferGate(archive, value);
-    } else static if (is(T == ModuleStart*)) {
-        transferModuleStart(archive, value);
-    } else static if (is(T == const(ModuleInfo*)[])) {
-        // The dependency image has them, not the file.
-        if (!archive.isWriting)
-            value = dependencyModulesOf(archive._image);
-    } else static if (is(T == Nullable!U, U)) {
-        bool present = !value.isNull;
-        archive.scalar(present);
-        if (present) {
-            if (archive.isWriting)
-                archive.transfer(value.get);
-            else {
-                U payload;
-                archive.transfer(payload);
-                value = payload;
-            }
-        }
     } else static if (is(T == E[], E)) {
         // A load needs the relocations only while it runs: it applies them,
         // and `Program.complete` the ones of names (`transferModule`).
@@ -1268,7 +1277,7 @@ private void transferModule(
 
 // The `ModuleStart` of a module is in the module: the file holds its
 // position in the program.
-private void transferModuleStart(
+private void transfer(
     ref Archive archive, ref ModuleStart* start,
 ) {
     size_t position;
@@ -1288,7 +1297,7 @@ private void transferModuleStart(
 }
 
 // A gate is the storage of a variable: a target and a length.
-private void transferGate(ref Archive archive, ref GateStorage gate) {
+private void transfer(ref Archive archive, ref GateStorage gate) {
     Target.Kind kind;
     size_t[3] reference;
     size_t length;
@@ -1314,7 +1323,7 @@ private void transferGate(ref Archive archive, ref GateStorage gate) {
 
 
 // A handle is a compiled function of the program, named by its place.
-private void transferHandle(ref Archive archive, ref FunctionHandle handle) {
+private void transfer(ref Archive archive, ref FunctionHandle handle) {
     size_t[2] position;
     if (archive.isWriting) {
         const compiled = cast(const(Function)*) handle.compiledCode;

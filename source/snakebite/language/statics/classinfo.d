@@ -147,8 +147,7 @@ public Linked!TypeInfo_Class classRuntimeInfo(
     ref ClassRuntimeCache cache,
     Hooks hooks,
 ) {
-    import snakebite.frontend.ast: blake3, hasPointers, isAbstract, STC,
-        toDString;
+    import snakebite.frontend.ast: blake3, hasPointers, isAbstract, STC;
     import snakebite.frontend.dmd.functions: prettyNameOf;
 
     if (auto cached = declaration in cache)
@@ -184,7 +183,7 @@ public Linked!TypeInfo_Class classRuntimeInfo(
                 info.m_flags |= isAbstract;
         }
     }
-    data.storeString(&info.name, prettyNameOf(declaration).toDString);
+    data.storeString(&info.name, prettyNameOf(declaration));
     info.nameSig = *cast(uint[4]*) blake3(
         cast(const(ubyte)[]) info.name,
     )[0 .. 16].ptr;

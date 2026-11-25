@@ -58,10 +58,9 @@ private ModuleStart startOf(
 ) {
     import snakebite.frontend.dmd.functions:
         findFunction, findModuleFunctions, prettyNameOf;
-    import std.string: fromStringz;
 
     ModuleStart start;
-    start.name = prettyNameOf(module_).fromStringz.idup;
+    start.name = prettyNameOf(module_);
     if (auto main_ = findFunction(module_, "main"))
         start.main = mainStartOf(main_, compiledFunction);
     if (betterC)
@@ -69,7 +68,7 @@ private ModuleStart startOf(
 
     start.standalone = !module_.needmoduleinfo;
     foreach (imported; module_.aimports)
-        start.importNames ~= prettyNameOf(imported).fromStringz.idup;
+        start.importNames ~= prettyNameOf(imported);
 
     auto functions = findModuleFunctions(module_);
     start.independentConstructors =

@@ -64,7 +64,6 @@ public struct Program {
         import snakebite.frontend.dmd.functions: findFunction, prettyNameOf;
         import std.conv: text;
         import snakebite.failure.report: SnakebiteException;
-        import std.string: fromStringz;
 
         this.rootModules = rootModules;
         this.name = name;
@@ -87,8 +86,8 @@ public struct Program {
                 if (mainModule !is null)
                     throw new SnakebiteException(text(
                         "only one entry point `main` is allowed: found in `",
-                        prettyNameOf(mainModule).fromStringz, "` and `",
-                        prettyNameOf(module_).fromStringz, "`"));
+                        prettyNameOf(mainModule), "` and `",
+                        prettyNameOf(module_), "`"));
                 mainModule = module_;
                 main = Main(found);
             }
@@ -128,10 +127,9 @@ public struct Program {
         return _links.definitionOf(variable);
     }
 
-    // Whether the `main` of the program is the C entry point (see
-    // `MainStart.cLinkage`). The choice of the dependency image needs it
-    // before any compile, so before the start data exists
-    // (`StartData.hasCEntryPoint`).
+    // Whether the `main` of the program is the C entry point. The choice of
+    // the dependency image needs the answer before any compile, so before the
+    // start data (see "Start data" in `CONTEXT.md`) exists.
     public bool hasCEntryPoint() const {
         import snakebite.frontend.dmd.functions: hasCLinkage;
 
