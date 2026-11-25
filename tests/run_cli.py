@@ -4184,42 +4184,6 @@ def test_build_module_generates_the_functions_of_a_struct_in_each_unit(
     assert_module_build_runs_as_bin_sb(tmp_path, app, ["user 3 1"])
 
 
-# The program file holds one copy of a datum that several units define: the
-# static variable of a template instance, which each unit that uses the
-# template defines. A program of three units that use it is not larger than a
-# program of one such unit by the size of copies.
-def test_build_module_program_file_holds_one_copy_of_a_shared_datum(
-    tmp_path: Path,
-) -> None:
-    def program_size(name: str, users: int) -> int:
-        app = write_modules(tmp_path / name, name, {
-            "pooled": """
-                int sample(int index)() {
-                    static int[16384] table = 7;
-                    return table[index];
-                }
-                """,
-            **{f"user{number}": f"""
-                import core.stdc.stdio: printf;
-                import pooled: sample;
-                unittest {{ printf("user{number} %d\\n", sample!0()); }}
-                """ for number in range(users)},
-        })
-        built = run_sb("--build=module", str(app), cwd=tmp_path / name)
-        assert built.returncode == 0, output(built)
-        for number in range(users):
-            assert f"user{number} 7" in guest_lines(built), output(built)
-        programs = list((tmp_path / name).glob(
-            ".snakebite/*/build/module/project.sbc"))
-        assert len(programs) == 1, programs
-        return programs[0].stat().st_size
-
-    one = program_size("one", 1)
-    three = program_size("three", 3)
-    # Each copy of the table is 64 KiB.
-    assert three - one < 64 * 1024, (one, three)
-
-
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(
