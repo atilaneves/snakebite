@@ -427,8 +427,11 @@ private struct Linker {
                 throw new SnakebiteException(
                     "the link finds no unit that defines `" ~ symbol ~ "`");
         auto start = &program.startData;
-        // The modules are in the order of the units; the program has them in
-        // the order of the root files.
+        // The link reads the files one after the other, so the modules are in
+        // the order of the units. A unit can hold root files that are not
+        // next to each other, so sort the modules by `order`, which is the
+        // position of the root file, to get the order that a link of one
+        // file for each module gives.
         start.modules.sort!((a, b) => a.order < b.order, SwapStrategy.stable);
         size_t[string] position;
         foreach (index, record; start.modules)
@@ -1559,6 +1562,10 @@ private void transferStartData(ref Archive archive, ref Program program) {
         "hasCEntryPoint", "betterC", "modules", "dependencyModules", "main"));
     static assert(FieldNameTuple!MainStart == AliasSeq!("present",
         "returnsVoid", "parameterCount", "function_"));
+
+    // The `crt_constructor` and `crt_destructor` functions are not here. Each
+    // `ModuleStart` holds its own (`transferStart`), so that the sort of the
+    // modules in a link keeps them with their module.
 
     // A link reads the start data of each file apart, and adds it to the
     // start data of the program.

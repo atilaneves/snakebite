@@ -68,7 +68,6 @@ private string buildFileText(
     import std.algorithm.searching: canFind;
     import std.algorithm.sorting: sort;
     import std.array: array, join;
-    import std.conv: to;
     import std.file: exists, getcwd, thisExePath;
     import std.path: baseName;
 
@@ -171,7 +170,7 @@ private string buildFileText(
             text ~= compileStatement(units[$ - 1], null, unit.roots,
                 ["--unit"]
                     ~ unit.positions.map!(position =>
-                        "--file-position=" ~ position.to!string).array
+                        "--file-position=" ~ imported!"std.conv".text(position)).array
                     ~ sources.files
                     .filter!(file => !unit.roots.canFind(file))
                     .map!(file => "--other-unit=" ~ file).array);
@@ -191,7 +190,10 @@ private string buildFileText(
 }
 
 
-// The root files of one unit, and the path that names the file of the unit.
+// A unit is the set of root files that one compile handles. The compile
+// writes one file for the unit. With `module` a unit is one root file; with
+// `package` it is the root files of one directory. `name` is the path that
+// names the file of the unit.
 private struct Unit {
     string name;
     string[] roots;
