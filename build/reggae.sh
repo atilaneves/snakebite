@@ -5,7 +5,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 # Apply generator, compiler and frontend version changes to existing builds
 # too.
 if [[ ! -f build.ninja || "${BASH_SOURCE[0]}" -nt build.ninja
-      || build/compilers.sh -nt build.ninja || dub.selections.json -nt build.ninja ]]; then
+      || build/compilers.sh -nt build.ninja || reggaefile.d -nt build.ninja || dub.selections.json -nt build.ninja ]]; then
     dmd=$(build/compilers.sh dmd)
     # Reggae builds the build description with the `dub` and the D compiler
     # on PATH: the ones of build/compilers.sh come first.

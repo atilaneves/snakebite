@@ -2,6 +2,11 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
+# The tests and bin/sb start dmd, ldc2 and dub by name: the compilers of
+# build/compilers.sh come first, so a local run and a CI run use the same ones.
+PATH=$(build/compilers.sh path):$PATH
+export PATH
+
 # dmd's -cov drops one-only linkage on manifest-constant init symbols,
 # which duplicates across the vendored dmd frontend/backend and fails
 # to link. kcov instruments the already-built binary via DWARF/ptrace

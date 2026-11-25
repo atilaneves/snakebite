@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The one place that states the compilers that build snakebite. The build
+# The one script that gives the compilers that build snakebite. The build
 # gets them with the official D installer (https://dlang.org/install.sh),
 # which installs a named version below ~/dlang when it is not there yet. A
 # compiler on PATH never builds snakebite.
@@ -14,9 +14,15 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 # `dmd` selection in dub.selections.json: the two cannot disagree.
 dmd=dmd-$(python3 -c 'import json, sys; print(json.load(sys.stdin)["versions"]["dmd"])' \
     < dub.selections.json)
-# LDC's frontend must be the dmd version above, and vendor/ldc-frontend must
-# hold the patch of LDC's additions for this LDC version (see reggaefile.d).
-ldc=ldc-1.43.0
+# The LDC version is `ldcVersion` in reggaefile.d: ninja regenerates the build
+# when that file changes, and cannot see a change of this script. LDC's
+# frontend must be the dmd version above, and vendor/ldc-frontend must hold
+# the patch of LDC's additions for this LDC version.
+ldc=ldc-$(sed -n 's/^enum ldcVersion = "\(.*\)";$/\1/p' reggaefile.d)
+if [[ $ldc == ldc- ]]; then
+    echo "$0: no \`enum ldcVersion\` in reggaefile.d" >&2
+    exit 1
+fi
 
 installer=$HOME/dlang/install.sh
 if [[ ! -x $installer ]]; then
@@ -40,7 +46,13 @@ case ${1:-} in
     dmd) program "$dmd" ;;
     ldc2) program "$ldc" ;;
     dub) program "$dmd" --dub ;;
-    path) echo "$(dirname -- "$(program "$dmd")"):$(dirname -- "$(program "$ldc")")" ;;
+    path)
+        # Separate statements: a failed install must end the script, and a
+        # command substitution inside the arguments of `echo` loses its status.
+        dmd_program=$(program "$dmd")
+        ldc_program=$(program "$ldc")
+        echo "$(dirname -- "$dmd_program"):$(dirname -- "$ldc_program")"
+        ;;
     *)
         echo "usage: $0 dmd|ldc2|dub|path" >&2
         exit 2

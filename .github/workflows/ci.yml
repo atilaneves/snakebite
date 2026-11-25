@@ -8,12 +8,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # build/compilers.sh states the compilers and installs them with
-      # install.sh, as on a developer machine. Their bin directories on PATH
-      # give the tests the same dmd, ldc2 and dub.
-      - name: Install the D compilers
-        run: build/compilers.sh path >> "$GITHUB_PATH"
-
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
