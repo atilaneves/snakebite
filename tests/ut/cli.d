@@ -3,7 +3,6 @@ module ut.cli;
 
 import snakebite.driver.cli: parseArgs;
 import snakebite.backends: BackendName;
-import snakebite.build.compile: filePositionsError;
 import std.algorithm.searching: startsWith;
 import ut;
 
@@ -182,21 +181,4 @@ unittest {
     result.status.should == 0;
     result.options.showHelp.should == true;
     result.diagnostic.startsWith("Usage: sb ").should == true;
-}
-
-
-// A unit compile needs one `--file-position` for each root file, and a
-// compile that is not a unit needs none.
-@("compileFilePositionCount")
-unittest {
-    (filePositionsError(true, ["a.d", "b.d"], [0, 3]) is null).should == true;
-    (filePositionsError(false, ["a.d", "b.d"], []) is null).should == true;
-
-    const size_t[][] wrong = [[], [0], [0, 3, 4]];
-    foreach (positions; wrong) {
-        const message = filePositionsError(true, ["a.d", "b.d"], positions);
-        (message is null).should == false;
-        "--file-position".should.be in message;
-    }
-    (filePositionsError(false, ["a.d"], [0]) is null).should == false;
 }

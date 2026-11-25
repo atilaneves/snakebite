@@ -162,16 +162,14 @@ private string buildFileText(
 
     if (build == Build.project)
         text ~= compileStatement(files.program, [files.imageSource],
-            sources.files, null);
+            sources.files, sources.importedCFilesAreRoots
+                ? ["--c-imports-are-roots"] : null);
     else {
         string[] units;
         foreach (unit; unitsOf(build, sources.files)) {
             units ~= files.unit(directory, unit.name);
             text ~= compileStatement(units[$ - 1], null, unit.roots,
-                ["--unit"]
-                    ~ unit.positions.map!(position =>
-                        "--file-position=" ~ imported!"std.conv".text(position)).array
-                    ~ sources.files
+                ["--unit"] ~ sources.files
                     .filter!(file => !unit.roots.canFind(file))
                     .map!(file => "--other-unit=" ~ file).array);
         }
@@ -197,8 +195,6 @@ private string buildFileText(
 private struct Unit {
     string name;
     string[] roots;
-    // The position of each root among the root files of the program.
-    size_t[] positions;
 }
 
 
@@ -213,14 +209,13 @@ private Unit[] unitsOf(
 
     Unit[] units;
     size_t[string] indexOf;
-    foreach (position, file; files) {
+    foreach (file; files) {
         const name = build == Build.package_ ? file.dirName : file;
-        if (auto index = name in indexOf) {
+        if (auto index = name in indexOf)
             units[*index].roots ~= file;
-            units[*index].positions ~= position;
-        } else {
+        else {
             indexOf[name] = units.length;
-            units ~= Unit(name, [file], [position]);
+            units ~= Unit(name, [file]);
         }
     }
     return units;

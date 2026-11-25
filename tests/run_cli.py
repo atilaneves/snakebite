@@ -3262,6 +3262,29 @@ def assert_runs_as_bin_sb(
     assert built.stderr == direct.stderr, output(built)
 
 
+# A run of the units gives the result of `bin/sb DIR` up to the order of the
+# lines of modules that do not import each other: native code links the
+# object files in any order, and the language fixes only the order that the
+# imports give. The lines are the same set, and each line in `first` comes
+# before its line in `second` for each pair (`imports`).
+def assert_runs_as_bin_sb_up_to_import_order(
+    built: subprocess.CompletedProcess[str],
+    direct: subprocess.CompletedProcess[str],
+    imports: list[tuple[str, str]] = [("shapes ", "zoo ")],
+) -> None:
+    assert built.returncode == direct.returncode, output(built)
+    assert sorted(guest_lines(built)) == sorted(guest_lines(direct)), \
+        output(built)
+    assert built.stderr == direct.stderr, output(built)
+    lines = guest_lines(built)
+    for first, second in imports:
+        positions = [[index for index, line in enumerate(lines)
+                      if line.startswith(prefix)]
+                     for prefix in (first, second)]
+        assert positions[0] and positions[1], output(built)
+        assert positions[0][0] < positions[1][0], output(built)
+
+
 # `--build=project` gives the result of `bin/sb DIR`: on the first run, on a
 # run with no change and on a run after a touch of a root file.
 def test_build_project_runs_as_bin_sb(tmp_path: Path) -> None:
@@ -3797,12 +3820,8 @@ UNIT_BUILDS = ["module", "package"]
 # class, and reads and writes its thread-local and its shared variable in a
 # module constructor. `animals.zoo` and `numbers.tally` instantiate the
 # template of `numbers.counter`, which has a static variable and no
-# dependency. Each module but `counter` has a unit test. `numbers.sub.leaf`
-# is in a sub-package, and `bee` and `zulu` are in the source directory: the
-# root files of `numbers` and of the source directory are not next to each
-# other in the list of root files. Each of these three has a module
-# constructor and a unit test that print, to show the order of the modules.
-# With `dependency`, `tally` uses the dub package of `write_dependency` too.
+# dependency. Each module but `counter` has a unit test. With `dependency`,
+# `tally` uses the dub package of `write_dependency` too.
 def write_unit_project(
     tmp_path: Path, name: str, dependency: bool = False,
 ) -> Path:
@@ -3815,16 +3834,11 @@ def write_unit_project(
     write(app / "dub.sdl", recipe)
     write(app / "source" / "numbers" / "counter.d", """
         module numbers.counter;
-        import core.stdc.stdio: printf;
-        pragma(crt_constructor) void crtCounter() { printf("crt-ctor numbers.counter\\n"); }
-        pragma(crt_destructor) void crtCounterEnd() { printf("crt-dtor numbers.counter\\n"); }
         int counted(T)() { static int count; return ++count; }
         """)
     write(app / "source" / "animals" / "shapes.d", """
         module animals.shapes;
         import core.stdc.stdio: printf;
-        pragma(crt_constructor) void crtShapes() { printf("crt-ctor animals.shapes\\n"); }
-        pragma(crt_destructor) void crtShapesEnd() { printf("crt-dtor animals.shapes\\n"); }
         int twice(int value) { return value * 2; }
         int perThread = 3;
         __gshared int everywhere = 100;
@@ -3859,16 +3873,6 @@ def write_unit_project(
         unittest {{ printf("tally %d %d\\n", answer(), counted!int()); }}
         {uses}
         """)
-    for module, path in [("numbers.sub.leaf", "numbers/sub/leaf"),
-                         ("bee", "bee"), ("zulu", "zulu")]:
-        write(app / "source" / f"{path}.d", f"""
-            module {module};
-            import core.stdc.stdio: printf;
-            shared static this() {{ printf("ctor {module}\\n"); }}
-            pragma(crt_constructor) void crt() {{ printf("crt-ctor {module}\\n"); }}
-            pragma(crt_destructor) void crtEnd() {{ printf("crt-dtor {module}\\n"); }}
-            unittest {{ printf("test {module}\\n"); }}
-            """)
     return app
 
 
@@ -3907,27 +3911,7 @@ def test_build_units_run_as_bin_sb(tmp_path: Path, build: str) -> None:
     assert "zoo 42 13 1100 animal dog" in output(direct), output(direct)
     for _ in range(2):
         built = run_sb(f"--build={build}", str(app), cwd=tmp_path)
-        assert_runs_as_bin_sb(built, direct)
-
-
-# The `crt_constructor` and `crt_destructor` functions of modules whose files
-# are not next to each other run in the order of `bin/sb DIR`: the order of
-# the modules of the program, not of the units.
-@pytest.mark.parametrize("build", UNIT_BUILDS)
-def test_build_units_run_crt_functions_in_the_order_of_bin_sb(
-    tmp_path: Path, build: str,
-) -> None:
-    app = write_unit_project(tmp_path, f"build-{build}-crt")
-
-    direct = run_sb(str(app), cwd=tmp_path)
-    assert direct.returncode == 0, output(direct)
-    built = run_sb(f"--build={build}", str(app), cwd=tmp_path)
-    assert_runs_as_bin_sb(built, direct)
-    crt = [line for line in guest_lines(built) if line.startswith("crt-")]
-    modules = ["animals.shapes", "bee", "numbers.counter",
-               "numbers.sub.leaf", "zulu"]
-    assert crt == ([f"crt-ctor {name}" for name in modules]
-                   + [f"crt-dtor {name}" for name in reversed(modules)]), crt
+        assert_runs_as_bin_sb_up_to_import_order(built, direct)
 
 
 # After an edit to a module, the run compiles the unit of that module and
@@ -3958,7 +3942,7 @@ def test_build_units_compile_only_the_changed_units(
     assert "project.sbc" in outputs, outputs
     direct = run_sb(str(app), cwd=tmp_path)
     assert direct.returncode == 0, output(direct)
-    assert_runs_as_bin_sb(built, direct)
+    assert_runs_as_bin_sb_up_to_import_order(built, direct)
     assert guest_lines(built) != guest_lines(first), output(built)
 
 
@@ -3991,7 +3975,7 @@ def test_build_units_with_a_dependency_run_as_bin_sb(
     assert "dep 42 7" in guest_lines(direct), output(direct)
     for _ in range(2):
         built = run_sb(f"--build={build}", str(app), cwd=tmp_path)
-        assert_runs_as_bin_sb(built, direct)
+        assert_runs_as_bin_sb_up_to_import_order(built, direct)
 
 
 # A program saved with the perf map on names its JIT code in the perf map
