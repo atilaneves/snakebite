@@ -25,11 +25,7 @@ jobs:
           compiler: ldc-1.43.0
 
       - name: Record ldc path
-        run: |
-          echo "LDC=$DC" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/ldc-bin"
-          ln -s "$DC" "$RUNNER_TEMP/ldc-bin/ldc"
-          echo "$RUNNER_TEMP/ldc-bin" >> "$GITHUB_PATH"
+        run: echo "LDC=$DC" >> "$GITHUB_ENV"
 
       - name: Install D compiler
         uses: dlang-community/setup-dlang@v2
