@@ -357,9 +357,9 @@ private string optionConflict(in Options options, in size_t argumentCount) {
 
 private enum saveHelp = "Compile the program and write it to FILE; do not run it.";
 private enum loadHelp = "Run the program that FILE holds; no project directory.";
-private enum buildHelp = "off (default), project or module: ninja compiles the"
-    ~ " dub project, or each module of it, when a file changed, and sb loads the"
-    ~ " program.";
+private enum buildHelp = "off (default), project, module or package: ninja"
+    ~ " compiles the dub project, or each module or D package of it, when a file"
+    ~ " changed, and sb loads the program.";
 
 private enum jitPerfMapHelp = "Write JIT symbols to /tmp/perf-<pid>.map.";
 
@@ -382,7 +382,7 @@ private enum helpText =
     "                            optimisation (faster build, slower run)\n" ~
     "  --save=FILE               " ~ saveHelp ~ "\n" ~
     "  --load=FILE               " ~ loadHelp ~ "\n" ~
-    "  --build=off|project|module\n" ~
+    "  --build=off|project|module|package\n" ~
     "                            " ~ buildHelp ~ "\n" ~
     "  --lowmem                  "
         ~ imported!"snakebite.memory.gc".lowmemHelp ~ "\n" ~

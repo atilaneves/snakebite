@@ -8,12 +8,14 @@ private:
 
 
 // What `--build` selects: no build, one compile of the root package, or one
-// compile of each module of the root package and a link of their files.
-public enum Build { off, project, module_ }
+// compile of each module or of each D package (the modules of one
+// directory) of the root package and a link of their files.
+public enum Build { off, project, module_, package_ }
 
 
 // The spelling of each mode on the command line.
-private immutable string[Build.max + 1] buildNames = ["off", "project", "module"];
+private immutable string[Build.max + 1] buildNames =
+    ["off", "project", "module", "package"];
 
 
 // Sets `build` to the mode that `name` spells, or returns false.
@@ -32,7 +34,7 @@ public string buildName(in Build build) {
 }
 
 
-public enum validBuildNames = "off, project, module";
+public enum validBuildNames = "off, project, module, package";
 
 
 // The files of the build of one project in one mode, in its project state

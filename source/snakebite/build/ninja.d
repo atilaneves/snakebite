@@ -50,7 +50,9 @@ private string[] configurationFiles(
 // module. With `module` there is one compile for each root file, which
 // writes the file of its unit, and a link of the files of the units writes
 // the program and the image module, as reggae builds an object file for each
-// module and links them. `buildInputs` are the inputs of `build.ninja`: the
+// module and links them. `package` is `module` with one compile for each D
+// package: the root files of one directory, as reggae builds an object file
+// for each package. `buildInputs` are the inputs of `build.ninja`: the
 // paths whose change can change `sources`.
 private string buildFileText(
     in string directory,
@@ -163,10 +165,11 @@ private string buildFileText(
             sources.files, null);
     else {
         string[] units;
-        foreach (root; sources.files) {
-            units ~= files.unit(directory, root);
-            text ~= compileStatement(units[$ - 1], null, [root],
-                ["--unit"] ~ sources.files.filter!(file => file != root)
+        foreach (unit; unitsOf(build, sources.files)) {
+            units ~= files.unit(directory, unit.name);
+            text ~= compileStatement(units[$ - 1], null, unit.roots,
+                ["--unit"] ~ sources.files
+                    .filter!(file => !unit.roots.canFind(file))
                     .map!(file => "--other-unit=" ~ file).array);
         }
         text ~= "\n" ~ statement([files.program], "link", units, [sb],
@@ -181,6 +184,37 @@ private string buildFileText(
     text ~= "\ndefault " ~ [files.program, files.image].map!ninjaPath.join(" ")
         ~ "\n";
     return text;
+}
+
+
+// The root files of one unit, and the path that names the file of the unit.
+private struct Unit {
+    string name;
+    string[] roots;
+}
+
+
+// The units of the root files `files` in the mode `build`, `module` or
+// `package`: one for each file, or one for each directory, as reggae builds
+// an object file for each module or for each D package.
+private Unit[] unitsOf(
+    in imported!"snakebite.build".Build build, in string[] files,
+) {
+    import snakebite.build: Build;
+    import std.path: dirName;
+
+    Unit[] units;
+    size_t[string] indexOf;
+    foreach (file; files) {
+        const name = build == Build.package_ ? file.dirName : file;
+        if (auto index = name in indexOf)
+            units[*index].roots ~= file;
+        else {
+            indexOf[name] = units.length;
+            units ~= Unit(name, [file]);
+        }
+    }
+    return units;
 }
 
 
