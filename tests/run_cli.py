@@ -4002,12 +4002,13 @@ def assert_module_build_runs_as_bin_sb(
 
 # An `extern(C)` prototype in one unit is the function that another unit
 # defines. Not corrected yet: the definition of a function that one module
-# declares with no body is known only when the unit files are put together.
-# Issue #1070 corrects it.
+# declares with no body is known only when the unit files are put together,
+# and module mode does not resolve it yet.
 @pytest.mark.xfail(
     strict=True,
     reason="the definition of a function declared with no body is known only"
-           " when the unit files are put together (issue #1070)")
+           " when the unit files are put together; module mode does not"
+           " resolve it yet")
 def test_build_module_links_an_extern_c_function_of_another_unit(
     tmp_path: Path,
 ) -> None:

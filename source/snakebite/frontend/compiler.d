@@ -1358,17 +1358,79 @@ private string[] moduleNamesOfFiles(
     return names;
 }
 
+// A module that `keepUnitTestsOfModules` loaded has the unit tests that a
+// root module has, with the attributes that the unit test of a unit-threaded
+// test has. Only a unit test in a template instance needs its body in this
+// unit: the program of the unit that has the module runs the others. The
+// symbols of `members` then are those that a parse of a module that is not a
+// root gives, an empty unit test with no attribute, for each unit test that
+// is not in a template.
+private void dropUnitTestsOutsideTemplates(
+    imported!"dmd.arraytypes".Dsymbols* members,
+) {
+    import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
+    import dmd.astenums: STC;
+    import dmd.dsymbol: DSYM, Dsymbol;
+    import dmd.dtemplate: TemplateDeclaration;
+    import dmd.func: UnitTestDeclaration;
+    import dmd.aggregate: AggregateDeclaration;
+
+    if (members is null)
+        return;
+    foreach (ref member; *members) {
+        if (member is null || member.isTemplateDeclaration !is null)
+            continue;
+        if (auto unitTest = member.isUnitTestDeclaration) {
+            auto placeholder = new UnitTestDeclaration(
+                unitTest.loc, unitTest.endloc, STC.none, null);
+            // The name that the parse of the module gave, which the unit that
+            // has the module gives the function.
+            placeholder.ident = unitTest.ident;
+            member = placeholder;
+        } else if (auto attribute = member.isAttribDeclaration) {
+            dropUnitTestsOutsideTemplates(attribute.decl);
+            if (member.dsym == DSYM.conditionalDeclaration
+                    || member.dsym == DSYM.staticIfDeclaration)
+                dropUnitTestsOutsideTemplates(
+                    (cast(ConditionalDeclaration) cast(void*) member).elsedecl);
+            // An attribute of a unit test only is not in the parse of a
+            // module that is not a root.
+            const onlyUnitTest = attribute.decl !is null
+                && attribute.decl.length == 1
+                && (*attribute.decl)[0] !is null
+                && (*attribute.decl)[0].isUnitTestDeclaration !is null
+                && (member.dsym == DSYM.userAttributeDeclaration
+                    || member.dsym == DSYM.storageClassDeclaration
+                    || member.dsym == DSYM.linkDeclaration
+                    || member.dsym == DSYM.visibilityDeclaration
+                    || member.dsym == DSYM.alignDeclaration);
+            if (onlyUnitTest)
+                member = (*attribute.decl)[0];
+        } else if (auto aggregate = member.isAggregateDeclaration) {
+            dropUnitTestsOutsideTemplates(aggregate.members);
+        }
+    }
+}
+
 // Makes each module that `keepUnitTestsOfModules` loaded as a root an import
-// again, as dmd makes the first root that imports it its `importedFrom`.
+// again, as dmd makes the first root that imports it its `importedFrom`. It
+// ends the promotion: the call comes after the loads of the imports.
 private void demoteKeptImports(imported!"dmd.dmodule".Module root) {
     import dmd.compiler: compiledImports, includeImports;
     import dmd.dmodule: Module;
 
-    if (!includeImports || compiledImports.length == 0)
+    if (!includeImports)
+        return;
+    // A module that a later phase loads, such as one that a template
+    // imports in a `mixin`, is an import as dmd has it.
+    includeImports = false;
+    if (compiledImports.length == 0)
         return;
     bool[Module] demoted;
-    foreach (module_; compiledImports[])
+    foreach (module_; compiledImports[]) {
         demoted[module_] = true;
+        dropUnitTestsOutsideTemplates(module_.members);
+    }
     foreach (module_; Module.amodules)
         if (module_ in demoted
                 || (module_.importedFrom !is null
