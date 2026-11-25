@@ -158,14 +158,15 @@ public struct ProgramReader {
 public LinkedProgram linkPrograms(
     in string[] inputs, in string output, in string buildKey,
 ) {
-    import core.memory: GC;
     import snakebite.backends.bytecode.runner: wire;
     import std.file: read;
 
     auto program = new Program(null, true);
-    auto runner = cast(Runner*) GC.calloc(Runner.sizeof);
-    wire(*program, *runner, JitSetting.init);
-    scope(exit) runner.end;
+    // A link runs no guest code: the runner is only what the load of a
+    // function needs to point to. With no JIT, and no execution state ever
+    // made, it holds nothing to end.
+    Runner runner = void;
+    wire(*program, runner, JitSetting(enabled: false));
     Linker linker = Linker(program);
     Header header;
     foreach (index, input; inputs) {
@@ -191,7 +192,7 @@ public LinkedProgram linkPrograms(
             throw new SnakebiteException(input
                 ~ " is of another program than " ~ inputs[0]);
         file._linker = &linker;
-        loadProgram(file, *program, *runner, null);
+        loadProgram(file, *program, runner, null);
     }
     linker.finish;
     saveProgram(*program, header, output);
