@@ -86,9 +86,9 @@ process, and `Program` holds them:
   is only meaningful with others of the same `Program`.
 - The call plans, their symbol resolver and the callback bridge are in
   `CallPlanStore`.
-- The start data of the program: the program name and the start data of
-  each root module. The entry function and the functions that the C runtime
-  runs come from those of the modules.
+- The start data of the program: the start data of each root module. The
+  entry function and the functions that the C runtime runs come from those
+  of the modules.
 - A datum that has no owner, or whose owner has no blocks, goes to the blocks
   of `Program.store` (`NativeData.reserve` with no owner). The file holds
   these blocks as it holds those of a `Module`.

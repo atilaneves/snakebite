@@ -5,7 +5,7 @@ import snakebite.backends.bytecode: Bytecode;
 import snakebite.backends.bytecode.inspection: functionAt;
 import snakebite.backends.bytecode.vm: Function, JitSetting;
 import snakebite.backends.statistics: CompilationStatistics;
-import snakebite.driver.execution: imagePathOf, LoadedProgram, loadProgramFile;
+import snakebite.driver.execution: LoadedProgram, loadProgramFile;
 import snakebite.frontend.ast: FuncDeclaration;
 import snakebite.program: Program;
 import snakebite.start.data: StartData;
@@ -33,7 +33,7 @@ public struct SavedFile {
 public SavedFile saveProgram(const Program program, in JitSetting jit) {
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode.inspection: eachCompiledPosition;
-    import std.file: getcwd, read, remove;
+    import std.file: read, remove;
 
     const path = temporaryPath;
     scope(exit) {
@@ -48,7 +48,7 @@ public SavedFile saveProgram(const Program program, in JitSetting jit) {
     auto compiler = new Bytecode(program, jit, recordsAddresses);
     {
         auto owned = Owned!Bytecode(compiler);
-        owned.save(path, getcwd, imagePathOf(cast() program));
+        owned.save(path);
         eachCompiledPosition(compiler, (declaration, module_, index) {
             saved.positions[declaration] = [module_, index];
         });

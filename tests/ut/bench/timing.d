@@ -63,7 +63,7 @@ static foreach (BackendType; Matrix!(
             0,
             1,
             null,
-            ["a", "-b"],
+            ["benchmarkArguments", "a", "-b"],
         );
 
         report.passed.should == true;

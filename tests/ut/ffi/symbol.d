@@ -581,7 +581,7 @@ static foreach (backend; Matrix!()) {
                 "module live_preparation;\n" ~ code);
             auto project = prepareProject(sandbox.inSandboxPath("app"),
                 nativeDependencies: false).project;
-            project.program.startsAsProject = false;
+            project.program.isSnippet = true;
             size_t analyses;
             Program liveProgram() {
                 ++analyses;

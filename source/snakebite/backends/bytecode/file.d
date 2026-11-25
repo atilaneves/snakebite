@@ -41,14 +41,15 @@ import std.traits: FieldNameTuple, Unqual;
 import std.typecons: Nullable;
 
 
-// What precedes the program in a file.
+// What precedes the program in a file. The key comes first: a load checks it
+// before it uses any other field (ADR-0020).
 public struct Header {
     // Names the build that wrote the file (`generatorKey`).
     public string buildKey;
-    // The dependency image that the program runs on, or empty.
+    // The dependency image that the program was compiled with, as an
+    // executable names the libraries that it needs. Empty for none, and in an
+    // SBC file: the run that puts a program together gives the image.
     public string imagePath;
-    // The directory that the program runs in.
-    public string workingDirectory;
 }
 
 
@@ -67,8 +68,7 @@ public void saveProgram(
 
     auto file = Archive.writing(program);
     file.text(magic);
-    Header written = Header(
-        header.buildKey, header.imagePath, header.workingDirectory);
+    Header written = header;
     transferHeader(file, written);
     // The memory that the load of the rest takes, before the rest: the save
     // counts it as it writes the rest (`Archive.need`).
@@ -272,9 +272,8 @@ private void transferNames(ref Archive archive, ref Archive source) {
 
 
 private void transferHeader(ref Archive archive, ref Header header) {
-    archive.transfer(header.buildKey);
-    archive.transfer(header.imagePath);
-    archive.transfer(header.workingDirectory);
+    foreach (ref field; header.tupleof)
+        archive.transfer(field);
 }
 
 

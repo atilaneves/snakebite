@@ -344,7 +344,7 @@ unittest {
     foreach (round; 0 .. 6) {
         auto program = Program([parseSnippet(text(
             "int main() { int sum = 0; foreach (i; 0 .. 10) sum += i; ",
-            "return sum + ", round, "; }"))], "snakebite");
+            "return sum + ", round, "; }"))]);
         auto backend = ownedBackend!Bytecode(program);
         FunctionHandle handle = backend.startData.main.get.function_;
 

@@ -34,7 +34,6 @@ public StartData buildStartData(
     ModuleStorage moduleStorage,
 ) {
     StartData data;
-    data.programName = program.name;
     data.betterC = program.checks.betterC;
     if (!data.betterC)
         data.dependencyModules = dependencyModulesOf(program.dependencyImage);

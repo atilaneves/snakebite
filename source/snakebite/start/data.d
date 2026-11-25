@@ -106,7 +106,6 @@ public const(ModuleInfo*)[] dependencyModulesOf(
 
 
 public struct StartData {
-    public string programName;
     public bool betterC;
     // The `ModuleStart` of each root module, in the order of the root
     // modules. A backend decides where each one lives (see

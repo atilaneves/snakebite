@@ -6,7 +6,7 @@ import core.runtime: UnitTestResult;
 import core.sync.mutex: Mutex;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.program: Program;
-import snakebite.image.dependency: TestHooks;
+import snakebite.image.dependency: DependencyImage, TestHooks;
 import snakebite.driver.execution: prepareProject, executeBackend, runProject;
 import snakebite.project.dub: dubSources;
 import snakebite.project.dubcache: DubDescription, projectDescriptionFromJson;
@@ -297,6 +297,14 @@ private UnitTestResult successfulOuterRunner() {
     return UnitTestResult(1, 1, false, false);
 }
 
+// A dependency image that names `hooks` as the runner of the unit tests, as
+// an image that holds a test runner does, and holds no code.
+private const(DependencyImage)* imageWithRunner(in TestHooks hooks) {
+    auto image = new DependencyImage;
+    image.testHooks = hooks;
+    return image;
+}
+
 private __gshared Mutex _initDepthLock;
 
 shared static this() {
@@ -326,8 +334,10 @@ static foreach (backend; Matrix!()) {
                 auto outer = prepareProject(sandbox.inSandboxPath("outer")).project.program;
                 _innerProgram = prepareProject(sandbox.inSandboxPath("inner")).project.program;
                 _nestedBackend = backendIdentity!backend;
-                _innerProgram.testHooks = TestHooks.of(null, &throwingInnerRunner);
-                outer.testHooks = TestHooks.of(null, &successfulOuterRunner);
+                _innerProgram.dependencyImage =
+                    imageWithRunner(TestHooks.of(null, &throwingInnerRunner));
+                outer.dependencyImage =
+                    imageWithRunner(TestHooks.of(null, &successfulOuterRunner));
                 rt_init;
                 const depth = atomicLoad(runtimeInitDepth);
                 scope(exit) {

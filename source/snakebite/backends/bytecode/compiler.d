@@ -204,12 +204,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // first run fills lazily is filled first: each start handle, and the callee
     // of each guest call site. A template instance that the frontend adds
     // during a compile compiles only when one of these reaches it. A function that does not compile ends the
-    // save with that error, and no file is written. A load runs the program
-    // in `workingDirectory`, with the dependency image `imagePath`, or with
-    // none when it is empty.
-    public void save(
-        in string path, in string workingDirectory, in string imagePath,
-    ) {
+    // save with that error, and no file is written. The file names the
+    // dependency image of the program, if it has one.
+    public void save(in string path) {
         import snakebite.backends.bytecode.file: Header, saveProgram;
         import snakebite.image.preparation: generatorKey;
 
@@ -231,8 +228,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         });
         fillGuestCallSites;
 
+        const image = _program.dependencyImage;
         saveProgram(compiledProgram,
-            Header(generatorKey, imagePath, workingDirectory), path);
+            Header(generatorKey, image is null ? "" : image.path), path);
     }
 
     // Fills the callee of every guest call site, compiling the callees, until

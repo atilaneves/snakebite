@@ -56,6 +56,13 @@ public struct BuildFiles {
         return file("image.so");
     }
 
+    // The directory that the program runs in, which only the dub recipe
+    // gives. The step that reads the recipe writes it, so that a run with no
+    // change does not read the recipe.
+    public string workingDirectory() const {
+        return file("working-directory");
+    }
+
     private string file(in string name) const {
         import std.path: buildPath;
 
@@ -84,6 +91,8 @@ public struct NinjaRun {
     // later build replaces the file under its name, so the open file keeps
     // the program of this build.
     public imported!"std.stdio".File program;
+    // The directory that the program runs in, when `status` is 0.
+    public string workingDirectory;
 }
 
 
@@ -130,7 +139,7 @@ private struct BuildLock {
 public NinjaRun buildProject(in string directory) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import std.file: exists, mkdirRecurse;
+    import std.file: exists, mkdirRecurse, readText;
     import std.process: spawnProcess, wait;
     import std.stdio: File, stderr, stdout;
 
@@ -146,8 +155,10 @@ public NinjaRun buildProject(in string directory) {
     const status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile])
         .wait;
     const duration = stopWatch.peek;
-    return NinjaRun(status, duration,
-        status == 0 ? File(files.program, "rb") : File.init);
+    if (status != 0)
+        return NinjaRun(status, duration);
+    return NinjaRun(status, duration, File(files.program, "rb"),
+        files.workingDirectory.readText);
 }
 
 

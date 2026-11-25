@@ -7,7 +7,6 @@ private:
 // The command of the compile statement:
 //
 //   sb --compile=FILE [--dflag=ARGUMENT]... [-IPATH]... [-JPATH]...
-//      --program-name=NAME --working-directory=DIRECTORY --image-path=IMAGE
 //      [--c-imports-are-roots] ROOT-FILE...
 //
 // It runs in the project directory. It runs the frontend on the root files,
@@ -31,9 +30,6 @@ public int compile(string[] args) {
     string[] compilerArguments;
     string[] importPaths;
     string[] stringImportPaths;
-    string programName;
-    string workingDirectory;
-    string imagePath;
     bool cImportsAreRoots;
     getopt(
         args,
@@ -41,9 +37,6 @@ public int compile(string[] args) {
         "dflag", &compilerArguments,
         "I", &importPaths,
         "J", &stringImportPaths,
-        "program-name", &programName,
-        "working-directory", &workingDirectory,
-        "image-path", &imagePath,
         "c-imports-are-roots", &cImportsAreRoots,
     );
 
@@ -52,16 +45,13 @@ public int compile(string[] args) {
     sources.importPaths = importPaths;
     sources.stringImportPaths = stringImportPaths;
     sources.flags = FrontendFlags(compilerArguments);
-    sources.workingDirectory = workingDirectory;
     sources.importedCFilesAreRoots = cImportsAreRoots;
     const directory = getcwd;
     // The image that the load uses exists, so the frontend accepts what only
     // the image runs.
     const buildsDependencyImage = true;
-    auto project = loadedProject(directory, sources, buildsDependencyImage,
-        programName);
-    saveProgram(project.program, output, workingDirectory, imagePath,
-        JitSetting.init);
+    auto project = loadedProject(directory, sources, buildsDependencyImage);
+    saveProgram(project.program, output, JitSetting.init);
     writeChanged(BuildFiles(output.dirName).imageSource,
         imageModule(project.program));
     writeDependencyFile(output ~ ".dep", output, directory);

@@ -185,7 +185,7 @@ private Expect ranOn(Backend)(in string[] flags, in string code) {
     HostActions actions;
     actions.halt = &endRun;
     auto program = Program(
-        [module_], "flags", checksOf(frontendFlags), actions);
+        [module_], checksOf(frontendFlags), actions);
     auto backend = ownedBackend!Backend(program);
 
     try {

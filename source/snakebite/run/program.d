@@ -53,20 +53,14 @@ package(snakebite) int runMain(
     auto main_ = found.get;
 
     int status;
-    string[] arguments;
+    auto arguments = hostArguments.dup; // `main` can change them.
     void*[] mainArguments;
     CArguments cArguments;
     if (start.hasCEntryPoint) {
-        arguments = hostArguments.length
-            ? hostArguments.dup : [start.programName];
         cArguments = CArguments(arguments);
         mainArguments = cArguments.of(main_.parameterCount);
-    } else if (main_.parameterCount != 0) {
-        arguments = hostArguments.length
-            ? hostArguments.dup
-            : [start.programName];
+    } else if (main_.parameterCount != 0)
         mainArguments = [cast(void*) &arguments];
-    }
     return failing(() {
         main_.function_.call(
             main_.returnsVoid ? null : &status, mainArguments);
@@ -171,7 +165,7 @@ public StartupReport runDruntimeMain(
         _runtimeCArgs = savedCArgs;
     }
     testHooks.install;
-    _runtimeArgs = arguments.length ? arguments.dup : [start.programName];
+    _runtimeArgs = arguments.dup;
     auto cArguments = _runtimeArgs.map!(arg => cast(char*) arg.toStringz).array ~ null;
     _runtimeCArgs.argc = cast(int) _runtimeArgs.length;
     _runtimeCArgs.argv = cArguments.ptr;

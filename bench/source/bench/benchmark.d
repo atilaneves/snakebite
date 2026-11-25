@@ -226,6 +226,7 @@ private BackendReport[] benchmarkAll(
 ) {
     import bench.oracle: oracleName, oracleReport;
     import snakebite.backends: Backends, backendIdentity;
+    import snakebite.driver.execution: programName;
 
     BackendReport[] reports;
     static foreach (BackendType; Backends)
@@ -237,7 +238,7 @@ private BackendReport[] benchmarkAll(
                 options.warmup,
                 options.runs,
                 enterWorkingDirectory,
-                options.programArguments,
+                [programName(project.directory)] ~ options.programArguments,
                 imported!"snakebite.backends.bytecode.vm".JitSetting(
                     !options.noJit),
             );
@@ -267,6 +268,7 @@ private bool selected(in Options options, in string name) {
     return wanted.length == 0 || wanted.canFind(name);
 }
 
+// `arguments` are the arguments of the program, its name first.
 public BackendReport benchmark(
     in string name,
     in imported!"snakebite.backends".BackendName backendName_,
@@ -274,7 +276,7 @@ public BackendReport benchmark(
     in uint warmup,
     in uint runs,
     in void delegate() enterWorkingDirectory = null,
-    in string[] programArguments = null,
+    in string[] arguments = null,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
@@ -312,7 +314,7 @@ public BackendReport benchmark(
             execution = executeBackend(
                 backendName_,
                 program,
-                [program.name] ~ programArguments,
+                arguments,
                 jit: jit,
             );
             return execution.status;
@@ -354,13 +356,13 @@ private string headerLine(
     in Options options,
 ) {
     import bench.report: milliseconds;
-    import snakebite.driver.execution: discoveryLabel;
+    import snakebite.driver.execution: discoveryLabel, programName;
     import std.conv: text;
 
     // Both one-off costs a user pays before any backend runs: finding out
     // what to run the frontend on, then the frontend itself.
     return text(
-        preparation.project.name,
+        programName(preparation.project.directory),
         "   ", discoveryLabel(preparation), " ",
         milliseconds(preparation.discovery),
         "   frontend ", milliseconds(preparation.duration),

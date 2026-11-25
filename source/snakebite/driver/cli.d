@@ -34,13 +34,14 @@ public int run(string[] args) {
     import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, executeLoaded, imagePathOf, PreparationReport,
-        prepareSources, runProject, saveProgram;
+        executeBackend, executeLoaded, PreparationReport, prepareSources,
+        programName, runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.build: Build, buildProject, isCommand, runCommand;
+    import snakebite.build: Build, buildFiles, buildProject, isCommand,
+        runCommand;
     import snakebite.memory.gc: selectFrontendMemory;
-    import std.file: exists, isDir;
+    import std.file: chdir, exists, isDir;
     import std.path: absolutePath, buildNormalizedPath;
     import std.stdio: stderr, stdout, write;
     import std.typecons: nullable;
@@ -58,7 +59,8 @@ public int run(string[] args) {
             // Nothing was prepared: the report shows those phases as taking
             // no time.
             const report = executeLoaded(
-                parsed.options.load, parsed.options.programArguments,
+                parsed.options.load,
+                [parsed.options.load] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit,
                     /*eager*/ false, parsed.options.jitPerfMap),
             );
@@ -74,14 +76,17 @@ public int run(string[] args) {
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
         if (parsed.options.build == Build.project) {
+            const directory = projectDirectory.absolutePath.buildNormalizedPath;
             // Mutable: the report keeps its duration.
-            auto ninja = buildProject(
-                projectDirectory.absolutePath.buildNormalizedPath);
+            auto ninja = buildProject(directory);
             if (ninja.status != 0)
                 return 1;
+            chdir(ninja.workingDirectory);
             const report = executeLoaded(
-                ninja.program, parsed.options.programArguments,
+                ninja.program,
+                [programName(directory)] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit),
+                buildFiles(directory).image,
             );
             _statistics = Statistics(true, PreparationReport.init, report,
                 nullable(ninja.duration));
@@ -105,9 +110,6 @@ public int run(string[] args) {
                     saveProgram(
                         preparation.project.program,
                         savePath,
-                        sources.workingDirectory.length
-                            ? sources.workingDirectory : directory,
-                        imagePathOf(preparation.project.program),
                         JitSetting(!parsed.options.noJit,
                             /*eager*/ false, parsed.options.jitPerfMap),
                     );
@@ -117,7 +119,7 @@ public int run(string[] args) {
                 const report = executeBackend(
                     parsed.options.backend,
                     preparation.project.program,
-                    [preparation.project.program.name]
+                    [programName(preparation.project.directory)]
                         ~ parsed.options.programArguments,
                     false,
                     true,

@@ -3163,10 +3163,10 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
 
 
 # The offset of the first of the two memory sizes of a program file: after
-# the magic text and the three strings of the header.
+# the magic text and the two strings of the header.
 def memory_size_offset(contents: bytes) -> int:
     offset = len(b"snakebite-program-v1\n")
-    for _ in range(3):
+    for _ in range(2):
         length = int.from_bytes(contents[offset:offset + 8], "little")
         offset += 8 + length
     return offset
@@ -3205,6 +3205,32 @@ def test_load_of_file_that_ends_early_fails_and_runs_nothing(
     assert loaded.returncode == 1, output(loaded)
     assert "ends before" in loaded.stderr, output(loaded)
     assert "ran" not in loaded.stdout, output(loaded)
+
+
+# A program from `--load` runs as an executable does: its first argument is
+# the path that `--load` names, and it runs where `sb` started.
+def test_loaded_program_gets_its_name_and_directory_as_an_executable(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        import core.stdc.stdio: printf;
+        import std.file: getcwd;
+        void main(string[] args) {
+            const cwd = getcwd;
+            printf("%.*s in %.*s\\n", cast(int) args[0].length, args[0].ptr,
+                cast(int) cwd.length, cwd.ptr);
+        }
+        """)
+    saved = run_sb("--backend=bytecode", "--no-optimise-image",
+                   "--save=program.sbc", str(tmp_path / "app"), cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    loaded = run_sb("--load=../program.sbc", cwd=elsewhere)
+    assert loaded.returncode == 0, output(loaded)
+    assert guest_lines(loaded) == [f"../program.sbc in {elsewhere.resolve()}"]
 
 
 # A program file that cannot seek, such as a pipe, has no size to check the
@@ -3288,6 +3314,31 @@ def test_build_project_runs_as_bin_sb(tmp_path: Path) -> None:
         direct = run_sb(str(app), cwd=tmp_path)
         assert_runs_as_bin_sb(built, direct)
         assert "flavoured 42 viewed" in guest_lines(built), output(built)
+
+
+# `--build=project` starts the program as `bin/sb DIR` does: the name of the
+# project directory is its first argument, and it runs in the
+# `workingDirectory` of the recipe, on the first run and on a run with no
+# change.
+def test_build_project_starts_the_program_as_bin_sb(tmp_path: Path) -> None:
+    app = write_build_project(tmp_path, "build-project-start", """
+        unittest {
+            import core.runtime: Runtime;
+            import std.file: getcwd;
+            const name = Runtime.args[0], cwd = getcwd;
+            printf("%.*s in %.*s\\n", cast(int) name.length, name.ptr,
+                cast(int) cwd.length, cwd.ptr);
+        }
+        """)
+    with (app / "dub.sdl").open("a") as recipe:
+        recipe.write('workingDirectory "views"\n')
+
+    for _ in range(2):
+        built = run_sb("--build=project", str(app), cwd=tmp_path)
+        direct = run_sb(str(app), cwd=tmp_path)
+        assert_runs_as_bin_sb(built, direct)
+        assert f"app in {(app / 'views').resolve()}" in guest_lines(built), \
+            output(built)
 
 
 # The frontend runs, and prints the message of the `pragma(msg)`, only in a
