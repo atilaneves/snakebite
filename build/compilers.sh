@@ -5,6 +5,8 @@
 # compiler on PATH never builds snakebite.
 #
 #   build/compilers.sh dmd|ldc2|dub  the absolute path of that program
+#   build/compilers.sh lib           the directory of the shared libraries of
+#                                    dmd (libphobos2.so)
 #   build/compilers.sh path          the bin directories of dmd and LDC, as
 #                                    a PATH prefix
 set -euo pipefail
@@ -46,6 +48,7 @@ case ${1:-} in
     dmd) program "$dmd" ;;
     ldc2) program "$ldc" ;;
     dub) program "$dmd" --dub ;;
+    lib) echo "$(dirname -- "$(dirname -- "$(program "$dmd")")")/lib64" ;;
     path)
         # Separate statements: a failed install must end the script, and a
         # command substitution inside the arguments of `echo` loses its status.
@@ -54,7 +57,7 @@ case ${1:-} in
         echo "$(dirname -- "$dmd_program"):$(dirname -- "$ldc_program")"
         ;;
     *)
-        echo "usage: $0 dmd|ldc2|dub|path" >&2
+        echo "usage: $0 dmd|ldc2|dub|lib|path" >&2
         exit 2
         ;;
 esac

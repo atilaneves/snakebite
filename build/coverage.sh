@@ -6,6 +6,9 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 # build/compilers.sh come first, so a local run and a CI run use the same ones.
 PATH=$(build/compilers.sh path):$PATH
 export PATH
+# The programs that dmd builds for the tests link libphobos2.so of that dmd.
+LD_LIBRARY_PATH=$(build/compilers.sh lib)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH
 
 # dmd's -cov drops one-only linkage on manifest-constant init symbols,
 # which duplicates across the vendored dmd frontend/backend and fails
