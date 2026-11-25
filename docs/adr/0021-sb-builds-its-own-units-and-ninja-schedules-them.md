@@ -22,62 +22,12 @@ into one file. The **root package** is the dub package of the project. A
 ninja is a build tool that runs commands in parallel and runs a command
 again when one of its inputs is newer than its output.
 
-The model is reggae with ninja, in the owner's words of 2026-11-18: "The
+The model is [reggae] with ninja, in the owner's words of 2026-11-18: "The
 model is reggae/ninja." Each thing that is built is a build statement with
 inputs and outputs. A design that puts such work inside another step, or
 that gives `sb` a rule for it, does not follow the model.
 
-## The model: how reggae builds a D project
-
-Read from the source of reggae 0.18.0, the version that this repository
-uses for its own build. File names are those of the reggae repository.
-
-Terms. A **build statement** of ninja is `build OUT: RULE IN | IMPLICIT`.
-ninja runs the command of the rule again when an input is newer than the
-output or when the command line changed. An **implicit input** is an input
-that ninja tracks but that the command line does not list. A **dependency
-file** is a file that a compile writes and that lists the files it read.
-
-1. reggae has three compile modes: one compile for all the source files
-   (`--all-at-once`), one for each D package (the default), and one for
-   each D module (`--per-module`) (`options.d`, `rules/d.d`).
-2. All three modes use one compile rule:
-   `dmd -makedeps=$out.dep $flags $includes $stringImports -of$out -c $in`
-   (`rules/common.d`). No compiler flag selects the mode. The mode decides
-   only how many compile statements there are and which source files are
-   the `$in` of each one. Each statement has one object file as its output.
-3. For a project with the packages `a` (`x.d`, `y.d`) and `b` (`z.d`,
-   `w.d`):
-   - for each module, four statements: `build a_x.o: _dcompile a/x.d`,
-     and the same for `a/y.d`, `b/z.d` and `b/w.d`;
-   - for each package, two statements: `build a.o: _dcompile a/x.d a/y.d`
-     and `build b.o: _dcompile b/z.d b/w.d`;
-   - all at once, one statement:
-     `build all.o: _dcompile a/x.d a/y.d b/z.d b/w.d`.
-
-   The names of the object files here are shortened.
-4. A compile gets the modules that its sources import through the import
-   paths (`-I`) and the string import paths (`-J`) only. No other source
-   file is on its command line.
-5. The compiler writes the dependency file (`-makedeps`). The rule gives it
-   to ninja with `depfile = $out.dep` and `deps = gcc` (`ninja.d`). So a
-   compile is stale when one of its source files changed, when a file that
-   it imported changed, when the compiler executable changed (it is an
-   implicit input of each compile statement), or when the command line
-   changed.
-6. There is one link statement: `dmd -of$out $flags $in`, with all the
-   object files as its inputs (`rules/d.d`). ninja runs it again when an
-   object file is newer than the output.
-7. reggae does nothing about a template instance that two object files
-   both hold. Each object file has its copy and the linker keeps one.
-8. reggae writes one more statement that makes the ninja file again when an
-   input of the build description changed.
-
-How `sb` follows this: a compile statement runs a child `sb`, the output is
-a file of bytecode in place of an object file, and the child `sb` writes
-the dependency file. The `project` mode is the all-at-once row with no link
-statement, because one compile makes the whole program. The `module` and
-`package` modes are the other two rows, with a link statement.
+[reggae]: https://github.com/atilaneves/reggae/blob/v0.18.0/payload/reggae/rules/d.d
 
 ## Decision
 
