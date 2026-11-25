@@ -175,20 +175,9 @@ Review subagents get either the branch or PR number and nothing else.
 Do not bias them by giving them more information; the point of a
 separate subagent to do code review is a fresh context window.
 
-A review looks for defects of behaviour. It "should also look for defects
-of coding policy". The coding policy is `ai/CODING.md` and this file.
-
-For each type, field, function, parameter, option and comment that a
-change adds, the reviewer asks:
-
-- Which test needs it?
-- Why is it in this file and not where that kind of thing already is?
-- Can a reader who does not know the change understand its name and its
-  comment?
-
-A thing with no answer is a finding.
-
-Report a finding of policy with the same weight as a finding of behaviour.
+A review subagent runs the `code-review` skill on the branch or PR that
+it gets. The coding standards that the skill checks are `ai/CODING.md` and
+this file.
 
 ## Agent skills
 
