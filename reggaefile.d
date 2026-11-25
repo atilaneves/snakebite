@@ -431,8 +431,12 @@ Target[] dubTarget(string compiler, string config, string objectSet,
             info.packages[0].lflags ~= flags.value ~ "-gcc=clang";
     }
     // The executable and loaded D images must share one runtime.
+    // The executable finds that shared runtime next to its compiler: LDC's
+    // configuration gives the run path, dmd's does not.
     info.packages[0].lflags ~= compiler == "dmd"
-        ? "-defaultlib=libphobos2.so" : "-link-defaultlib-shared";
+        ? ["-defaultlib=libphobos2.so", "-L-rpath=" ~ buildPath(
+            buildOptions.dCompiler.dirName.dirName, "lib64")]
+        : ["-link-defaultlib-shared"];
     info.options = buildOptions;
     info.packages[0].stringImportPaths ~=
         hostCompilerRecordDirectory(buildOptions.dCompiler, objectSet);
