@@ -70,8 +70,6 @@ unittest {
 // names both (dmd: "only one entry point `main` is allowed").
 @("program.twoRootModulesWithMainAreRefused")
 unittest {
-    import std.algorithm: canFind;
-
     auto modules = parseSnippets([
         q{
             module first;
@@ -83,10 +81,8 @@ unittest {
         },
     ]);
 
-    auto thrown = Program(modules).shouldThrow!SnakebiteException;
-
-    assert(thrown.msg.canFind("only one entry point `main` is allowed"), thrown.msg);
-    assert(thrown.msg.canFind("`first`") && thrown.msg.canFind("`second`"), thrown.msg);
+    Program(modules).shouldThrowWithMessage!SnakebiteException(
+        "only one entry point `main` is allowed: found in `first` and `second`");
 }
 
 
