@@ -54,8 +54,7 @@ that it owns are not kept elsewhere with only a note in the `Module`. A
 reference to another module (an import) is a reference: the `Module` holds
 it as a position in the list of modules of the program, with the module
 names beside it. The owner of a template instance is the module that
-declares the template. ADR-0021 item 9 changes this for the `module` and
-`package` modes. A saved file is a list of modules.
+declares the template (ADR-0021 item 7). A saved file is a list of modules.
 
 The compiler makes a `Module` at the first function or datum of its D
 module. `buildStartData` asks the compiler for the storage of the record of

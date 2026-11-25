@@ -52,10 +52,36 @@ imported as `SourceProgram`. Compare **Bytecode program**.
 **Bytecode program**:
 What one process holds of a compiled program while it runs: the compiled
 functions, the signatures, the static storage, the call plans and the start
-data. The bytecode compiler fills it on demand. It is
+data. The bytecode compiler fills it on demand, or one function makes it
+from **SBC files** (ADR-0021). It is
 `snakebite.backends.bytecode.program.Program`, not the source `Program`.
 The module qualifies the name, and inside the bytecode compiler the source
 one is `SourceProgram`.
+
+**Compilation unit**:
+The source files that are given to one compile (ADR-0021). With `module` it
+is one source file; with `package` it is the source files of one directory;
+with `project` it is all the source files. A compile to a file writes one
+**SBC file** for its compilation unit.
+_Avoid_: unit
+
+**SBC file**:
+The `.sbc` file that a compile to a file writes. It holds a list of modules:
+the functions and data that the modules of its compilation unit define, the
+template instances that the compile made (each in the entry of the module that
+declares the template), the symbol name of each definition, and a reference by
+symbol name to each thing that is defined elsewhere. A native object file is
+the inspiration for its content; a deviation needs a reason (ADR-0021).
+
+**Root modules**:
+The modules that are given to a compile as the files to compile. The meaning
+is the one that it has in dmd. Compare **Root-owned**.
+
+**Bytecode modules**:
+All the modules of the program that `sb` compiles to bytecode. The other
+modules are native code. A call to a function of a bytecode module is a call
+to bytecode; a call to a function of any other module is a native call.
+_Avoid_: project modules
 
 **Static world**:
 The static data, the type information, the class information, the plans and
