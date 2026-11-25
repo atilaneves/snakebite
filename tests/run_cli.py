@@ -3788,6 +3788,164 @@ def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
     assert_runs_as_bin_sb(built, direct)
 
 
+# A dub project of four modules. `zoo` imports `shapes`: it calls a function
+# of `shapes`, extends its class, and reads and writes its thread-local and
+# its shared variable in a module constructor. `zoo` and `tally` instantiate
+# the template of `counter`, which has a static variable. Each module but
+# `counter` has a unit test. With `marks`, the frontend prints `compiled M`
+# when it analyses a function body of module M: only the compile of M does.
+# With `dependency`, `tally` uses the dub package of `write_dependency` too.
+def write_module_project(
+    tmp_path: Path, name: str, marks: bool = False, dependency: bool = False,
+) -> Path:
+    def mark(module: str) -> str:
+        return f'pragma(msg, "compiled {module}");' if marks else ""
+
+    recipe = dub_project_recipe(name)
+    if dependency:
+        write_dependency(tmp_path / "dep", name + "-dep", 42)
+        recipe = (f'name "{dub_name(name)}"\ntargetType "library"\n'
+                  + f'dependency "{dub_name(name + "-dep")}" path="../dep"\n')
+    app = tmp_path / "app"
+    write(app / "dub.sdl", recipe)
+    write(app / "source" / "counter.d", """
+        module counter;
+        int counted(T)() { static int count; return ++count; }
+        """)
+    write(app / "source" / "shapes.d", f"""
+        module shapes;
+        import core.stdc.stdio: printf;
+        int twice(int value) {{ {mark("shapes")} return value * 2; }}
+        int perThread = 3;
+        __gshared int everywhere = 100;
+        class Animal {{ string name() const {{ return "animal"; }} }}
+        unittest {{ printf("shapes %d %d\\n", perThread, everywhere); }}
+        """)
+    write(app / "source" / "zoo.d", f"""
+        module zoo;
+        import core.stdc.stdio: printf;
+        import counter: counted;
+        import shapes;
+        class Dog : Animal {{
+            override string name() const {{ {mark("zoo")} return "dog"; }}
+        }}
+        static this() {{ perThread += 10; everywhere += 1000; }}
+        unittest {{
+            const Animal animal = new Animal, dog = new Dog;
+            printf("zoo %d %d %d %.*s %.*s %d\\n", twice(21), perThread,
+                everywhere, cast(int) animal.name.length, animal.name.ptr,
+                cast(int) dog.name.length, dog.name.ptr, counted!int());
+        }}
+        """)
+    uses = """
+        import dep: depAnswer = answer, Point;
+        unittest { printf("dep %d %d\\n", depAnswer(), Point(3, 4).sum); }
+        """ if dependency else ""
+    write(app / "source" / "tally.d", f"""
+        module tally;
+        import core.stdc.stdio: printf;
+        import counter: counted;
+        int answer() {{ {mark("tally")} return 7; }}
+        unittest {{ printf("tally %d %d\\n", answer(), counted!int()); }}
+        {uses}
+        """)
+    return app
+
+
+# The commands that ninja ran, as its log of the build has them: one line for
+# each output of each command that ran.
+def ninja_log_lines(tmp_path: Path) -> list[str]:
+    logs = list(tmp_path.glob(".snakebite/*/build/.ninja_log"))
+    assert len(logs) == 1, logs
+    return logs[0].read_text().splitlines()
+
+
+def compiled_modules(result: subprocess.CompletedProcess[str]) -> set[str]:
+    return {line.removeprefix("compiled ")
+            for line in output(result).splitlines()
+            if line.startswith("compiled ")}
+
+
+# `--build=module` gives the result of `bin/sb DIR`: on the first run and on
+# a run with no change.
+def test_build_module_runs_as_bin_sb(tmp_path: Path) -> None:
+    app = write_module_project(tmp_path, "build-module-runs")
+
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    assert "zoo 42 13 1100 animal dog" in output(direct), output(direct)
+    for _ in range(2):
+        built = run_sb("--build=module", str(app), cwd=tmp_path)
+        assert_runs_as_bin_sb(built, direct)
+
+
+# After an edit to a module that no other module imports, the run compiles
+# that module only, and the result shows the edit.
+def test_build_module_compiles_only_the_changed_module(tmp_path: Path) -> None:
+    app = write_module_project(tmp_path, "build-module-one", marks=True)
+    first = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+    assert compiled_modules(first) == {"shapes", "zoo", "tally"}, output(first)
+
+    tally = app / "source" / "tally.d"
+    tally.write_text(tally.read_text().replace("return 7;", "return 8;"))
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert compiled_modules(built) == {"tally"}, output(built)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    assert guest_lines(built) == guest_lines(direct), output(built)
+    assert any(line.startswith("tally 8 ") for line in guest_lines(built)), \
+        output(built)
+
+
+# After an edit to a module that another module imports, the run compiles
+# both modules, and no other one.
+def test_build_module_compiles_the_importer_of_a_changed_module(
+    tmp_path: Path,
+) -> None:
+    app = write_module_project(tmp_path, "build-module-import", marks=True)
+    first = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+
+    shapes = app / "source" / "shapes.d"
+    shapes.write_text(shapes.read_text().replace("value * 2", "value * 3"))
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert compiled_modules(built) == {"shapes", "zoo"}, output(built)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    assert guest_lines(built) == guest_lines(direct), output(built)
+    assert any(line.startswith("zoo 63 ") for line in guest_lines(built)), \
+        output(built)
+
+
+# With no change, a run starts no command of the build: no compile and no
+# link.
+def test_build_module_without_a_change_starts_no_command(
+    tmp_path: Path,
+) -> None:
+    app = write_module_project(tmp_path, "build-module-none")
+    first = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+    commands = ninja_log_lines(tmp_path)
+
+    again = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(again, first)
+    assert ninja_log_lines(tmp_path) == commands
+
+
+# `--build=module` gives the result of `bin/sb DIR` for the project with a
+# dub dependency.
+def test_build_module_with_a_dependency_runs_as_bin_sb(tmp_path: Path) -> None:
+    app = write_module_project(tmp_path, "build-module-dep", dependency=True)
+
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    assert "dep 42 7" in guest_lines(direct), output(direct)
+    for _ in range(2):
+        built = run_sb("--build=module", str(app), cwd=tmp_path)
+        assert_runs_as_bin_sb(built, direct)
+
+
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(
