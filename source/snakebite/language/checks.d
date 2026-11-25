@@ -230,14 +230,13 @@ public CAssertCall cAssertCallOf(
     in imported!"snakebite.frontend.ast".Loc loc,
     imported!"snakebite.frontend.ast".FuncDeclaration function_,
 ) {
-    import snakebite.frontend.dmd.functions: prettyNameOf;
+    import snakebite.frontend.lock: withCompilerQuery;
 
-    return CAssertCall(
-        assertion,
-        loc.filename,
-        cast(uint) loc.linnum,
-        function_ is null ? "" : prettyNameOf(function_).ptr,
-    );
+    // The C string of dmd, as `__assert_fail` takes it.
+    const(char)* name = "";
+    if (function_ !is null)
+        withCompilerQuery({ name = function_.toPrettyChars; });
+    return CAssertCall(assertion, loc.filename, cast(uint) loc.linnum, name);
 }
 
 // What `assert(e1)` must do about `e1`'s own invariant, once its condition

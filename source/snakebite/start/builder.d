@@ -60,7 +60,7 @@ private ModuleStart startOf(
         findFunction, findModuleFunctions, prettyNameOf;
 
     ModuleStart start;
-    start.name = prettyNameOf(module_).idup;
+    start.name = prettyNameOf(module_);
     if (auto main_ = findFunction(module_, "main"))
         start.main = mainStartOf(main_, compiledFunction);
     if (betterC)
@@ -68,7 +68,7 @@ private ModuleStart startOf(
 
     start.standalone = !module_.needmoduleinfo;
     foreach (imported; module_.aimports)
-        start.importNames ~= prettyNameOf(imported).idup;
+        start.importNames ~= prettyNameOf(imported);
 
     auto functions = findModuleFunctions(module_);
     start.independentConstructors =
