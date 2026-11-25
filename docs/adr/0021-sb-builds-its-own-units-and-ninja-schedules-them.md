@@ -22,10 +22,12 @@ into one file. The **root package** is the dub package of the project. A
 ninja is a build tool that runs commands in parallel and runs a command
 again when one of its inputs is newer than its output.
 
-The model is reggae with ninja, in the owner's words of 2026-11-18: "The
+The model is [reggae] with ninja, in the owner's words of 2026-11-18: "The
 model is reggae/ninja." Each thing that is built is a build statement with
 inputs and outputs. A design that puts such work inside another step, or
 that gives `sb` a rule for it, does not follow the model.
+
+[reggae]: https://github.com/atilaneves/reggae/blob/v0.18.0/payload/reggae/rules/d.d
 
 ## Decision
 
@@ -99,8 +101,9 @@ The tool for this measurement is not decided. The owner wants an overhaul of
 the present tool. Until a decision, the measurement is: touch the file, run
 `sb`, and read the time of the build from its report.
 
-The gate of #958, 3 ms or less to the first guest instruction, applies to
-the load step only. The time of the ninja run is a separate number. One
+The load time has no gate. The owner on 2026-11-25: "3ms would be great,
+but I don't think we can use that as a gate." The time of the ninja run is
+a separate number from the load time. One
 measurement of a ninja 1.13.2 run with nothing to do, on a machine with
 other work, gave 3.4 ms for 1 unit, 4.5 ms for 50 and 8.5 ms for 500.
 
@@ -108,7 +111,9 @@ other work, gave 3.4 ms for 1 unit, 4.5 ms for 50 and 8.5 ms for 500.
 
 `project` is first. It needs a compile that loads no dependency image
 (item 13), so the parts of track A of #960 that give this come before it.
-`module` and `package` start after `project` is measured.
+`module` and `package` come next. They do not wait for a measurement: the
+owner's order is `project`, then `module`, then `package`, and then "we
+will measure to see which one is fastest".
 
 ## Rules that stay
 
