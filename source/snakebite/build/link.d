@@ -16,6 +16,7 @@ private:
 public int link(string[] args) {
     import snakebite.backends.bytecode.file: linkPrograms;
     import snakebite.build: BuildFiles, writeChanged;
+    import snakebite.image.preparation: generatorKey;
     import snakebite.project.dependencies: imageModuleWithoutRootCode;
     import std.getopt: getopt;
     import std.path: dirName;
@@ -24,7 +25,7 @@ public int link(string[] args) {
     getopt(args, "link", &output);
     if (args.length < 2)
         throw new Exception("--link needs the files of the units");
-    const linked = linkPrograms(args[1 .. $], output);
+    const linked = linkPrograms(args[1 .. $], output, generatorKey);
     writeChanged(BuildFiles(output.dirName).imageSource,
         imageModuleWithoutRootCode(linked.hasCEntryPoint && !linked.betterC));
     return 0;

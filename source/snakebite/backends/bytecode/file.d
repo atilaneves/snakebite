@@ -152,11 +152,13 @@ public struct ProgramReader {
 // puts the modules of the same name together, keeps one function of each
 // name (one with a body) and one own copy of each name, and joins the
 // imports of the modules by name. A function that no unit defines is an
-// error.
-public LinkedProgram linkPrograms(in string[] inputs, in string output) {
+// error, and so is a file that a build with another key than `buildKey`
+// wrote (`Header.buildKey`).
+public LinkedProgram linkPrograms(
+    in string[] inputs, in string output, in string buildKey,
+) {
     import core.memory: GC;
     import snakebite.backends.bytecode.runner: wire;
-    import snakebite.image.preparation: generatorKey;
     import std.file: read;
 
     auto program = new Program(null, true);
@@ -179,7 +181,7 @@ public LinkedProgram linkPrograms(in string[] inputs, in string output) {
         file.expectText!magic;
         Header read_;
         transferHeader(file, read_);
-        if (read_.buildKey != generatorKey)
+        if (read_.buildKey != buildKey)
             throw new SnakebiteException(input
                 ~ " was written by another build of snakebite");
         if (index == 0)
