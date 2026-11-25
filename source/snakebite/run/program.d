@@ -45,8 +45,11 @@ package(snakebite) int runMain(
     StartData start,
     in string[] hostArguments,
 ) {
-    if (!start.main.present)
+    auto found = start.main;
+    if (found.isNull)
         return 0;
+
+    auto main_ = found.get;
 
     int status;
     string[] arguments;
@@ -56,16 +59,16 @@ package(snakebite) int runMain(
         arguments = hostArguments.length
             ? hostArguments.dup : [start.programName];
         cArguments = CArguments(arguments);
-        mainArguments = cArguments.of(start.main.parameterCount);
-    } else if (start.main.parameterCount != 0) {
+        mainArguments = cArguments.of(main_.parameterCount);
+    } else if (main_.parameterCount != 0) {
         arguments = hostArguments.length
             ? hostArguments.dup
             : [start.programName];
         mainArguments = [cast(void*) &arguments];
     }
     return failing(() {
-        start.main.function_.call(
-            start.main.returnsVoid ? null : &status, mainArguments);
+        main_.function_.call(
+            main_.returnsVoid ? null : &status, mainArguments);
     }) ? 1 : status;
 }
 

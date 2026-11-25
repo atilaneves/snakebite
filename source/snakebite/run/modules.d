@@ -682,22 +682,34 @@ private ModuleInfo*[] recordsOf(
     ModuleInfo*[string] nativeByName;
     foreach (record; nativeRecords)
         nativeByName[record.name] = record;
+    size_t[string] positionOf;
+    foreach (i, module_; start.modules)
+        positionOf[module_.name] = i;
+    // The modules that each module imports, by name. druntime orders no
+    // module that has nothing to construct or destruct, and no import of
+    // one: dmd marks it the same way.
+    auto rootImports = new size_t[][start.modules.length];
     auto nativeImports = new ModuleInfo*[][start.modules.length];
-    if (nativeRecords.length)
-        foreach (i, module_; start.modules)
-            foreach (name; module_.importNames)
-                if (auto record = name in nativeByName)
-                    nativeImports[i] ~= *record;
+    foreach (i, module_; start.modules) {
+        bool[size_t] seen;
+        foreach (name; module_.importNames) {
+            if (auto position = name in positionOf)
+                if (*position != i && !start.modules[*position].standalone
+                        && *position !in seen) {
+                    seen[*position] = true;
+                    rootImports[i] ~= *position;
+                }
+            if (auto record = name in nativeByName)
+                nativeImports[i] ~= *record;
+        }
+    }
     auto crtRecord = crtRecordOf(run, start);
-    const imports = start.importPositions;
     auto importSlots = new ModuleInfo**[start.modules.length];
     foreach (i, module_; start.modules) {
         Fields fields;
         fields.name = module_.name;
-        // druntime orders no module that has nothing to construct or
-        // destruct, and no import of one: dmd marks it the same way.
         fields.standalone = module_.standalone;
-        fields.importCount = imports[i].length + nativeImports[i].length;
+        fields.importCount = rootImports[i].length + nativeImports[i].length;
         // Every module with a destructor also gets a constructor entry, so
         // that `finish` learns where druntime put it in the order.
         auto sharedDestructor = run.phaseOf(
@@ -728,10 +740,10 @@ private ModuleInfo*[] recordsOf(
     }
 
     foreach (i, slots; importSlots) {
-        foreach (j, index; imports[i])
+        foreach (j, index; rootImports[i])
             slots[j] = records[index];
         foreach (j, record; nativeImports[i])
-            slots[imports[i].length + j] = record;
+            slots[rootImports[i].length + j] = record;
     }
     auto roots = crtRecord is null ? records : crtRecord ~ records; // Registration takes mutable records.
     return nativeRecords.length ? roots ~ nativeRecords : roots;
@@ -790,14 +802,18 @@ private ModuleInfo*[] nativeRecordsOf(Run* run) {
 // The record is first and standalone, as druntime puts such a module first
 // among the ones that have a destructor, which makes its destructor the last.
 private ModuleInfo* crtRecordOf(Run* run, StartData start) {
-    auto constructors = start.crtConstructors; // A phase calls the handles: not const.
+    FunctionHandle[] constructors;
+    FunctionHandle[] destructors;
+    foreach (module_; start.modules) {
+        constructors ~= module_.crtConstructors;
+        destructors ~= module_.crtDestructors;
+    }
     if (constructors.length)
         run.crtConstructors = new Phase(
             run, Phase.Kind.constructor, constructors);
     else
         atomicStore(run.crtConstructed, true);
 
-    auto destructors = start.crtDestructors; // As `constructors`.
     if (destructors.length == 0)
         return null;
 

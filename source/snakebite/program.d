@@ -62,7 +62,6 @@ public struct Program {
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.functions: findFunction;
-        import snakebite.start.data: firstMain;
 
         this.rootModules = rootModules;
         this.name = name;
@@ -76,10 +75,13 @@ public struct Program {
                 _rootModuleSet[module_] = true;
             }
 
-            auto found = firstMain!(module_ => findFunction(module_, "main"))(
-                rootModules);
-            if (found !is null)
-                main = Main(found);
+            foreach (module_; rootModules) {
+                auto found = findFunction(module_, "main");
+                if (found !is null) {
+                    main = Main(found);
+                    break;
+                }
+            }
         });
     }
 
@@ -116,12 +118,14 @@ public struct Program {
         return _links.definitionOf(variable);
     }
 
+    // Whether the `main` of the program is the C entry point (see
+    // `MainStart.cLinkage`). The choice of the dependency image needs it
+    // before any compile, so before the start data exists
+    // (`StartData.hasCEntryPoint`).
     public bool hasCEntryPoint() const {
         import snakebite.frontend.dmd.functions: hasCLinkage;
-        import snakebite.start.data: isCEntryPoint;
 
-        return isCEntryPoint(main.func !is null,
-            hasCLinkage(cast() main.func));
+        return main.func !is null && hasCLinkage(cast() main.func);
     }
 
     public bool isInterpreted(

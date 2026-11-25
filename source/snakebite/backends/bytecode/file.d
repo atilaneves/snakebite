@@ -38,6 +38,7 @@ import snakebite.start.data:
 import std.conv: text;
 import std.meta: AliasSeq;
 import std.traits: FieldNameTuple, Unqual;
+import std.typecons: Nullable;
 
 
 // What precedes the program in a file.
@@ -687,6 +688,34 @@ private void transfer(T)(ref Archive archive, ref T value) {
         archive.scalar(value);
     } else static if (is(T : real) || is(T == bool) || is(T : dchar)) {
         archive.scalar(value);
+    } else static if (is(T == FunctionHandle)) {
+        transferHandle(archive, value);
+    } else static if (is(Unqual!T == GateStorage)) {
+        transferGate(archive, value);
+    } else static if (is(T == ModuleStart*)) {
+        transferModuleStart(archive, value);
+    } else static if (is(T == const(ModuleInfo*)[])) {
+        // The dependency image has them, not the file.
+        if (!archive.isWriting)
+            value = dependencyModulesOf(archive._image);
+    } else static if (is(T == Nullable!U, U)) {
+        bool present = !value.isNull;
+        archive.scalar(present);
+        if (present) {
+            if (archive.isWriting)
+                archive.transfer(value.get);
+            else {
+                U payload;
+                archive.transfer(payload);
+                value = payload;
+            }
+        }
+    } else static if (is(Unqual!T == StartData) || is(Unqual!T == ModuleStart)
+            || is(Unqual!T == MainStart)) {
+        // Each field goes through the branch of its type. A field of a type
+        // with no branch stops the build.
+        static foreach (index, name; FieldNameTuple!T)
+            archive.transfer(value.tupleof[index]);
     } else static if (is(T == E[], E)) {
         // A load needs the relocations only while it runs: it applies them,
         // and `Program.complete` the ones of names (`transferModule`).
@@ -979,7 +1008,7 @@ private void transferBody(
         } else
             program._modules[m].newFunctions(program.memory, functionCount);
     }
-    transferStartData(archive, program);
+    archive.transfer(program.startData);
     transferPlans(archive, program);
     transferSignatures(archive, program);
     // All data before any function: a function can point into any module.
@@ -1210,7 +1239,7 @@ private void transferModule(
     // The fields of `Module`: the start record, the blocks and the functions.
     static assert(FieldNameTuple!Module == AliasSeq!("start", "blocks", "_functions"));
     // `blocks` is set by `transferBlocks`, before the functions.
-    transferStart(archive, module_.start);
+    archive.transfer(module_.start);
     foreach (function_; module_._functions) {
         if (archive.isWriting) {
             auto prepared = prepareToWrite(archive, *function_);
@@ -1239,114 +1268,52 @@ private void transferModule(
 }
 
 
-private void transferStartData(ref Archive archive, ref Program program) {
-    // The file holds the fields that this function lists. The build stops
-    // when a field is added, so that no program file silently loses it.
-    static assert(FieldNameTuple!StartData == AliasSeq!("programName",
-        "betterC", "modules", "dependencyModules"));
-
-    ref start = program.startData;
-    archive.transfer(start.programName);
-    archive.transfer(start.betterC);
-    const count = archive.length(start.modules.length);
-    if (archive.isWriting)
-        archive.need!(ModuleStart*)(count);
-    else
-        start.modules = archive.newArray!(ModuleStart*)(count);
-    foreach (i, ref record; start.modules) {
-        size_t position;
-        if (archive.isWriting) {
-            const found = record in archive._moduleOfStart;
-            if (found is null)
-                internalFailure("a module record belongs to no module");
-            position = *found;
-        }
-        archive.scalar(position);
-        if (!archive.isWriting) {
-            if (position >= program._modules.length)
-                throw new SnakebiteException(
-                    "the program file names a module that it does not hold");
-            record = &program._modules[position].start;
-        }
+// The `ModuleStart` of a module is in the module: the file holds its
+// position in the program.
+private void transferModuleStart(
+    ref Archive archive, ref ModuleStart* start,
+) {
+    size_t position;
+    if (archive.isWriting) {
+        const found = start in archive._moduleOfStart;
+        if (found is null)
+            internalFailure("a module start belongs to no module");
+        position = *found;
     }
-    if (!archive.isWriting)
-        start.dependencyModules = dependencyModulesOf(archive._image);
-}
-
-
-private void transferStart(ref Archive archive, ref ModuleStart record) {
-    // As in `transferStartData`: a new field must be listed and transferred.
-    static assert(FieldNameTuple!ModuleStart == AliasSeq!("name", "standalone",
-        "importNames", "independentConstructors", "sharedConstructors",
-        "threadConstructors", "sharedDestructors", "threadDestructors",
-        "unitTests", "crtConstructors", "crtDestructors", "sharedGates",
-        "threadGates", "main"));
-    static assert(FieldNameTuple!MainStart == AliasSeq!("present",
-        "cLinkage", "returnsVoid", "parameterCount", "function_"));
-
-    archive.transfer(record.name);
-    archive.transfer(record.standalone);
-    archive.transfer(record.importNames);
-    transferHandles(archive, record.independentConstructors);
-    transferHandles(archive, record.sharedConstructors);
-    transferHandles(archive, record.threadConstructors);
-    transferHandles(archive, record.sharedDestructors);
-    transferHandles(archive, record.threadDestructors);
-    transferHandles(archive, record.unitTests);
-    transferHandles(archive, record.crtConstructors);
-    transferHandles(archive, record.crtDestructors);
-    transferGates(archive, record.sharedGates);
-    transferGates(archive, record.threadGates);
-    archive.transfer(record.main.present);
-    archive.transfer(record.main.cLinkage);
-    archive.transfer(record.main.returnsVoid);
-    archive.transfer(record.main.parameterCount);
-    if (record.main.present)
-        transferHandle(archive, record.main.function_);
+    archive.scalar(position);
+    if (!archive.isWriting) {
+        if (position >= archive._program._modules.length)
+            throw new SnakebiteException(
+                "the program file names a module that it does not hold");
+        start = &archive._program._modules[position].start;
+    }
 }
 
 // A gate is the storage of a variable: a target and a length.
-private void transferGates(ref Archive archive, ref GateStorage[] gates) {
-    const count = archive.length(gates.length);
-    if (archive.isWriting)
-        archive.need!GateStorage(count);
-    else
-        gates = archive.newArray!GateStorage(count);
-    foreach (ref gate; gates) {
-        Target.Kind kind;
-        size_t[3] reference;
-        size_t length;
-        if (archive.isWriting) {
-            length = gate.length;
-            kind = archive.gateTarget(gate, reference);
-        }
-        archive.transfer(kind);
-        archive.scalar(reference);
-        archive.scalar(length);
-        if (!archive.isWriting) {
-            // The gate is ready to run once it is read, as after a compile
-            // to RAM.
-            const target = targetOf(archive, kind, reference);
-            gate.bytes = (cast(ubyte*) (isName(kind)
-                ? archive._program.plans.wordOfName(target)
-                : target.address))[0 .. length];
-            if (kind == Target.Kind.staticData)
-                gate.where = DatumRef(archive.blocksAt(reference[0]),
-                    reference[1], reference[2]);
-        }
+private void transferGate(ref Archive archive, ref GateStorage gate) {
+    Target.Kind kind;
+    size_t[3] reference;
+    size_t length;
+    if (archive.isWriting) {
+        length = gate.length;
+        kind = archive.gateTarget(gate, reference);
+    }
+    archive.transfer(kind);
+    archive.scalar(reference);
+    archive.scalar(length);
+    if (!archive.isWriting) {
+        // The gate is ready to run once it is read, as after a compile
+        // to RAM.
+        const target = targetOf(archive, kind, reference);
+        gate.bytes = (cast(ubyte*) (isName(kind)
+            ? archive._program.plans.wordOfName(target)
+            : target.address))[0 .. length];
+        if (kind == Target.Kind.staticData)
+            gate.where = DatumRef(archive.blocksAt(reference[0]),
+                reference[1], reference[2]);
     }
 }
 
-
-private void transferHandles(ref Archive archive, ref FunctionHandle[] handles) {
-    const count = archive.length(handles.length);
-    if (archive.isWriting)
-        archive.need!FunctionHandle(count);
-    else
-        handles = archive.newArray!FunctionHandle(count);
-    foreach (ref handle; handles)
-        transferHandle(archive, handle);
-}
 
 // A handle is a compiled function of the program, named by its place.
 private void transferHandle(ref Archive archive, ref FunctionHandle handle) {

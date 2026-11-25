@@ -58,6 +58,16 @@ from **SBC files** (ADR-0021). It is
 The module qualifies the name, and inside the bytecode compiler the source
 one is `SourceProgram`.
 
+**Start data**:
+What a backend gives to the runner (`snakebite.run`) to start a program, with
+no frontend data in it. It holds one `ModuleStart` for each root module (its
+constructors, destructors, unit tests and `main`, as handles to compiled
+functions, and the names of the modules that it imports), and what follows
+from them for the whole program: which `main` runs, and whether it is the C
+entry point. `snakebite.start.data`. A backend builds it from the source
+`Program`; the source `Program` holds the frontend modules, and the start data
+holds what is left of them to run.
+
 **Compilation unit**:
 The source files that are given to one compile (ADR-0021). With `module` it
 is one source file; with `package` it is the source files of one directory;

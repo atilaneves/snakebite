@@ -101,7 +101,6 @@ private MainStart mainStartOf(
     import snakebite.frontend.ast: nextOf, Tvoid;
 
     MainStart start;
-    start.present = true;
     start.cLinkage = hasCLinkage(main_);
     start.returnsVoid = main_.type.nextOf.ty == Tvoid;
     start.parameterCount = typeFunctionOf(main_).parameterList.length;

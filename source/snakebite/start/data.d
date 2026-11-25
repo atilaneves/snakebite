@@ -4,12 +4,18 @@ module snakebite.start.data;
 private:
 
 
-// What the start of a guest program needs, with no frontend data in it: one
-// start record for each root module (`ModuleStart`), made from that module
-// alone, and what the program takes from the records together (`StartData`):
-// which record an import names, the `crt_constructor` and `crt_destructor`
-// functions in the order of the records, and `main`. A backend builds the
-// records (`buildStartData`); `GuestModules` and `runMain` run on them only.
+import std.typecons: Nullable;
+
+
+// The start data of a guest program: what a backend gives to the runner
+// (`snakebite.run`) to start the program, with no frontend data in it. A
+// `ModuleStart` holds what one root module contributes: its constructors,
+// destructors, unit tests and `main`, and the names of the modules that it
+// imports. A backend makes each one from its module alone. `StartData` holds
+// them for the root modules of the program, and what follows from them for
+// the whole program: which `main` runs, and whether it is the C entry point.
+// A backend builds it (`buildStartData`); `GuestModules` and `runMain` run on
+// it only. See "Start data" in `CONTEXT.md`.
 
 // What a backend gives out to name a function. It means nothing outside the
 // backend that made it, and that backend decides when the function is
@@ -54,7 +60,7 @@ public struct ModuleStart {
     public GateStorage[] sharedGates;
     public GateStorage[] threadGates;
     // The module-level `main` of the module, if it declares one.
-    public MainStart main;
+    public Nullable!MainStart main;
 
     // Calls `visit` with each function handle of the module.
     public void eachHandle(scope void delegate(FunctionHandle) visit) {
@@ -63,8 +69,8 @@ public struct ModuleStart {
                 unitTests, crtConstructors, crtDestructors])
             foreach (handle; handles)
                 visit(handle);
-        if (main.present)
-            visit(main.function_);
+        if (!main.isNull)
+            visit(main.get.function_);
     }
 
     // Whether the module has a constructor or a destructor.
@@ -79,42 +85,15 @@ public struct ModuleStart {
 
 
 public struct MainStart {
-    // Whether the module declares a `main`.
-    public bool present;
     // A C-linkage `main` is the entry of the process, as the C runtime
-    // calls it.
+    // calls it: druntime does not start, so a build with unit tests runs
+    // none of them and no module constructor, and the program is only
+    // that function.
     public bool cLinkage;
     public bool returnsVoid;
     // The number of parameters `main` declares.
     public size_t parameterCount;
     public FunctionHandle function_;
-
-    // Whether the module declares a `main`.
-    public bool opCast(T : bool)() const {
-        return present;
-    }
-}
-
-
-// The rule for the `main` of a program: the one of the first module that
-// has one. `mainOf` gives the `main` of a module as a value that is false
-// when the module has none. Gives that type's `init` when no module has one.
-public auto firstMain(alias mainOf, Modules)(Modules modules) {
-    foreach (module_; modules) {
-        auto found = mainOf(module_);
-        if (found)
-            return found;
-    }
-    return typeof(mainOf(modules[0])).init;
-}
-
-
-// The rule for the C entry point: a C-linkage `main` is the entry of the
-// process, as the C runtime calls it. druntime does not start, so a build
-// with unit tests runs none of them and no module constructor, and the
-// program is only that function.
-public bool isCEntryPoint(in bool hasMain, lazy bool cLinkage) {
-    return hasMain && cLinkage;
 }
 
 
@@ -129,61 +108,27 @@ public const(ModuleInfo*)[] dependencyModulesOf(
 public struct StartData {
     public string programName;
     public bool betterC;
-    // One record for each root module, in the order of the root modules. A
-    // backend decides where each record lives (see `buildStartData`).
+    // The `ModuleStart` of each root module, in the order of the root
+    // modules. A backend decides where each one lives (see
+    // `buildStartData`).
     public ModuleStart*[] modules;
     public const(ModuleInfo*)[] dependencyModules;
 
-    // The `main` of the program: the one of the first record that has one.
-    public MainStart main() {
-        return firstMain!(module_ => module_.main)(modules);
+    // The `main` of the program: the one of the first module that has one.
+    // A native linker reports several as an error; this takes the first, as
+    // `Program` does.
+    public Nullable!MainStart main() {
+        foreach (module_; modules)
+            if (!module_.main.isNull)
+                return module_.main;
+        return Nullable!MainStart.init;
     }
 
+    // Whether the `main` of the program is the C entry point (see
+    // `MainStart.cLinkage`).
     public bool hasCEntryPoint() {
         const main_ = main;
-        return isCEntryPoint(main_.present, main_.cLinkage);
-    }
-
-    // In the order of the records, which is the order of the constructors.
-    public FunctionHandle[] crtConstructors() {
-        FunctionHandle[] handles;
-        foreach (module_; modules)
-            handles ~= module_.crtConstructors;
-        return handles;
-    }
-
-    // As `crtConstructors`.
-    public FunctionHandle[] crtDestructors() {
-        FunctionHandle[] handles;
-        foreach (module_; modules)
-            handles ~= module_.crtDestructors;
-        return handles;
-    }
-
-    // For each record, the positions in `modules` of the records that it
-    // imports and that druntime orders, in the order of its imports and
-    // each one time. An import that names no record, and an import of the
-    // module itself, have no position.
-    public size_t[][] importPositions() const {
-        size_t[string] positionOf;
-        foreach (i, module_; modules)
-            positionOf[module_.name] = i;
-
-        auto positions = new size_t[][modules.length];
-        foreach (i, module_; modules) {
-            bool[size_t] seen;
-            foreach (name; module_.importNames) {
-                const position = name in positionOf;
-                if (position is null || *position == i
-                        || modules[*position].standalone
-                        || *position in seen)
-                    continue;
-
-                seen[*position] = true;
-                positions[i] ~= *position;
-            }
-        }
-        return positions;
+        return !main_.isNull && main_.get.cLinkage;
     }
 
     // Calls `visit` with each function handle of the program.
