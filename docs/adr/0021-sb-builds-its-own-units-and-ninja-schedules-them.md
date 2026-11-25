@@ -62,10 +62,16 @@ that gives `sb` a rule for it, does not follow the model.
 8. With `module` and `package` a link step writes one saved program from the
    unit files. A run loads only that file. A load of separate unit files is
    built only if the measured link time is a large part of the rebuild.
-9. With `module` and `package`, a template instance goes into the unit that
-   instantiates it, as in an object file, and the link step keeps one copy.
-   ADR-0017 gives the instance to the module that declares the template.
-   That rule changes when these two modes are built.
+9. With `module` and `package`, the file of a unit holds each template
+   instance that the unit makes, as an object file does, in the entry of the
+   module that declares the template (ADR-0017). The file of a unit names
+   each of its functions. A function of another unit is a function of that
+   name with no body. The data that two units can both define (variables,
+   type information, class information and the descriptors of thread-local
+   variables) are names with an own copy (`snakebite.ffi.names`). The link
+   reads the files with the code of a load, puts the entries of one module
+   together, keeps one function of each name (one with a body) and one own
+   copy of each name, and saves the program with the code of a save.
 10. A backend executes each template instance that it can (issue #961). The
     `module` and `package` modes assume that no root unit needs an instance
     that is native in the dependency image (ADR-0007).

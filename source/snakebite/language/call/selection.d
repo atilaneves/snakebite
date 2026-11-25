@@ -294,8 +294,9 @@ public struct CallSelection {
 
         // A declaration without a body can only describe a native call or
         // a builtin - never a guest one, since there is no guest body to
-        // run.
-        if (function_.fbody is null) {
+        // run - unless the program defines it where the parser kept no body:
+        // a unit test of another unit of the program.
+        if (function_.fbody is null && isDefinedElsewhere(function_)) {
             version (LDC)
                 return intrinsicPlanOf(function_).call;
             else

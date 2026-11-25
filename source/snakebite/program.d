@@ -177,7 +177,8 @@ public struct Program {
         import snakebite.frontend.dmd.functions:
             frontendIsDefinedElsewhere = isDefinedElsewhere;
 
-        return frontendIsDefinedElsewhere(declaration, _programModuleSet);
+        return !isUnitTestOfOtherUnit(declaration)
+            && frontendIsDefinedElsewhere(declaration, _programModuleSet);
     }
 
     // Whether only this program defines `declaration`, so that no other
@@ -208,8 +209,28 @@ public struct Program {
         import snakebite.frontend.dmd.functions:
             frontendIsDefinedElsewhere = isDefinedElsewhere;
 
+        if (isUnitTestOfOtherUnit(declaration))
+            return true;
+        // A unit defines a function that the compiler generates for a type,
+        // such as the hash of a struct, with the type information that it
+        // makes of the type.
+        if (auto function_ = declaration.isFuncDeclaration)
+            if (function_.isGenerated)
+                return false;
         return isUnit
             && frontendIsDefinedElsewhere(declaration, _rootModuleSet)
             && !frontendIsDefinedElsewhere(declaration, _programModuleSet);
+    }
+
+    // Whether `declaration` is a unit test of another unit. The parser keeps
+    // no body of a unit test of a module that is not a root module, so the
+    // declaration looks like one that another object defines.
+    private bool isUnitTestOfOtherUnit(Dsymbol declaration) const {
+        import snakebite.frontend.dmd.functions:
+            frontendIsRootOwned = isRootOwned;
+
+        return isUnit && declaration.isUnitTestDeclaration !is null
+            && frontendIsRootOwned(declaration, _programModuleSet)
+            && !frontendIsRootOwned(declaration, _rootModuleSet);
     }
 }

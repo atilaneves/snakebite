@@ -79,7 +79,7 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
 
     import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
     import dmd.dsymbolsem: include;
-    import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
+    import dmd.dtemplate: TemplateDeclaration, TemplateInstance, TemplateMixin;
     import dmd.expression: FuncExp;
     import dmd.func: CtorDeclaration, DtorDeclaration,
         FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
@@ -95,6 +95,21 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     override void visit(TemplateInstance instance) {
         if (instance.members !is null && instance.compilesIntoBuild)
             foreach (member; *instance.members)
+                member.accept(this);
+    }
+
+    // A build compiles the members of a template mixin into the module that
+    // has the mixin, as the members of the module. The walk of
+    // `SemanticTimeTransitiveVisitor` visits only its arguments.
+    // The C entry point that dmd mixes into the module of a D `main`
+    // (`_d_cmain`) starts druntime, which calls the D `main`; sb starts the
+    // program itself.
+    override void visit(TemplateMixin mixin_) {
+        if (mixin_.tempdecl !is null
+                && mixin_.tempdecl.ident.toString == "_d_cmain")
+            return;
+        if (mixin_.members !is null)
+            foreach (member; *mixin_.members)
                 member.accept(this);
     }
 

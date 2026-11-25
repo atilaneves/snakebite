@@ -107,7 +107,7 @@ private string buildFileText(
         plain(["cd", directory]) ~ shell(["&&"])
             ~ plain([sb]) ~ shell(["--compile=$out"])
             ~ shell(commandVariables),
-        ["depfile = $out.dep", "deps = gcc", "restat = 1", "pool = console"]);
+        ["depfile = $out.dep", "deps = gcc", "restat = 1"]);
     text ~= rule("link",
         plain(["cd", directory]) ~ shell(["&&"])
             ~ plain([sb]) ~ shell(["--link=$out", "$in"]),
@@ -148,6 +148,11 @@ private string buildFileText(
     ) {
         string text = "\n" ~ statement([output], "compile", roots,
             [sb] ~ frontendConfiguration, imageSource);
+        // The one compile of the root package gives its output to the
+        // terminal as it comes. The compiles of the units run in parallel,
+        // and ninja gives the output of each when it ends.
+        if (build == Build.project)
+            text ~= "  pool = console\n";
         foreach (name; compilerVariables)
             text ~= statementVariable(name, variables[name]);
         return text ~ statementVariable("options", options ~ unitOptions);
