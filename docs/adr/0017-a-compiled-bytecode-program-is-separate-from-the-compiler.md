@@ -55,7 +55,7 @@ that it owns are not kept elsewhere with only a note in the `Module`. A
 reference to another module (an import) is a reference: the `Module` holds
 it as the name of the module. `StartData` finds the record of each name
 when the program starts. The owner of a template instance is the module that
-declares the template. ADR-0021 item 9 changes this for the `module` and
+declares the template. ADR-0021 item 7 changes this for the `module` and
 `package` modes. A saved file is a list of modules.
 
 The compiler makes a `Module` at the first function or datum of its D
