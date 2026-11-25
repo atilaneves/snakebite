@@ -225,6 +225,10 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             foreach (module_; _program.rootModules)
                 (cast() module_).accept(collector); // DMD visitors need mutable nodes.
             collector.compileFound;
+            if (_program.isUnit)
+                _program.eachExportedVariable((variable) {
+                    _world.data.exportStorage(variable);
+                });
         });
         startData.eachHandle((handle) {
             handle.compiledCode;

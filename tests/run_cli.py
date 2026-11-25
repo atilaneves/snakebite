@@ -3866,11 +3866,13 @@ def compiled_modules(result: subprocess.CompletedProcess[str]) -> set[str]:
             if line.startswith("compiled ")}
 
 
-# The lines of the program, without the lines that the frontend prints: ninja
-# gives the output of each compile of a unit on its own output.
+# The lines of the program on both streams, without the lines that the
+# frontend prints (`compiled M`): a build of a module compiles it for each unit
+# that imports it, as a native build of each unit does.
 def program_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
-    return [line for line in guest_lines(result)
-            if not line.startswith("compiled ")]
+    return guest_lines(result) + [
+        line for line in result.stderr.splitlines()
+        if not line.startswith("compiled ")]
 
 
 # `--build=module` gives the result of `bin/sb DIR`: on the first run and on
@@ -3951,6 +3953,213 @@ def test_build_module_with_a_dependency_runs_as_bin_sb(tmp_path: Path) -> None:
     for _ in range(2):
         built = run_sb("--build=module", str(app), cwd=tmp_path)
         assert_runs_as_bin_sb(built, direct)
+
+
+# A dub project of the modules `modules`, a map of module name to text. Each
+# module that has `unittest` prints with `printf`.
+def write_modules(
+    tmp_path: Path, name: str, modules: dict[str, str],
+) -> Path:
+    app = tmp_path / "app"
+    write(app / "dub.sdl", dub_project_recipe(name))
+    for module, text in modules.items():
+        write(app / "source" / f"{module}.d", f"module {module};\n" + text)
+    return app
+
+
+# `--build=module` gives the result of `bin/sb DIR`, which holds the lines
+# `expected`.
+def assert_module_build_runs_as_bin_sb(
+    tmp_path: Path, app: Path, expected: list[str],
+) -> None:
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    for line in expected:
+        assert line in guest_lines(direct), output(direct)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert built.returncode == 0, output(built)
+    assert_runs_as_bin_sb(built, direct)
+
+
+# An `extern(C)` prototype in one unit is the function that another unit
+# defines.
+def test_build_module_links_an_extern_c_function_of_another_unit(
+    tmp_path: Path,
+) -> None:
+    app = write_modules(tmp_path, "build-module-cfunc", {
+        "a": "extern(C) int cdef(int x) { return x + 5; }\n",
+        "b": """
+            import core.stdc.stdio: printf;
+            extern(C) int cdef(int);
+            unittest { printf("cdef %d\\n", cdef(37)); }
+            """,
+    })
+    assert_module_build_runs_as_bin_sb(tmp_path, app, ["cdef 42"])
+
+
+# An `extern` variable in one unit is the variable that another unit
+# defines.
+def test_build_module_links_an_extern_c_variable_of_another_unit(
+    tmp_path: Path,
+) -> None:
+    app = write_modules(tmp_path, "build-module-cvar", {
+        "c": "extern(C) __gshared int externVar = 31;\n",
+        "b": """
+            import core.stdc.stdio: printf;
+            extern(C) extern __gshared int externVar;
+            unittest { externVar += 11; printf("var %d\\n", externVar); }
+            """,
+    })
+    assert_module_build_runs_as_bin_sb(tmp_path, app, ["var 42"])
+
+
+# A function of C that no unit defines is the function of the process, as in
+# a native build.
+def test_build_module_calls_an_extern_c_function_of_the_process(
+    tmp_path: Path,
+) -> None:
+    app = write_modules(tmp_path, "build-module-libc", {
+        "a": """
+            import core.stdc.stdio: printf;
+            extern(C) int abs(int);
+            unittest { printf("abs %d\\n", abs(-7)); }
+            """,
+        "b": "int unused() { return 1; }\n",
+    })
+    assert_module_build_runs_as_bin_sb(tmp_path, app, ["abs 7"])
+
+
+# A compile error ends the run with status 1 and the error text of
+# `bin/sb DIR` on the standard error.
+def test_build_module_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
+    app = write_module_project(tmp_path, "build-module-error")
+    shapes = app / "source" / "shapes.d"
+    shapes.write_text(shapes.read_text()
+                      + "int broken() { return undefinedName; }\n")
+
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 1, output(direct)
+    assert built.returncode == 1, output(built)
+    assert "undefinedName" in direct.stderr, output(direct)
+    assert direct.stderr in built.stderr, output(built)
+    assert "undefinedName" not in built.stdout, output(built)
+
+    shapes.write_text(shapes.read_text().replace("undefinedName", "3"))
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+
+
+# A new module that no other module imports compiles alone: no other unit
+# compiles again. A removed module that no other module imports compiles
+# nothing.
+def test_build_module_compiles_only_a_new_module(tmp_path: Path) -> None:
+    app = write_module_project(tmp_path, "build-module-new", marks=True)
+    first = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+
+    extra = app / "source" / "extra.d"
+    write(extra, """
+        module extra;
+        import core.stdc.stdio: printf;
+        int more() { pragma(msg, "compiled extra"); return 9; }
+        unittest { printf("extra %d\\n", more()); }
+        """)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert compiled_modules(built) == {"extra"}, output(built)
+    assert "extra 9" in guest_lines(built), output(built)
+
+    extra.unlink()
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert built.returncode == 0, output(built)
+    assert compiled_modules(built) == set(), output(built)
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert program_lines(built) == program_lines(direct), output(built)
+
+
+# The members of a template mixin are members of the module that has the
+# mixin: another module calls a function that the mixin gives it, in each
+# mode, and the unit of the module that has the mixin defines the function.
+@pytest.mark.parametrize("mode", ["project", "module"])
+def test_build_mode_defines_the_functions_of_a_template_mixin(
+    tmp_path: Path, mode: str,
+) -> None:
+    app = write_modules(tmp_path, "build-mixin-" + mode, {
+        "mixed": """
+            mixin template Giver() {
+                int given() { return 41; }
+            }
+            mixin Giver;
+            """,
+        "taker": """
+            import core.stdc.stdio: printf;
+            import mixed;
+            unittest { printf("mixin %d\\n", given() + 1); }
+            """,
+    })
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert "mixin 42" in guest_lines(direct), output(direct)
+    built = run_sb(f"--build={mode}", str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+
+
+# A unit test of a module that another unit has runs in the program: the unit
+# that calls it has no body of it.
+def test_build_module_calls_the_unit_test_of_another_unit(
+    tmp_path: Path,
+) -> None:
+    app = write_modules(tmp_path, "build-module-tests", {
+        "tested": """
+            import core.stdc.stdio: printf;
+            unittest { printf("tested\\n"); }
+            """,
+        "caller": """
+            import core.stdc.stdio: printf;
+            import tested;
+            unittest {
+                foreach (test; __traits(getUnitTests, tested))
+                    test();
+                printf("caller\\n");
+            }
+            """,
+    })
+    direct = run_sb(str(app), cwd=tmp_path)
+    assert direct.returncode == 0, output(direct)
+    assert guest_lines(direct).count("tested") == 2, output(direct)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert_runs_as_bin_sb(built, direct)
+
+
+# A function that the compiler generates for a type, such as the equality and
+# the destructor of a struct, is in each unit that uses the type.
+def test_build_module_generates_the_functions_of_a_struct_in_each_unit(
+    tmp_path: Path,
+) -> None:
+    app = write_modules(tmp_path, "build-module-generated", {
+        "shape": """
+            import core.stdc.stdio: printf;
+            struct Pair { int a; string b; ~this() { ++destroyed; } }
+            __gshared int destroyed;
+            unittest {
+                { Pair p = Pair(1, "x"); assert(p == Pair(1, "x")); }
+                printf("shape %d\\n", destroyed);
+            }
+            """,
+        "user": """
+            import core.stdc.stdio: printf;
+            import shape;
+            unittest {
+                const before = destroyed;
+                { Pair p = Pair(2, "y"); assert(p != Pair(3, "y")); }
+                int[Pair] table;
+                table[Pair(5, "z")] = 1;
+                printf("user %d %d\\n", destroyed - before,
+                    cast(int) table.length);
+            }
+            """,
+    })
+    assert_module_build_runs_as_bin_sb(tmp_path, app, ["user 3 1"])
 
 
 # A program saved with the perf map on names its JIT code in the perf map

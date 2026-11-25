@@ -64,6 +64,15 @@ public struct BuildFiles {
         return file("units/" ~ relative ~ ".sbu");
     }
 
+    // The root files, one on each line, for the compile of each unit. The
+    // compile reads the file to know which of the modules that it imports
+    // are in other units. No statement has the file as an input: a compile
+    // needs a root file that it does not import no more than a native
+    // compile of a module needs the object files of the others.
+    public string unitFiles() const {
+        return file("units.list");
+    }
+
     // What the dependency image needs from the root code, which the compile
     // writes beside the program.
     public string imageSource() const {
@@ -156,7 +165,7 @@ public NinjaRun buildProject(in string directory, in Build build) {
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.file: exists, mkdirRecurse;
     import std.process: spawnProcess, wait;
-    import std.stdio: File, stderr, stdout;
+    import std.stdio: File, stderr, stdin, stdout;
 
     const files = buildFiles(directory, build);
     files.directory.mkdirRecurse;
@@ -167,8 +176,11 @@ public NinjaRun buildProject(in string directory, in Build build) {
     stderr.flush;
     auto stopWatch = StopWatch(AutoStart.yes);
     // ninja makes `build.ninja` again only when it gets its absolute path.
-    const status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile])
-        .wait;
+    // ninja writes the output of a command that ran in parallel, and its own
+    // messages, to its standard output. They are messages of the frontend,
+    // which `bin/sb DIR` writes to the standard error.
+    const status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile],
+        stdin, stderr).wait;
     const duration = stopWatch.peek;
     return NinjaRun(status, duration,
         status == 0 ? File(files.program, "rb") : File.init);

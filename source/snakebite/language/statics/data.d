@@ -582,6 +582,16 @@ public struct NativeData {
         return storageOf(variable);
     }
 
+    // Gives `variable` its storage, which a unit of a program makes for a
+    // variable that another unit declares `extern`, as an object file holds
+    // the symbol of a variable that nothing in the file refers to.
+    public void exportStorage(VarDeclaration variable) {
+        if (variable.isThreadLocalStorage)
+            addressOfTlsDescriptor(variable);
+        else
+            addressOfStorage(variable);
+    }
+
     // The address of the storage of a variable that is not thread-local, with
     // what it points at: a datum of the blocks, or, for native storage, the
     // name of its symbol.

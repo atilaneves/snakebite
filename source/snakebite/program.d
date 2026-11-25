@@ -123,6 +123,16 @@ public struct Program {
         return _links.definesLinkableFunctions;
     }
 
+    // Calls `action` with each variable that a root module defines and that
+    // another module can declare as `extern`: the variables that an object
+    // file of the module exports.
+    public void eachExportedVariable(
+        scope void delegate(
+            imported!"snakebite.frontend.ast".VarDeclaration) action,
+    ) const {
+        _links.eachVariable(action);
+    }
+
     // As `linkedFunctionOf`, for an `extern` variable.
     public imported!"snakebite.frontend.ast".VarDeclaration linkedVariableOf(
         imported!"snakebite.frontend.ast".VarDeclaration variable,

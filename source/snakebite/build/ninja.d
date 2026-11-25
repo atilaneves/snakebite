@@ -11,8 +11,10 @@ private:
 public void writeBuildFile(
     in string directory, in imported!"snakebite.build".Build build,
 ) {
-    import snakebite.build: buildFiles, writeChanged;
+    import snakebite.build: Build, buildFiles, writeChanged;
     import snakebite.project.dub: dubBuildInputs, dubDescribeProject, dubSources;
+    import std.algorithm.iteration: map;
+    import std.array: join;
     import std.file: mkdirRecurse, setTimes;
     import std.datetime: Clock;
 
@@ -22,6 +24,8 @@ public void writeBuildFile(
     const text = buildFileText(directory, build, sources,
         dubBuildInputs(description, sources.files));
     files.directory.mkdirRecurse;
+    if (build == Build.module_)
+        writeChanged(files.unitFiles, sources.files.map!(file => file ~ "\n").join);
     if (writeChanged(files.ninjaFile, text))
         return;
     // The run that makes the text can make an input of it, as dub makes its
@@ -144,10 +148,10 @@ private string buildFileText(
     ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null);
     string compileStatement(
         in string output, in string[] imageSource, in string[] roots,
-        in string[] unitOptions,
+        in string[] unitOptions, in string[] orderOnlyInputs,
     ) {
         string text = "\n" ~ statement([output], "compile", roots,
-            [sb] ~ frontendConfiguration, imageSource);
+            [sb] ~ frontendConfiguration, imageSource, orderOnlyInputs);
         // The one compile of the root package gives its output to the
         // terminal as it comes. The compiles of the units run in parallel,
         // and ninja gives the output of each when it ends.
@@ -160,14 +164,16 @@ private string buildFileText(
 
     if (build == Build.project)
         text ~= compileStatement(files.program, [files.imageSource],
-            sources.files, null);
+            sources.files, null, null);
     else {
         string[] units;
         foreach (root; sources.files) {
             units ~= files.unit(directory, root);
+            // The list of the root files does not change the command of a
+            // unit: a new file compiles only itself.
             text ~= compileStatement(units[$ - 1], null, [root],
-                ["--unit"] ~ sources.files.filter!(file => file != root)
-                    .map!(file => "--other-unit=" ~ file).array);
+                ["--unit", "--unit-files=" ~ files.unitFiles],
+                [files.unitFiles]);
         }
         text ~= "\n" ~ statement([files.program], "link", units, [sb],
             [files.imageSource]);
@@ -264,6 +270,7 @@ private string statement(
     in string[] inputs,
     in string[] implicitInputs,
     in string[] implicitOutputs = null,
+    in string[] orderOnlyInputs = null,
 ) {
     import std.algorithm.iteration: map;
     import std.array: join;
@@ -276,6 +283,9 @@ private string statement(
         ~ inputs.map!(input => " " ~ input.ninjaPath).join
         ~ (implicitInputs.length
             ? " |" ~ implicitInputs.map!(input => " " ~ input.ninjaPath).join
+            : "")
+        ~ (orderOnlyInputs.length
+            ? " ||" ~ orderOnlyInputs.map!(input => " " ~ input.ninjaPath).join
             : "")
         ~ "\n";
 }

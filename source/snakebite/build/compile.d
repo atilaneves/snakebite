@@ -8,14 +8,14 @@ private:
 //
 //   sb --compile=FILE [--dflag=ARGUMENT]... [-IPATH]... [-JPATH]...
 //      --program-name=NAME --working-directory=DIRECTORY --image-path=IMAGE
-//      [--c-imports-are-roots] [--unit [--other-unit=FILE]...] ROOT-FILE...
+//      [--c-imports-are-roots] [--unit [--unit-files=LIST]] ROOT-FILE...
 //
 // It runs in the project directory. It runs the frontend on the root files,
 // loads no dependency image, and writes the program to FILE with the save of
 // `--save`, and `FILE.dep`: the files that the frontend read. With `--unit`
-// the root files are one unit of the program and the files `--other-unit`
-// are the other units: FILE is the file of the unit, which a link joins to
-// the files of the other units (`link`). Without it, beside FILE it writes
+// the root files are one unit of the program and the file LIST holds the root
+// files of the program, one on each line: FILE is the file of the unit, which
+// a link joins to the files of the other units (`link`). Without it, beside FILE it writes
 // what the image needs from the root code (`BuildFiles.imageSource`), only
 // when that changed. With `--unit` the image needs nothing from the root
 // code (ADR-0021, item 10).
@@ -27,9 +27,13 @@ public int compile(string[] args) {
     import snakebite.frontend.compiler: FrontendFlags;
     import snakebite.project.dependencies: imageModule;
     import snakebite.project.dub: SourceSet;
-    import std.file: getcwd;
+    import std.algorithm.iteration: filter;
+    import std.algorithm.searching: canFind;
+    import std.array: array;
+    import std.file: getcwd, readText;
     import std.getopt: getopt;
     import std.path: dirName;
+    import std.string: splitLines;
 
     string output;
     string[] compilerArguments;
@@ -40,7 +44,7 @@ public int compile(string[] args) {
     string imagePath;
     bool cImportsAreRoots;
     bool isUnit;
-    string[] otherUnitFiles;
+    string unitFiles;
     getopt(
         args,
         "compile", &output,
@@ -52,7 +56,7 @@ public int compile(string[] args) {
         "image-path", &imagePath,
         "c-imports-are-roots", &cImportsAreRoots,
         "unit", &isUnit,
-        "other-unit", &otherUnitFiles,
+        "unit-files", &unitFiles,
     );
 
     SourceSet sources;
@@ -63,7 +67,9 @@ public int compile(string[] args) {
     sources.workingDirectory = workingDirectory;
     sources.importedCFilesAreRoots = cImportsAreRoots;
     sources.isUnit = isUnit;
-    sources.otherUnitFiles = otherUnitFiles;
+    if (unitFiles.length)
+        sources.otherUnitFiles = unitFiles.readText.splitLines
+            .filter!(file => !sources.files.canFind(file)).array;
     const directory = getcwd;
     // The image that the load uses exists, so the frontend accepts what only
     // the image runs.

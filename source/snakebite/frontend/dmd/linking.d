@@ -50,6 +50,15 @@ public struct LinkMap {
         return _functions.length != 0;
     }
 
+    // Calls `action` with each variable that a root module defines and that
+    // another module can declare.
+    public void eachVariable(
+        scope void delegate(VarDeclaration) action,
+    ) const {
+        foreach (variable; _variables)
+            action(cast() variable);
+    }
+
     // `declaration` when it has a body, no definition is known for it, or
     // it cannot be linked by name.
     public FuncDeclaration definitionOf(
