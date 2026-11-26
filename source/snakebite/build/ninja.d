@@ -60,11 +60,10 @@ private string buildFileText(
     import std.algorithm.searching: canFind;
     import std.algorithm.sorting: sort;
     import std.array: array, join;
-    import std.file: exists, getcwd, thisExePath;
+    import std.file: exists, thisExePath;
 
     const files = buildFiles(directory);
     const sb = thisExePath;
-    const start = getcwd;
     // The frontend of the compile reads the configuration of the compiler
     // that built `sb`. dub's build and the image run `compiler`.
     const compiler = compilerPath(defaultCompiler);
@@ -84,25 +83,21 @@ private string buildFileText(
             .map!(path => "-J" ~ path).array,
     ];
     string text = "builddir = " ~ files.directory.ninjaValue ~ "\n";
+    // ninja runs the commands in the directory that `sb` started in, which
+    // the project state directory depends on. Each command gets the project
+    // directory as an argument.
     text ~= rule("generate",
-        plain(["cd", start]) ~ shell(["&&"])
-            ~ plain([sb, "--build=project", "--generate", directory]),
+        [sb, "--build=project", "--generate", directory], null,
         ["generator = 1", "restat = 1", "pool = console"]);
     text ~= rule("dependencies",
-        plain(["cd", start]) ~ shell(["&&"])
-            ~ plain([sb, dubDependenciesOption, directory]) ~ shell(["$out"]),
+        [sb, dubDependenciesOption, directory], ["$out"],
         ["restat = 1", "pool = console"]);
     text ~= rule("compile",
-        plain(["cd", directory]) ~ shell(["&&"])
-            ~ plain([sb, "--compile=" ~ files.program])
-            ~ shell(commandVariables),
+        [sb, "--compile=" ~ files.program, directory], commandVariables,
         ["depfile = " ~ files.program.ninjaValue ~ ".dep", "deps = gcc",
             "restat = 1", "pool = console"]);
-    // ninja quotes the path of `$out` for the shell.
     text ~= rule("image",
-        plain(["cd", directory]) ~ shell(["&&"]) ~ plain(environmentOfBuild)
-            ~ plain([sb]) ~ shell(["--image=$out"])
-            ~ shell(commandVariables),
+        [sb, "--image=" ~ files.image, directory], commandVariables,
         ["depfile = $out.dep", "deps = gcc", "pool = console"]);
 
     // The outputs are the libraries that dub's build makes. A linker file
@@ -159,56 +154,21 @@ private enum commandVariables =
     ["$flags", "$includes", "$stringImports", "$options", "$in"];
 
 
-// The environment that a compile with the host compiler reads, with the
-// values that it had when `build.ninja` was made: as reggae reads its
-// options when it makes the build.
-private string[] environmentOfBuild() {
-    import std.process: environment;
-
-    string[] command = ["env"];
-    foreach (name; ["DFLAGS", "LFLAGS"]) {
-        const value = environment.get(name);
-        command ~= value is null ? ["-u", name] : [name ~ "=" ~ value];
-    }
-    return command;
-}
-
-
-// A word of the command of a rule. The shell takes `text` as it is when it
-// is `verbatim`: an operator of the shell, or a variable of ninja, which
-// ninja expands to words. Other text is one word, quoted.
-private struct Word {
-    string text;
-    bool verbatim;
-}
-
-
-private Word[] plain(in string[] words) {
-    import std.algorithm.iteration: map;
-    import std.array: array;
-
-    return words.map!(word => Word(word, false)).array;
-}
-
-
-private Word[] shell(in string[] words) {
-    import std.algorithm.iteration: map;
-    import std.array: array;
-
-    return words.map!(word => Word(word, true)).array;
-}
-
-
+// A rule whose command is `words`, each one word for the shell, then the
+// ninja variables `variables`, which ninja expands to words.
 private string rule(
-    in string name, in Word[] command, in string[] settings,
+    in string name,
+    in string[] words,
+    in string[] variables,
+    in string[] settings,
 ) {
     import std.algorithm.iteration: map;
-    import std.array: join;
+    import std.array: array, join;
 
+    const command = words.map!(word => word.shellQuoted.ninjaValue).array
+        ~ variables;
     return "\nrule " ~ name ~ "\n"
-        ~ "  command = "
-        ~ command.map!(word => word.verbatim
-            ? word.text : word.text.shellQuoted.ninjaValue).join(" ") ~ "\n"
+        ~ "  command = " ~ command.join(" ") ~ "\n"
         ~ settings.map!(setting => "  " ~ setting ~ "\n").join;
 }
 
