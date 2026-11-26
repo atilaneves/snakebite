@@ -36,6 +36,8 @@ Use ASD-STE100 - Simplified Technical English in all communication.
 * Existing code that breaks a rule is not a model to copy.
 * All code is a liability and must justify its existence. Code that
   doesn't exist to make a test pass should probably be deleted.
+* A case that the code treats differently from the general case needs a
+  stated reason. With no reason, the general path handles it.
 * One True Brace Style. For functions with many attributes, `{` on its
   own line is acceptable.
 * Use UFCS liberally.
