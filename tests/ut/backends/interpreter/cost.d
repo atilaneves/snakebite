@@ -30,7 +30,9 @@ static foreach (rootOwned; [true, false]) {
             bool* available;
             Definition whereDefined(Dsymbol) const {
                 assert(*available, "ownership queried after preparation");
-                return rootOwned ? Definition.rootOwned : Definition.definedElsewhere;
+                return rootOwned
+                    ? Definition.rootOwned
+                    : Definition.definedElsewhere;
             }
         }
         bool available = true;

@@ -78,7 +78,6 @@ public bool isRootOwned(
 // define it too. The answer comes from the declaration alone, never from a
 // loaded image, so a compile with no image gives the same answer.
 public imported!"snakebite.language.definition".Definition whereDefined(
-
     imported!"dmd.dsymbol".Dsymbol declaration,
     in bool[imported!"dmd.dmodule".Module] rootModules,
 ) {
@@ -100,14 +99,16 @@ public imported!"snakebite.language.definition".Definition whereDefined(
     if (owner.outer !is null) {
         const outer = whereDefined(owner.outer, rootModules);
         return outer == Definition.rootOwned
-            ? Definition.rootOrElsewhere : outer;
+            ? Definition.rootOrElsewhere
+            : outer;
     }
     if (function_ !is null && function_.isFuncLiteralDeclaration !is null)
         return Definition.rootOrElsewhere;
     if (!owner.instantiated)
         return Definition.definedElsewhere;
     return function_ is null || backendExecutes(function_)
-        ? Definition.rootOrElsewhere : Definition.definedElsewhere;
+        ? Definition.rootOrElsewhere
+        : Definition.definedElsewhere;
 }
 
 private struct Owner {

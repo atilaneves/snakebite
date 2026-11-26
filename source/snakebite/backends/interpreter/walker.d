@@ -1248,7 +1248,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // guest one, since there is no guest body to walk.
         auto body_ = function_.fbody;
         const decision = CallSelection.atCallSite(
-            _callSelection.decisionOf(function_), callSite);
+            _callSelection.decisionOf(function_),
+            callSite,
+        );
         if (!callbackEntry) final switch (decision.route)
             with (CallSelection.Route) {
         case native:
@@ -1468,7 +1470,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.frontend.ast: VarArg;
 
         if (typeFunctionOf(function_).parameterList.varargs != VarArg.variadic
-                || _callSelection.decisionOf(function_).route == CallSelection.Route.guest)
+                || _callSelection.decisionOf(function_).route
+                    == CallSelection.Route.guest)
             return treeCalleeOf(function_);
         return variadicHostCalleeAt(function_, site, arguments);
     }
@@ -2236,7 +2239,9 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
                 && layout.hiddenThis.variable !is null)
             calleeContextPlanOf(site.isCallExp, callee);
         const decision = CallSelection.atCallSite(
-            _callSelection.decisionOf(callee), site);
+            _callSelection.decisionOf(callee),
+            site,
+        );
 
         if (decision.route == CallSelection.Route.guest
                 && typeFunctionOf(callee).parameterList.varargs

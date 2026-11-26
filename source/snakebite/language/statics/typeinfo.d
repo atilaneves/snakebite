@@ -558,8 +558,13 @@ public struct RuntimeTypes {
     private LinkedClass findLinkedClass(ClassDeclaration declaration) {
         final switch (_whereDefined(declaration)) with (Definition) {
             case definedElsewhere:
-                return LinkedClass(Linked!TypeInfo_Class.named(plans.names.named(
-                    classInfoSymbol(declaration), 0, declaration.toString)));
+                // `auto`: `const` makes the `Name*` that `named` takes const.
+                auto symbol = plans.names.named(
+                    classInfoSymbol(declaration),
+                    0,
+                    declaration.toString,
+                );
+                return LinkedClass(Linked!TypeInfo_Class.named(symbol));
             case rootOwned:
                 return LinkedClass.init;
             case rootOrElsewhere:

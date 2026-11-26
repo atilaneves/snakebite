@@ -9393,7 +9393,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const decision = CallSelection.atCallSite(
-            _bytecode._world.callSelection.decisionOf(callee), site);
+            _bytecode._world.callSelection.decisionOf(callee),
+            site,
+        );
         final switch (decision.route) with (CallSelection.Route) {
         case native:
             Arg[] initialArgs;
@@ -9602,7 +9604,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
         const decision = CallSelection.atCallSite(
-            _bytecode._world.callSelection.decisionOf(callee), site);
+            _bytecode._world.callSelection.decisionOf(callee),
+            site,
+        );
         if (decision.route != CallSelection.Route.guest)
             return size_t.max;
         auto type = typeFunctionOf(callee);

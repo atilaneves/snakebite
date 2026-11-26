@@ -219,15 +219,11 @@ public struct CallSelection {
     // Cache hits do not enter the frontend. A cold decision snapshots its
     // parent-chain facts under the frontend lock: another module's semantic
     // pass can change a shared package parent after this callee is complete.
-    public Decision decisionOf(
-        FuncDeclaration function_,
-    ) {
+    public Decision decisionOf(FuncDeclaration function_) {
         if (auto cached = function_ in _decisions)
             return *cached;
 
-        return *_decisions.insert(
-            function_, buildDecision(function_),
-        );
+        return *_decisions.insert(function_, buildDecision(function_));
     }
 
     // Whether `function_`'s own body should interpret/compile - the one
@@ -236,25 +232,19 @@ public struct CallSelection {
     // a value) still asks. A caller that also wants the builtin wrapper
     // itself should read `decisionOf` directly instead of calling this
     // and `decisionOf` both, which would pay the cache lookup twice.
-    public bool usesGuestBody(
-        FuncDeclaration function_,
-    ) {
+    public bool usesGuestBody(FuncDeclaration function_) {
         return decisionOf(function_).route == Route.guest;
     }
 
     // A variadic function whose route is native must keep its host
     // address. Its call plan depends on the extra argument types at each
     // call site. The route is the one that a direct call takes.
-    public bool usesNativeVariadicAddress(
-        FuncDeclaration function_,
-    ) {
+    public bool usesNativeVariadicAddress(FuncDeclaration function_) {
         import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        return typeFunctionOf(function_).parameterList.varargs
-                == VarArg.variadic
-            && decisionOf(function_).route
-                == Route.native;
+        return typeFunctionOf(function_).parameterList.varargs == VarArg.variadic
+            && decisionOf(function_).route == Route.native;
     }
 
     // A guest D variadic method called without a receiver adjustment is
@@ -265,27 +255,21 @@ public struct CallSelection {
         FuncDeclaration function_,
         in ptrdiff_t adjustment,
     ) {
-        return adjustment == 0
-            && isVariadicGuest(function_);
+        return adjustment == 0 && isVariadicGuest(function_);
     }
 
-    public bool isVariadicGuest(
-        FuncDeclaration function_,
-    ) {
+    public bool isVariadicGuest(FuncDeclaration function_) {
         import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
-        return typeFunctionOf(function_).parameterList.varargs
-                == VarArg.variadic
+        return typeFunctionOf(function_).parameterList.varargs == VarArg.variadic
             && usesGuestBody(function_);
     }
 
     // Whether another object defines the function decides between native
     // code and the guest body (ADR-0009). A missing native symbol is then
     // the error of the native call, as at the link of a native build.
-    private Decision buildDecision(
-        FuncDeclaration function_,
-    ) {
+    private Decision buildDecision(FuncDeclaration function_) {
         import snakebite.frontend.dmd.functions: contextOf;
 
         const context = contextOf(function_);

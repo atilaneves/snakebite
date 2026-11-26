@@ -564,14 +564,14 @@ static foreach (backend; Matrix!(
 // The native copy of the shared and the thread-local variable of
 // `nestedInstanceModule` below. Their values differ from the initial values
 // of the instance, so the result tells the copy that is used.
-public extern(C) __gshared int snakebite_ut_nested_shared = 5000;
+public extern(C) shared int snakebite_ut_nested_shared = 5000;
 public extern(C) int snakebite_ut_nested_thread = 7000;
 
 private enum nestedInstanceModule = q{
     module nested_instance_dep;
     int variables(alias f)() {
         pragma(mangle, "snakebite_ut_nested_shared")
-        __gshared static int shared_ = 1000;
+        shared static int shared_ = 1000;
         pragma(mangle, "snakebite_ut_nested_thread")
         static int thread = 2000;
         return shared_ + thread + f(1);

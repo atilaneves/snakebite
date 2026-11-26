@@ -135,9 +135,7 @@ public struct Program {
     // Where `declaration` is defined: the one decision that the call
     // selection and the static data, TypeInfo and class information take
     // for a declaration (`snakebite.frontend.dmd.functions`).
-    public Definition whereDefined(
-        Dsymbol declaration,
-    ) const {
+    public Definition whereDefined(Dsymbol declaration) const {
         import snakebite.frontend.dmd.functions:
             frontendWhereDefined = whereDefined;
 
