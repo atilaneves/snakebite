@@ -121,11 +121,24 @@ static foreach (backend; Matrix!(
         auto program = Program([modules[0]]);
         auto backend_ = ownedBackend!backend(program);
 
-        static foreach (entry; [
-            ["direct", "_D14routing_helper8fortyTwoFZi"],
-            ["cDirect", "`cFortyTwo`"],
-            ["address", "_D14routing_helper8fortyTwoFZi"],
-        ]) {{
+        // On the bytecode backend a call through the address of a function
+        // with no definition is a memory fault that ends the process with a
+        // line that names the symbol. A test process cannot survive it, so
+        // `call_through_address` of
+        // `test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs`
+        // in `tests/run_cli.py` states that use.
+        static if (is(backend == Bytecode))
+            enum entries = [
+                ["direct", "_D14routing_helper8fortyTwoFZi"],
+                ["cDirect", "`cFortyTwo`"],
+            ];
+        else
+            enum entries = [
+                ["direct", "_D14routing_helper8fortyTwoFZi"],
+                ["cDirect", "`cFortyTwo`"],
+                ["address", "_D14routing_helper8fortyTwoFZi"],
+            ];
+        static foreach (entry; entries) {{
             int result;
             const thrown = backend_
                 .call(findFunction(modules[0], entry[0]), &result, [])
@@ -171,11 +184,20 @@ static foreach (backend; Matrix!(
         ]);
         auto backend_ = ownedBackend!backend(Program([modules[0]]));
 
-        static foreach (entry; [
-            ["readShared", "sharedValue"],
-            ["readThread", "threadValue"],
-            ["makeClass", "7Missing6__initZ"],
-        ]) {{
+        // On the bytecode backend a use of a `__gshared` variable or of a
+        // class with no definition is a memory fault that ends the process
+        // with a line that names the symbol. A test process cannot survive
+        // it, so `test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs`
+        // in `tests/run_cli.py` states those two uses.
+        static if (is(backend == Bytecode))
+            enum entries = [["readThread", "threadValue"]];
+        else
+            enum entries = [
+                ["readShared", "sharedValue"],
+                ["readThread", "threadValue"],
+                ["makeClass", "7Missing6__initZ"],
+            ];
+        static foreach (entry; entries) {{
             int result;
             const thrown = backend_
                 .call(findFunction(modules[0], entry[0]), &result, [])

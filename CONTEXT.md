@@ -36,9 +36,10 @@ are not root-owned are called across the barrier.
 **Defined elsewhere**:
 A declaration that the compile of the **Root modules** does not define: one
 with no body or an `extern` one, and each declaration of a
-dependency module that its archive defines. A call to it crosses the barrier,
-and a missing symbol for it is an error, as at the link of a native build.
-Compare **Definition**.
+dependency module that its archive defines. A call to it crosses the barrier.
+A missing symbol for it is an error when code that uses it runs, not when the
+program is made ready to run, where the link of a native build fails
+(ADR-0017). Compare **Definition**.
 
 **Definition**:
 The one decision, made for each declaration, of where it is defined
@@ -190,9 +191,12 @@ _Avoid_: abort, crash
 **Guest fault**:
 A hardware fault of the guest that compiled D would die of: a load, a store
 or a call through an address that is not mapped (a null pointer included),
-and an integer division that the hardware traps. It is not a halt and
-nothing recovers from it. A handler for SIGSEGV and SIGFPE writes one line
-to standard error (the kind, and the innermost guest function and the line
-when the backend knows them), then the default action of the signal ends the
-process, as it ends compiled D.
+and an integer division that the hardware traps. A load, a store or a call
+through the address of a symbol that no object defines is a guest fault too,
+of which compiled D does not die, because its link fails first (ADR-0017). It
+is not a halt and nothing recovers from it. A handler for SIGSEGV and SIGFPE
+writes one line to standard error (the kind, or for a symbol that no object
+defines the failure that names it, and the innermost guest function and the
+line when the backend knows them), then the default action of the signal
+ends the process, as it ends compiled D.
 _Avoid_: crash, trap
