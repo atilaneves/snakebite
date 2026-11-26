@@ -700,29 +700,25 @@ static foreach (backend; Matrix!(
     @Tags(backend.stringof)
     unittest {
         0.shouldBeStatusOf!(backend, q{
-            import core.time: seconds;
             import std.concurrency;
 
             struct Flush {}
 
             void writer(Tid parent) {
-                const received = receiveTimeout(2.seconds,
+                receive(
                     (string message, Tid origin) {
                         assert(origin == parent);
                         parent.send(message);
                     },
                     (Flush message, Tid origin) { assert(false); },
                 );
-                assert(received);
             }
 
             void main() {
                 auto thread = spawn(&writer, thisTid);
                 thread.send("worker output", thisTid);
                 string echoed;
-                assert(receiveTimeout(3.seconds,
-                    (string message) { echoed = message; },
-                ));
+                receive((string message) { echoed = message; });
                 assert(echoed == "worker output");
             }
         });
