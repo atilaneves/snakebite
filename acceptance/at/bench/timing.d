@@ -53,6 +53,9 @@ unittest {
                 program,
                 0,
                 1,
+                enterWorkingDirectory: null,
+                arguments: ["benchmark"],
+                isSnippet: true,
             ).runTime.median;
 
         const repeatedRuns = benchmark(
@@ -61,6 +64,9 @@ unittest {
             program,
             2,
             10,
+            enterWorkingDirectory: null,
+            arguments: ["benchmark"],
+            isSnippet: true,
         );
 
         const singleMedian =

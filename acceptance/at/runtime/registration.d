@@ -34,7 +34,8 @@ private size_t runsThatGiveBack(Backend)(
         const mapped = executableChunkBytes;
         auto program = Program([parseSnippet(code)]);
         auto instance = ownedBackend!Backend(program);
-        run(instance.startData, instance.compilationStatistics).should == status;
+        run(instance.startData, instance.compilationStatistics,
+            ["snakebite"]).should == status;
         if (GuestModules.held == held && executableChunkBytes == mapped)
             ++givenBack;
     }
