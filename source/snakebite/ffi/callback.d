@@ -582,7 +582,7 @@ private void invoke(ref Slot slot, CallFrame* frame) {
 // lock, and only the first crossing of a word, which reserves its
 // entry, takes this bridge's mutex (never the compiler lock).
 //
-// A struct, not a class (ai/CODING.md): no base, no children, no virtual
+// A struct, not a class (AGENTS.md): no base, no children, no virtual
 // methods. `CallPlanStore` owns one, and every plan prepared with it shares
 // it by reference, so it is always reached through a heap-allocated
 // `CallbackBridge*`, the same way a class reference would be shared.

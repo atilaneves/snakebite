@@ -240,4 +240,4 @@ entry names all three.
 `CallSelection` holds the shared DMD code-generator and call-site rules.
 Adding a wrapper does not make a declaration an intrinsic. The bytecode VM
 imports only `BuiltinCall` from `builtin/call.d`, never a dmd frontend
-type (CODING.md, "Code organisation").
+type (AGENTS.md, "Code organisation").

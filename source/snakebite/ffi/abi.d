@@ -400,7 +400,7 @@ private void classify(
 
     // An enum has its base type's native layout and classification, the
     // same "native layout" rule every backend already follows for every
-    // other type (`ai/CODING.md`'s runtime-semantics section). `type.ty`
+    // other type (`AGENTS.md`'s runtime-semantics section). `type.ty`
     // below never matches `Tenum` itself, only a base-type case, so an
     // unclassified enum has to be unwrapped exactly once, here at this
     // function's own entry - the only place every path into `classify` (a
