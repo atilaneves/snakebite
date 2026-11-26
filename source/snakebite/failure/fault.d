@@ -77,6 +77,7 @@ private extern (C) void onFault(
     int signal, imported!"core.sys.posix.signal".siginfo_t* info, void*,
 ) @system nothrow @nogc {
     import core.sys.posix.signal: raise;
+    import snakebite.ffi.names: absentFailureAt;
 
     // A signal that something sent (`kill`, `raise`) is no fault of the
     // guest. `raise` leaves it pending: it is delivered when this handler
@@ -96,7 +97,10 @@ private extern (C) void onFault(
         message.put("): ");
     }
     message.put("fatal: ");
-    message.put(kindOf(signal, info));
+    // A use of a symbol that no object defines faults in its span.
+    const absent = absentFailureAt(info.si_addr);
+    const failure = absent.length ? absent : kindOf(signal, info);
+    message.put(failure);
     if (where.function_.length != 0) {
         message.put(", in ");
         message.put(where.function_);

@@ -19,12 +19,8 @@ build/ut-without-build-tools.sh
 # Arena scans hold the frontend lock and depend on retained process state.
 # Validate ownership separately so bin/ut can run unit tests in parallel.
 bin/arena
-# The tests tagged `@Tags("alone")` need a process in which no other
-# test runs: they gate on measured times, or they count what the process
-# holds while no other thread starts. Run them on their own,
-# single-threaded, so they never share the process with other tests.
-bin/at '~@alone'
-bin/at -s '@alone'
+bin/at
+bin/alone
 build/test-repl.sh
 build/test-cli.sh
 build/test-flags.sh

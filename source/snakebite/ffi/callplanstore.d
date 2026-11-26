@@ -37,7 +37,8 @@ public struct CallPlanStore {
     public void* addressOf(Name* name) {
         if (auto address = addressIfPresent(name))
             return address;
-        throw missing(name.symbol, name.declaredBy);
+        const symbol = symbolOf(name);
+        throw missing(symbol.symbol, symbol.declaredBy);
     }
 
     // As `addressOf`, but null for a symbol that no object defines. A name
@@ -49,9 +50,14 @@ public struct CallPlanStore {
         auto found = cast(void*) atomicLoad!(MemoryOrder.acq)(name.address);
         if (found is null) {
             if (auto adjusted = name.adjusted) {
-                found = cast(void*) callbacks.adjustedEntryOf(
-                    addressOf(adjusted.code), adjusted.signature,
-                    adjusted.adjustment);
+                auto code = addressIfPresent(adjusted.code);
+                found = code is null
+                    ? Name.absent
+                    : cast(void*) callbacks.adjustedEntryOf(
+                        code,
+                        adjusted.signature,
+                        adjusted.adjustment,
+                    );
                 atomicStore!(MemoryOrder.rel)(
                     name.address, cast(shared(void*)) found);
             }
@@ -64,6 +70,12 @@ public struct CallPlanStore {
             }
         }
         return found is Name.absent ? null : found;
+    }
+
+    // The name of the symbol that `name` reaches: an entry that host code
+    // calls with an adjustment reaches its code.
+    private static Name* symbolOf(Name* name) @safe pure nothrow @nogc {
+        return name.adjusted ? name.adjusted.code : name;
     }
 
     // The one decision for a datum that the program and another object can
@@ -103,12 +115,18 @@ public struct CallPlanStore {
 
     // The word that refers to `target`, which is a name (`isNamed`), in a
     // program made ready to run: the address of its symbol, or the table or
-    // the record of an interface of the class information that it names.
+    // the record of an interface of the class information that it names. A
+    // symbol that no object defines is no error here: the word is an address
+    // where a use of the symbol fails (`absentReferenceOf`), as a call of the
+    // symbol fails only when it runs (`bound`).
     public size_t wordOfName(in Target target) {
         import snakebite.failure.report: SnakebiteException;
         import snakebite.native.address: interfaceWordOf;
 
-        const address = addressOf(cast(Name*) target.address);
+        auto name = cast(Name*) target.address;
+        const address = addressIfPresent(name);
+        if (address is null)
+            return cast(size_t) absentReferenceOf(name);
         if (target.kind == Target.Kind.hostSymbol)
             return cast(size_t) address;
         const info = cast(const(TypeInfo_Class)) address;
@@ -117,6 +135,21 @@ public struct CallPlanStore {
                 "the program file names an interface that a class does not "
                 ~ "have");
         return interfaceWordOf(target.kind, info, target.index);
+    }
+
+    // The word that a reference to the symbol `name`, which no object
+    // defines, holds in a program made ready to run: an address where a use
+    // of the symbol fails with the failure that names the symbol and its
+    // declaration (`snakebite.ffi.names.absentAddressOf`).
+    private void* absentReferenceOf(Name* name) {
+        import snakebite.ffi.names: absentAddressOf;
+
+        auto symbol = symbolOf(name);
+        auto start = absentAddressOf(
+            symbol.symbol,
+            () => missingText(symbol.symbol, symbol.declaredBy),
+        );
+        return start + symbol.distance;
     }
 
     // Whether the word that refers to `target` is found only when the
@@ -136,12 +169,22 @@ public struct CallPlanStore {
     // of a native build reports it: the one place that makes it.
     // `declaredBy` names the declaration, when there is one.
     public static Exception missing(in char[] symbol, in char[] declaredBy) {
+        return new Exception(missingText(symbol, declaredBy));
+    }
+
+    private static string missingText(in char[] symbol, in char[] declaredBy) {
         import std.conv: text;
 
-        return new Exception(text(
-            "ffi cannot resolve the symbol `", symbol, "`",
-            declaredBy.length ? text(" declared by `", declaredBy, "`") : "",
-            ": it is not in this process"));
+        const declaration = declaredBy.length
+            ? text(" declared by `", declaredBy, "`")
+            : "";
+        return text(
+            "ffi cannot resolve the symbol `",
+            symbol,
+            "`",
+            declaration,
+            ": it is not in this process",
+        );
     }
 
     // The registry of the guest function words, and the owner of their

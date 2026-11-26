@@ -123,7 +123,9 @@ Target frontendBoundaryObject() {
     }
     const fixtureFiles = ownFiles(frontendBoundaryFixture);
     string[] files;
-    foreach (directory; ["source", "tests", "bench", "validation", "acceptance"])
+    foreach (directory; [
+        "source", "tests", "bench", "validation", "acceptance", "alone",
+    ])
         files ~= ownFiles(directory);
     const check = "python3 $project/build/frontend_boundary.py";
     return Target(
@@ -405,7 +407,8 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     if (compiler != "dmd")
         info = info.withLdcFrontend(buildOptions.dCompiler,
             pinnedFrontendProbe(buildOptions.dCompiler));
-    if (config == "acceptance-test" || config == "arena-validation")
+    if (config == "acceptance-test" || config == "arena-validation"
+            || config == "alone-test")
         info.packages[0].dflags ~= "-unittest";
     if (compiler != "dmd") {
         foreach (ref package_; info.packages)
@@ -540,6 +543,7 @@ Build reggaeBuild() {
         ~ dubTarget("dmd", "unittest", "unittest", "ut")
         ~ dubTarget("dmd", "arena-validation", "arena-validation", "arena")
         ~ dubTarget("ldc2", "acceptance-test", "release", "at", releaseFlags)
+        ~ dubTarget("ldc2", "alone-test", "release", "alone", releaseFlags)
         ~ dubTarget("ldc2", "sb", "release", "sb", releaseFlags)
         ~ dubTarget("ldc2", "sb-repl", "release", "sb-repl", releaseFlags)
         ~ dubTarget("ldc2", "bench", "release", "bench", releaseFlags);

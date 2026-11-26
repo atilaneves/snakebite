@@ -34,8 +34,9 @@ modules.
    barrier. The call resolves through the dependency image
    (ADR-0007) or through the host.
 3. A function that is not root-owned and that has no native symbol
-   is an error for the missing symbol, with or without a body. A real
-   build reports this same case as an unresolved symbol at link time.
+   is an error for the missing symbol, with or without a body, when code
+   that uses it runs (ADR-0017). A real build reports this same case as
+   an unresolved symbol at link time, also when no code that runs uses it.
    The owner decided this on 2026-11-16 (issue #960); before that, a
    function with a body was interpreted.
 4. The `pragma(mangle)` declarations the interpreter currently skips

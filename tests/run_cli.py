@@ -2259,16 +2259,42 @@ def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_progr
 
 
 # A compile needs no address of a symbol of another object: a program that
-# reads a variable that no object defines saves, and fails where the address
-# is found, when its code is made ready to run, as the compiled program does.
-def test_saved_program_that_reads_an_absent_variable_fails_as_the_compiled_program(
-    tmp_path: Path,
-) -> None:
-    write(tmp_path / "app" / "main.d", """
+# uses a symbol that no object defines saves, and fails when the code that
+# uses it runs, with a failure that names the symbol. A use is a read or a
+# write of a variable, or a call through the address of a function, and the
+# failure names the symbol at any part of a variable.
+@pytest.mark.parametrize(("symbol", "program"), [
+    ("snakebite_test_no_such_variable", """
         module main;
         extern(C) extern __gshared int snakebite_test_no_such_variable;
         int main() { return snakebite_test_no_such_variable; }
-        """)
+        """),
+    ("snakebite_test_no_such_variable", """
+        module main;
+        extern(C) extern __gshared int snakebite_test_no_such_variable;
+        int main() {
+            snakebite_test_no_such_variable = 3;
+            return 4;
+        }
+        """),
+    ("snakebite_test_no_such_function", """
+        module main;
+        extern(C) int snakebite_test_no_such_function(int);
+        int main() {
+            auto function_ = &snakebite_test_no_such_function;
+            return function_(1);
+        }
+        """),
+    ("snakebite_test_no_such_array", """
+        module main;
+        extern(C) extern __gshared int[1 << 20] snakebite_test_no_such_array;
+        int main() { return snakebite_test_no_such_array[300_000]; }
+        """),
+], ids=["read", "write", "call_through_address", "read_far_into_array"])
+def test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs(
+    tmp_path: Path, symbol: str, program: str,
+) -> None:
+    write(tmp_path / "app" / "main.d", program)
     common = ("--backend=bytecode", "--no-optimise-image")
     app = str(tmp_path / "app")
     from_ram = run_sb(*common, app, cwd=tmp_path)
@@ -2278,8 +2304,7 @@ def test_saved_program_that_reads_an_absent_variable_fails_as_the_compiled_progr
     loaded = run_sb(f"--load={tmp_path / 'program.sbc'}", cwd=tmp_path)
     for result in (from_ram, loaded):
         assert result.returncode != 0, output(result)
-        assert "symbol `snakebite_test_no_such_variable` declared by "\
-            "`snakebite_test_no_such_variable`" in result.stderr, (
+        assert f"symbol `{symbol}` declared by `{symbol}`" in result.stderr, (
             output(result))
 
 
