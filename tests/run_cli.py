@@ -2258,9 +2258,31 @@ def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_progr
         output(from_ram))
 
 
+# A variable that no object defines is an error only when code reads it: a
+# program with a function that reads it and never runs saves, loads and runs.
+def test_saved_program_that_never_reads_an_absent_variable_runs(
+    tmp_path: Path,
+) -> None:
+    write(tmp_path / "app" / "main.d", """
+        module main;
+        extern(C) extern __gshared int snakebite_test_no_such_variable;
+        int neverCalled() { return snakebite_test_no_such_variable; }
+        int main() { return 4; }
+        """)
+    common = ("--backend=bytecode", "--no-optimise-image")
+    app = str(tmp_path / "app")
+    from_ram = run_sb(*common, app, cwd=tmp_path)
+    saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
+                   cwd=tmp_path)
+    assert saved.returncode == 0, output(saved)
+    loaded = run_sb(f"--load={tmp_path / 'program.sbc'}", cwd=tmp_path)
+    for result in (from_ram, loaded):
+        assert result.returncode == 4, output(result)
+
+
 # A compile needs no address of a symbol of another object: a program that
-# reads a variable that no object defines saves, and fails where the address
-# is found, when its code is made ready to run, as the compiled program does.
+# reads a variable that no object defines saves, and fails when the code
+# that reads it runs.
 def test_saved_program_that_reads_an_absent_variable_fails_as_the_compiled_program(
     tmp_path: Path,
 ) -> None:

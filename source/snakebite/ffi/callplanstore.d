@@ -37,33 +37,51 @@ public struct CallPlanStore {
     public void* addressOf(Name* name) {
         if (auto address = addressIfPresent(name))
             return address;
-        throw missing(name.symbol, name.declaredBy);
+        // An adjusted entry is absent when the code it reaches is.
+        const named = name.adjusted ? name.adjusted.code : name;
+        throw missing(named.symbol, named.declaredBy);
     }
 
     // As `addressOf`, but null for a symbol that no object defines. A name
     // with an own copy (`Names.defineOwn`) gives the copy that
     // `chosenCopy` decides.
     public void* addressIfPresent(Name* name) {
+        import snakebite.failure.fault: isAbsent;
+
+        auto found = keptAddressOf(name);
+        return isAbsent(found) ? null : found;
+    }
+
+    // The address that the name `name` keeps: the address of its symbol, or,
+    // for a symbol that no object defines, an address that no access can
+    // use, where a fault names the symbol and its declaration
+    // (`snakebite.failure.fault.reserveAbsent`).
+    private void* keptAddressOf(Name* name) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import snakebite.failure.fault: isAbsent, reserveAbsent;
 
         auto found = cast(void*) atomicLoad!(MemoryOrder.acq)(name.address);
-        if (found is null) {
-            if (auto adjusted = name.adjusted) {
+        if (found !is null)
+            return found;
+        if (auto adjusted = name.adjusted) {
+            found = keptAddressOf(adjusted.code);
+            if (!isAbsent(found))
                 found = cast(void*) callbacks.adjustedEntryOf(
-                    addressOf(adjusted.code), adjusted.signature,
-                    adjusted.adjustment);
-                atomicStore!(MemoryOrder.rel)(
-                    name.address, cast(shared(void*)) found);
-            }
-            else {
-                auto processCopy = resolver.resolve(name.symbol);
-                found = names.keep(name, (own) {
-                    auto copy = chosenCopy(processCopy, own);
-                    return copy is null ? Name.absent : copy + name.distance;
-                });
-            }
+                    found,
+                    adjusted.signature,
+                    adjusted.adjustment,
+                );
+            atomicStore!(MemoryOrder.rel)(
+                name.address, cast(shared(void*)) found);
+            return found;
         }
-        return found is Name.absent ? null : found;
+        auto processCopy = resolver.resolve(name.symbol);
+        return names.keep(name, (own) {
+            auto copy = chosenCopy(processCopy, own);
+            return copy is null
+                ? reserveAbsent(missingText(name.symbol, name.declaredBy))
+                : copy + name.distance;
+        });
     }
 
     // The one decision for a datum that the program and another object can
@@ -104,12 +122,16 @@ public struct CallPlanStore {
     // The word that refers to `target`, which is a name (`isNamed`), in a
     // program made ready to run: the address of its symbol, or the table or
     // the record of an interface of the class information that it names.
+    // A symbol that no object defines is no error here: the word is an
+    // address where a use of it fails (`keptAddressOf`), as a call of the
+    // symbol fails only when it runs (`bound`).
     public size_t wordOfName(in Target target) {
+        import snakebite.failure.fault: isAbsent;
         import snakebite.failure.report: SnakebiteException;
         import snakebite.native.address: interfaceWordOf;
 
-        const address = addressOf(cast(Name*) target.address);
-        if (target.kind == Target.Kind.hostSymbol)
+        const address = keptAddressOf(cast(Name*) target.address);
+        if (target.kind == Target.Kind.hostSymbol || isAbsent(address))
             return cast(size_t) address;
         const info = cast(const(TypeInfo_Class)) address;
         if (target.index >= info.interfaces.length)
@@ -136,12 +158,17 @@ public struct CallPlanStore {
     // of a native build reports it: the one place that makes it.
     // `declaredBy` names the declaration, when there is one.
     public static Exception missing(in char[] symbol, in char[] declaredBy) {
+        return new Exception(missingText(symbol, declaredBy));
+    }
+
+    private static string missingText(in char[] symbol, in char[] declaredBy) {
         import std.conv: text;
 
-        return new Exception(text(
-            "ffi cannot resolve the symbol `", symbol, "`",
-            declaredBy.length ? text(" declared by `", declaredBy, "`") : "",
-            ": it is not in this process"));
+        const declaration = declaredBy.length
+            ? text(" declared by `", declaredBy, "`")
+            : "";
+        return text("ffi cannot resolve the symbol `", symbol, "`",
+            declaration, ": it is not in this process");
     }
 
     // The registry of the guest function words, and the owner of their

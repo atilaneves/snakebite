@@ -67,10 +67,10 @@ public struct Name {
         return _ownDatum;
     }
 
-    // What `CallPlanStore.addressOf` found: the address, `absent`, or null
-    // before the first question.
+    // What `CallPlanStore.addressOf` found, or null before the first
+    // question. For a symbol that no object defines it is an address that no
+    // access can use (`snakebite.failure.fault.reserveAbsent`).
     package shared(void*) address;
-    package enum absent = cast(void*) size_t.max;
 }
 
 // The entry that host code calls to reach host code with a receiver

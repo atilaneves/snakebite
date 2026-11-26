@@ -96,13 +96,100 @@ private extern (C) void onFault(
         message.put("): ");
     }
     message.put("fatal: ");
-    message.put(kindOf(signal, info));
+    const absent = absentFailureAt(info.si_addr);
+    message.put(absent.length ? absent : kindOf(signal, info));
     if (where.function_.length != 0) {
         message.put(", in ");
         message.put(where.function_);
     }
     message.put("\n");
     message.flush;
+}
+
+// A symbol that no object defines is an error only when code uses it: a word
+// that refers to it holds an address that `reserveAbsent` gives, in address
+// space that the process maps with no access. A read, a write or a call
+// through the word faults there, and the fault line is the failure that was
+// kept with the address. Each symbol has a span of its own, so that an
+// address in a part of the symbol names it too.
+private enum spanSize = size_t(1) << 20;
+private enum spanCount = size_t(1) << 16;
+
+private struct Absent {
+    size_t index;
+    string failure;
+    Absent* next;
+}
+
+// Mapped at the first `reserveAbsent`.
+private shared(void*) _absentStart;
+private shared size_t _absentCount;
+// Newest first. Each `Absent` is a heap block that this keeps reachable.
+private shared(Absent*) _absents;
+
+// A new address that no access can use, where a fault writes `failure`.
+public void* reserveAbsent(string failure) @trusted {
+    import core.atomic: atomicFetchAdd, atomicLoad, cas;
+    import core.sys.posix.sys.mman:
+        MAP_ANON, MAP_FAILED, MAP_PRIVATE, mmap, munmap, PROT_NONE;
+    import snakebite.failure.report: internalFailure;
+
+    enum size = spanSize * spanCount;
+    // Address space only: a mapping with no access takes no memory.
+    enum flags = MAP_PRIVATE | MAP_ANON;
+    enum noFile = -1;
+    enum offset = 0;
+
+    auto start = cast(void*) atomicLoad(_absentStart);
+    if (start is null) {
+        auto mapped = mmap(null, size, PROT_NONE, flags, noFile, offset);
+        if (mapped is MAP_FAILED)
+            internalFailure(
+                "no address space for the symbols that no object defines");
+        // Threads that map at the same time keep the first mapping.
+        if (cas(&_absentStart, cast(shared(void*)) null,
+                cast(shared(void*)) mapped))
+            start = mapped;
+        else {
+            munmap(mapped, size);
+            start = cast(void*) atomicLoad(_absentStart);
+        }
+    }
+
+    const index = atomicFetchAdd(_absentCount, 1);
+    if (index >= spanCount)
+        internalFailure("too many symbols that no object defines");
+    auto absent = new Absent(index, failure);
+    shared(Absent)* head;
+    do {
+        head = atomicLoad(_absents);
+        absent.next = cast(Absent*) head;
+    } while (!cas(&_absents, head, cast(shared(Absent)*) absent));
+    return start + index * spanSize;
+}
+
+// Whether `reserveAbsent` gave `address`, or an address in its span.
+public bool isAbsent(in void* address) @trusted nothrow @nogc {
+    import core.atomic: atomicLoad;
+
+    const start = cast(const(void)*) atomicLoad(_absentStart);
+    return start !is null && address >= start
+        && address - start < spanSize * spanCount;
+}
+
+// The failure that `reserveAbsent` kept for the span of `address`, or empty.
+private string absentFailureAt(in void* address) @trusted nothrow @nogc {
+    import core.atomic: atomicLoad;
+
+    if (!isAbsent(address))
+        return null;
+    const start = cast(const(void)*) atomicLoad(_absentStart);
+    const index = (address - start) / spanSize;
+    for (auto absent = cast(Absent*) atomicLoad(_absents); absent !is null;
+            absent = absent.next)
+        if (absent.index == index)
+            return absent.failure;
+    return null;
 }
 
 // `onStack` is an address on the stack that faulted: the handler runs there.
