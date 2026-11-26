@@ -76,8 +76,11 @@ public string imageSourceAt(
 
     string text;
     withCompilerLock({
-        text = imageSourceText(path, imageSource(program),
-            defersStartup(program));
+        text = imageSourceText(
+            path,
+            imageSource(program),
+            defersStartup(program),
+        );
     });
     return text;
 }

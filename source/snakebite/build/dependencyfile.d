@@ -45,8 +45,9 @@ public void writeRetargetedDependencyFile(
 ) {
     import snakebite.failure.report: internalFailure;
     import snakebite.frontend.compiler: escapedMakePath;
-    import std.algorithm.iteration: fold;
+    import std.algorithm.iteration: fold, map;
     import std.algorithm.searching: startsWith;
+    import std.array: array;
     import std.file: readText, write;
     import std.string: replace;
 
@@ -55,9 +56,11 @@ public void writeRetargetedDependencyFile(
     if (!rule.startsWith(named))
         internalFailure("the compiler's dependency file names another target");
     // Each input has this form in the file that `-makedeps` writes.
-    const inputs = intermediates.fold!((text, intermediate) => text.replace(
-        " \\\n  " ~ escapedMakePath(intermediate),
-        "",
-    ))(rule[named.length .. $]);
+    const forms = intermediates
+        .map!(intermediate => " \\\n  " ~ escapedMakePath(intermediate))
+        .array;
+    const inputs = forms.fold!((text, form) => text.replace(form, ""))(
+        rule[named.length .. $],
+    );
     path.write(escapedMakePath(target) ~ ":" ~ inputs);
 }
