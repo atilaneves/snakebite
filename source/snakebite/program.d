@@ -9,7 +9,7 @@ private:
 // dub-aware driver asks dub for import paths and flags and builds one of
 // these.
 public struct Program {
-    import snakebite.image.dependency: DependencyImage, TestHooks;
+    import snakebite.image.dependency: DependencyImage;
     import snakebite.frontend.ast: Dsymbol, FuncDeclaration, Module;
     import snakebite.failure.halt: HaltAction, HostActions;
     import snakebite.frontend.checks: Checks;
@@ -28,36 +28,18 @@ public struct Program {
     // Built once from `rootModules`; see `linkedFunctionOf`.
     private LinkMap _links;
     Main main;
-    string name;
     private Checks _checks;
     private HostActions _actions;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
-    // Whether the program starts as a project does: its unit tests run
-    // before `main`, under the runner that the project's own images name.
-    bool startsAsProject;
-    TestHooks testHooks;
 
     // The entry point is the module-level `main` of the root modules, which
-    // can be one at most.
-    this(Module[] rootModules) {
-        this(rootModules, "");
-    }
-
+    // can be one at most. `checks` are the ones the frontend analysed
+    // `rootModules` under, and `actions` are what `-checkaction=halt` does
+    // here: the default halt ends the process, as compiled code does.
     this(
         Module[] rootModules,
-        in string name,
-    ) {
-        this(rootModules, name, Checks());
-    }
-
-    // `checks` are the ones the frontend analysed `rootModules` under, and
-    // `actions` are what `-checkaction=halt` does here: the default halt ends
-    // the process, as compiled code does.
-    this(
-        Module[] rootModules,
-        in string name,
-        in Checks checks,
+        in Checks checks = Checks(),
         in HostActions actions = HostActions(),
     ) {
         import snakebite.frontend.compiler: withCompilerLock;
@@ -66,7 +48,6 @@ public struct Program {
         import snakebite.failure.report: SnakebiteException;
 
         this.rootModules = rootModules;
-        this.name = name;
         _checks = checks;
         _actions = actions;
         // The walks read the frontend's global state, which a thread that

@@ -33,30 +33,37 @@ public struct BuildFiles {
     public string directory;
 
     public string ninjaFile() const {
-        return file("build.ninja");
+        return fileName("build.ninja");
     }
 
     // The saved Bytecode program.
     public string program() const {
-        return file("project.sbc");
+        return fileName("project.sbc");
     }
 
     // What the dependency image needs from the root code, which the compile
     // writes beside the program.
     public string imageSource() const {
-        return file("image.d");
+        return fileName("image.d");
     }
 
     // The lock of the build: one run at a time changes the files.
     public string lockFile() const {
-        return file("lock");
+        return fileName("lock");
     }
 
     public string image() const {
-        return file("image.so");
+        return fileName("image.so");
     }
 
-    private string file(in string name) const {
+    // The directory that the program runs in, which only the dub recipe
+    // gives. The step that reads the recipe writes it, so that a run with no
+    // change does not read the recipe.
+    public string workingDirectoryFileName() const {
+        return fileName("working-directory");
+    }
+
+    private string fileName(in string name) const {
         import std.path: buildPath;
 
         return directory.buildPath(name);
@@ -78,12 +85,13 @@ public BuildFiles buildFiles(in string directory) {
 public struct NinjaRun {
     import core.time: Duration;
 
-    public int status;
     public Duration duration;
-    // The program file that the build wrote, open, when `status` is 0. A
-    // later build replaces the file under its name, so the open file keeps
-    // the program of this build.
+    // The program file that the build wrote, open. A later build replaces
+    // the file under its name, so the open file keeps the program of this
+    // build.
     public imported!"std.stdio".File program;
+    // The directory that the program runs in.
+    public string workingDirectory;
 }
 
 
@@ -126,13 +134,15 @@ private struct BuildLock {
 // `directory`, and writes the file first when it does not exist. ninja
 // starts the commands that make the program, if they must run. The run holds
 // the lock of the build from before it checks `build.ninja` until it has the
-// program file open, so no other run changes a build file in between.
-public NinjaRun buildProject(in string directory) {
+// program file open, so no other run changes a build file in between. The
+// result is null when ninja fails.
+public imported!"std.typecons".Nullable!NinjaRun buildProject(in string directory) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
-    import std.file: exists, mkdirRecurse;
+    import std.file: exists, mkdirRecurse, readText;
     import std.process: spawnProcess, wait;
     import std.stdio: File, stderr, stdout;
+    import std.typecons: Nullable, nullable;
 
     const files = buildFiles(directory);
     files.directory.mkdirRecurse;
@@ -146,8 +156,13 @@ public NinjaRun buildProject(in string directory) {
     const status = spawnProcess(["ninja", "--quiet", "-f", files.ninjaFile])
         .wait;
     const duration = stopWatch.peek;
-    return NinjaRun(status, duration,
-        status == 0 ? File(files.program, "rb") : File.init);
+    if (status != 0)
+        return Nullable!NinjaRun();
+    return nullable(NinjaRun(
+        duration,
+        File(files.program, "rb"),
+        files.workingDirectoryFileName.readText,
+    ));
 }
 
 

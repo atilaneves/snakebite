@@ -70,6 +70,12 @@ public struct TestHooks {
 private __gshared TestHooks.Watch* _watch;
 
 
+// The hooks of the unit test runner that `image` names, none for no image.
+public TestHooks testHooksOf(in DependencyImage* image) {
+    return image is null ? TestHooks.init : image.testHooks;
+}
+
+
 // A project's dependency image stays loaded until the executable exits.
 // This value describes the image; its scope does not limit that lifetime.
 public struct DependencyImage {

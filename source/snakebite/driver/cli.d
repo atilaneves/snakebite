@@ -31,17 +31,19 @@ public struct Options {
 // `bin/sb`: run a project's unit tests and its `main` on one backend.
 public int run(string[] args) {
     import snakebite.backends: BackendName;
+    import snakebite.image.dependency: testHooksOf;
     import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, executeLoaded, imagePathOf, PreparationReport,
+        executeBackend, executeBuilt, executeLoaded, PreparationReport,
         prepareSources, runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.build: Build, buildProject, isCommand, runCommand;
+    import snakebite.build: Build, buildFiles, buildProject, isCommand,
+        runCommand;
     import snakebite.memory.gc: selectFrontendMemory;
     import std.file: exists, isDir;
-    import std.path: absolutePath, buildNormalizedPath;
+    import std.path: absolutePath, baseName, buildNormalizedPath;
     import std.stdio: stderr, stdout, write;
     import std.typecons: nullable;
 
@@ -58,9 +60,13 @@ public int run(string[] args) {
             // Nothing was prepared: the report shows those phases as taking
             // no time.
             const report = executeLoaded(
-                parsed.options.load, parsed.options.programArguments,
-                JitSetting(!parsed.options.noJit,
-                    /*eager*/ false, parsed.options.jitPerfMap),
+                parsed.options.load,
+                [parsed.options.load] ~ parsed.options.programArguments,
+                JitSetting(
+                    !parsed.options.noJit,
+                    /*eager*/ false,
+                    parsed.options.jitPerfMap,
+                ),
             );
             _statistics = Statistics(true, PreparationReport.init, report);
             return report.status;
@@ -74,17 +80,24 @@ public int run(string[] args) {
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
         if (parsed.options.build == Build.project) {
-            // Mutable: the report keeps its duration.
-            auto ninja = buildProject(
-                projectDirectory.absolutePath.buildNormalizedPath);
-            if (ninja.status != 0)
+            const directory = projectDirectory.absolutePath.buildNormalizedPath;
+            auto ninja = buildProject(directory);
+            if (ninja.isNull)
                 return 1;
-            const report = executeLoaded(
-                ninja.program, parsed.options.programArguments,
+            // Mutable: the loaded program closes the file.
+            auto built = ninja.get;
+            const report = executeBuilt(
+                built,
+                [directory.baseName] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit),
+                buildFiles(directory).image,
             );
-            _statistics = Statistics(true, PreparationReport.init, report,
-                nullable(ninja.duration));
+            _statistics = Statistics(
+                true,
+                PreparationReport.init,
+                report,
+                nullable(built.duration),
+            );
             return report.status;
         }
         return runProject(
@@ -105,11 +118,11 @@ public int run(string[] args) {
                     saveProgram(
                         preparation.project.program,
                         savePath,
-                        sources.workingDirectory.length
-                            ? sources.workingDirectory : directory,
-                        imagePathOf(preparation.project.program),
-                        JitSetting(!parsed.options.noJit,
-                            /*eager*/ false, parsed.options.jitPerfMap),
+                        JitSetting(
+                            !parsed.options.noJit,
+                            /*eager*/ false,
+                            parsed.options.jitPerfMap,
+                        ),
                     );
                     return 0;
                 }
@@ -117,12 +130,16 @@ public int run(string[] args) {
                 const report = executeBackend(
                     parsed.options.backend,
                     preparation.project.program,
-                    [preparation.project.program.name]
+                    [preparation.project.directory.baseName]
                         ~ parsed.options.programArguments,
-                    false,
-                    true,
-                    JitSetting(!parsed.options.noJit,
-                        /*eager*/ false, parsed.options.jitPerfMap),
+                    preparation.project.program.dependencyImage.testHooksOf,
+                    collectGarbage: false,
+                    endsProcess: true,
+                    jit: JitSetting(
+                        !parsed.options.noJit,
+                        /*eager*/ false,
+                        parsed.options.jitPerfMap,
+                    ),
                 );
                 _statistics = Statistics(true, preparation, report);
                 return report.status;

@@ -61,13 +61,15 @@ static foreach (backend; AliasSeq!(Interpreter, Bytecode, LoadedBytecode)) {
                     && args[1] == "first"
                     && args[2] == "second" ? 42 : 2;
             }
-        })], "snakebite");
+        })]);
         string[] hostArguments = ["sb", "first", "second"];
 
         auto instance = ownedBackend!backend(program);
         run(
-            instance.startData, instance.compilationStatistics,
-            hostArguments).should == 42;
+            instance.startData,
+            instance.compilationStatistics,
+            hostArguments,
+        ).should == 42;
     }
 }
 
@@ -92,7 +94,7 @@ unittest {
         int main() {
             return sum(pairs[]) + first.b + cast(int) word.length + 14;
         }
-    })], "snakebite");
+    })]);
 
     auto instance = loadedInParts(program, 7);
     run(instance.startData, instance.compilationStatistics, ["snakebite"])

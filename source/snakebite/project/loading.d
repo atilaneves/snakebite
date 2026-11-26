@@ -9,7 +9,6 @@ import snakebite.project.dub: SourceSet;
 public struct Project {
     import snakebite.program: Program;
 
-    public string name;
     public string directory;
     public SourceSet sources;
     public Program program;
@@ -18,25 +17,21 @@ public struct Project {
 
 // Finding the sources (`sourceSet`: `dub describe` for a dub project) and
 // running the frontend over them are separate steps so a caller can time
-// the second alone; see `snakebite.driver.execution.prepareProject`. The
-// program has the name `name`, or the last part of `directory` when it is
-// empty.
+// the second alone; see `snakebite.driver.execution.prepareProject`.
 public Project loadProject(
     in string directory,
     SourceSet sources,
     in bool dependencyImage,
-    in string name = null,
 ) {
     import snakebite.program: Program;
     import snakebite.frontend.compiler:
         checksOf, FrontendFlags, parseRootModules;
     import std.algorithm.iteration: map;
     import std.array: array;
-    import std.path: absolutePath, baseName, buildNormalizedPath;
+    import std.path: absolutePath, buildNormalizedPath;
 
     Project project;
     project.directory = directory.absolutePath.buildNormalizedPath;
-    project.name = name.length ? name : project.directory.baseName;
     project.sources = sources;
 
     const flags = FrontendFlags(
@@ -53,7 +48,7 @@ public Project loadProject(
         project.directory,
         project.sources.importedCFilesAreRoots,
     );
-    project.program = Program(parsed, project.name, checksOf(flags));
+    project.program = Program(parsed, checksOf(flags));
 
     return project;
 }

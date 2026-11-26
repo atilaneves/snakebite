@@ -26,6 +26,9 @@ unittest {
             program,
             0,
             1,
+            enterWorkingDirectory: null,
+            arguments: ["benchmark"],
+            isSnippet: true,
         );
 
         report.passed.should == true;
@@ -62,8 +65,9 @@ static foreach (BackendType; Matrix!(
             program,
             0,
             1,
-            null,
-            ["a", "-b"],
+            enterWorkingDirectory: null,
+            arguments: ["benchmarkArguments", "a", "-b"],
+            isSnippet: true,
         );
 
         report.passed.should == true;

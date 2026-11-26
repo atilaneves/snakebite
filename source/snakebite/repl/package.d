@@ -198,7 +198,6 @@ public struct Repl {
         actions.halt = &endCell;
         return Program(
             interpretedModules(module_, _importPaths),
-            "",
             checksOf(_flags),
             actions,
         );
