@@ -28,6 +28,7 @@ unittest {
             1,
             enterWorkingDirectory: null,
             arguments: ["benchmark"],
+            isSnippet: true,
         );
 
         report.passed.should == true;
@@ -66,6 +67,7 @@ static foreach (BackendType; Matrix!(
             1,
             null,
             ["benchmarkArguments", "a", "-b"],
+            isSnippet: true,
         );
 
         report.passed.should == true;

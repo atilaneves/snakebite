@@ -268,7 +268,8 @@ private bool selected(in Options options, in string name) {
     return wanted.length == 0 || wanted.canFind(name);
 }
 
-// `arguments` are the arguments of the program, its name first.
+// `arguments` are the arguments of the program, its name first. `isSnippet`
+// is as for `executeBackend`.
 public BackendReport benchmark(
     in string name,
     in imported!"snakebite.backends".BackendName backendName_,
@@ -279,6 +280,7 @@ public BackendReport benchmark(
     in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
+    in bool isSnippet = false,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
@@ -316,6 +318,7 @@ public BackendReport benchmark(
                 program,
                 arguments,
                 jit: jit,
+                isSnippet: isSnippet,
             );
             return execution.status;
         });
