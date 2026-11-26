@@ -36,9 +36,9 @@ public void writeBuildFile(in string directory) {
 private string[] configurationFiles(
     in string directory, lazy string[] files,
 ) {
-    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+    import snakebite.project.loading: ProjectDirectory;
 
-    scope entered = ProjectDirectory(directory, directory, EndsProcess.no);
+    scope entered = ProjectDirectory(directory);
     return files;
 }
 
@@ -86,19 +86,35 @@ private string buildFileText(
     // ninja runs the commands in the directory that `sb` started in, which
     // the project state directory depends on. Each command gets the project
     // directory as an argument.
-    text ~= rule("generate",
-        [sb, "--build=project", "--generate", directory], null,
-        ["generator = 1", "restat = 1", "pool = console"]);
-    text ~= rule("dependencies",
-        [sb, dubDependenciesOption, directory], ["$out"],
-        ["restat = 1", "pool = console"]);
-    text ~= rule("compile",
-        [sb, "--compile=" ~ files.program, directory], commandVariables,
-        ["depfile = " ~ files.program.ninjaValue ~ ".dep", "deps = gcc",
-            "restat = 1", "pool = console"]);
-    text ~= rule("image",
-        [sb, "--image=" ~ files.image, directory], commandVariables,
-        ["depfile = $out.dep", "deps = gcc", "pool = console"]);
+    text ~= rule(
+        "generate",
+        [sb, "--build=project", "--generate", directory],
+        ["generator = 1", "restat = 1", "pool = console"],
+    );
+    text ~= rule(
+        "dependencies",
+        [sb, dubDependenciesOption, directory],
+        ["$out"],
+        ["restat = 1", "pool = console"],
+    );
+    text ~= rule(
+        "compile",
+        [sb, "--compile=" ~ files.program, directory],
+        commandVariables,
+        [
+            "depfile = " ~ files.program.ninjaValue ~ ".dep",
+            "deps = gcc",
+            "restat = 1",
+            "pool = console",
+        ],
+    );
+    // ninja quotes the path of `$out` for the shell.
+    text ~= rule(
+        "image",
+        [sb, directory],
+        ["--image=$out"] ~ commandVariables,
+        ["depfile = $out.dep", "deps = gcc", "pool = console"],
+    );
 
     // The outputs are the libraries that dub's build makes. A linker file
     // that exists before the build is an input of the image. `inputs` names
@@ -152,6 +168,16 @@ private enum compilerVariables = ["flags", "includes", "stringImports"];
 // The variables that the compile and the image statements set.
 private enum commandVariables =
     ["$flags", "$includes", "$stringImports", "$options", "$in"];
+
+
+// A rule whose command is `words`, each one word for the shell.
+private string rule(
+    in string name,
+    in string[] words,
+    in string[] settings,
+) {
+    return rule(name, words, null, settings);
+}
 
 
 // A rule whose command is `words`, each one word for the shell, then the

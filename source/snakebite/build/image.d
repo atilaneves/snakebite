@@ -17,7 +17,7 @@ public int image(string[] args) {
     import snakebite.build.dependencyfile: writeRetargetedDependencyFile;
     import snakebite.image.preparation:
         defaultCompiler, defersStartup, ImageBuild, Optimise;
-    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+    import snakebite.project.loading: ProjectDirectory;
     import std.file: mkdirRecurse, readText, rmdirRecurse;
     import std.getopt: getopt;
     import std.path: buildPath;
@@ -41,10 +41,17 @@ public int image(string[] args) {
         );
     const directory = args[1];
     const source = args[2];
-    scope entered = ProjectDirectory(directory, directory, EndsProcess.no);
-    const build = ImageBuild(defaultCompiler, importPaths, stringImportPaths,
-        compilerArguments, args[3 .. $], linkerArguments, Optimise.yes,
-        defersStartup(source.readText));
+    scope entered = ProjectDirectory(directory);
+    const build = ImageBuild(
+        defaultCompiler,
+        importPaths,
+        stringImportPaths,
+        compilerArguments,
+        args[3 .. $],
+        linkerArguments,
+        Optimise.yes,
+        defersStartup(source.readText),
+    );
 
     const staging = output ~ ".staging";
     staging.mkdirRecurse;

@@ -9,8 +9,8 @@ private:
 //   sb --compile=FILE DIR [--dflag=ARGUMENT]... [-IPATH]... [-JPATH]...
 //      [--c-imports-are-roots] ROOT-FILE...
 //
-// It runs in the project directory DIR, as the names of the root files are
-// relative to it. It runs the frontend on the root files, loads no
+// It runs in the project directory DIR, where a compiler finds the
+// configuration of the project, as `bin/sb DIR` does. It runs the frontend on the root files, loads no
 // dependency image, and writes the program to FILE with the save of
 // `--save`. Beside FILE it writes what the image needs from the root code
 // (`BuildFiles.imageSource`), only when that changed, and `FILE.dep`: the
@@ -23,7 +23,7 @@ public int compile(string[] args) {
     import snakebite.frontend.compiler: FrontendFlags;
     import snakebite.project.dependencies: imageModule;
     import snakebite.project.dub: SourceSet;
-    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+    import snakebite.project.loading: ProjectDirectory;
     import std.getopt: getopt;
     import std.path: dirName;
 
@@ -50,7 +50,7 @@ public int compile(string[] args) {
     sources.stringImportPaths = stringImportPaths;
     sources.flags = FrontendFlags(compilerArguments);
     sources.importedCFilesAreRoots = cImportsAreRoots;
-    scope entered = ProjectDirectory(directory, directory, EndsProcess.no);
+    scope entered = ProjectDirectory(directory);
     // The image that the load uses exists, so the frontend accepts what only
     // the image runs.
     const buildsDependencyImage = true;
