@@ -135,8 +135,6 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   or path.
 * A variable or field that holds how many things there are is named `num`
   and the plural of the thing: `numModules`, not `moduleCount`.
-* A name or a comment says what a value is: an address, a length, a
-  function. It does not call a pointer-sized value a "word".
 
 ## Production code (in `source`)
 
