@@ -317,7 +317,7 @@ public struct CallPlanStore {
     // defines is not bound here: a call to that name is connected to the
     // bytecode of the definition (`CallSite.connect`), so no call uses its
     // native entry. A plan is bound once; threads that bind the same plan
-    // write the same word.
+    // write the same address.
     pragma(inline, true)
     public void bindNewPlans() {
         import core.atomic: atomicLoad, MemoryOrder;

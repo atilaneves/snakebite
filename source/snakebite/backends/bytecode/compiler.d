@@ -9521,7 +9521,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         const variadic = type.parameterList.varargs == VarArg.variadic;
         if (arityMismatches(type.parameterList, arguments, variadic))
-            internalFailure("dmd rejects a call with the wrong number of arguments");
+            internalFailure(
+                "dmd rejects a call with the wrong number of arguments",
+            );
         const returnShape = CallAdapter.ofType(type);
         if (returnShape.isVoid && !returnShape.resultIsReceiver
                 && destOffset != discardResult)
@@ -9543,7 +9545,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (calleeLayout.hiddenThis.variable is null)
             return null;
         if (!hasThis)
-            internalFailure("dmd binds a hidden `this` to every call of a method");
+            internalFailure(
+                "dmd binds a hidden `this` to every call of a method",
+            );
         return [Arg(
             receiverOffset,
             calleeLayout.hiddenThis.parameter.offset,
@@ -10231,7 +10235,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         const siteIndex = _code.callSites.length;
         _code.callSites ~= site;
         const place = nativeResultPlace(
-            destOffset, returnShape.isVoid, returnShape.returnFacts);
+            destOffset,
+            returnShape.isVoid,
+            returnShape.returnFacts,
+        );
         const handler = parts.window.isNull
             ? &opCall
             : windowCallHandler(place);
@@ -10280,11 +10287,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 args,
                 hasContext,
             );
-        const initialCount = args.length;
+        const numInitial = args.length;
         args ~= compileGuestArguments(preparation, calleeLayout);
 
         SignatureArguments result;
-        auto declared = args[initialCount .. $];
+        auto declared = args[numInitial .. $];
         result.guest = args;
         result.native = args;
         if (functionType.parameterList.varargs == VarArg.variadic) {
@@ -10292,10 +10299,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             result.guest = args ~ variadic.guest;
             const hidden = functionType.isDstyleVariadic
                 ? compileEvaluatedArgument(
-                    variadic.guest[0].callerOffset, preparation.hiddenArgument)
+                    variadic.guest[0].callerOffset,
+                    preparation.hiddenArgument,
+                )
                 : Arg.init;
-            result.native = args[0 .. initialCount] ~ preparation.nativeOrder(
-                hidden, declared, variadic.values);
+            result.native = args[0 .. numInitial] ~ preparation.nativeOrder(
+                hidden,
+                declared,
+                variadic.values,
+            );
         }
         return result;
     }

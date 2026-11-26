@@ -260,7 +260,7 @@ public struct CallSite {
         }
         kind = Kind.guest;
         // The names of a program (`snakebite.ffi.names`) keep a guest
-        // function as an untyped word: the module of names is below the
+        // function as an untyped address: the module of names is below the
         // bytecode backend and does not know its types.
         callee = cast(const(Function)*) definition;
         // The window was laid out from the signature, before the callee was
