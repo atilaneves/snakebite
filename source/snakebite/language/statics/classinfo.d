@@ -40,7 +40,9 @@ public struct Hooks {
     // The class information that the program built for a class, as the
     // program refers to it (`RuntimeTypes.builtClassInfo`).
     public Linked!TypeInfo_Class delegate(
-        ClassDeclaration declaration, TypeInfo_Class info) builtClassInfo;
+        ClassDeclaration declaration,
+        TypeInfo_Class info,
+    ) builtClassInfo;
 }
 
 // How many pointers `typeid(object)` follows from the object reference

@@ -340,6 +340,11 @@ private struct PendingGate {
 private alias FunctionPosition = size_t[2];
 
 
+// Where a datum is in a file: the index of the set of blocks that hold it
+// (`Archive.blocksAt`), then the block and the offset in the block.
+private alias DatumPosition = size_t[3];
+
+
 // The bytes of a file as they are written or read, and the places that the
 // file refers to by number: the signatures of the program and the functions
 // of its modules.
@@ -1314,7 +1319,7 @@ private void transferDefinitionsHere(ref Archive archive, ref Program program) {
     size_t[] functionSymbols;
     FunctionPosition[] functionPlaces;
     size_t[] datumSymbols;
-    size_t[3][] datumPlaces;
+    DatumPosition[] datumPlaces;
     if (archive.isWriting)
         program.plans.names.eachDefinitionHere(
             (string symbol, ref const DefinitionHere definition) {

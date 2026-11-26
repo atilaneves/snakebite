@@ -428,7 +428,8 @@ public struct RuntimeTypes {
     // name is `mangled`, as the name of its symbol, which dmd gives it
     // (`TypeInfoDeclaration`).
     private Linked!TypeInfo druntimeTypeInfo(in char[] mangled) {
-        return Linked!TypeInfo.named(plans.names.named(typeInfoSymbol(mangled)));
+        const symbol = typeInfoSymbol(mangled);
+        return Linked!TypeInfo.named(plans.names.named(symbol));
     }
 
     // The symbol of the type information of the type with the mangled name
@@ -527,7 +528,8 @@ public struct RuntimeTypes {
     // (`hasOwnCopy`), it is the name of the class information
     // (`ownClassInfo`).
     public Linked!TypeInfo_Class builtClassInfo(
-        ClassDeclaration declaration, TypeInfo_Class info,
+        ClassDeclaration declaration,
+        TypeInfo_Class info,
     ) {
         if (hasOwnCopy(declaration))
             return ownClassInfo(declaration, info);
@@ -538,10 +540,7 @@ public struct RuntimeTypes {
                 info.m_init.ptr,
             );
         if (info.vtbl.ptr !is null)
-            _data.defineHere(
-                classSymbol(declaration, "6__vtblZ"),
-                info.vtbl.ptr,
-            );
+            _data.defineHere(classSymbol(declaration, "6__vtblZ"), info.vtbl.ptr);
         _data.defineHere(classInfoSymbol(declaration), cast(const(void)*) info);
         return Linked!TypeInfo_Class.held(info);
     }

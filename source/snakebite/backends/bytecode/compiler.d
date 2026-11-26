@@ -125,6 +125,8 @@ private extern(C++) final class EagerCompileCollector
             _bytecode._world.classRuntimeInfo(declaration);
     }
 
+    // An interface has class information too, but the walk of dmd visits it
+    // apart from a class.
     override void visit(InterfaceDeclaration declaration) {
         visit(cast(ClassDeclaration) declaration);
     }
