@@ -4,7 +4,8 @@ module snakebite.driver.execution;
 private:
 
 
-import std.typecons: Nullable;
+import std.functional: toDelegate;
+import std.typecons: Nullable, nullable;
 
 
 public struct ExecutionReport {
@@ -159,6 +160,8 @@ public imported!"snakebite.project.loading".Project loadedProject(
 
 
 // Runs `program` with the arguments `hostArguments`, its name first. A
+// program that is not a snippet runs its unit tests under the runner that
+// `testHooks` hold: the ones of its dependency image, if it has one. A
 // snippet is a program from the REPL or from a unit test of `sb`, which has
 // no native equivalent: it runs its module constructors and `main` directly,
 // with no unit tests.
@@ -166,6 +169,7 @@ public ExecutionReport executeBackend(
     in imported!"snakebite.backends".BackendName name,
     imported!"snakebite.backends".Program program,
     in string[] hostArguments,
+    in imported!"snakebite.image.dependency".TestHooks testHooks,
     in bool collectGarbage = true,
     in bool endsProcess = false,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
@@ -173,7 +177,6 @@ public ExecutionReport executeBackend(
     in bool isSnippet = false,
 ) {
     import snakebite.backends: makeBackend;
-    import snakebite.image.dependency: testHooksOf;
     import std.datetime.stopwatch: AutoStart, StopWatch;
 
     import std.stdio: stdin, stdout, stderr;
@@ -196,7 +199,7 @@ public ExecutionReport executeBackend(
     auto start = &backend.startData();
     return runStartData(
         *start, backend.compilationStatistics, running, stopWatch,
-        program.dependencyImage.testHooksOf, isSnippet, hostArguments,
+        testHooks, isSnippet, hostArguments,
         collectGarbage, endsProcess);
 }
 
@@ -228,18 +231,40 @@ public ExecutionReport executeLoaded(
 ) {
     import std.stdio: File;
 
-    return executeLoaded(File(path, "rb"), arguments, jit, Nullable!string());
+    return runLoaded(File(path, "rb"), arguments, jit, toDelegate(&imageOfFile));
 }
 
 
-// As `executeLoaded` with the path, for the open program file `file`. The
-// load reads it from its start. `imagePath` is the dependency image that the
-// run gives to a file that names none, as a build does (`loadProgramFile`).
-public ExecutionReport executeLoaded(
+// As `executeLoaded`, for the open program file `file` that a build wrote. A
+// build gives the dependency image `imagePath`; the file names none.
+public ExecutionReport executeBuilt(
     imported!"std.stdio".File file,
     in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
-    in Nullable!string imagePath,
+    in string imagePath,
+) {
+    return runLoaded(file, arguments, jit,
+        (in Header header) => nullable(imagePath));
+}
+
+
+private alias Header = imported!"snakebite.backends.bytecode.file".Header;
+private alias ImageOf = Nullable!string delegate(in Header);
+
+
+// The dependency image that a program file names.
+private Nullable!string imageOfFile(in Header header) {
+    return header.imagePath;
+}
+
+
+// Runs the program of the open file `file`, from its start. `imageOf` says
+// where the dependency image of the program is.
+private ExecutionReport runLoaded(
+    imported!"std.stdio".File file,
+    in string[] arguments,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    scope ImageOf imageOf,
 ) {
     import snakebite.backends.statistics: CompilationStatistics, ExecutionClock;
     import snakebite.image.dependency: testHooksOf;
@@ -247,7 +272,7 @@ public ExecutionReport executeLoaded(
     import std.stdio: stdin, stdout, stderr;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto loaded = loadProgramFile(file, jit, imagePath);
+    auto loaded = loadFile(file, jit, imageOf);
     file.close;
     scope(exit) loaded.runner.end;
 
@@ -289,11 +314,20 @@ public struct LoadedProgram {
 
 
 // Reads the program file `file`, from its start, into a new program wired to
-// a new runner with `jit`. It does not change the working directory.
+// a new runner with `jit`. It does not change the working directory. The
+// program runs on the dependency image that the file names, if it names one.
 public LoadedProgram loadProgramFile(
     imported!"std.stdio".File file,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
-    in Nullable!string imagePath,
+) {
+    return loadFile(file, jit, toDelegate(&imageOfFile));
+}
+
+
+private LoadedProgram loadFile(
+    imported!"std.stdio".File file,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    scope ImageOf imageOf,
 ) {
     import snakebite.failure.report: SnakebiteException;
 
@@ -308,8 +342,7 @@ public LoadedProgram loadProgramFile(
             throw new SnakebiteException("the program file is too large");
     // The parts of the file go one after the other through this buffer.
     ubyte[64 * 1024] buffer = void;
-    return loadProgramFile(file.byChunk(buffer[]), cast(size_t) size, jit,
-        imagePath);
+    return loadParts(file.byChunk(buffer[]), cast(size_t) size, jit, imageOf);
 }
 
 
@@ -321,8 +354,7 @@ public LoadedProgram loadProgramFile(
 ) {
     import std.range: only;
 
-    return loadProgramFile(only(contents), contents.length, jit,
-        Nullable!string());
+    return loadProgramFile(only(contents), contents.length, jit);
 }
 
 
@@ -330,13 +362,19 @@ public LoadedProgram loadProgramFile(
 // part after part, into a new program wired to a new runner with `jit`. A
 // part stays valid until the range is advanced. The program runs on the
 // dependency image that the file names (`--save` writes it, as an executable
-// names its libraries), or on `imagePath`, which a run gives to a file that
-// names none (a build does), or on none when neither is set. A file that
-// names an image and a run that gives another are a conflict.
+// names its libraries), or on none.
 public LoadedProgram loadProgramFile(Parts)(
     Parts parts, in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
-    in Nullable!string imagePath,
+) {
+    return loadParts(parts, size, jit, toDelegate(&imageOfFile));
+}
+
+
+private LoadedProgram loadParts(Parts)(
+    Parts parts, in size_t size,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    scope ImageOf imageOf,
 ) {
     import core.memory: GC;
     import snakebite.backends.bytecode.file: ProgramReader;
@@ -376,11 +414,7 @@ public LoadedProgram loadProgramFile(Parts)(
     // On the GC heap, as the image of a compile is: the program and its call
     // plans and tables of thread-local variables refer to it until the
     // module destructors have run, after a run returns.
-    if (!loaded.header.imagePath.isNull && !imagePath.isNull)
-        throw new SnakebiteException(
-            "the program file names a dependency image and the run gives one");
-    const image = loaded.header.imagePath.isNull
-        ? imagePath : loaded.header.imagePath;
+    const image = imageOf(loaded.header);
     if (!image.isNull) {
         loaded.image = new DependencyImage;
         *loaded.image = loadImage(image.get);

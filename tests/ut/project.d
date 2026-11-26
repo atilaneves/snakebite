@@ -6,7 +6,7 @@ import core.runtime: UnitTestResult;
 import core.sync.mutex: Mutex;
 import snakebite.backends: BackendName, backendIdentity;
 import snakebite.program: Program;
-import snakebite.image.dependency: DependencyImage, TestHooks;
+import snakebite.image.dependency: TestHooks;
 import snakebite.driver.execution: prepareProject, executeBackend, runProject;
 import snakebite.project.dub: dubSources;
 import snakebite.project.dubcache: DubDescription, projectDescriptionFromJson;
@@ -285,6 +285,7 @@ private extern shared size_t runtimeInitDepth;
 
 private Program _innerProgram;
 private BackendName _nestedBackend;
+private TestHooks _innerHooks;
 private extern(C) int rt_init();
 private extern(C) int rt_term();
 
@@ -293,16 +294,9 @@ private UnitTestResult throwingInnerRunner() {
 }
 
 private UnitTestResult successfulOuterRunner() {
-    executeBackend(_nestedBackend, _innerProgram, ["inner"], false).status.should == 1;
+    executeBackend(_nestedBackend, _innerProgram, ["inner"], _innerHooks,
+        false).status.should == 1;
     return UnitTestResult(1, 1, false, false);
-}
-
-// A dependency image that names `hooks` as the runner of the unit tests, as
-// an image that holds a test runner does, and holds no code.
-private const(DependencyImage)* imageWithRunner(in TestHooks hooks) {
-    auto image = new DependencyImage;
-    image.testHooks = hooks;
-    return image;
 }
 
 private __gshared Mutex _initDepthLock;
@@ -334,10 +328,7 @@ static foreach (backend; Matrix!()) {
                 auto outer = prepareProject(sandbox.inSandboxPath("outer")).project.program;
                 _innerProgram = prepareProject(sandbox.inSandboxPath("inner")).project.program;
                 _nestedBackend = backendIdentity!backend;
-                _innerProgram.dependencyImage =
-                    imageWithRunner(TestHooks.of(null, &throwingInnerRunner));
-                outer.dependencyImage =
-                    imageWithRunner(TestHooks.of(null, &successfulOuterRunner));
+                _innerHooks = TestHooks.of(null, &throwingInnerRunner);
                 rt_init;
                 const depth = atomicLoad(runtimeInitDepth);
                 scope(exit) {
@@ -345,7 +336,8 @@ static foreach (backend; Matrix!()) {
                         rt_init;
                     rt_term;
                 }
-                executeBackend(_nestedBackend, outer, ["outer"], false).status.should == 0;
+                executeBackend(_nestedBackend, outer, ["outer"],
+                    TestHooks.of(null, &successfulOuterRunner), false).status.should == 0;
                 atomicLoad(runtimeInitDepth).should == depth;
             }
         }

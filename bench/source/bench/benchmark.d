@@ -285,6 +285,7 @@ public BackendReport benchmark(
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
     import snakebite.driver.execution: executeBackend, ExecutionReport;
+    import snakebite.image.dependency: testHooksOf;
 
     BackendReport report;
     report.name = name;
@@ -317,6 +318,7 @@ public BackendReport benchmark(
                 backendName_,
                 program,
                 arguments,
+                program.dependencyImage.testHooksOf,
                 jit: jit,
                 isSnippet: isSnippet,
             );

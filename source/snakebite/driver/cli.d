@@ -31,10 +31,11 @@ public struct Options {
 // `bin/sb`: run a project's unit tests and its `main` on one backend.
 public int run(string[] args) {
     import snakebite.backends: BackendName;
+    import snakebite.image.dependency: testHooksOf;
     import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, executeLoaded, PreparationReport, prepareSources,
+        executeBackend, executeBuilt, executeLoaded, PreparationReport, prepareSources,
         runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
@@ -83,11 +84,11 @@ public int run(string[] args) {
             // Mutable: the loaded program closes the file.
             auto built = ninja.get;
             chdir(built.workingDirectory);
-            const report = executeLoaded(
+            const report = executeBuilt(
                 built.program,
                 [directory.baseName] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit),
-                nullable(buildFiles(directory).image),
+                buildFiles(directory).image,
             );
             _statistics = Statistics(true, PreparationReport.init, report,
                 nullable(built.duration));
@@ -122,6 +123,7 @@ public int run(string[] args) {
                     preparation.project.program,
                     [preparation.project.directory.baseName]
                         ~ parsed.options.programArguments,
+                    preparation.project.program.dependencyImage.testHooksOf,
                     false,
                     true,
                     JitSetting(!parsed.options.noJit,

@@ -4,7 +4,7 @@ module ut.ffi.symbol;
 import ut;
 import snakebite.ffi: Resolver;
 import snakebite.image.preparation: ProjectImageCache, defaultCompiler;
-import snakebite.image.dependency: DependencyImage, loadImage;
+import snakebite.image.dependency: DependencyImage, loadImage, TestHooks;
 import core.thread: Thread;
 import snakebite.backends: backendIdentity;
 import snakebite.driver.execution: prepareProject, executeBackend;
@@ -591,7 +591,7 @@ static foreach (backend; Matrix!()) {
             (cold is null).should == true;
             analyses.should == 1;
             executeBackend(backendIdentity!backend, project.program,
-                ["live_preparation"], collectGarbage: false,
+                ["live_preparation"], TestHooks.init, collectGarbage: false,
                 isSnippet: true).status.should == 42;
 
             const warm = prepareDependencies(project.directory,
@@ -599,7 +599,7 @@ static foreach (backend; Matrix!()) {
             (warm is null).should == true;
             analyses.should == 1;
             executeBackend(backendIdentity!backend, project.program,
-                ["live_preparation"], collectGarbage: false,
+                ["live_preparation"], TestHooks.init, collectGarbage: false,
                 isSnippet: true).status.should == 42;
 
             // Entry startup settings differ from a live session. A separate
@@ -613,7 +613,7 @@ static foreach (backend; Matrix!()) {
             (liveHit is null).should == true;
             analyses.should == 2;
             executeBackend(backendIdentity!backend, project.program,
-                ["live_preparation"], collectGarbage: false,
+                ["live_preparation"], TestHooks.init, collectGarbage: false,
                 isSnippet: true).status.should == 42;
         }
     }
