@@ -68,9 +68,7 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   Either name them with a variable or add a comment.
 * Do not use `__gshared` unless absolutely necessary. Shared code
   should be `immutable` if it can be, `shared` otherwise. All global
-  and TLS data is suspect and must have its existence justified. The
-  working directory (`chdir`) and the environment are mutable global state
-  too.
+  and TLS data is suspect and must have its existence justified.
 * Downcasts are a code smell - use virtual dispatch instead unless
   justified.
 * Our helpers return D types. A helper returns `string`, not
@@ -95,6 +93,9 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   call argument, a name on its own line first.
 * Break a line only when the text does not fit. An operator and its right
   operand stay on the line of the left operand when they fit there.
+* Source lines are usually at most 80 columns; the limit is soft, and "fits"
+  in the rules above means fits within 80 columns unless a break would read
+  worse.
 * When a function needs its own mutable copy of a parameter, take the
   parameter by value. A copy in the body that works around the type of the
   parameter is the fault.
