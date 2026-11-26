@@ -14,11 +14,11 @@ private:
 // the root files, loads no dependency image, and writes the program to FILE
 // with the save of
 // `--save`. Beside FILE it writes what the image needs from the root code
-// (`BuildFiles.imageSource`), only when that changed, and `FILE.dep`: the
-// files that the frontend read.
+// (`imageSourceOf`), only when that changed, and `FILE.dep`: the files that
+// the frontend read.
 public int compile(string[] args) {
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.build: BuildFiles, writeChanged;
+    import snakebite.build: imageSourceOf, writeChanged;
     import snakebite.build.dependencyfile: writeDependencyFile;
     import snakebite.driver.execution: loadedProject, saveProgram;
     import snakebite.frontend.compiler: FrontendFlags;
@@ -26,7 +26,6 @@ public int compile(string[] args) {
     import snakebite.project.dub: SourceSet;
     import snakebite.project.loading: ProjectDirectory;
     import std.getopt: getopt;
-    import std.path: dirName;
 
     string output;
     string[] compilerArguments;
@@ -57,8 +56,7 @@ public int compile(string[] args) {
     const buildsDependencyImage = true;
     auto project = loadedProject(directory, sources, buildsDependencyImage);
     saveProgram(project.program, output, JitSetting.init);
-    writeChanged(BuildFiles(output.dirName).imageSource,
-        imageModule(project.program));
+    writeChanged(imageSourceOf(output), imageModule(project.program));
     writeDependencyFile(output ~ ".dep", output, directory);
     return 0;
 }

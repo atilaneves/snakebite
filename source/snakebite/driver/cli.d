@@ -39,8 +39,7 @@ public int run(string[] args) {
         prepareSources, runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.build: Build, buildFiles, buildProject, isCommand,
-        runCommand;
+    import snakebite.build: Build, buildProject, isCommand, runCommand;
     import snakebite.memory.gc: selectFrontendMemory;
     import std.file: exists, isDir;
     import std.path: absolutePath, baseName, buildNormalizedPath;
@@ -79,18 +78,19 @@ public int run(string[] args) {
         string projectDirectory = parsed.options.projectDirectory;
         if (!projectDirectory.exists || !projectDirectory.isDir)
             projectDirectory = fetchProject(projectDirectory);
-        if (parsed.options.build == Build.project) {
+        if (parsed.options.build != Build.off) {
             const directory = projectDirectory.absolutePath.buildNormalizedPath;
-            auto ninja = buildProject(directory);
+            auto ninja = buildProject(directory, parsed.options.build);
             if (ninja.isNull)
                 return 1;
-            // Mutable: the loaded program closes the file.
+            // `auto`: `executeBuilt` takes the run mutable, to close its
+            // files.
             auto built = ninja.get;
             const report = executeBuilt(
                 built,
                 [directory.baseName] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit),
-                buildFiles(directory).image,
+                built.imagePath,
             );
             _statistics = Statistics(
                 true,
@@ -372,8 +372,9 @@ private string optionConflict(in Options options, in size_t argumentCount) {
 
 private enum saveHelp = "Compile the program and write it to FILE; do not run it.";
 private enum loadHelp = "Run the program that FILE holds; no project directory.";
-private enum buildHelp = "off (default), or project: ninja compiles the dub project"
-    ~ " when a file changed, and sb loads the program.";
+private enum buildHelp = "off (default), project or module: ninja compiles the"
+    ~ " dub project, or each of its source files, when a file changed, and sb"
+    ~ " loads the program.";
 
 private enum jitPerfMapHelp = "Write JIT symbols to /tmp/perf-<pid>.map.";
 
