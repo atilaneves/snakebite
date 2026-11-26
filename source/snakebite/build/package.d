@@ -86,10 +86,10 @@ public struct NinjaRun {
     import core.time: Duration;
 
     public Duration duration;
-    // The program file that the build wrote, open. A later build replaces
-    // the file under its name, so the open file keeps the program of this
+    // The program files that the build wrote, open. A later build replaces
+    // a file under its name, so an open file keeps the program of this
     // build.
-    public imported!"std.stdio".File program;
+    public imported!"std.stdio".File[] programs;
     // The directory that the program runs in.
     public string workingDirectory;
 }
@@ -160,7 +160,7 @@ public imported!"std.typecons".Nullable!NinjaRun buildProject(in string director
         return Nullable!NinjaRun();
     return nullable(NinjaRun(
         duration,
-        File(files.program, "rb"),
+        [File(files.program, "rb")],
         files.workingDirectoryFileName.readText,
     ));
 }

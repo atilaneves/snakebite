@@ -12,8 +12,9 @@
 // the callback bridge holds). A loaded program does not grow
 // (`loadedProgramGrows`), so no GC array grows from a record in `data`.
 //
-// The first word of `scanned` points to the `Program`, so a pointer into
-// `scanned` keeps the `Program`, its stores and both blocks. A pointer into
+// The first word of the memory of each file in `scanned` points to the
+// `Program`, so a pointer into `scanned` keeps the `Program`, its stores and
+// both blocks. A pointer into
 // `data` keeps `data` only. Each holder of a pointer into `data` holds the
 // `Program` too: the `Program` itself; its `Runner`, which holds the
 // `Program`, and with it each frame of a run and each `Function.jit`; a
@@ -122,15 +123,36 @@ public struct ProgramMemory {
                 ~ "size");
     }
 
-    // Takes the blocks for `need` from the GC, with `owner` in the first word
-    // of `scanned`. Call it once, before the first allocation.
-    public void reserve(in MemoryNeed need, const(void)* owner) {
+    // Takes the blocks for the files whose needs are `needs` from the GC.
+    // Call it once, before the first allocation. A save counts the memory of
+    // its file from the start of `scanned`, so the load of each file starts
+    // at a page of `scanned`, as `startFile` does: the data at a page in it
+    // then fall where the save counted them.
+    public void reserve(in MemoryNeed[] needs) {
         import core.memory: GC;
 
-        data.take(need.data, GC.BlkAttr.NO_SCAN);
-        scanned.take(need.scanned, 0);
+        size_t dataBytes, scannedBytes;
+        foreach (need; needs) {
+            dataBytes += need.data;
+            scannedBytes = fileStart(scannedBytes) + need.scanned;
+        }
+        data.take(dataBytes, GC.BlkAttr.NO_SCAN);
+        scanned.take(scannedBytes, 0);
+    }
+
+    // Starts the memory of the next file, with `owner` in its first word of
+    // `scanned`.
+    public void startFile(const(void)* owner) {
+        scanned._used = fileStart(scanned._used);
         *cast(const(void)**) scanned.allocate(ownerBytes).ptr = owner;
     }
+}
+
+
+// Where the memory of a file starts in `scanned`, after `used` bytes of the
+// files before it.
+private size_t fileStart(in size_t used) @safe pure nothrow @nogc {
+    return used == 0 ? 0 : atPage(used);
 }
 
 

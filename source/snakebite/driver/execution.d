@@ -234,13 +234,14 @@ public ExecutionReport executeLoaded(
 ) {
     import std.stdio: File;
 
-    return runLoaded(File(path, "rb"), arguments, jit, &imagePathOfHeader);
+    return runLoaded([File(path, "rb")], arguments, jit, &imagePathOfHeader);
 }
 
 
-// As `executeLoaded`, for the program file that the ninja run `built` wrote,
-// in the working directory that the run gives. A build gives the dependency
-// image `imagePath`; the file names none.
+// As `executeLoaded`, for the program files that the ninja run `built`
+// wrote, in the working directory that the run gives. A build gives the
+// dependency image `imagePath`, or none when it is empty; the files name
+// none.
 public ExecutionReport executeBuilt(
     imported!"snakebite.build".NinjaRun built,
     in string[] arguments,
@@ -255,7 +256,7 @@ public ExecutionReport executeBuilt(
         EndsProcess.yes,
     );
     return runLoaded(
-        built.program,
+        built.programs,
         arguments,
         jit,
         (in Header header) => imagePath,
@@ -272,10 +273,10 @@ private string imagePathOfHeader(in Header header) {
 }
 
 
-// Runs the program of the open file `file`, from its start. `imagePathOf` says
-// where the dependency image of the program is.
+// Runs the program of the open files `files`, each from its start.
+// `imagePathOf` says where the dependency image of the program is.
 private ExecutionReport runLoaded(ImagePathOf)(
-    imported!"std.stdio".File file,
+    imported!"std.stdio".File[] files,
     in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
     ImagePathOf imagePathOf,
@@ -286,8 +287,9 @@ private ExecutionReport runLoaded(ImagePathOf)(
     import std.stdio: stdin, stdout, stderr;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto loaded = loadFile(file, jit, imagePathOf);
-    file.close;
+    auto loaded = loadFiles(files, jit, imagePathOf);
+    foreach (ref file; files)
+        file.close;
     scope(exit) loaded.runner.end;
 
     auto savedInput = stdin;
@@ -321,12 +323,10 @@ private ExecutionReport runLoaded(ImagePathOf)(
 // A program that `loadProgramFile` read, with no compiler. Its owner ends the
 // runner (`Runner.end`) when the program has run.
 public struct LoadedProgram {
-    import snakebite.backends.bytecode.file: Header;
     import snakebite.backends.bytecode.program: Program;
     import snakebite.backends.bytecode.runner: Runner;
     import snakebite.image.dependency: DependencyImage;
 
-    public Header header;
     // Null when the program runs on no dependency image.
     public DependencyImage* image;
     public Program* program;
@@ -341,34 +341,38 @@ public LoadedProgram loadProgramFile(
     imported!"std.stdio".File file,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
-    return loadFile(file, jit, &imagePathOfHeader);
+    return loadFiles([file], jit, &imagePathOfHeader);
 }
 
 
-private LoadedProgram loadFile(ImagePathOf)(
-    imported!"std.stdio".File file,
+// Reads the program files `files`, each from its start, into one new
+// program, as `loadParts` does.
+private LoadedProgram loadFiles(ImagePathOf)(
+    imported!"std.stdio".File[] files,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
     ImagePathOf imagePathOf,
 ) {
     import snakebite.failure.report: SnakebiteException;
+    import std.stdio: File;
 
-    // `File.size` gives `ulong.max` for a file that cannot seek, such as a
-    // pipe: the load checks each count against the size.
-    const size = file.size;
-    if (size == ulong.max)
-        throw new SnakebiteException(
-            "the program file has no size: it is not a file that can seek");
-    static if (size_t.sizeof < ulong.sizeof)
-        if (size > size_t.max)
-            throw new SnakebiteException("the program file is too large");
-    // The parts of the file go one after the other through this buffer.
-    ubyte[64 * 1024] buffer = void;
-    return loadParts(
-        file.byChunk(buffer[]),
-        cast(size_t) size,
-        jit,
-        imagePathOf,
-    );
+    alias Parts = typeof(File.init.byChunk(new ubyte[1]));
+    auto parts = new Parts[files.length];
+    auto sizes = new size_t[files.length];
+    foreach (index, ref file; files) {
+        // `File.size` gives `ulong.max` for a file that cannot seek, such as
+        // a pipe: the load checks each count against the size.
+        const size = file.size;
+        if (size == ulong.max)
+            throw new SnakebiteException(
+                "the program file has no size: it is not a file that can seek");
+        static if (size_t.sizeof < ulong.sizeof)
+            if (size > size_t.max)
+                throw new SnakebiteException("the program file is too large");
+        sizes[index] = cast(size_t) size;
+        // The parts of the file go one after the other through this buffer.
+        parts[index] = file.byChunk(new ubyte[64 * 1024]);
+    }
+    return loadParts(parts, sizes, jit, imagePathOf);
 }
 
 
@@ -394,18 +398,22 @@ public LoadedProgram loadProgramFile(Parts)(
     in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
-    return loadParts(parts, size, jit, &imagePathOfHeader);
+    return loadParts([parts], [size], jit, &imagePathOfHeader);
 }
 
 
+// Reads the program files whose bytes the input ranges `parts` give, of
+// `sizes` bytes, into one new program wired to a new runner with `jit`. The
+// dependency image of the program is the one that `imagePathOf` gives for
+// the header of the first file.
 private LoadedProgram loadParts(Parts, ImagePathOf)(
-    Parts parts,
-    in size_t size,
+    Parts[] parts,
+    in size_t[] sizes,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
     ImagePathOf imagePathOf,
 ) {
     import core.memory: GC;
-    import snakebite.backends.bytecode.file: ProgramReader;
+    import snakebite.backends.bytecode.file: load, ProgramReader;
     import snakebite.backends.bytecode.program: Program;
     import snakebite.backends.bytecode.runner: Runner, wire;
     import snakebite.failure.report: SnakebiteException;
@@ -431,18 +439,26 @@ private LoadedProgram loadParts(Parts, ImagePathOf)(
     // needs a new pool until its first collection has set its thresholds.
     GC.disable;
     scope(exit) GC.enable;
-    auto source = Source(parts);
-    auto reader = ProgramReader(&source.next, size);
-    LoadedProgram loaded;
-    loaded.header = reader.header;
-    if (loaded.header.buildKey != generatorKey)
-        throw new SnakebiteException(
-            "the program file was written by another build of snakebite");
+    // Neither array grows: a reader keeps the address of its source.
+    auto sources = new Source[parts.length];
+    auto readers = new ProgramReader[parts.length];
+    Header first;
+    foreach (index, ref reader; readers) {
+        sources[index] = Source(parts[index]);
+        reader = ProgramReader(&sources[index].next, sizes[index]);
+        const header = reader.header;
+        if (header.buildKey != generatorKey)
+            throw new SnakebiteException(
+                "the program file was written by another build of snakebite");
+        if (index == 0)
+            first = header;
+    }
 
     // On the GC heap, as the image of a compile is: the program and its call
     // plans and tables of thread-local variables refer to it until the
     // module destructors have run, after a run returns.
-    const imagePath = imagePathOf(loaded.header);
+    LoadedProgram loaded;
+    const imagePath = imagePathOf(first);
     if (imagePath.length) {
         loaded.image = new DependencyImage;
         *loaded.image = loadImage(imagePath);
@@ -455,7 +471,7 @@ private LoadedProgram loadParts(Parts, ImagePathOf)(
     loaded.runner = cast(Runner*) GC.calloc(Runner.sizeof);
     wire(*loaded.program, *loaded.runner, jit);
     scope(failure) loaded.runner.end;
-    reader.load(*loaded.program, *loaded.runner, loaded.image);
+    load(readers, *loaded.program, *loaded.runner, loaded.image);
     return loaded;
 }
 

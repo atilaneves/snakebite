@@ -83,12 +83,15 @@ public struct Program {
         return module_;
     }
 
-    // `count` empty modules, in `memory`, for a load to fill.
+    // `count` empty modules, in `memory`, after the modules that the program
+    // has, for a load of a file to fill. The list of the modules is a GC
+    // array: a load of a file does not know how many modules the files after
+    // it have.
     public void newModules(in size_t count) {
-        _modules = memory.data.array!(Module*)(count);
-        foreach (ref module_; _modules) {
-            module_ = memory.data.make!Module;
+        foreach (_; 0 .. count) {
+            auto module_ = memory.data.make!Module;
             module_.blocks.takeFrom(&memory);
+            _modules ~= module_;
         }
     }
 

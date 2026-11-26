@@ -215,8 +215,10 @@ public struct Names {
     // Names are made rarely and never on a path whose time matters, so the
     // tables of names share one lock. Made at the first new name.
     private shared Mutex _lock;
-    // Whether a program file made the names (`fromFile`).
+    // Whether program files made the names (`fromFile`).
     private bool _fromFile;
+    // The names of each program file, when program files made the names.
+    private Name[][] _fileChunks;
 
     // The name of the symbol `symbol`, `distance` bytes after its start.
     // `declaredBy` is the declaration of the symbol, kept with a new name. A
@@ -298,14 +300,16 @@ public struct Names {
     // entry that reaches the code of an earlier name with an adjustment, that
     // name, the adjustment and the signature. A file holds each name once, so
     // a name is made with no lookup and no entry in a table: the names are
-    // one chunk of the length of the file's table. Nothing names a symbol
-    // after a load, because the load has no frontend (ADR-0017), and `named`
-    // and `adjusted` refuse it.
+    // one chunk of the length of the file's table, one chunk for each file
+    // of the program. Two files can each have a name of one symbol. Nothing
+    // names a symbol after a load, because the load has no frontend
+    // (ADR-0017), and `named` and `adjusted` refuse it. A load runs before
+    // the program runs, on one thread.
     public Name[] fromFile(
         in size_t count,
         scope void delegate(in size_t index, ref FileName made) make,
     ) {
-        import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+        import core.atomic: atomicLoad, MemoryOrder;
         import snakebite.failure.report: internalFailure, SnakebiteException;
 
         if (atomicLoad!(MemoryOrder.raw)(_chunkCount) != 0)
@@ -329,9 +333,7 @@ public struct Names {
                 name._declaredBy = made.declaredBy;
             }
         }
-        _chunks[0] = chunk;
-        _used = count;
-        atomicStore!(MemoryOrder.rel)(_chunkCount, 1);
+        _fileChunks ~= chunk;
         return chunk;
     }
 
@@ -424,17 +426,19 @@ public struct Names {
     // The name that `address` is, or null when it is no name of this.
     public Name* nameAt(in void* address) const @trusted nothrow @nogc {
         import core.atomic: atomicLoad, MemoryOrder;
+        import std.array: staticArray;
 
         const count = atomicLoad!(MemoryOrder.acq)(_chunkCount);
-        foreach (chunk; _chunks[0 .. count]) {
-            const start = cast(const(void)*) chunk.ptr;
-            const end = start + chunk.length * Name.sizeof;
-            if (address < start || address >= end)
-                continue;
-            if ((address - start) % Name.sizeof != 0)
-                return null;
-            return cast(Name*) address;
-        }
+        foreach (chunks; [_chunks[0 .. count], _fileChunks].staticArray)
+            foreach (chunk; chunks) {
+                const start = cast(const(void)*) chunk.ptr;
+                const end = start + chunk.length * Name.sizeof;
+                if (address < start || address >= end)
+                    continue;
+                if ((address - start) % Name.sizeof != 0)
+                    return null;
+                return cast(Name*) address;
+            }
         return null;
     }
 
