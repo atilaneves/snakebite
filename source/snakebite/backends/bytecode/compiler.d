@@ -59,6 +59,7 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 private extern(C++) final class EagerCompileCollector
         : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
     import snakebite.frontend.ast: FuncDeclaration;
+    import snakebite.language.definition: Definition;
     import snakebite.frontend.declarationcollector: DeclarationCollector;
     alias visit = DeclarationCollector.visit;
 
@@ -75,9 +76,15 @@ private extern(C++) final class EagerCompileCollector
         if (function_ in _visited)
             return;
         _visited[function_] = true;
-        if (function_.fbody is null || !_bytecode.isGuestFunction(function_))
-            return;
-        _found ~= function_;
+        const defined = _bytecode._world.callSelection.whereDefined(function_);
+        final switch (defined) with (Definition) {
+            case rootOwned:
+                _found ~= function_;
+                break;
+            case rootOrElsewhere:
+            case definedElsewhere:
+                break;
+        }
     }
 
     // Compiles each function found, then walks its body and compiles the
@@ -96,6 +103,7 @@ private extern(C++) final class EagerCompileCollector
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.frontend.ast: ClassDeclaration, Declaration,
         FuncDeclaration, SourceModule = Module;
+    import snakebite.language.definition: Definition;
     import snakebite.program: SourceProgram = Program;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
@@ -204,12 +212,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // first run fills lazily is filled first: each start handle, and the callee
     // of each guest call site. A template instance that the frontend adds
     // during a compile compiles only when one of these reaches it. A function that does not compile ends the
-    // save with that error, and no file is written. A load runs the program
-    // in `workingDirectory`, with the dependency image `imagePath`, or with
-    // none when it is empty.
-    public void save(
-        in string path, in string workingDirectory, in string imagePath,
-    ) {
+    // save with that error, and no file is written. The file names the
+    // dependency image of the program, if it has one.
+    public void save(in string path) {
         import snakebite.backends.bytecode.file: Header, saveProgram;
         import snakebite.image.preparation: generatorKey;
 
@@ -231,8 +236,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         });
         fillGuestCallSites;
 
-        saveProgram(compiledProgram,
-            Header(generatorKey, imagePath, workingDirectory), path);
+        const image = _program.dependencyImage;
+        const imagePath = image is null ? "" : image.path;
+        saveProgram(compiledProgram, Header(generatorKey, imagePath), path);
     }
 
     // Fills the callee of every guest call site, compiling the callees, until
@@ -348,14 +354,6 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         string result;
         call(function_, &result, []);
         return result;
-    }
-
-    package bool isDefinedElsewhere(FuncDeclaration function_) const {
-        return _program.isDefinedElsewhere(function_);
-    }
-
-    package bool isGuestFunction(FuncDeclaration function_) const {
-        return _program.isInterpreted(function_);
     }
 
     package FuncDeclaration definitionOf(FuncDeclaration function_) {
@@ -9394,9 +9392,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         auto type = typeFunctionOf(callee);
 
-        const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
-            callee, &_bytecode.isDefinedElsewhere,
-        ), site);
+        const decision = CallSelection.atCallSite(
+            _bytecode._world.callSelection.decisionOf(callee),
+            site,
+        );
         final switch (decision.route) with (CallSelection.Route) {
         case native:
             Arg[] initialArgs;
@@ -9604,9 +9603,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         windowEnd = size_t.max;
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
-        const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
-            callee, &_bytecode.isDefinedElsewhere,
-        ), site);
+        const decision = CallSelection.atCallSite(
+            _bytecode._world.callSelection.decisionOf(callee),
+            site,
+        );
         if (decision.route != CallSelection.Route.guest)
             return size_t.max;
         auto type = typeFunctionOf(callee);

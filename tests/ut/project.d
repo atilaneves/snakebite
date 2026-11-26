@@ -285,6 +285,7 @@ private extern shared size_t runtimeInitDepth;
 
 private Program _innerProgram;
 private BackendName _nestedBackend;
+private TestHooks _innerHooks;
 private extern(C) int rt_init();
 private extern(C) int rt_term();
 
@@ -293,7 +294,13 @@ private UnitTestResult throwingInnerRunner() {
 }
 
 private UnitTestResult successfulOuterRunner() {
-    executeBackend(_nestedBackend, _innerProgram, null, false).status.should == 1;
+    executeBackend(
+        _nestedBackend,
+        _innerProgram,
+        ["inner"],
+        _innerHooks,
+        collectGarbage: false,
+    ).status.should == 1;
     return UnitTestResult(1, 1, false, false);
 }
 
@@ -326,8 +333,7 @@ static foreach (backend; Matrix!()) {
                 auto outer = prepareProject(sandbox.inSandboxPath("outer")).project.program;
                 _innerProgram = prepareProject(sandbox.inSandboxPath("inner")).project.program;
                 _nestedBackend = backendIdentity!backend;
-                _innerProgram.testHooks = TestHooks.of(null, &throwingInnerRunner);
-                outer.testHooks = TestHooks.of(null, &successfulOuterRunner);
+                _innerHooks = TestHooks.of(null, &throwingInnerRunner);
                 rt_init;
                 const depth = atomicLoad(runtimeInitDepth);
                 scope(exit) {
@@ -335,7 +341,13 @@ static foreach (backend; Matrix!()) {
                         rt_init;
                     rt_term;
                 }
-                executeBackend(_nestedBackend, outer, null, false).status.should == 0;
+                executeBackend(
+                    _nestedBackend,
+                    outer,
+                    ["outer"],
+                    TestHooks.of(null, &successfulOuterRunner),
+                    collectGarbage: false,
+                ).status.should == 0;
                 atomicLoad(runtimeInitDepth).should == depth;
             }
         }

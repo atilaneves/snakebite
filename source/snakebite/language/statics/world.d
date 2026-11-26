@@ -71,16 +71,25 @@ public struct StaticWorld {
         _backend = backend;
         plans = PlanCache(planStore);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        data = NativeData(store, &plans, &_program.isRootOwned,
-            &_program.isDefinedElsewhere,
+        callSelection.whereDefined =
+            (function_) => _program.whereDefined(function_);
+        data = NativeData(
+            store,
+            &plans,
+            &_program.whereDefined,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
-            &writeClassImage, (type) => types.get(type),
-            backend.blocksOf, &callableKind);
-        types = RuntimeTypes(&_program.isRootOwned,
-            &_program.isDefinedElsewhere,
+            &writeClassImage,
+            (type) => types.get(type),
+            backend.blocksOf,
+            &callableKind,
+        );
+        types = RuntimeTypes(
+            &_program.whereDefined,
             &callableAddress,
-            &classRuntimeInfo, &data);
+            &classRuntimeInfo,
+            &data,
+        );
     }
 
     // The function that a call of `function_` runs.
@@ -171,13 +180,11 @@ public struct StaticWorld {
             return Linked!(void*).init;
 
         const(void)* word;
-        if (callSelection.usesNativeVariadicAddress(
-                method, &isDefinedElsewhere))
+        if (callSelection.usesNativeVariadicAddress(method))
             return Linked!(void*).named(plans.nameOf(method));
-        if (callSelection.usesGuestBody(method, &isDefinedElsewhere)) {
+        if (callSelection.usesGuestBody(method)) {
             word = _backend.guestWord(method);
-            if (callSelection.storesGuestWord(
-                    method, &isDefinedElsewhere, adjustment))
+            if (callSelection.storesGuestWord(method, adjustment))
                 return Linked!(void*).held(cast(void*) word);
         }
         auto address = plans.callableAddress(word, method, adjustment);
@@ -186,10 +193,6 @@ public struct StaticWorld {
         if (adjustment == 0 && _backend.addressGiven !is null)
             _backend.addressGiven(method, address);
         return address;
-    }
-
-    private bool isDefinedElsewhere(FuncDeclaration function_) const {
-        return _program.isDefinedElsewhere(function_);
     }
 
     // `linked` as a backend that reads it as it runs, and does not save,

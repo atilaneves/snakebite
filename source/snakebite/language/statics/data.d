@@ -33,12 +33,12 @@ public struct NativeData {
         StructLiteralExp, Type, VarDeclaration;
 
     import snakebite.ffi: PlanCache;
+    import snakebite.language.definition: Definition;
     import snakebite.ffi.callplanstore: CallPlanStore;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
-    private bool delegate(Dsymbol) const _isRootOwned;
-    private bool delegate(Dsymbol) const _isDefinedElsewhere;
+    private Definition delegate(Dsymbol) const _whereDefined;
     private VarDeclaration delegate(VarDeclaration) _linkedVariable;
     // An `extern` variable's definition, found once for each variable.
     private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
@@ -93,8 +93,7 @@ public struct NativeData {
     public this(
         StaticStore* store,
         PlanCache* plans,
-        bool delegate(Dsymbol) const isRootOwned,
-        bool delegate(Dsymbol) const isDefinedElsewhere,
+        Definition delegate(Dsymbol) const whereDefined,
         VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
         void delegate(ClassDeclaration, void*) classImage,
@@ -102,8 +101,7 @@ public struct NativeData {
         StaticBlocks* delegate(Module) blocksOf = null,
         FunctionKind functionKind = null,
     ) {
-        _isRootOwned = isRootOwned;
-        _isDefinedElsewhere = isDefinedElsewhere;
+        _whereDefined = whereDefined;
         _linkedVariable = linkedVariable;
         _symbolAddress = symbolAddress;
         _classImage = classImage;
@@ -531,7 +529,7 @@ public struct NativeData {
     // (finding 1.3 - compiled D gives every thread its own copy of a
     // module-level or `static` local that is not `shared`/`__gshared`),
     // otherwise the one copy every thread shares. Native storage when
-    // the variable has it (`storageKindOf`); this program's own
+    // the variable has it (`storageName`); this program's own
     // otherwise.
     public Placed storageOf(VarDeclaration declaration) {
         auto variable = definitionOf(declaration);
@@ -599,13 +597,18 @@ public struct NativeData {
 
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
-        final switch (storageKindOf(variable)) {
-            case StorageKind.own:
+        final switch (_whereDefined(variable)) with (Definition) {
+            case rootOwned:
                 return *_storageNames.insert(variable, null);
-            case StorageKind.native:
+            // Native code reads and writes the variable there, so one storage
+            // serves both sides. A missing symbol is an error, as at the link
+            // of a native build, never a reason to use the program's copy.
+            case definedElsewhere:
                 return *_storageNames.insert(variable,
                     named(nativeSymbolName(variable), variable.toString));
-            case StorageKind.nativeIfPresent:
+            // A native build keeps one copy, so the native copy is used when
+            // the process has one.
+            case rootOrElsewhere:
                 return namedWithOwnCopy(variable);
         }
     }
@@ -662,19 +665,32 @@ public struct NativeData {
             const facts = typeFacts(variable.type);
             string nativeName;
             const(char)[] declaredBy;
-            const kind = storageKindOf(variable);
             // Another object defines a native variable, and can define one
             // of a template instance: its symbol is found on each thread
             // (`TlsSlots.slotFor`). The program has its own copy of each
             // other variable.
-            if (kind != StorageKind.own) {
+            bool named;
+            bool ownCopy;
+            final switch (_whereDefined(variable)) with (Definition) {
+                case rootOwned:
+                    ownCopy = true;
+                    break;
+                case rootOrElsewhere:
+                    named = true;
+                    ownCopy = true;
+                    break;
+                case definedElsewhere:
+                    named = true;
+                    break;
+            }
+            if (named) {
                 import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
                 nativeName = nativeSymbolName(variable);
                 declaredBy = variable.toString;
             }
             Placed template_;
-            if (kind != StorageKind.native)
+            if (ownCopy)
                 template_ = buildInitialBytes(variable, facts);
 
             TypeFacts descriptorFacts;
@@ -689,7 +705,7 @@ public struct NativeData {
                 storeString(bytes + TlsDescriptor.declaredBy.offsetof,
                     declaredBy);
             }
-            if (kind != StorageKind.native)
+            if (ownCopy)
                 storeAddress(&this, bytes + TlsDescriptor.templateBytes.offsetof,
                     Address(Target.Kind.staticData, template_.ptr,
                         template_.where));
@@ -715,26 +731,6 @@ public struct NativeData {
             return *found;
 
         return *_definitions.insert(variable, _linkedVariable(variable));
-    }
-
-    private enum StorageKind {
-        // Another object defines the variable: its storage is native, and a
-        // missing symbol is an error, as at the link of a native build. Native
-        // code reads and writes it there, so one storage serves both sides.
-        native,
-        own,
-        // The program defines it, and a dependency can define it too: a
-        // static variable of a template instance, or one nested in a
-        // function of one. A native build keeps one copy of it, so the
-        // native copy is used when the process has one.
-        nativeIfPresent,
-    }
-
-    private StorageKind storageKindOf(VarDeclaration variable) const {
-        if (_isDefinedElsewhere(variable))
-            return StorageKind.native;
-        return _isRootOwned(variable)
-            ? StorageKind.own : StorageKind.nativeIfPresent;
     }
 
     private static bool isExtern(VarDeclaration variable) {

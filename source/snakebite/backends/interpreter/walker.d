@@ -288,7 +288,7 @@ private struct Shared {
     import snakebite.native.value: BitfieldAccess;
     import snakebite.host.sharedtable: SharedTable;
 
-    // The program being run: its `isDefinedElsewhere` is the one decision
+    // The program being run: its `whereDefined` is the one decision
     // for whether a callee is walked or called natively.
     const Program program;
     // Declared before what points into it, so that it is destroyed after.
@@ -581,7 +581,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private CStack!ActiveExceptionScope _activeExceptionScopes;
     private CStack!ExceptionCandidate _candidateScratch;
     package RuntimeTypes* _runtimeTypes;
-    // The program being run: its `isDefinedElsewhere` is the one decision
+    // The program being run: its `whereDefined` is the one decision
     // for whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
     package const Program _program;
@@ -999,10 +999,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     }
 
     private const(FrameLayout)* callLayoutOf(FuncDeclaration function_) {
-        const decision = _callSelection.decisionOf(
-            function_,
-            (callee) => _program.isDefinedElsewhere(callee),
-        );
+        const decision = _callSelection.decisionOf(function_);
         return layoutOf(function_, decision.route == CallSelection.Route.guest
             ? LayoutKind.body : LayoutKind.parameters);
     }
@@ -1250,10 +1247,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // or a builtin, regardless of which module owns it - never a
         // guest one, since there is no guest body to walk.
         auto body_ = function_.fbody;
-        const decision = CallSelection.atCallSite(_callSelection.decisionOf(
-            function_,
-            (callee) => _program.isDefinedElsewhere(callee),
-        ), callSite);
+        const decision = CallSelection.atCallSite(
+            _callSelection.decisionOf(function_),
+            callSite,
+        );
         if (!callbackEntry) final switch (decision.route)
             with (CallSelection.Route) {
         case native:
@@ -1425,7 +1422,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private TreeCallee* makeTreeCallee(FuncDeclaration function_) {
         import snakebite.frontend.ast: VarArg;
 
-        const decision = decisionFor(function_);
+        const decision = _callSelection.decisionOf(function_);
         const variadic = typeFunctionOf(function_).parameterList.varargs
             == VarArg.variadic;
         final switch (decision.route) with (CallSelection.Route) {
@@ -1473,7 +1470,8 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import snakebite.frontend.ast: VarArg;
 
         if (typeFunctionOf(function_).parameterList.varargs != VarArg.variadic
-                || decisionFor(function_).route == CallSelection.Route.guest)
+                || _callSelection.decisionOf(function_).route
+                    == CallSelection.Route.guest)
             return treeCalleeOf(function_);
         return variadicHostCalleeAt(function_, site, arguments);
     }
@@ -1499,7 +1497,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         import std.algorithm: max;
         import snakebite.native.value: alignUp;
 
-        const decision = decisionFor(function_);
+        const decision = _callSelection.decisionOf(function_);
         final switch (decision.route) with (CallSelection.Route) {
             case native:
                 break;
@@ -1546,13 +1544,6 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         callee.slots = slots;
         reserveFrame(callee, size, alignment);
         return callee;
-    }
-
-    private CallSelection.Decision decisionFor(FuncDeclaration function_) {
-        return _callSelection.decisionOf(
-            function_,
-            (callee) => _program.isDefinedElsewhere(callee),
-        );
     }
 
     // The callee of `decision` with what its result is, or null when the call
@@ -2211,10 +2202,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         FuncDeclaration function_,
         BodyScout scout,
     ) {
-        const decision = _callSelection.decisionOf(
-            function_,
-            (callee) => _program.isDefinedElsewhere(callee),
-        );
+        const decision = _callSelection.decisionOf(function_);
         if (decision.route != CallSelection.Route.guest)
             return;
 
@@ -2250,10 +2238,10 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         if (site.isCallExp !is null && callee.isThis is null
                 && layout.hiddenThis.variable !is null)
             calleeContextPlanOf(site.isCallExp, callee);
-        const decision = CallSelection.atCallSite(_callSelection.decisionOf(
-            callee,
-            (callee) => _program.isDefinedElsewhere(callee),
-        ), site);
+        const decision = CallSelection.atCallSite(
+            _callSelection.decisionOf(callee),
+            site,
+        );
 
         if (decision.route == CallSelection.Route.guest
                 && typeFunctionOf(callee).parameterList.varargs
@@ -6784,10 +6772,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         // Only a bodiless declaration can be a builtin whose wrapper takes
         // a declared parameter by address.
         const destination = function_.fbody is null
-            ? _callSelection.decisionOf(
-                function_,
-                (callee) => _program.isDefinedElsewhere(callee),
-            ).destinationParameter
+            ? _callSelection.decisionOf(function_).destinationParameter
             : size_t.max;
         _bindArguments(typeFunctionOf(function_), arguments, loc,
             frameBase, layout, allowExtra, destination);
@@ -7357,8 +7342,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
 
         return typeFunctionOf(function_).parameterList.varargs
                 == VarArg.variadic
-            && !_callSelection.isVariadicGuest(
-                function_, (callee) => _program.isDefinedElsewhere(callee));
+            && !_callSelection.isVariadicGuest(function_);
     }
 
     // The call plan depends on the types of the extra arguments at this

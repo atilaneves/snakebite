@@ -20,6 +20,7 @@ public void writeBuildFile(in string directory) {
     const text = buildFileText(directory, sources,
         dubBuildInputs(description, sources.files));
     files.directory.mkdirRecurse;
+    writeChanged(files.workingDirectoryFileName, sources.runDirectory(directory));
     if (writeChanged(files.ninjaFile, text))
         return;
     // The run that makes the text can make an input of it, as dub makes its
@@ -60,7 +61,6 @@ private string buildFileText(
     import std.algorithm.sorting: sort;
     import std.array: array, join;
     import std.file: exists, getcwd, thisExePath;
-    import std.path: baseName;
 
     const files = buildFiles(directory);
     const sb = thisExePath;
@@ -83,9 +83,6 @@ private string buildFileText(
         "stringImports": sources.stringImportPaths
             .map!(path => "-J" ~ path).array,
     ];
-    const workingDirectory = sources.workingDirectory.length
-        ? sources.workingDirectory : directory;
-
     string text = "builddir = " ~ files.directory.ninjaValue ~ "\n";
     text ~= rule("generate",
         plain(["cd", start]) ~ shell(["&&"])
@@ -122,7 +119,12 @@ private string buildFileText(
             ~ sources.files ~ frontendConfiguration ~ sources.linkerFiles)
         .filter!(path => !libraries.canFind(path)).array.dup.sort.uniq.array;
 
-    text ~= statement([files.ninjaFile], "generate", null, generatorInputs);
+    text ~= statement(
+        [files.ninjaFile, files.workingDirectoryFileName],
+        "generate",
+        null,
+        generatorInputs,
+    );
     text ~= statement(sourceInputs, "phony", null, null);
     if (libraries.length)
         text ~= "\n" ~ statement(libraries, "dependencies", null, dependencyInputs);
@@ -130,17 +132,18 @@ private string buildFileText(
         sources.files, [sb] ~ frontendConfiguration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
-    text ~= statementVariable("options", [
-        "--program-name=" ~ directory.baseName,
-        "--working-directory=" ~ workingDirectory,
-        "--image-path=" ~ files.image,
-    ] ~ (sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null));
+    text ~= statementVariable(
+        "options",
+        sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null,
+    );
     text ~= "\n" ~ statement([files.image], "image",
         [files.imageSource] ~ sources.linkerFiles, [sb, compiler] ~ compilerConfiguration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
-    text ~= statementVariable("options",
-        sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array);
+    text ~= statementVariable(
+        "options",
+        sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array,
+    );
     text ~= "\ndefault " ~ [files.program, files.image].map!ninjaPath.join(" ")
         ~ "\n";
     return text;

@@ -69,6 +69,13 @@ public struct SourceSet {
     // module that a D module imports. A dub recipe names its C files in
     // `sourceFiles`, and dub does not compile one that it does not name.
     public bool importedCFilesAreRoots;
+
+    // The directory where `dub test` runs the test binary of the project in
+    // `projectDirectory`: the `workingDirectory` of the recipe, else the
+    // project directory.
+    public string runDirectory(in string projectDirectory) const {
+        return workingDirectory.length ? workingDirectory : projectDirectory;
+    }
 }
 
 

@@ -226,6 +226,7 @@ private BackendReport[] benchmarkAll(
 ) {
     import bench.oracle: oracleName, oracleReport;
     import snakebite.backends: Backends, backendIdentity;
+    import std.path: baseName;
 
     BackendReport[] reports;
     static foreach (BackendType; Backends)
@@ -237,7 +238,7 @@ private BackendReport[] benchmarkAll(
                 options.warmup,
                 options.runs,
                 enterWorkingDirectory,
-                options.programArguments,
+                [project.directory.baseName] ~ options.programArguments,
                 imported!"snakebite.backends.bytecode.vm".JitSetting(
                     !options.noJit),
             );
@@ -267,20 +268,24 @@ private bool selected(in Options options, in string name) {
     return wanted.length == 0 || wanted.canFind(name);
 }
 
+// `arguments` are the arguments of the program, its name first. `isSnippet`
+// is as for `executeBackend`.
 public BackendReport benchmark(
     in string name,
     in imported!"snakebite.backends".BackendName backendName_,
     imported!"snakebite.backends".Program program,
     in uint warmup,
     in uint runs,
-    in void delegate() enterWorkingDirectory = null,
-    in string[] programArguments = null,
+    in void delegate() enterWorkingDirectory,
+    in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
+    in bool isSnippet = false,
 ) {
     import bench.capture: captureStdout;
     import bench.report: timingStatistics, updateTestCounts;
     import snakebite.driver.execution: executeBackend, ExecutionReport;
+    import snakebite.image.dependency: testHooksOf;
 
     BackendReport report;
     report.name = name;
@@ -312,8 +317,10 @@ public BackendReport benchmark(
             execution = executeBackend(
                 backendName_,
                 program,
-                [program.name] ~ programArguments,
+                arguments,
+                program.dependencyImage.testHooksOf,
                 jit: jit,
+                isSnippet: isSnippet,
             );
             return execution.status;
         });
@@ -356,11 +363,12 @@ private string headerLine(
     import bench.report: milliseconds;
     import snakebite.driver.execution: discoveryLabel;
     import std.conv: text;
+    import std.path: baseName;
 
     // Both one-off costs a user pays before any backend runs: finding out
     // what to run the frontend on, then the frontend itself.
     return text(
-        preparation.project.name,
+        preparation.project.directory.baseName,
         "   ", discoveryLabel(preparation), " ",
         milliseconds(preparation.discovery),
         "   frontend ", milliseconds(preparation.duration),

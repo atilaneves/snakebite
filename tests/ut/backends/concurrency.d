@@ -17,7 +17,7 @@ import std.conv: text;
 // same host-linked class declaration (`object.Exception`) at once.
 //
 // `linkedClassInfo` returns `null` (skipping `mangleToBuffer` outright) for
-// any root-owned, guest-declared class (`RuntimeTypes.isRootOwned`), so
+// a class that only the program defines (`Program.whereDefined`), so
 // only a class the host itself links - `Exception`, here - ever reaches
 // `mangleToBuffer`. `mangleToBuffer` walks dmd's own AST (a
 // `ClassDeclaration`'s bases, identifiers, parent module) the same way any

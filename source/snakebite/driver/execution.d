@@ -85,7 +85,7 @@ public int runProject(
     const discovery = stopWatch.peek;
     scope entered = ProjectDirectory(
         directory,
-        sources.workingDirectory.length ? sources.workingDirectory : directory,
+        sources.runDirectory(directory),
         endsProcess,
     );
     return body(directory, sources, discovery, &entered.enterWorking);
@@ -136,39 +136,41 @@ public PreparationReport prepareSources(
             project.directory, project.sources, () => project.program,
             optimise,
         );
-    if (project.program.dependencyImage !is null)
-        project.program.testHooks = project.program.dependencyImage.testHooks;
     return PreparationReport(project, discovery, frontendDuration, stopWatch.peek);
 }
 
 
 // The frontend result of the project that `sources` describe, ready to run as
-// a project. The program has the name `name`, or the last part of
-// `directory` when it is empty.
+// a project.
 public imported!"snakebite.project.loading".Project loadedProject(
     in string directory,
     imported!"snakebite.project.dub".SourceSet sources,
     in bool nativeDependencies,
-    in string name = null,
 ) {
     import snakebite.frontend.compiler: Snippets, initialize;
     import snakebite.project.loading: loadProject;
 
     initialize(Snippets.no);
-    auto project = loadProject(directory, sources, nativeDependencies, name);
-    project.program.startsAsProject = true;
-    return project;
+    return loadProject(directory, sources, nativeDependencies);
 }
 
 
+// Runs `program` with the arguments `hostArguments`, its name first. A
+// program that is not a snippet runs its unit tests under the runner that
+// `testHooks` hold: the ones of its dependency image, if it has one. A
+// snippet is a program from the REPL or from a unit test of `sb`, which has
+// no native equivalent: it runs its module constructors and `main` directly,
+// with no unit tests.
 public ExecutionReport executeBackend(
     in imported!"snakebite.backends".BackendName name,
     imported!"snakebite.backends".Program program,
-    in string[] hostArguments = null,
+    in string[] hostArguments,
+    in imported!"snakebite.image.dependency".TestHooks testHooks,
     in bool collectGarbage = true,
     in bool endsProcess = false,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
+    in bool isSnippet = false,
 ) {
     import snakebite.backends: makeBackend;
     import std.datetime.stopwatch: AutoStart, StopWatch;
@@ -192,70 +194,101 @@ public ExecutionReport executeBackend(
     const running = ExecutionClock.start(backend.compilationStatistics);
     auto start = &backend.startData();
     return runStartData(
-        *start, backend.compilationStatistics, running, stopWatch,
-        program.testHooks, program.startsAsProject, hostArguments,
-        collectGarbage, endsProcess);
+        *start,
+        backend.compilationStatistics,
+        running,
+        stopWatch,
+        testHooks,
+        isSnippet,
+        hostArguments,
+        collectGarbage,
+        endsProcess,
+    );
 }
 
 // Compiles all of `program` and writes it to `path`; it runs nothing.
-// `workingDirectory` is where a load runs the program, and `imagePath` the
-// dependency image that it loads, or empty for none.
 public void saveProgram(
     imported!"snakebite.backends".Program program,
     in string path,
-    in string workingDirectory,
-    in string imagePath,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
     import snakebite.backends.api: Owned;
     import snakebite.backends.bytecode: Bytecode;
 
-    auto backend = Owned!Bytecode(new Bytecode(program, jit, true));
-    backend.save(path, workingDirectory, imagePath);
-}
-
-
-// The path of the dependency image of `program`, or empty when it has none.
-public string imagePathOf(imported!"snakebite.backends".Program program) {
-    return program.dependencyImage is null ? "" : program.dependencyImage.path;
+    const recordsAddresses = true;
+    auto backend = Owned!Bytecode(new Bytecode(program, jit, recordsAddresses));
+    backend.save(path);
 }
 
 
 // Loads the program that the file `path` holds and runs it as
 // `executeBackend` runs a compiled one: the same `runStartData`, on a
-// `Program` and a `Runner` that the file fills instead of a compiler.
+// `Program` and a `Runner` that the file fills instead of a compiler. The
+// program gets `arguments`, its name first, and runs in the working
+// directory of the process, as an executable does. The file names the
+// dependency image of the program, if it has one.
 public ExecutionReport executeLoaded(
     in string path,
-    in string[] programArguments,
+    in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
     import std.stdio: File;
 
-    return executeLoaded(File(path, "rb"), programArguments, jit);
+    return runLoaded(File(path, "rb"), arguments, jit, &imagePathOfHeader);
 }
 
 
-// As `executeLoaded` with the path, for the open program file `file`. The
-// load reads it from its start.
-public ExecutionReport executeLoaded(
-    imported!"std.stdio".File file,
-    in string[] programArguments,
+// As `executeLoaded`, for the program file that the ninja run `built` wrote,
+// in the working directory that the run gives. A build gives the dependency
+// image `imagePath`; the file names none.
+public ExecutionReport executeBuilt(
+    imported!"snakebite.build".NinjaRun built,
+    in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    in string imagePath,
+) {
+    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+
+    scope entered = ProjectDirectory(
+        built.workingDirectory,
+        built.workingDirectory,
+        EndsProcess.yes,
+    );
+    return runLoaded(
+        built.program,
+        arguments,
+        jit,
+        (in Header header) => imagePath,
+    );
+}
+
+
+private alias Header = imported!"snakebite.backends.bytecode.file".Header;
+
+
+// The dependency image that a program file names, empty for none.
+private string imagePathOfHeader(in Header header) {
+    return header.imagePath;
+}
+
+
+// Runs the program of the open file `file`, from its start. `imagePathOf` says
+// where the dependency image of the program is.
+private ExecutionReport runLoaded(ImagePathOf)(
+    imported!"std.stdio".File file,
+    in string[] arguments,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    ImagePathOf imagePathOf,
 ) {
     import snakebite.backends.statistics: CompilationStatistics, ExecutionClock;
-    import snakebite.image.dependency: TestHooks;
-    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+    import snakebite.image.dependency: testHooksOf;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.stdio: stdin, stdout, stderr;
 
     auto stopWatch = StopWatch(AutoStart.yes);
-    auto loaded = loadProgramFile(file, jit);
+    auto loaded = loadFile(file, jit, imagePathOf);
     file.close;
     scope(exit) loaded.runner.end;
-    scope entered = ProjectDirectory(
-        loaded.header.workingDirectory, loaded.header.workingDirectory,
-        EndsProcess.yes);
-    entered.enterWorking;
 
     auto savedInput = stdin;
     auto savedOutput = stdout;
@@ -266,13 +299,22 @@ public ExecutionReport executeLoaded(
         stderr = savedError;
     }
 
-    auto program = loaded.program;
     CompilationStatistics compilation;
     const running = ExecutionClock.start(compilation);
+    const isSnippet = false;
+    const collectGarbage = false;
+    const endsProcess = true;
     return runStartData(
-        program.startData, compilation, running, stopWatch,
-        loaded.image is null ? TestHooks.init : loaded.image.testHooks, true,
-        [program.startData.programName] ~ programArguments, false, true);
+        loaded.program.startData,
+        compilation,
+        running,
+        stopWatch,
+        loaded.image.testHooksOf,
+        isSnippet,
+        arguments,
+        collectGarbage,
+        endsProcess,
+    );
 }
 
 
@@ -293,10 +335,20 @@ public struct LoadedProgram {
 
 
 // Reads the program file `file`, from its start, into a new program wired to
-// a new runner with `jit`. It does not change the working directory.
+// a new runner with `jit`. It does not change the working directory. The
+// program runs on the dependency image that the file names, if it names one.
 public LoadedProgram loadProgramFile(
     imported!"std.stdio".File file,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
+    return loadFile(file, jit, &imagePathOfHeader);
+}
+
+
+private LoadedProgram loadFile(ImagePathOf)(
+    imported!"std.stdio".File file,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    ImagePathOf imagePathOf,
 ) {
     import snakebite.failure.report: SnakebiteException;
 
@@ -311,7 +363,12 @@ public LoadedProgram loadProgramFile(
             throw new SnakebiteException("the program file is too large");
     // The parts of the file go one after the other through this buffer.
     ubyte[64 * 1024] buffer = void;
-    return loadProgramFile(file.byChunk(buffer[]), cast(size_t) size, jit);
+    return loadParts(
+        file.byChunk(buffer[]),
+        cast(size_t) size,
+        jit,
+        imagePathOf,
+    );
 }
 
 
@@ -329,10 +386,23 @@ public LoadedProgram loadProgramFile(
 
 // Reads the program file of `size` bytes that the input range `parts` gives,
 // part after part, into a new program wired to a new runner with `jit`. A
-// part stays valid until the range is advanced.
+// part stays valid until the range is advanced. The program runs on the
+// dependency image that the file names (`--save` writes it, as an executable
+// names its libraries), or on none.
 public LoadedProgram loadProgramFile(Parts)(
-    Parts parts, in size_t size,
+    Parts parts,
+    in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+) {
+    return loadParts(parts, size, jit, &imagePathOfHeader);
+}
+
+
+private LoadedProgram loadParts(Parts, ImagePathOf)(
+    Parts parts,
+    in size_t size,
+    in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    ImagePathOf imagePathOf,
 ) {
     import core.memory: GC;
     import snakebite.backends.bytecode.file: ProgramReader;
@@ -372,9 +442,10 @@ public LoadedProgram loadProgramFile(Parts)(
     // On the GC heap, as the image of a compile is: the program and its call
     // plans and tables of thread-local variables refer to it until the
     // module destructors have run, after a run returns.
-    if (loaded.header.imagePath.length) {
+    const imagePath = imagePathOf(loaded.header);
+    if (imagePath.length) {
         loaded.image = new DependencyImage;
-        *loaded.image = loadImage(loaded.header.imagePath);
+        *loaded.image = loadImage(imagePath);
     }
 
     // On the GC heap, as the backend of a compile is: the module destructors
@@ -392,9 +463,10 @@ public LoadedProgram loadProgramFile(Parts)(
 // Runs the program of `start` and reports on it. `running` began before the
 // backend made `start`, and `latency` before the backend was made. It takes
 // no backend: whatever made `start` and `compilation`, compiled or loaded,
-// can call it. `startsAsProject` false is a snippet. The function holds the
-// `GuestModules.Entry` of `start` until it returns, as the runtime of a
-// program with a C entry point ends with it.
+// can call it. A program that is not a snippet runs its unit tests under the
+// runner that `testHooks` hold. The function holds the `GuestModules.Entry`
+// of `start` until it returns, as the runtime of a program with a C entry
+// point ends with it.
 ExecutionReport runStartData(
     ref imported!"snakebite.start.data".StartData start,
     ref const imported!"snakebite.backends.statistics".CompilationStatistics
@@ -402,7 +474,7 @@ ExecutionReport runStartData(
     in imported!"snakebite.backends.statistics".ExecutionClock running,
     ref imported!"std.datetime.stopwatch".StopWatch latency,
     in imported!"snakebite.image.dependency".TestHooks testHooks,
-    in bool startsAsProject,
+    in bool isSnippet,
     in string[] hostArguments,
     in bool collectGarbage,
     in bool endsProcess,
@@ -414,8 +486,8 @@ ExecutionReport runStartData(
     const entry = GuestModules.Entry(start, compilation);
     StartupReport startup;
     int status;
-    // A program with a C `main` is not started as a project either.
-    if (!startsAsProject || start.hasCEntryPoint || start.betterC)
+    // A program with a C `main` runs no unit tests either.
+    if (isSnippet || start.hasCEntryPoint || start.betterC)
         status = run(start, compilation, hostArguments);
     else {
         startup = runDruntimeMain(

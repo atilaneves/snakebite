@@ -112,7 +112,11 @@ private string heldByWorkerCode(in Sandbox sandbox) {
 private int programStatus(Backend)(in string code) {
     auto program = Program([parseSnippet(code)]);
     auto backend = ownedBackend!Backend(program);
-    return run(backend.startData, backend.compilationStatistics);
+    return run(
+        backend.startData,
+        backend.compilationStatistics,
+        ["snakebite"],
+    );
 }
 
 private void waitForSandboxFile(Sandbox sandbox, in string fileName) {

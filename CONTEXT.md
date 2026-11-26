@@ -33,6 +33,20 @@ A declaration whose source belongs to the modules snakebite was asked
 to run. Root-owned functions are executed by a backend; functions that
 are not root-owned are called across the barrier.
 
+**Defined elsewhere**:
+A declaration that the compile of the **Root modules** does not define: one
+with no body or an `extern` one, and each declaration of a
+dependency module that its archive defines. A call to it crosses the barrier,
+and a missing symbol for it is an error, as at the link of a native build.
+Compare **Definition**.
+
+**Definition**:
+The one decision, made for each declaration, of where it is defined
+(`snakebite.language.definition`). It has three results: `rootOwned` (only the
+root modules define it, and a backend executes it), `rootOrElsewhere` (the
+root modules define it and another object can too, as for a template instance,
+of which one copy is kept) and `definedElsewhere` (see **Defined elsewhere**).
+
 **Native layout**:
 The memory representation compiled D uses. Guest values always use
 native layout, so crossing the barrier never copies or converts.

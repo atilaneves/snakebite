@@ -117,8 +117,6 @@ configuration "alone-test" {
     sourcePaths "alone"
     sourceFiles "tests/ut/loaded.d"
     sourceFiles "tests/ut/package.d" "tests/ut/backends/package.d"
-    sourcePaths "bench/source"
-    excludedSourceFiles "bench/source/bench/main.d"
     importPaths "alone"
     importPaths "tests"
 

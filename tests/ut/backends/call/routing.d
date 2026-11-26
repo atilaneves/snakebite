@@ -10,6 +10,7 @@ import ut.backends;
 import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
 import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.language.definition: Definition;
 import std.algorithm.searching: canFind;
 
 
@@ -189,7 +190,7 @@ static foreach (backend; Matrix!(
 // What is nested in a function is defined where that function is: another
 // object defines the static locals of a dependency function that is not in a
 // template instance. The program defines those of a function of its own.
-@("isDefinedElsewhere.nestedInAFunction")
+@("whereDefined.nestedInAFunction")
 unittest {
     import snakebite.frontend.ast: Identifier;
 
@@ -210,9 +211,9 @@ unittest {
     }
     auto plain = findFunction(modules[1], "plain");
 
-    program.isDefinedElsewhere(local(findFunction(modules[0], "own")))
-        .should == false;
-    program.isDefinedElsewhere(local(plain)).should == true;
+    program.whereDefined(local(findFunction(modules[0], "own")))
+        .should == Definition.rootOwned;
+    program.whereDefined(local(plain)).should == Definition.definedElsewhere;
 }
 
 
@@ -556,5 +557,88 @@ static foreach (backend; Matrix!(
             backend_.call(findFunction(modules[0], "answer"), &result, []);
         }
         result.should == 71;
+    }
+}
+
+
+// The native copy of the shared and the thread-local variable of
+// `nestedInstanceModule` below. Their values differ from the initial values
+// of the instance, so the result tells the copy that is used.
+public extern(C) shared int snakebite_ut_nested_shared = 5000;
+public extern(C) int snakebite_ut_nested_thread = 7000;
+
+private enum nestedInstanceModule = q{
+    module nested_instance_dep;
+    int variables(alias f)() {
+        pragma(mangle, "snakebite_ut_nested_shared")
+        shared static int shared_ = 1000;
+        pragma(mangle, "snakebite_ut_nested_thread")
+        static int thread = 2000;
+        return shared_ + thread + f(1);
+    }
+    class Box(alias f) { int value; this() { value = f(1); } }
+    int made(alias f)() { return (new Box!f).value; }
+};
+
+// A template instance of a dependency that holds a function of the root
+// module (a lambda that captures a local) is a dependency instance whose
+// static variables the process can define too: a native build keeps one copy
+// of each.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a native build has one definition of each variable"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE reads no native data"),
+)) {
+    @("sharedDefinition.instanceNestedInRootFunction." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto modules = parseSnippets([
+            q{
+                module nested_instance_root;
+                import nested_instance_dep;
+                int answer() {
+                    int local = 10;
+                    return variables!(a => a + local)
+                        + made!(a => a + local);
+                }
+            },
+            nestedInstanceModule,
+        ]);
+        auto backend_ = ownedBackend!backend(Program([modules[0]]));
+
+        int result;
+        backend_.call(findFunction(modules[0], "answer"), &result, []);
+        result.should == 12000 + 11 + 11;
+    }
+}
+
+
+// A function of a root module with a body and `extern` storage is declared
+// there and defined elsewhere: a call reaches the native function.
+public extern(C) int snakebite_ut_extern_body() { return 9; }
+
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "a native build has one definition of the function"),
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE runs each body from source and calls no native code"),
+)) {
+    @("rootOwned.externWithBody." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        auto modules = parseSnippets([
+            q{
+                module extern_body_root;
+                pragma(mangle, "snakebite_ut_extern_body")
+                extern(C) extern int declared() { return 1; }
+                int answer() { return declared(); }
+            },
+        ]);
+        auto backend_ = ownedBackend!backend(Program([modules[0]]));
+
+        int result;
+        backend_.call(findFunction(modules[0], "answer"), &result, []);
+        result.should == 9;
     }
 }

@@ -6,6 +6,7 @@ import snakebite.program: Program;
 import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.language.definition: Definition;
 import snakebite.frontend.ast: Dsymbol, FuncDeclaration, Module, VarDeclaration;
 import snakebite.language.layout.variables: forEachRuntimeVariable;
 import snakebite.native.staticstore: StaticStore;
@@ -27,13 +28,11 @@ static foreach (rootOwned; [true, false]) {
     unittest {
         struct Ownership {
             bool* available;
-            bool isRootOwned(Dsymbol) const {
+            Definition whereDefined(Dsymbol) const {
                 assert(*available, "ownership queried after preparation");
-                return rootOwned;
-            }
-            bool isDefinedElsewhere(Dsymbol) const {
-                assert(*available, "ownership queried after preparation");
-                return !rootOwned;
+                return rootOwned
+                    ? Definition.rootOwned
+                    : Definition.definedElsewhere;
             }
         }
         bool available = true;
@@ -54,8 +53,7 @@ static foreach (rootOwned; [true, false]) {
         auto data = NativeData(
             &store,
             &plans,
-            &ownership.isRootOwned,
-            &ownership.isDefinedElsewhere,
+            &ownership.whereDefined,
             (declaration) => declaration,
             (declaration) => Linked!(void*).init,
             (declaration, place) {},

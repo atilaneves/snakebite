@@ -154,11 +154,17 @@ public void shouldBeStatusOf(
         nativeMainStatus!(Source.text, Source.id).should == expected;
     } else {
         enum program_ = RegisterProgram!(module_, code).program;
-        auto program = Program([parsedProgram(program_)], "snakebite");
+        auto program = Program([parsedProgram(program_)]);
         auto backend = ownedBackend!BackendType(program);
         asTestFailure(
-            run(backend.startData, backend.compilationStatistics),
-            file, line).should == expected;
+            run(
+                backend.startData,
+                backend.compilationStatistics,
+                ["snakebite"],
+            ),
+            file,
+            line,
+        ).should == expected;
     }
 }
 
@@ -180,11 +186,17 @@ public void shouldBeStatusOfWithJitCode(
         import snakebite.backends.bytecode.vm: Function;
 
         enum program_ = RegisterProgram!(module_, code).program;
-        auto program = Program([parsedProgram(program_)], "snakebite");
+        auto program = Program([parsedProgram(program_)]);
         auto backend = ownedBackend!BackendType(program);
         asTestFailure(
-            run(backend.startData, backend.compilationStatistics),
-            file, line).should == expected;
+            run(
+                backend.startData,
+                backend.compilationStatistics,
+                ["snakebite"],
+            ),
+            file,
+            line,
+        ).should == expected;
         if (!testJit.enabled)
             return;
         foreach (name; jitted) {

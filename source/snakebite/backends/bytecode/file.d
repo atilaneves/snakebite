@@ -41,14 +41,16 @@ import std.traits: FieldNameTuple, Unqual;
 import std.typecons: Nullable;
 
 
-// What precedes the program in a file.
+// What precedes the program in a file. The key comes first: a load checks it
+// before it uses any other field (ADR-0020).
 public struct Header {
     // Names the build that wrote the file (`generatorKey`).
     public string buildKey;
-    // The dependency image that the program runs on, or empty.
+    // The dependency image that the program was compiled with, as an
+    // executable names the libraries that it needs. Empty for a program with
+    // none, and in a file that a build wrote: the run that puts a program
+    // together gives the image.
     public string imagePath;
-    // The directory that the program runs in.
-    public string workingDirectory;
 }
 
 
@@ -58,7 +60,9 @@ private enum magic = "snakebite-program-v1\n";
 // Writes `program`, whole and compiled, to `path`. The file is complete or it
 // does not exist: it is written under another name and renamed.
 public void saveProgram(
-    ref Program program, in Header header, in string path,
+    ref Program program,
+    Header header,
+    in string path,
 ) {
     import std.file: remove, rename, write;
 
@@ -67,9 +71,7 @@ public void saveProgram(
 
     auto file = Archive.writing(program);
     file.text(magic);
-    Header written = Header(
-        header.buildKey, header.imagePath, header.workingDirectory);
-    transferHeader(file, written);
+    transferHeader(file, header);
     // The memory that the load of the rest takes, before the rest: the save
     // counts it as it writes the rest (`Archive.need`).
     const needAt = file._written.data.length;
@@ -272,9 +274,8 @@ private void transferNames(ref Archive archive, ref Archive source) {
 
 
 private void transferHeader(ref Archive archive, ref Header header) {
-    archive.transfer(header.buildKey);
-    archive.transfer(header.imagePath);
-    archive.transfer(header.workingDirectory);
+    foreach (ref field; header.tupleof)
+        archive.transfer(field);
 }
 
 
