@@ -127,8 +127,8 @@ private string programOfSource(
 
 // The build statements: `build.ninja` itself, the compiles `compiles` of the
 // source files of the root package, each to a program file and an image
-// module, and for a build of the whole root package the libraries of the dub
-// dependencies and the dependency image. `buildInputs` are the inputs of
+// source, the libraries of the dub dependencies, and the dependency image of
+// the image sources of all the compiles. `buildInputs` are the inputs of
 // `build.ninja`: the paths whose change can change `sources`.
 private string buildFileText(
     in imported!"snakebite.build".BuildFiles files,
@@ -138,8 +138,8 @@ private string buildFileText(
     in Compile[] compiles,
     in string[] buildInputs,
 ) {
-    import snakebite.build: Build, buildName, buildsDependencyImage,
-        dubDependenciesOption, imageSourceOf;
+    import snakebite.build: Build, buildName, dubDependenciesOption,
+        imageSourceOf;
     import snakebite.frontend.hostcompiler: compilerConfigurationFiles, hostCompiler,
         hostConfigurationFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
@@ -244,30 +244,30 @@ private string buildFileText(
             text ~= statementVariable(name, variables[name]);
         text ~= statementVariable("options", compileOptions);
     }
-    const imageTargets = buildsDependencyImage(build) ? [files.image] : null;
-    if (imageTargets.length) {
-        if (libraries.length)
-            text ~= "\n" ~ statement(
-                libraries,
-                "dependencies",
-                null,
-                dependencyInputs,
-            );
+    if (libraries.length)
         text ~= "\n" ~ statement(
-            imageTargets,
-            "image",
-            [imageSourceOf(files.projectProgram)] ~ sources.linkerFiles,
-            [sb, compiler] ~ compilerConfiguration,
+            libraries,
+            "dependencies",
+            null,
+            dependencyInputs,
         );
-        foreach (name; compilerVariables)
-            text ~= statementVariable(name, variables[name]);
-        text ~= statementVariable(
-            "options",
-            sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array,
-        );
-    }
+    const imageSources = compiles
+        .map!(compile => imageSourceOf(compile.program))
+        .array;
+    text ~= "\n" ~ statement(
+        [files.image],
+        "image",
+        imageSources ~ sources.linkerFiles,
+        [sb, compiler] ~ compilerConfiguration,
+    );
+    foreach (name; compilerVariables)
+        text ~= statementVariable(name, variables[name]);
+    text ~= statementVariable(
+        "options",
+        sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array,
+    );
     const defaults = compiles.map!(compile => compile.program).array
-        ~ imageTargets;
+        ~ files.image;
     text ~= "\ndefault " ~ defaults.map!ninjaPath.join(" ") ~ "\n";
     return text;
 }

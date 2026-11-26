@@ -22,7 +22,7 @@ public int compile(string[] args) {
     import snakebite.build.dependencyfile: writeDependencyFile;
     import snakebite.driver.execution: loadedProject, saveProgram;
     import snakebite.frontend.compiler: FrontendFlags;
-    import snakebite.project.dependencies: imageModule;
+    import snakebite.project.dependencies: imageSourceAt;
     import snakebite.project.dub: SourceSet;
     import snakebite.project.loading: ProjectDirectory;
     import std.getopt: getopt;
@@ -56,7 +56,8 @@ public int compile(string[] args) {
     const buildsDependencyImage = true;
     auto project = loadedProject(directory, sources, buildsDependencyImage);
     saveProgram(project.program, output, JitSetting.init);
-    writeChanged(imageSourceOf(output), imageModule(project.program));
+    const imageSource = imageSourceOf(output);
+    writeChanged(imageSource, imageSourceAt(project.program, imageSource));
     writeDependencyFile(output ~ ".dep", output, directory);
     return 0;
 }

@@ -15,15 +15,6 @@ private:
 public enum Build { off, project, module_ }
 
 
-// Whether a build of mode `build` builds the dependency image. The present
-// limit of module mode is that it builds none: the image of a build of each
-// module needs the native template instances of all its compiles, which the
-// program files do not carry yet (#1015).
-public bool buildsDependencyImage(in Build build) @safe pure nothrow @nogc {
-    return build == Build.project;
-}
-
-
 // The name of `build` on the command line.
 public string buildName(in Build build) @safe pure {
     import std.conv: text;
@@ -94,8 +85,9 @@ public struct BuildFiles {
 }
 
 
-// What the dependency image needs from the root code of the compile that
-// writes the program file `program`, which the compile writes beside it.
+// The image source of the compile that writes the program file `program`:
+// what the dependency image needs from the root code of the compile, which
+// the compile writes beside the program file.
 public string imageSourceOf(in string program) @safe pure nothrow {
     import std.path: setExtension;
 
@@ -125,7 +117,7 @@ public struct NinjaRun {
     public imported!"std.stdio".File[] programs;
     // The directory that the program runs in.
     public string workingDirectory;
-    // The dependency image of the program, or empty for none.
+    // The dependency image of the program.
     public string imagePath;
 }
 
@@ -199,7 +191,6 @@ public imported!"std.typecons".Nullable!NinjaRun buildProject(
     const duration = stopWatch.peek;
     if (status != 0)
         return Nullable!NinjaRun();
-    const imagePath = buildsDependencyImage(build) ? files.image : "";
     const programNames = files.programListFileName.readText.splitLines;
     // `auto`: `NinjaRun` holds the files as mutable.
     auto programs = programNames.map!(program => File(program, "rb")).array;
@@ -207,7 +198,7 @@ public imported!"std.typecons".Nullable!NinjaRun buildProject(
         duration,
         programs,
         files.workingDirectoryFileName.readText,
-        imagePath,
+        files.image,
     ));
 }
 

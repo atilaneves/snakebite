@@ -93,6 +93,10 @@ public struct DependencyImage {
     // The image exports its function registry under this name. The frontend
     // generator writes the definition and `resolve` looks it up.
     public enum registrySymbol = "snakebite_dependency_image_symbols_v1";
+    // Each image source defines its part of the registry as a function of
+    // this name in its module. The function of `registrySymbol` asks each
+    // part in turn (`imageModuleText`).
+    public enum sourceRegistry = "symbols";
     public enum entryStartupSettings = deferredRegistrySource;
 
     public string path() @safe @nogc nothrow pure const return scope {

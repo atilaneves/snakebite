@@ -4,6 +4,10 @@ module snakebite.project.imagesource;
 private:
 
 
+// The declarations of the image source of `program` (`imageSourceText`), or
+// empty when the program needs no native template instance. The function of
+// the registry is one of them (`DependencyImage.sourceRegistry`).
+//
 // Takes the frontend lock: a parse on another thread appends template
 // instances to the member list of a root module it does not own, and that
 // must not happen while this walk iterates the list.
@@ -148,12 +152,12 @@ private extern(C++) class Collector
                 }
             }
         }
-        string result = "module snakebite_dependency_image;\n";
+        string result;
         foreach (name; _imports.keys.sort)
             result ~= "import " ~ name ~ ";\n";
         result ~= _opaqueDeclarations;
-        string registry = "export extern(C) void* "
-            ~ DependencyImage.registrySymbol ~ "(const(char)[] name) {\n";
+        string registry = "void* " ~ DependencyImage.sourceRegistry
+            ~ "(const(char)[] name) {\n";
         foreach (i, guestKey; _references.keys.sort.array) {
             auto reference = _references[guestKey]; // Function identities are mutable AST nodes.
             import std.algorithm: canFind;
