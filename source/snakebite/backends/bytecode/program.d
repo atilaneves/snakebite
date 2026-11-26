@@ -5,7 +5,7 @@ private:
 
 import snakebite.backends.bytecode.relocation: plain, setBy;
 import snakebite.backends.bytecode.vm: bindHostCode,
-    bindInstructionReferences, Function,
+    bindInstructionReferences, CallSite, Function,
     JitSetting, prepareForExecution;
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
@@ -114,8 +114,9 @@ public struct Program {
     // ready to run on the runner that has `jit` and `jitInstance`: a compile
     // to RAM and a load both end with this, and a save does not call it.
     // Each word that names a symbol (`snakebite.ffi.names`) gets the address
-    // that `plans` finds for it. Returns null, or the reason why the function
-    // is not valid.
+    // that `plans` finds for it, and each call to a name is connected to the
+    // definition of the name (`CallSite.connect`). Returns null, or the
+    // reason why the function is not valid.
     public static string complete(JitInstance)(
         Function* function_, ref CallPlanStore plans, in JitSetting jit,
         JitInstance jitInstance,
@@ -131,6 +132,9 @@ public struct Program {
         }
         function_.relocs = null;
         plans.bindNewPlans;
+        foreach (ref site; function_.callSites)
+            if (site.kind == CallSite.Kind.named)
+                site.connect(plans);
         function_.fixWindowFacts;
         if (const reason = bindInstructionReferences(*function_))
             return reason;

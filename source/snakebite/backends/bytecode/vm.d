@@ -90,6 +90,14 @@ public struct CallSite {
         // and the like), which has no host symbol FFI could ever find, so this VM calls the entry
         // directly instead of going through `executeCallPlan`.
         builtin,
+        // A call that a compile to a file makes to a function that the
+        // compile does not define: a call to the name of `nativePlan`, made
+        // from the signature alone. `args` are what a `guest` callee reads
+        // and `nativeArgs` what the plan reads. When the program is made
+        // ready to run, `connect` makes it the call to the definition of the
+        // name. A name that nothing defines stays `named`, and its call
+        // fails as the native call does.
+        named,
     }
 
     // `callee` already compiled, called directly.
@@ -210,6 +218,35 @@ public struct CallSite {
         site.nativeArgs = nativeArgs;
         site.returnWidth = returnWidth;
         return site;
+    }
+
+    // A call to the code that `nativePlan` names. A site with no window has
+    // `args` in the frame of a callee of the signature, and `nativeArgs` in
+    // the order of the plan; a site with a window has one list for both.
+    public static CallSite named(
+        const(CallPlan)* nativePlan, Arg[] args, Arg[] nativeArgs,
+        size_t returnWidth,
+    ) {
+        auto site = native(nativePlan, args, returnWidth);
+        site.kind = Kind.named;
+        site.nativeArgs = nativeArgs;
+        return site;
+    }
+
+    // Makes a `named` site the call to the definition of its name, as a
+    // linker connects a reference: a `guest` site when a program file
+    // defines the name, else a `native` site when the plan found the code of
+    // the name. The plans of the program are bound before this.
+    package void connect(ref const CallPlanStore plans) {
+        if (auto definition = plans.guestDefinitionOf(nativePlan)) {
+            kind = Kind.guest;
+            callee = cast(const(Function)*) definition;
+            return;
+        }
+        if (nativePlan.address is null)
+            return;
+        kind = Kind.native;
+        args = nativeArgs;
     }
 
     // No lazy-preparation overload: unlike `native`, a builtin's entry
@@ -440,19 +477,21 @@ public struct CallSite {
         return eligible;
     }
 
-    // Fills `slot` for a callee that a call window can hold: no closure and
-    // no frame that needs a stricter alignment than the window gives. A
-    // site that is not eligible takes the generic path, which copies the
-    // arguments out of the window.
+    // Fills `slot` for a callee that a call window can hold
+    // (`Function.windowCallable`): no closure, and no frame that needs a
+    // stricter alignment than the window gives. A call to a name laid out its
+    // window from the signature, before the callee was known. A site that is
+    // not eligible takes the generic path, which copies the arguments out of
+    // the window.
     private bool fill(ref FastCall slot) const {
         if (windowSlot == size_t.max)
             return false;
         const function_ = cacheCallee();
-        if (function_.closureOffset != size_t.max)
+        if (!function_.windowCallable
+                || function_.closureOffset != size_t.max)
             return false;
         assert(function_.frameAlignment > 0
             && (function_.frameAlignment & (function_.frameAlignment - 1)) == 0);
-        assert(function_.windowCallable);
         if (function_.activationAlignment > windowAlignment)
             return false;
         slot.adopt(function_.windowFacts);
@@ -2062,12 +2101,13 @@ private const(Instruction)* runColdThrow(Decoded)(ref Decoded execution) {
 }
 
 
-// Calls `callSites[execution.source]`'s callee, one of the four
+// Calls `callSites[execution.source]`'s callee, one of the
 // `CallSite.Kind`s:
 // a guest callee already compiled to `Instruction`s, a native one reached
 // through a prepared FFI plan, an indirect one whose own address sits in
-// the caller's frame, or a builtin one reached through its own resolved
-// entry directly. `execution.width` is unused.
+// the caller's frame, a builtin one reached through its own resolved
+// entry directly, or a name that nothing defines. `execution.width` is
+// unused.
 private alias opCallGeneral =
     executeCall!(runCall, OperandKind.result, OperandKind.immediate);
 
@@ -2588,20 +2628,31 @@ private const(Instruction)* runCall(Decoded)(
     case value:
         return runIndirect!true(execution, site);
     case native:
-        auto arguments = gatherArguments(execution, site.args);
-        auto values = arguments.values;
-        auto result = execution.destination;
-        executeCallPlan(
-            CallPlanStore.bound(site.nativePlan),
-            result, values.ptr, values.length,
-        );
-        return execution.next;
+        return runNative(execution, site.nativePlan, site.args);
+    case named:
+        // No definition connected: the plan throws the failure of the name.
+        return runNative(execution, site.nativePlan, site.nativeArgs);
     case builtin:
         auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
         site.builtinEntry(execution.destination, values.ptr, values.length);
         return execution.next;
     }
+}
+
+
+private const(Instruction)* runNative(Decoded)(
+    ref Decoded execution, const(CallPlan)* plan, in Arg[] args,
+) {
+    auto arguments = gatherArguments(execution, args);
+    auto values = arguments.values;
+    executeCallPlan(
+        CallPlanStore.bound(plan),
+        execution.destination,
+        values.ptr,
+        values.length,
+    );
+    return execution.next;
 }
 
 

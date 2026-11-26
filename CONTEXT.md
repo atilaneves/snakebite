@@ -36,10 +36,12 @@ are not root-owned are called across the barrier.
 **Defined elsewhere**:
 A declaration that the compile of the **Root modules** does not define: one
 with no body or an `extern` one, and each declaration of a
-dependency module that its archive defines. A call to it crosses the barrier.
-A missing symbol for it is an error when code that uses it runs, not when the
-program is made ready to run, where the link of a native build fails
-(ADR-0017). Compare **Definition**.
+dependency module that its archive defines. A call to it crosses the barrier,
+except in a compile to a file: there it is a call to its name, which the
+program connects to the bytecode of an **SBC file** that defines the name,
+else to native code, when the program is made ready to run. A missing symbol
+for it is an error when code that uses it runs, not when the program is made
+ready to run, where the link of a native build fails (ADR-0017). Compare **Definition**.
 
 **Definition**:
 The one decision, made for each declaration, of where it is defined

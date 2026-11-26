@@ -82,6 +82,17 @@ public struct CallPlanStore {
         return found is Name.absent ? null : found;
     }
 
+    // The guest function that a program file defines for the code that
+    // `plan` names (`Names.defineHere`), or null.
+    public const(void)* guestDefinitionOf(
+        const(CallPlan)* plan,
+    ) const {
+        const pending = plan.pending;
+        if (pending is null || pending.name is null)
+            return null;
+        return names.definitionHere(pending.name.symbol);
+    }
+
     // The name of the symbol that `name` reaches: an entry that host code
     // calls with an adjustment reaches its code.
     private static Name* symbolOf(Name* name) @safe pure nothrow @nogc {
