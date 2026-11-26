@@ -36,9 +36,9 @@
   Either name them with a variable or add a comment.
 * Do not use `__gshared` unless absolutely necessary. Shared code
   should be `immutable` if it can be, `shared` otherwise. All global
-  and TLS data is suspect and must have its existence justified. Mutable
-  global state includes the state of the process: the working directory
-  (`chdir`) and the environment.
+  and TLS data is suspect and must have its existence justified. The
+  working directory (`chdir`) and the environment are mutable global state
+  too.
 * Downcasts are a code smell - use virtual dispatch instead unless
   justified.
 * Our helpers return D types. A helper returns `string`, not
@@ -51,22 +51,20 @@
   line. One that is split over several lines has one parameter or argument
   per line. Then a later removal or addition changes one line only: "The
   diff is bigger than it should have been because `"snakebite"` wasn't on
-  its own line." Existing code that breaks this rule is not a model to
-  copy.
-* Do not split a ternary expression over lines inside another expression,
-  such as a call argument: "don't break up ternary expressions like this,
-  it's ugly." Give it a name on its own line.
+  its own line." Follow this rule over existing code that breaks it.
+* Give a ternary expression that is part of another expression, such as a
+  call argument, a name on its own line: "don't break up ternary
+  expressions like this, it's ugly."
 * When a function needs its own mutable copy of a parameter, take the
-  parameter by value. Do not make a copy in the body to work around the
-  type of the parameter: "What's with the explicit type declaration on the
+  parameter by value. A copy in the body that works around the type of the
+  parameter is the fault: "What's with the explicit type declaration on the
   lhs?"
 * Use Phobos before a hand-written equivalent, for example `std.conv.to`
   for an enum from a string.
 * A struct with a flag that says if its other fields mean anything is an
   optional value: use `Nullable` or a pointer, not a flag.
-  This does not apply to a `string`: "A `string` is already nullable: the
-  empty string." Do not use `Nullable!string`; the empty string says
-  "none".
+  A `string` is the exception: "A `string` is already nullable: the empty
+  string." The empty string says "none".
 * Do not take a value apart to pass its fields to a function that can take
   the value.
 * Do not add a `static assert` that repeats the field names of a struct to
@@ -84,8 +82,8 @@
   understand. When a change makes part of a comment false, rewrite the
   whole comment.
 * A name says what the thing is: "`file` is not a string, `fileName` is."
-  A function that returns the name or path of a file is not named as if it
-  returned a file.
+  A function that returns the name or path of a file is named for the name
+  or path.
 
 ## Production code (in `source`)
 
