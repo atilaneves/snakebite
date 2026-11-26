@@ -41,9 +41,11 @@ public struct CallPlanStore {
         throw missing(symbol.symbol, symbol.declaredBy);
     }
 
-    // As `addressOf`, but null for a symbol that no object defines. A name
-    // with an own copy (`Names.defineOwn`) gives the copy that
-    // `chosenCopy` decides.
+    // As `addressOf`, but null for a symbol that no object defines. The order
+    // is that of a linker: a function that a program file defines
+    // (`Names.defineHere`), then, for any other symbol, the copy that
+    // `chosenCopy` decides, which is the process or the own copy
+    // (`Names.defineOwn`).
     public void* addressIfPresent(Name* name) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
@@ -61,22 +63,20 @@ public struct CallPlanStore {
                 atomicStore!(MemoryOrder.rel)(
                     name.address, cast(shared(void*)) found);
             }
-            else {
-                // As a linker takes the object files before the libraries:
-                // a function that a program file defines before the process.
+            else if (auto here = names.definitionHere(name.symbol)) {
                 // Host code calls a guest function through its callback
                 // entry.
-                if (auto here = names.definitionHere(name.symbol))
-                    found = names.keep(name, (own) =>
-                        cast(void*) callbacks.entryOf(here) + name.distance);
-                else {
-                    auto processCopy = resolver.resolve(name.symbol);
-                    found = names.keep(name, (own) {
-                        auto copy = chosenCopy(processCopy, own);
-                        return copy is null ? Name.absent
-                            : copy + name.distance;
-                    });
-                }
+                found = names.keep(name, (own) =>
+                    cast(void*) callbacks.entryOf(here) + name.distance);
+            }
+            else {
+                auto processCopy = resolver.resolve(name.symbol);
+                found = names.keep(name, (own) {
+                    auto copy = chosenCopy(processCopy, own);
+                    return copy is null
+                        ? Name.absent
+                        : copy + name.distance;
+                });
             }
         }
         return found is Name.absent ? null : found;

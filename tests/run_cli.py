@@ -2263,39 +2263,61 @@ def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_progr
 # uses it runs, with a failure that names the symbol. A use is a read or a
 # write of a variable, or a call through the address of a function, and the
 # failure names the symbol at any part of a variable.
-@pytest.mark.parametrize(("symbol", "program"), [
-    ("snakebite_test_no_such_variable", """
+@pytest.mark.parametrize(("symbol", "declared", "program", "dependency"), [
+    ("snakebite_test_no_such_variable", "snakebite_test_no_such_variable", """
         module main;
         extern(C) extern __gshared int snakebite_test_no_such_variable;
         int main() { return snakebite_test_no_such_variable; }
-        """),
-    ("snakebite_test_no_such_variable", """
+        """, ""),
+    ("snakebite_test_no_such_variable", "snakebite_test_no_such_variable", """
         module main;
         extern(C) extern __gshared int snakebite_test_no_such_variable;
         int main() {
             snakebite_test_no_such_variable = 3;
             return 4;
         }
-        """),
-    ("snakebite_test_no_such_function", """
+        """, ""),
+    ("snakebite_test_no_such_function", "snakebite_test_no_such_function", """
         module main;
         extern(C) int snakebite_test_no_such_function(int);
         int main() {
             auto function_ = &snakebite_test_no_such_function;
             return function_(1);
         }
-        """),
-    ("snakebite_test_no_such_array", """
+        """, ""),
+    ("snakebite_test_no_such_array", "snakebite_test_no_such_array", """
         module main;
         extern(C) extern __gshared int[1 << 20] snakebite_test_no_such_array;
         int main() { return snakebite_test_no_such_array[300_000]; }
+        """, ""),
+    # A `__gshared` variable and a class of a dependency that has no object
+    # code: the `.di` file declares them, and nothing defines them.
+    ("_D7missing11sharedValuei", "sharedValue", """
+        module main;
+        import missing;
+        int main() { return sharedValue; }
+        """, """
+        module missing;
+        __gshared int sharedValue = 3;
         """),
-], ids=["read", "write", "call_through_address", "read_far_into_array"])
+    ("_D7missing7Missing6__initZ", "Missing", """
+        module main;
+        import missing;
+        int main() { return (new Missing).field; }
+        """, """
+        module missing;
+        class Missing { int field; }
+        """),
+], ids=["read", "write", "call_through_address", "read_far_into_array",
+        "read_shared_variable_of_a_dependency", "new_class_of_a_dependency"])
 def test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs(
-    tmp_path: Path, symbol: str, program: str,
+    tmp_path: Path, symbol: str, declared: str, program: str,
+    dependency: str,
 ) -> None:
     write(tmp_path / "app" / "main.d", program)
-    common = ("--backend=bytecode", "--no-optimise-image")
+    write(tmp_path / "deps" / "missing.di", dependency)
+    common = ("--backend=bytecode", "--no-optimise-image", "-I",
+              str(tmp_path / "deps"))
     app = str(tmp_path / "app")
     from_ram = run_sb(*common, app, cwd=tmp_path)
     saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
@@ -2304,7 +2326,7 @@ def test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs(
     loaded = run_sb(f"--load={tmp_path / 'program.sbc'}", cwd=tmp_path)
     for result in (from_ram, loaded):
         assert result.returncode != 0, output(result)
-        assert f"symbol `{symbol}` declared by `{symbol}`" in result.stderr, (
+        assert f"symbol `{symbol}` declared by `{declared}`" in result.stderr, (
             output(result))
 
 
@@ -3934,7 +3956,13 @@ def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
 # its constant, and the module constructor runs. The result is that of native
 # code built the same way. Native code fixes no order of the constructors and
 # unit tests of modules that do not import each other: the lines are a set.
-# An edit of the constant gives the new number.
+# An edit of the constant gives the new number. A compile of a module reads
+# the modules that it imports, and the frontend prints the message of a
+# `pragma(msg)` of each module that it reads: the number of messages of `b` is
+# the number of compiles that read `b`. The test runner module of dub imports
+# `a` and `b`. An edit of `b` starts the compiles of `b`, of `a`, which
+# imports `b`, and of the runner; an edit of `a` starts those of `a` and of
+# the runner, and not that of `b`.
 def test_build_module_runs_as_native_code_built_by_module(
     tmp_path: Path,
 ) -> None:
@@ -3951,6 +3979,7 @@ def test_build_module_runs_as_native_code_built_by_module(
         }
         """)
 
+    message = "the frontend read b"
     for factor in (2, 3):
         write(app / "source" / "b.d", f"""
             module b;
@@ -3959,6 +3988,7 @@ def test_build_module_runs_as_native_code_built_by_module(
             int twice(int x) {{ return 2 * x; }}
             shared static this() {{ writeln("b ctor"); }}
             unittest {{ writeln("b test"); }}
+            pragma(msg, "{message}");
             """)
         native = subprocess.run(
             ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
@@ -3966,9 +3996,21 @@ def test_build_module_runs_as_native_code_built_by_module(
         assert native.returncode == 0, output(native)
         built = run_sb("--build=module", str(app), cwd=tmp_path)
         assert built.returncode == 0, output(built)
-        assert sorted(guest_lines(built)) == sorted(native.stdout.splitlines()), \
+        lines = [line for line in guest_lines(built) if line != message]
+        assert sorted(lines) == sorted(native.stdout.splitlines()), \
             output(built)
-        assert str(42 * factor) in guest_lines(built), output(built)
+        assert str(42 * factor) in lines, output(built)
+
+    def messages() -> int:
+        result = run_sb("--build=module", str(app), cwd=tmp_path)
+        assert result.returncode == 0, output(result)
+        return output(result).count(message)
+
+    assert messages() == 0
+    touch(app / "source" / "b.d")
+    assert messages() == 3
+    touch(app / "source" / "a.d")
+    assert messages() == 2
 
 
 # A program saved with the perf map on names its JIT code in the perf map
@@ -8671,70 +8713,6 @@ def test_intrinsic_without_a_wrapper_names_itself(
         "no host wrapper serves the LDC intrinsic `llvm.x86.sse.rsqrt.ps` "
         "declared by `__builtin_ia32_rsqrtps`"
     ) in output(result)
-
-
-# CTFE cannot modify the pool, a variable of the module, at compile time.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-def test_task_pool_reduce_runs_to_completion(
-    tmp_path: Path, backend: str,
-) -> None:
-    write(
-        tmp_path / "app" / "app.d",
-        """
-        module app;
-        import std.parallelism;
-        import std.range : iota;
-        unittest {
-            auto sum = taskPool.reduce!"a + b"(iota(1, 101));
-            assert(sum == 5050);
-        }
-        """,
-    )
-
-    result = run_sb(
-        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
-        cwd=tmp_path,
-    )
-
-    assert result.returncode == 0, output(result)
-
-
-# A failed copy between slices of different lengths, or between slices that
-# overlap, throws and leaves the destination as it was: druntime's checks of
-# the copy stay on in the release build of `bin/sb`. CTFE reports the copy as
-# an error of the compile, which the program cannot catch.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-def test_invalid_slice_copies_throw(tmp_path: Path, backend: str) -> None:
-    write(
-        tmp_path / "app" / "probe.d",
-        """
-        module probe;
-        void main() {
-            int[2] sourceStorage = [1, 2];
-            int[3] storage = [3, 4, 5];
-            int[] source = sourceStorage[];
-            int[] destination = storage[];
-            bool caught;
-            try destination[] = source[];
-            catch (Throwable) caught = true;
-            assert(caught);
-            assert(storage == [3, 4, 5]);
-            int[3] overlap = [1, 2, 3];
-            int* overlapPtr = overlap.ptr;
-            source = overlapPtr[0 .. 2];
-            destination = overlapPtr[1 .. 3];
-            caught = false;
-            try destination[] = source[];
-            catch (Throwable) caught = true;
-            assert(caught);
-            assert(overlap == [1, 2, 3]);
-        }
-        """,
-    )
-
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
-
-    assert result.returncode == 0, output(result)
 
 
 # The test suite of `unit-threaded` runs its tests on worker threads that

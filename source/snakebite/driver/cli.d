@@ -83,7 +83,8 @@ public int run(string[] args) {
             auto ninja = buildProject(directory, parsed.options.build);
             if (ninja.isNull)
                 return 1;
-            // Mutable: the loaded program closes the file.
+            // `auto`: `executeBuilt` takes the run mutable, to close its
+            // files.
             auto built = ninja.get;
             const report = executeBuilt(
                 built,

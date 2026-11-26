@@ -17,10 +17,15 @@ module snakebite.ffi.names;
 // (`Names.defineOwn`). `CallPlanStore.chosenCopy` decides which copy is used
 // when the program is made ready to run.
 //
-// A function that only one compile defines (`Definition.rootOwned`) has its
-// symbol in the program file of that compile (`Names.defineHere`), as an
-// object file has the symbol of each of its definitions. A reference to the
-// symbol from any file of the program reaches it.
+// A program of several files (a build of each module, issue #1015) holds
+// functions only: a function that only one compile defines
+// (`Definition.rootOwned`) has its symbol in the program file of that
+// compile (`Names.defineHere`), as an object file has the symbol of each of
+// its definitions. A reference to the symbol from any file reaches it. Two
+// definitions of one symbol are an error. A symbol that a file defines goes
+// before the process, as a linker takes object files before libraries
+// (`CallPlanStore.addressIfPresent`). A datum or a template instance that
+// more than one file defines is not covered yet.
 private:
 
 import snakebite.ffi.callplan: NativeSignature;
@@ -420,9 +425,10 @@ public struct Names {
     // its root modules, and a load each that a file holds. A second
     // definition of one symbol is an error that names the symbol, as a
     // linker reports it.
-    public void defineHere(string symbol, const(void)* word) {
+    public void defineHere(in string symbol, const(void)* word) {
         import snakebite.failure.report: SnakebiteException;
 
+        // `auto`: `Mutex.lock` is not `const`.
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
@@ -433,16 +439,15 @@ public struct Names {
     }
 
     // The guest function that defines `symbol` (`defineHere`), or null.
-    public const(void)* definitionHere(in char[] symbol) const {
+    public const(void)* definitionHere(in char[] symbol) const
+            @safe pure nothrow @nogc {
         if (auto found = symbol in _definedHere)
             return *found;
         return null;
     }
 
     // Each symbol that only one compile defines, with its definition.
-    public void eachDefinitionHere(
-        scope void delegate(string, const(void)*) visit,
-    ) const {
+    public void eachDefinitionHere(Visit)(scope Visit visit) const {
         foreach (symbol, word; _definedHere)
             visit(symbol, word);
     }

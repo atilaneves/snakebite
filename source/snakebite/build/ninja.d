@@ -22,8 +22,8 @@ public void writeBuildFile(
     auto description = dubDescribeProject(directory);
     const sources = dubSources(directory, description);
     const files = buildFiles(directory, build);
-    const compiles = compilesOf(directory, build, sources);
-    const text = buildFileText(directory, build, sources, compiles,
+    const compiles = compilesOf(files, directory, build, sources);
+    const text = buildFileText(files, directory, build, sources, compiles,
         dubBuildInputs(description, sources.files));
     files.directory.mkdirRecurse;
     writeChanged(files.workingDirectoryFileName, sources.runDirectory(directory));
@@ -60,21 +60,23 @@ private struct Compile {
 
 
 // The compiles of mode `build`: one of all the source files of the root
-// package, or one of each source file, whose program file has the path of
-// the source file in the project directory `directory`.
+// package, or one of each source file, whose program file is in the build
+// files `files`, at the path of the source file in the project directory
+// `directory`.
 private Compile[] compilesOf(
+    in imported!"snakebite.build".BuildFiles files,
     in string directory,
     in imported!"snakebite.build".Build build,
     in imported!"snakebite.project.dub".SourceSet sources,
 ) {
-    import snakebite.build: Build, buildFiles;
+    import snakebite.build: Build;
+    import snakebite.failure.report: internalFailure;
     import std.algorithm.iteration: map;
     import std.array: array;
 
-    const files = buildFiles(directory, build);
     final switch (build) with (Build) {
         case off:
-            throw new Exception("a build of mode off has no compile");
+            internalFailure("a build of mode off has no compile");
         case project:
             return [Compile(files.projectProgram, sources.files.dup)];
         case module_:
@@ -89,18 +91,23 @@ private Compile[] compilesOf(
 
 // The program file in `buildDirectory` of the compile of the source file
 // `source` alone: its path relative to the project directory `directory`.
-// A source file outside the project directory has a part `parent` for each
-// directory up.
+// A source file outside the project directory has a part `..`, which the
+// path of the program file spells `_`; a part that starts with `_` has one
+// more `_`, so that no two source files have one program file.
 private string programOfSource(
     in string buildDirectory, in string directory, in string source,
-) {
+) @safe {
     import std.algorithm.iteration: map;
+    import std.algorithm.searching: startsWith;
     import std.path: absolutePath, buildPath, pathSplitter, relativePath,
         setExtension;
 
+    static string spelled(in string part) {
+        return part == ".." ? "_" : part.startsWith("_") ? "_" ~ part : part;
+    }
+
     const relative = source.absolutePath(directory).relativePath(directory);
-    return buildDirectory.buildPath(relative.pathSplitter
-        .map!(part => part == ".." ? "parent" : part).buildPath)
+    return buildDirectory.buildPath(relative.pathSplitter.map!spelled.buildPath)
         .setExtension("sbc");
 }
 
@@ -111,14 +118,15 @@ private string programOfSource(
 // dependencies and the dependency image. `buildInputs` are the inputs of
 // `build.ninja`: the paths whose change can change `sources`.
 private string buildFileText(
+    in imported!"snakebite.build".BuildFiles files,
     in string directory,
     in imported!"snakebite.build".Build build,
     in imported!"snakebite.project.dub".SourceSet sources,
     in Compile[] compiles,
     in string[] buildInputs,
 ) {
-    import snakebite.build: Build, buildFiles, buildName, dubDependenciesOption,
-        imageSourceOf;
+    import snakebite.build: Build, buildName, buildsDependencyImage,
+        dubDependenciesOption, imageSourceOf;
     import snakebite.frontend.hostcompiler: compilerConfigurationFiles, hostCompiler,
         hostConfigurationFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
@@ -128,7 +136,6 @@ private string buildFileText(
     import std.array: array, join;
     import std.file: exists, thisExePath;
 
-    const files = buildFiles(directory, build);
     const sb = thisExePath;
     // The frontend of the compile reads the configuration of the compiler
     // that built `sb`. dub's build and the image run `compiler`.
@@ -163,16 +170,16 @@ private string buildFileText(
         ["$out"],
         ["restat = 1", "pool = console"],
     );
+    // The one compile of the whole project gets the console, so that its
+    // output reaches the terminal as `bin/sb` writes it. The compiles of a
+    // build of each module run at the same time, as the compiles of a native
+    // ninja build do: ninja shows the output of each when it ends.
+    const consolePool = build == Build.project ? ["pool = console"] : null;
     text ~= rule(
         "compile",
         [sb, directory],
         ["--compile=$out"] ~ commandVariables,
-        [
-            "depfile = $out.dep",
-            "deps = gcc",
-            "restat = 1",
-            "pool = console",
-        ],
+        ["depfile = $out.dep", "deps = gcc", "restat = 1"] ~ consolePool,
     );
     // ninja quotes the path of `$out` for the shell.
     text ~= rule(
@@ -216,15 +223,12 @@ private string buildFileText(
             sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null,
         );
     }
-    auto defaults = compiles.map!(compile => compile.program).array;
-    // The dependency image of a build of each module, from the native
-    // template instances of all its compiles, is not built yet (ADR-0021,
-    // item 14).
-    if (build == Build.project) {
+    const imageTargets = buildsDependencyImage(build) ? [files.image] : null;
+    if (imageTargets.length) {
         if (libraries.length)
             text ~= "\n" ~ statement(libraries, "dependencies", null,
                 dependencyInputs);
-        text ~= "\n" ~ statement([files.image], "image",
+        text ~= "\n" ~ statement(imageTargets, "image",
             [imageSourceOf(files.projectProgram)] ~ sources.linkerFiles,
             [sb, compiler] ~ compilerConfiguration);
         foreach (name; compilerVariables)
@@ -233,8 +237,9 @@ private string buildFileText(
             "options",
             sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array,
         );
-        defaults ~= files.image;
     }
+    const defaults = compiles.map!(compile => compile.program).array
+        ~ imageTargets;
     text ~= "\ndefault " ~ defaults.map!ninjaPath.join(" ") ~ "\n";
     return text;
 }
@@ -301,10 +306,11 @@ private string statement(
     import std.algorithm.iteration: map;
     import std.array: join;
 
+    const implicitOutputsText = implicitOutputs.length
+        ? " |" ~ implicitOutputs.map!(output => " " ~ output.ninjaPath).join
+        : "";
     return "build " ~ outputs.map!ninjaPath.join(" ")
-        ~ (implicitOutputs.length
-            ? " |" ~ implicitOutputs.map!(output => " " ~ output.ninjaPath).join
-            : "")
+        ~ implicitOutputsText
         ~ ": " ~ rule
         ~ inputs.map!(input => " " ~ input.ninjaPath).join
         ~ (implicitInputs.length
