@@ -11,20 +11,19 @@ private:
 //
 // It runs in the project directory DIR, where the host compiler finds the
 // configuration of the project. As for a D compiler, a file whose name ends
-// in `.d` is an image source and any other file is a linker file. It writes
-// the image module of the image sources (`imageModuleText`), compiles it and
-// the image sources with the host compiler, links them with the linker files
-// to FILE, and writes `FILE.dep`: the files that the host compiler read, but
-// the image module, which the command removes.
+// in `.d` is an image source and any other file is a linker file. It builds
+// the image of the image sources and the linker files to FILE
+// (`ImageBuild.make`) and writes `FILE.dep`: the files that the host compiler
+// read, but the image module, which the build writes and removes.
 public int image(string[] args) {
     import snakebite.build.dependencyfile: writeRetargetedDependencyFile;
     import snakebite.image.preparation:
-        defaultCompiler, defersStartup, ImageBuild, imageModuleText, Optimise;
+        defaultCompiler, ImageBuild, ImageSource, Optimise;
     import snakebite.project.loading: ProjectDirectory;
-    import std.algorithm.iteration: filter;
     import std.algorithm.searching: any;
-    import std.array: array;
-    import std.file: mkdirRecurse, readText, rmdirRecurse, write;
+    import std.algorithm.sorting: partition;
+    import std.algorithm.mutation: SwapStrategy;
+    import std.file: mkdirRecurse, readText, rmdirRecurse;
     import std.getopt: getopt;
     import std.path: buildPath, extension;
 
@@ -46,12 +45,20 @@ public int image(string[] args) {
             "--image needs the project directory and the image sources"
         );
     const directory = args[1];
-    const files = args[2 .. $];
-    const sources = files.filter!(file => file.extension == ".d").array;
-    const linkerFiles = files.filter!(file => file.extension != ".d").array;
+    // `auto`: `partition` reorders the paths in place. The order of the
+    // linker files is the order of the link.
+    auto inputPaths = args[2 .. $];
+    static bool isImageSource(in string path) { return path.extension == ".d"; }
+    const linkerFiles = inputPaths
+        .partition!(isImageSource, SwapStrategy.stable);
+    const sourcePaths = inputPaths[0 .. $ - linkerFiles.length];
     scope entered = ProjectDirectory(directory);
-    const deferStartup = sources
-        .any!(source => defersStartup(source.readText));
+    // The image source of each compile says whether the program of the
+    // compile has a C entry point. In a build of each module, only the
+    // compile of the module that defines that entry point says yes, and the
+    // image of the program defers the start of its modules when one does.
+    const deferStartup = sourcePaths
+        .any!(path => ImageSource.parse(path.readText).defersStartup);
     const build = ImageBuild(
         defaultCompiler,
         importPaths,
@@ -66,21 +73,14 @@ public int image(string[] args) {
     const staging = output ~ ".staging";
     staging.mkdirRecurse;
     scope(exit) staging.rmdirRecurse;
-    const modulePath = staging.buildPath("image.d");
-    modulePath.write(imageModuleText(sources, deferStartup));
     const compilerRule = staging.buildPath("image.o.dep");
-    const objectPath = build.make(
-        [modulePath] ~ sources,
-        staging,
-        output,
-        compilerRule,
-    );
+    const objectPath = build.make(sourcePaths, staging, output, compilerRule);
     writeRetargetedDependencyFile(
         output ~ ".dep",
         output,
         compilerRule,
         objectPath,
-        [modulePath],
+        ImageBuild.modulePath(staging),
     );
     return 0;
 }

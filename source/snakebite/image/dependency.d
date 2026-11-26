@@ -90,13 +90,14 @@ public struct DependencyImage {
     private void*[RuntimeEntry.symbols.length] _wrappers;
     public TestHooks testHooks;
 
-    // The image exports its function registry under this name. The frontend
-    // generator writes the definition and `resolve` looks it up.
+    // The image exports its function registry under this name. The image
+    // module defines the registry (`imageModuleText`) and `resolve` looks it
+    // up.
     public enum registrySymbol = "snakebite_dependency_image_symbols_v1";
-    // Each image source defines its part of the registry as a function of
-    // this name in its module. The function of `registrySymbol` asks each
-    // part in turn (`imageModuleText`).
-    public enum sourceRegistry = "symbols";
+    // The name of the function that is the part of the registry of an image
+    // source, in the module of the image source (`imageDeclarations`). The
+    // registry asks each part in turn.
+    public enum registryPartName = "symbols";
     public enum entryStartupSettings = deferredRegistrySource;
 
     public string path() @safe @nogc nothrow pure const return scope {

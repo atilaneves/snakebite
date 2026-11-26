@@ -139,7 +139,7 @@ private string buildFileText(
     in string[] buildInputs,
 ) {
     import snakebite.build: Build, buildName, dubDependenciesOption,
-        imageSourceOf;
+        imageSourcePath;
     import snakebite.frontend.hostcompiler: compilerConfigurationFiles, hostCompiler,
         hostConfigurationFiles;
     import snakebite.image.preparation: compilerPath, defaultCompiler;
@@ -238,7 +238,7 @@ private string buildFileText(
             "compile",
             compile.sources,
             [sb] ~ frontendConfiguration,
-            [imageSourceOf(compile.program)],
+            [imageSourcePath(compile.program)],
         );
         foreach (name; compilerVariables)
             text ~= statementVariable(name, variables[name]);
@@ -248,11 +248,11 @@ private string buildFileText(
         text ~= "\n" ~ statement(
             libraries,
             "dependencies",
-            null,
-            dependencyInputs,
+            inputs: null,
+            implicitInputs: dependencyInputs,
         );
     const imageSources = compiles
-        .map!(compile => imageSourceOf(compile.program))
+        .map!(compile => imageSourcePath(compile.program))
         .array;
     text ~= "\n" ~ statement(
         [files.image],

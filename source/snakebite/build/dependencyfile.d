@@ -24,43 +24,41 @@ public void writeDependencyFile(
         .map!(name => name.absolutePath(directory).buildNormalizedPath)
         .array;
     const rule = escapedMakePath(target) ~ ":"
-        ~ inputs.sort.uniq.map!(input => " \\\n  " ~ escapedMakePath(input))
-            .join
-        ~ "\n";
+        ~ inputs.sort.uniq.map!ruleInput.join ~ "\n";
     path.write(rule);
+}
+
+
+// The input `path` in the form of a rule that `dmd -makedeps` writes.
+private string ruleInput(in string path) {
+    import snakebite.frontend.compiler: escapedMakePath;
+
+    return " \\\n  " ~ escapedMakePath(path);
 }
 
 
 // Writes to `path` the rule of the file `compilerRule`, which a host compiler
 // wrote with `-makedeps` for its output `compilerTarget`, with `target` in
-// place of that output and without the files `intermediates`. An
-// intermediate file is one that the command writes and removes: it is no
-// input of the build.
+// place of that output and without the input `intermediate`: a file that the
+// command writes and removes, so no input of the build.
 public void writeRetargetedDependencyFile(
     in string path,
     in string target,
     in string compilerRule,
     in string compilerTarget,
-    in string[] intermediates,
+    in string intermediate,
 ) {
     import snakebite.failure.report: internalFailure;
     import snakebite.frontend.compiler: escapedMakePath;
-    import std.algorithm.iteration: fold, map;
     import std.algorithm.searching: startsWith;
-    import std.array: array;
     import std.file: readText, write;
     import std.string: replace;
 
     const rule = compilerRule.readText;
-    const named = escapedMakePath(compilerTarget) ~ ":";
-    if (!rule.startsWith(named))
+    const ruleHead = escapedMakePath(compilerTarget) ~ ":";
+    if (!rule.startsWith(ruleHead))
         internalFailure("the compiler's dependency file names another target");
-    // Each input has this form in the file that `-makedeps` writes.
-    const forms = intermediates
-        .map!(intermediate => " \\\n  " ~ escapedMakePath(intermediate))
-        .array;
-    const inputs = forms.fold!((text, form) => text.replace(form, ""))(
-        rule[named.length .. $],
-    );
+    const inputs = rule[ruleHead.length .. $]
+        .replace(ruleInput(intermediate), "");
     path.write(escapedMakePath(target) ~ ":" ~ inputs);
 }

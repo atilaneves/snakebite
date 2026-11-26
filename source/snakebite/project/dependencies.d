@@ -53,36 +53,57 @@ private DependencyAnalysis dependencyAnalysis(
     imported!"snakebite.program".Program program,
 ) {
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.project.imagesource: imageSource, imageInputs;
+    import snakebite.project.imagesource: imageDeclarations, imageInputs;
 
     DependencyAnalysis result;
     withCompilerLock({
-        result = DependencyAnalysis(imageSource(program), imageInputs(program),
-            defersStartup(program));
+        result = DependencyAnalysis(
+            imageDeclarations(program),
+            imageInputs(program),
+            defersStartup(program),
+        );
     });
     return result;
 }
 
 
-// The image source of `program` (`imageSourceText`) that is written to
-// `path`: what the image of a project entry needs from the root code.
-public string imageSourceAt(
+// The image source of `program`: what the image of a project entry needs
+// from the root code, in the module of `sourceModuleName`.
+public imported!"snakebite.image.preparation".ImageSource imageSource(
     imported!"snakebite.program".Program program,
-    in string path,
 ) {
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.image.preparation: imageSourceText;
-    import snakebite.project.imagesource: imageSource;
+    import snakebite.image.preparation: ImageSource;
+    import snakebite.project.imagesource: imageDeclarations;
 
-    string text;
+    ImageSource source;
     withCompilerLock({
-        text = imageSourceText(
-            path,
-            imageSource(program),
+        source = ImageSource(
+            sourceModuleName(program),
             defersStartup(program),
+            imageDeclarations(program),
         );
     });
-    return text;
+    return source;
+}
+
+
+// The name of the module of the image source of `program`. The image
+// compiles the image sources of all the compiles of a build together, and
+// each compile has other root modules.
+private string sourceModuleName(imported!"snakebite.program".Program program) {
+    import snakebite.frontend.dmd.functions: prettyNameOf;
+    import std.algorithm.iteration: map;
+    import std.algorithm.sorting: sort;
+    import std.array: array, join;
+    import std.conv: text;
+    import std.digest.sha: sha1Of;
+    import std.digest: toHexString;
+
+    // `auto`: `sort` reorders the names in place.
+    auto rootNames = program.rootModules.map!prettyNameOf.array;
+    const digest = rootNames.sort.join("\n").sha1Of.toHexString;
+    return text("snakebite_image_source_", digest);
 }
 
 

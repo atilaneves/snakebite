@@ -127,7 +127,7 @@ druntime still performs D module initialization and thread cleanup.
 The default compiler is `dmd` for a DMD host and `ldc2` for an LDC host. Callers
 can supply its path. Use the same compiler installation as the host. Preparation
 does not run the compiler to check its family or version. A compiler of the
-wrong family fails when it compiles the image. The image source holds a
+wrong family fails when it compiles the image. The image module holds a
 `static assert` on the frontend version, so a compiler with a different
 frontend version also fails when it compiles the image. A compiler that is a
 wrapper script is identified by the path and the content of the wrapper only.

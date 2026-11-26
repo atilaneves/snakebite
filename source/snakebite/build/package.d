@@ -85,10 +85,9 @@ public struct BuildFiles {
 }
 
 
-// The image source of the compile that writes the program file `program`:
-// what the dependency image needs from the root code of the compile, which
-// the compile writes beside the program file.
-public string imageSourceOf(in string program) @safe pure nothrow {
+// The path of the image source (`ImageSource`) of the compile that writes the
+// program file `program`: the compile writes it beside the program file.
+public string imageSourcePath(in string program) @safe pure nothrow {
     import std.path: setExtension;
 
     return program.setExtension("image.d");
