@@ -113,6 +113,11 @@ public struct ProjectDirectory {
 
     @disable this(this);
 
+    // Enters `directory` and goes back when it is destroyed.
+    this(in string directory) {
+        this(directory, directory, EndsProcess.no);
+    }
+
     this(
         in string project,
         in string working,

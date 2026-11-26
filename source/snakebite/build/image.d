@@ -6,16 +6,18 @@ private:
 
 // The command of the image statement:
 //
-//   sb --image=FILE [--dflag=ARGUMENT]... [-IPATH]... [-JPATH]...
+//   sb --image=FILE DIR [--dflag=ARGUMENT]... [-IPATH]... [-JPATH]...
 //      [--lflag=ARGUMENT]... IMAGE-MODULE [LINKER-FILE]...
 //
-// It compiles the image module (`imageModuleText`) with the host compiler,
-// links it with the linker files to FILE, and writes `FILE.dep`: the files
-// that the host compiler read.
+// It runs in the project directory DIR, where the host compiler finds the
+// configuration of the project. It compiles the image module
+// (`imageModuleText`) with the host compiler, links it with the linker files
+// to FILE, and writes `FILE.dep`: the files that the host compiler read.
 public int image(string[] args) {
     import snakebite.build.dependencyfile: writeRetargetedDependencyFile;
     import snakebite.image.preparation:
         defaultCompiler, defersStartup, ImageBuild, Optimise;
+    import snakebite.project.loading: ProjectDirectory;
     import std.file: mkdirRecurse, readText, rmdirRecurse;
     import std.getopt: getopt;
     import std.path: buildPath;
@@ -33,12 +35,23 @@ public int image(string[] args) {
         "J", &stringImportPaths,
         "lflag", &linkerArguments,
     );
-    if (args.length < 2)
-        throw new Exception("--image needs the image module");
-    const source = args[1];
-    const build = ImageBuild(defaultCompiler, importPaths, stringImportPaths,
-        compilerArguments, args[2 .. $], linkerArguments, Optimise.yes,
-        defersStartup(source.readText));
+    if (args.length < 3)
+        throw new Exception(
+            "--image needs the project directory and the image module"
+        );
+    const directory = args[1];
+    const source = args[2];
+    scope entered = ProjectDirectory(directory);
+    const build = ImageBuild(
+        defaultCompiler,
+        importPaths,
+        stringImportPaths,
+        compilerArguments,
+        args[3 .. $],
+        linkerArguments,
+        Optimise.yes,
+        defersStartup(source.readText),
+    );
 
     const staging = output ~ ".staging";
     staging.mkdirRecurse;

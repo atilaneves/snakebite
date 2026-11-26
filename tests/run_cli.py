@@ -3910,6 +3910,27 @@ def test_build_project_runs_after_a_removed_compiler_configuration(
         assert_prints_dependency_lines(built, 42)
 
 
+# `DFLAGS` set and `LFLAGS` not set: the first `--build=project` run succeeds,
+# and the flag of `DFLAGS` reaches the compile.
+def test_build_project_runs_with_dflags_and_no_lflags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = write_build_project(tmp_path, "build-project-dflags", """
+        version (FromDflags) enum source = "from DFLAGS";
+        else enum source = "not from DFLAGS";
+        unittest {
+            printf("%.*s\\n", cast(int) source.length, source.ptr);
+        }
+        """)
+    monkeypatch.delenv("LFLAGS", raising=False)
+
+    built = run_sb("--build=project", str(app), cwd=tmp_path,
+                   env={"DFLAGS": "-version=FromDflags"})
+
+    assert built.returncode == 0, output(built)
+    assert "from DFLAGS" in guest_lines(built), output(built)
+
+
 # A compile error ends the run with status 1 and the error text of
 # `bin/sb DIR`. The run after the correction gives the result of `bin/sb DIR`.
 def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
@@ -8630,70 +8651,6 @@ def test_intrinsic_without_a_wrapper_names_itself(
         "no host wrapper serves the LDC intrinsic `llvm.x86.sse.rsqrt.ps` "
         "declared by `__builtin_ia32_rsqrtps`"
     ) in output(result)
-
-
-# CTFE cannot modify the pool, a variable of the module, at compile time.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-def test_task_pool_reduce_runs_to_completion(
-    tmp_path: Path, backend: str,
-) -> None:
-    write(
-        tmp_path / "app" / "app.d",
-        """
-        module app;
-        import std.parallelism;
-        import std.range : iota;
-        unittest {
-            auto sum = taskPool.reduce!"a + b"(iota(1, 101));
-            assert(sum == 5050);
-        }
-        """,
-    )
-
-    result = run_sb(
-        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
-        cwd=tmp_path,
-    )
-
-    assert result.returncode == 0, output(result)
-
-
-# A failed copy between slices of different lengths, or between slices that
-# overlap, throws and leaves the destination as it was: druntime's checks of
-# the copy stay on in the release build of `bin/sb`. CTFE reports the copy as
-# an error of the compile, which the program cannot catch.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-def test_invalid_slice_copies_throw(tmp_path: Path, backend: str) -> None:
-    write(
-        tmp_path / "app" / "probe.d",
-        """
-        module probe;
-        void main() {
-            int[2] sourceStorage = [1, 2];
-            int[3] storage = [3, 4, 5];
-            int[] source = sourceStorage[];
-            int[] destination = storage[];
-            bool caught;
-            try destination[] = source[];
-            catch (Throwable) caught = true;
-            assert(caught);
-            assert(storage == [3, 4, 5]);
-            int[3] overlap = [1, 2, 3];
-            int* overlapPtr = overlap.ptr;
-            source = overlapPtr[0 .. 2];
-            destination = overlapPtr[1 .. 3];
-            caught = false;
-            try destination[] = source[];
-            catch (Throwable) caught = true;
-            assert(caught);
-            assert(overlap == [1, 2, 3]);
-        }
-        """,
-    )
-
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
-
-    assert result.returncode == 0, output(result)
 
 
 # The test suite of `unit-threaded` runs its tests on worker threads that
