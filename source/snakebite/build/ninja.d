@@ -68,9 +68,14 @@ private struct Compile {
 
 
 // The compiles of mode `build`: one of all the source files of the root
-// package, or one of each source file, whose program file is in the build
-// files `files`, at the path of the source file in the project directory
-// `directory`.
+// package, one of each source file, or one of the source files of each
+// directory (a D package), as reggae's build of each package groups them.
+// The program file of a compile of one source file or of one D package is in
+// the build files `files`, at the path in the project directory `directory`
+// of its first source file. reggae names the object of a D package for the
+// path of the package and the name of its first source file, joined with
+// `_`; the program file is the path of that source file, because two packages
+// can give one name with `_`, as `x/y_z` with `w` and `x/y` with `z_w`.
 private Compile[] compilesOf(
     in imported!"snakebite.build".BuildFiles files,
     in string directory,
@@ -79,8 +84,27 @@ private Compile[] compilesOf(
 ) {
     import snakebite.build: Build;
     import snakebite.failure.report: internalFailure;
-    import std.algorithm.iteration: map;
+    import std.algorithm.iteration: chunkBy, map;
+    import std.algorithm.mutation: SwapStrategy;
+    import std.algorithm.sorting: sort;
     import std.array: array;
+    import std.path: absolutePath, dirName;
+
+    // The compiles of the compilation units: the source files for which
+    // `unitPath` gives one path are one unit. The stable sort keeps the order
+    // of the source files of one unit as dub gives them.
+    Compile[] compilesOfUnits(alias unitPath)() {
+        return sources.files
+            .dup
+            .sort!((a, b) => unitPath(a) < unitPath(b), SwapStrategy.stable)
+            .chunkBy!unitPath
+            .map!(group => group[1].array)
+            .map!(unit => Compile(
+                programOfSource(files.directory, directory, unit[0]),
+                unit,
+            ))
+            .array;
+    }
 
     final switch (build) with (Build) {
         case off:
@@ -88,18 +112,17 @@ private Compile[] compilesOf(
         case project:
             return [Compile(files.projectProgram, sources.files.dup)];
         case module_:
-            return sources.files
-                .map!(source => Compile(
-                    programOfSource(files.directory, directory, source),
-                    [source],
-                ))
-                .array;
+            return compilesOfUnits!(source => source);
+        case package_:
+            return compilesOfUnits!(
+                source => source.absolutePath(directory).dirName
+            );
     }
 }
 
 
-// The program file in `buildDirectory` of the compile of the source file
-// `source` alone: its path relative to the project directory `directory`.
+// The program file in `buildDirectory` of the compile whose first source
+// file is `source`: its path relative to the project directory `directory`.
 // A source file outside the project directory has a part `..`, which the
 // path of the program file spells `_`; a part that starts with `_` has one
 // more `_`, so that no two source files have one program file.
@@ -185,8 +208,9 @@ private string buildFileText(
     );
     // The one compile of the whole project gets the console, so that its
     // output reaches the terminal as `bin/sb` writes it. The compiles of a
-    // build of each module run at the same time, as the compiles of a native
-    // ninja build do: ninja shows the output of each when it ends.
+    // build of each module or of each D package run at the same time, as the
+    // compiles of a native ninja build do: ninja shows the output of each when
+    // it ends.
     const consolePool = build == Build.project ? ["pool = console"] : null;
     text ~= rule(
         "compile",
