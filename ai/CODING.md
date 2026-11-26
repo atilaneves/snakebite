@@ -45,12 +45,31 @@
 * Do not `idup` a `string`. It is immutable already.
 * Use `new` for a GC object, not `GC.calloc` and a cast. If `new` cannot
   work, say why in a comment.
-* A parameter list that fits on one line stays on one line. A parameter
-  list that is split over several lines has one parameter per line.
+* A parameter list or an argument list that fits on one line stays on one
+  line. One that is split over several lines has one parameter or argument
+  per line. Then a later removal or addition changes one line only: "The
+  diff is bigger than it should have been because `"snakebite"` wasn't on
+  its own line." Existing code that breaks this rule is not a model to
+  copy.
+* Do not split a ternary expression over lines inside another expression,
+  such as a call argument: "don't break up ternary expressions like this,
+  it's ugly." Give it a name on its own line.
+* When a function needs its own mutable copy of a parameter, take the
+  parameter by value. Do not make a copy in the body to work around the
+  type of the parameter: "What's with the explicit type declaration on the
+  lhs?"
+* Pass a value down as an argument. Do not change global process state
+  (`chdir`, the environment) to give a value to code that is called later:
+  "Why are we doing this instead of passing the working directory down?
+  `execute` et al all take the working directory, why change global
+  process state??"
 * Use Phobos before a hand-written equivalent, for example `std.conv.to`
   for an enum from a string.
 * A struct with a flag that says if its other fields mean anything is an
   optional value: use `Nullable` or a pointer, not a flag.
+  This does not apply to a `string`: "A `string` is already nullable: the
+  empty string." Do not use `Nullable!string`; the empty string says
+  "none".
 * Do not take a value apart to pass its fields to a function that can take
   the value.
 * Do not add a `static assert` that repeats the field names of a struct to
@@ -67,6 +86,9 @@
 * A comment is a sentence that a reader who has not seen the PR can
   understand. When a change makes part of a comment false, rewrite the
   whole comment.
+* A name says what the thing is: "`file` is not a string, `fileName` is."
+  A function that returns the name or path of a file is not named as if it
+  returned a file.
 
 ## Production code (in `source`)
 
