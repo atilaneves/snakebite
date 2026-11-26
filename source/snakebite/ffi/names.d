@@ -17,15 +17,15 @@ module snakebite.ffi.names;
 // (`Names.defineOwn`). `CallPlanStore.chosenCopy` decides which copy is used
 // when the program is made ready to run.
 //
-// A program of several files (a build of each module, issue #1015) holds
-// functions only: a function that only one compile defines
-// (`Definition.rootOwned`) has its symbol in the program file of that
-// compile (`Names.defineHere`), as an object file has the symbol of each of
-// its definitions. A reference to the symbol from any file reaches it. Two
-// definitions of one symbol are an error. A symbol that a file defines goes
-// before the process, as a linker takes object files before libraries
-// (`CallPlanStore.addressIfPresent`). A datum or a template instance that
-// more than one file defines is not covered yet.
+// In a program of several SBC files (a build of each module, issue #1015), a
+// function or a datum that only one compile defines (`Definition.rootOwned`)
+// has its symbol in the SBC file of that compile (`Names.defineHere`), as an
+// object file has the symbol of each of its definitions. A reference to the
+// symbol from any file reaches it. Two definitions of one symbol are an
+// error. A symbol that a file defines goes before the process, as a linker
+// takes object files before libraries (`CallPlanStore.addressIfPresent`). A
+// datum or a template instance that more than one file defines is not
+// covered yet.
 private:
 
 import snakebite.ffi.callplan: NativeSignature;
@@ -192,6 +192,25 @@ public struct FileName {
 }
 
 
+// The definition of a symbol that only one compile defines
+// (`Names.defineHere`): a guest function or a datum of the static data of the
+// program.
+public struct DefinitionHere {
+    // The guest function, or null for a datum. A guest function is a
+    // `const(void)*`, because this module does not know the type that a
+    // backend has for it.
+    public const(void)* guestFunction;
+    // The start of the datum, or null for a guest function. For a
+    // thread-local variable, the datum is the descriptor of the variable
+    // (`snakebite.stack.tls.TlsDescriptor`), from which each thread makes
+    // its own copy.
+    public const(void)* datumStart;
+    // The datum of the static data of the program that `datumStart` is the
+    // start of.
+    public DatumRef datum;
+}
+
+
 // The names of one program. A `Name` never moves, so that its address can
 // stand for the symbol in the program. Names are made under a lock and read
 // without one (ADR-0006).
@@ -229,12 +248,10 @@ public struct Names {
     private bool _fromFile;
     // The names of each program file, when program files made the names.
     private Name[][] _fileChunks;
-    // The guest function of each symbol that only one compile defines
+    // The definition of each symbol that only one compile defines
     // (`defineHere`). Written by a compile to a file, which does not run the
     // program, and by a load, before the program runs: a read takes no lock.
-    // A guest function is a `const(void)*`, because this module does not
-    // know the type that a backend has for it.
-    private const(void)*[string] _definedHere;
+    private DefinitionHere[string] _definedHere;
 
     // The name of the symbol `symbol`, `distance` bytes after its start.
     // `declaredBy` is the declaration of the symbol, kept with a new name. A
@@ -421,11 +438,12 @@ public struct Names {
         return made;
     }
 
-    // `guestFunction` is the definition of `symbol`, which only one compile
-    // defines: a compile to a file gives each such function of its root
-    // modules, and a load each that a file holds. A second definition of one
-    // symbol is an error that names the symbol, as a linker reports it.
-    public void defineHere(in string symbol, const(void)* guestFunction) {
+    // `definition` is the definition of `symbol`, which only one compile
+    // defines: a compile to a file gives each such function and datum of its
+    // root modules, and a load each that a file holds. A second definition
+    // of one symbol is an error that names the symbol, as a linker reports
+    // it.
+    public void defineHere(in string symbol, in DefinitionHere definition) {
         import snakebite.failure.report: SnakebiteException;
 
         // `auto`: `Mutex.lock` is not `const`.
@@ -436,21 +454,19 @@ public struct Names {
             throw new SnakebiteException(
                 "multiple definition of the symbol `" ~ symbol ~ "`",
             );
-        _definedHere[symbol] = guestFunction;
+        _definedHere[symbol] = definition;
     }
 
-    // The guest function that defines `symbol` (`defineHere`), or null.
-    public const(void)* definitionHere(in char[] symbol) const
+    // The definition of `symbol` (`defineHere`), or null.
+    public const(DefinitionHere)* definitionHere(in char[] symbol) const
             @safe pure nothrow @nogc {
-        if (auto found = symbol in _definedHere)
-            return *found;
-        return null;
+        return symbol in _definedHere;
     }
 
     // Each symbol that only one compile defines, with its definition.
     public void eachDefinitionHere(Visit)(scope Visit visit) const {
-        foreach (symbol, guestFunction; _definedHere)
-            visit(symbol, guestFunction);
+        foreach (symbol, ref definition; _definedHere)
+            visit(symbol, definition);
     }
 
     // Each name that has an own copy (`defineOwn`).

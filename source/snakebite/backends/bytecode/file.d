@@ -28,7 +28,7 @@ import snakebite.image.dependency: DependencyImage;
 import snakebite.memory.program: bytesFor, MemoryNeed, pageAlignment,
     ProgramMemory;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
-import snakebite.ffi.names: Name;
+import snakebite.ffi.names: DefinitionHere, Name;
 import snakebite.native.staticstore: StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
@@ -1307,32 +1307,59 @@ private void transferOwnCopies(ref Archive archive, ref Program program) {
 
 
 // The symbols that only the compile of the file defines (`Names.defineHere`):
-// the index of each in the table of symbols and the place of its function.
+// for each function, the index of the symbol in the table of symbols and the
+// place of the function, then for each datum, the index of the symbol and the
+// place of the datum.
 private void transferDefinitionsHere(ref Archive archive, ref Program program) {
-    size_t[] symbols;
-    FunctionPosition[] places;
+    size_t[] functionSymbols;
+    FunctionPosition[] functionPlaces;
+    size_t[] datumSymbols;
+    size_t[3][] datumPlaces;
     if (archive.isWriting)
         program.plans.names.eachDefinitionHere(
-            (string symbol, const(void)* guestFunction) {
-                symbols ~= archive.symbolIndexOfName(symbol);
-                const function_ = cast(const(Function)*) guestFunction;
-                places ~= archive.positionOf(function_);
+            (string symbol, ref const DefinitionHere definition) {
+                const symbolIndex = archive.symbolIndexOfName(symbol);
+                if (const guestFunction = definition.guestFunction) {
+                    functionSymbols ~= symbolIndex;
+                    const function_ = cast(const(Function)*) guestFunction;
+                    functionPlaces ~= archive.positionOf(function_);
+                    return;
+                }
+                const datum = definition.datum;
+                datumSymbols ~= symbolIndex;
+                datumPlaces ~= archive.blocksPosition(
+                    datum.set,
+                    datum.block,
+                    datum.offset,
+                );
             },
         );
     // The load needs the lists only while it runs.
-    transferTemporary(archive, symbols);
-    transferTemporary(archive, places);
+    transferTemporary(archive, functionSymbols);
+    transferTemporary(archive, functionPlaces);
+    transferTemporary(archive, datumSymbols);
+    transferTemporary(archive, datumPlaces);
     if (archive.isWriting)
         return;
-    if (places.length != symbols.length)
+    if (functionPlaces.length != functionSymbols.length
+            || datumPlaces.length != datumSymbols.length)
         throw new SnakebiteException(
             "the program file holds definitions that do not match",
         );
-    foreach (index, place; places)
+    foreach (index, place; functionPlaces) {
+        const guestFunction = archive.functionAt(place[0], place[1]);
         program.plans.names.defineHere(
-            archive.symbolNameAt(symbols[index]),
-            archive.functionAt(place[0], place[1]),
+            archive.symbolNameAt(functionSymbols[index]),
+            DefinitionHere(guestFunction),
         );
+    }
+    foreach (index, place; datumPlaces) {
+        const datum = DatumRef(archive.blocksAt(place[0]), place[1], place[2]);
+        program.plans.names.defineHere(
+            archive.symbolNameAt(datumSymbols[index]),
+            DefinitionHere(null, archive.dataAt(place), datum),
+        );
+    }
 }
 
 

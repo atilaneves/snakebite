@@ -428,10 +428,22 @@ public struct RuntimeTypes {
     // name is `mangled`, as the name of its symbol, which dmd gives it
     // (`TypeInfoDeclaration`).
     private Linked!TypeInfo druntimeTypeInfo(in char[] mangled) {
+        return Linked!TypeInfo.named(plans.names.named(typeInfoSymbol(mangled)));
+    }
+
+    // The symbol of the type information of the type with the mangled name
+    // `mangled`, as dmd names it.
+    private static string typeInfoSymbol(in char[] mangled) {
         import std.conv: text;
 
-        return Linked!TypeInfo.named(plans.names.named(text("_D",
-            9 + mangled.length, "TypeInfo_", mangled, "6__initZ")));
+        enum prefix = "TypeInfo_";
+        return text(
+            "_D",
+            prefix.length + mangled.length,
+            prefix,
+            mangled,
+            "6__initZ",
+        );
     }
 
     // The symbol of the class information of `declaration`.
@@ -507,11 +519,38 @@ public struct RuntimeTypes {
         return linkedClass(declaration).name;
     }
 
+    // The class information `info` that the program built for
+    // `declaration`, as the program refers to it. For a class that only the
+    // root modules define, it is `info`, and an SBC file defines the symbols
+    // of the class information, the vtable and the initial image with them.
+    // For a class that the program and another object can both define
+    // (`hasOwnCopy`), it is the name of the class information
+    // (`ownClassInfo`).
+    public Linked!TypeInfo_Class builtClassInfo(
+        ClassDeclaration declaration, TypeInfo_Class info,
+    ) {
+        if (hasOwnCopy(declaration))
+            return ownClassInfo(declaration, info);
+        // An interface has neither an initial image nor a vtable.
+        if (info.m_init.ptr !is null)
+            _data.defineHere(
+                classSymbol(declaration, "6__initZ"),
+                info.m_init.ptr,
+            );
+        if (info.vtbl.ptr !is null)
+            _data.defineHere(
+                classSymbol(declaration, "6__vtblZ"),
+                info.vtbl.ptr,
+            );
+        _data.defineHere(classInfoSymbol(declaration), cast(const(void)*) info);
+        return Linked!TypeInfo_Class.held(info);
+    }
+
     // The name of the class information of `declaration` (`hasOwnCopy`),
     // with `info`, which the program built, as its own copy, and the names
     // of its vtable and its initial image with theirs. Each name has its
     // copy from the step that makes it (`Names.namedWithOwn`).
-    public Linked!TypeInfo_Class ownClassInfo(
+    private Linked!TypeInfo_Class ownClassInfo(
         ClassDeclaration declaration, TypeInfo_Class info,
     ) {
         Name* named(string symbol, const(void)* start) {
@@ -673,6 +712,13 @@ public struct RuntimeTypes {
             if (auto arg = declaration.argType(1))
                 reference(&info.m_arg2, get(arg));
         }
+        // dmd emits the type information of a struct in the object of the
+        // module that declares it.
+        if (_whereDefined(declaration) == Definition.rootOwned)
+            _data.defineHere(
+                typeInfoSymbol(declaration.type.deco.toDString),
+                cast(const(void)*) info,
+            );
         return *_structs.insert(declaration, info);
     }
 }

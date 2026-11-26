@@ -61,6 +61,33 @@ package(snakebite) bool compilesIntoBuild(
     return instance.inst is instance && instance.needsCodegen;
 }
 
+// Whether the code generator of dmd emits the storage of `variable` in the
+// object of the module that declares it (`dmd.glue.toobj`, the visit of a
+// `VarDeclaration`): a static variable that is not `extern`, not a tuple and
+// not a variable whose address cannot be taken.
+package(snakebite) bool hasStorageInObject(
+    imported!"dmd.declaration".VarDeclaration variable,
+) {
+    import dmd.astenums: STC;
+
+    return variable.aliasTuple is null && variable.canTakeAddressOf
+        && variable.isDataseg && !(variable.storage_class & STC.extern_);
+}
+
+// Whether the code generator of dmd emits the type information of the struct
+// `declaration` in the object of the module that declares it
+// (`dmd.glue.toobj`, the visit of a `StructDeclaration`): a struct that is
+// not anonymous and not only declared, in a compile with type information.
+package(snakebite) bool hasTypeInfoInObject(
+    imported!"dmd.dstruct".StructDeclaration declaration,
+) {
+    import dmd.globals: global;
+    import dmd.mtype: Type;
+
+    return !declaration.isAnonymous && declaration.members !is null
+        && global.params.useTypeInfo && Type.dtypeinfo !is null;
+}
+
 // Named distinctly from every class that extends it (`Collector` in
 // `imagesource.d`, `InlineAsmCollector` and `InlineAsmVersionGate` in
 // `inlineasm.d`): an `extern(C++) class` with no explicit C++ namespace

@@ -5,7 +5,7 @@ private:
 
 import snakebite.ffi.callback: CallbackBridge, CallbackHandler;
 import snakebite.ffi.callplan: CallPlan, NativeSignature, Pending, planOf;
-import snakebite.ffi.names: Linked, Name, Names;
+import snakebite.ffi.names: DefinitionHere, Linked, Name, Names;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.native.address: Target;
@@ -43,7 +43,7 @@ public struct CallPlanStore {
     }
 
     // As `addressOf`, but null for a symbol that no object defines. The order
-    // is that of a linker: a function that a program file defines
+    // is that of a linker: a function or a datum that an SBC file defines
     // (`Names.defineHere`), then, for any other symbol, the copy that
     // `chosenCopy` decides, which is the process or the own copy
     // (`Names.defineOwn`).
@@ -65,10 +65,8 @@ public struct CallPlanStore {
                     name.address, cast(shared(void*)) found);
             }
             else if (auto here = names.definitionHere(name.symbol)) {
-                // Host code calls a guest function through its callback
-                // entry.
                 found = names.keep(name, (own) {
-                    return cast(void*) callbacks.entryOf(here) + name.distance;
+                    return addressOfDefinition(*here) + name.distance;
                 });
             }
             else {
@@ -82,12 +80,23 @@ public struct CallPlanStore {
         return found is Name.absent ? null : found;
     }
 
+    // The address of `definition`, which an SBC file holds: host code calls
+    // a guest function through its callback entry.
+    private void* addressOfDefinition(in DefinitionHere definition) {
+        if (definition.guestFunction is null)
+            return cast(void*) definition.datumStart;
+        return cast(void*) callbacks.entryOf(definition.guestFunction);
+    }
+
     // The guest function that an SBC file defines for the code that `plan`
     // names (`Names.defineHere`), or null.
     public const(void)* guestDefinitionOf(const(CallPlan)* plan) const
             @safe pure nothrow @nogc {
         const name = plan.name;
-        return name is null ? null : names.definitionHere(name.symbol);
+        if (name is null)
+            return null;
+        const here = names.definitionHere(name.symbol);
+        return here is null ? null : here.guestFunction;
     }
 
     // The name of the symbol that `name` reaches: an entry that host code

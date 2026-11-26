@@ -549,6 +549,7 @@ public struct NativeData {
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
         Placed bytes;
         withCompilerLock({
@@ -558,8 +559,25 @@ public struct NativeData {
             }
             bytes = buildInitialBytes(variable, facts);
             _statics.insert(variable, bytes);
+            // The program holds the storage only for a variable that only
+            // the root modules define (`storageName`).
+            defineHere(nativeSymbolName(variable), bytes.ptr);
         });
         return bytes;
+    }
+
+    // The datum that starts at `start` is the definition of `symbol` in an
+    // SBC file, for a datum that only the root modules define
+    // (`Definition.rootOwned`), so that the other files of a program reach
+    // it by name (ADR-0021). A compile to memory refers to the datum by its
+    // address and names nothing, and does not make the symbol.
+    public void defineHere(lazy string symbol, const(void)* start) {
+        import snakebite.ffi.names: DefinitionHere;
+
+        if (!recordRelocs)
+            return;
+        const datum = addressOfData(start).target.datum;
+        planStore.names.defineHere(symbol, DefinitionHere(null, start, datum));
     }
 
     // The storage of `variable` as the start data of the program hold it
@@ -655,6 +673,7 @@ public struct NativeData {
             return *found;
 
         import snakebite.frontend.compiler: withCompilerLock;
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
         Placed descriptor;
         withCompilerLock({
@@ -671,9 +690,14 @@ public struct NativeData {
             // other variable.
             bool named;
             bool ownCopy;
+            // Only the root modules define the variable: an SBC file defines
+            // its symbol with the descriptor, from which each thread makes
+            // its own copy (`TlsSlots.slotFor`).
+            bool definedHere;
             final switch (_whereDefined(variable)) with (Definition) {
                 case rootOwned:
                     ownCopy = true;
+                    definedHere = true;
                     break;
                 case rootOrElsewhere:
                     named = true;
@@ -684,8 +708,6 @@ public struct NativeData {
                     break;
             }
             if (named) {
-                import snakebite.frontend.dmd.mangle: nativeSymbolName;
-
                 nativeName = nativeSymbolName(variable);
                 declaredBy = variable.toString;
             }
@@ -710,6 +732,8 @@ public struct NativeData {
                     Address(Target.Kind.staticData, template_.ptr,
                         template_.where));
             _tlsDescriptors.insert(variable, descriptor);
+            if (definedHere)
+                defineHere(nativeSymbolName(variable), descriptor.ptr);
         });
         return descriptor;
     }

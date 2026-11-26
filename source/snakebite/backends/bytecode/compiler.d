@@ -58,18 +58,24 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 // the member list of a module, and a walk must not iterate a list that grows.
 private extern(C++) final class EagerCompileCollector
         : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
-    import snakebite.frontend.ast: FuncDeclaration;
+    import snakebite.frontend.ast: ClassDeclaration, Dsymbol, FuncDeclaration,
+        InterfaceDeclaration, StructDeclaration, VarDeclaration;
     import snakebite.language.definition: Definition;
     import snakebite.frontend.declarationcollector: DeclarationCollector;
+    import snakebite.program: Program;
     alias visit = DeclarationCollector.visit;
 
     private Bytecode _bytecode;
+    // The source program of `_bytecode`, which decides where each
+    // declaration is defined.
+    private const Program _program;
     private bool[FuncDeclaration] _visited;
     // The functions to compile, in the order that the walks found them.
     private FuncDeclaration[] _found;
 
-    this(Bytecode bytecode) {
+    this(Bytecode bytecode, const Program program) {
         _bytecode = bytecode;
+        _program = program;
     }
 
     override void visit(FuncDeclaration function_) {
@@ -85,6 +91,46 @@ private extern(C++) final class EagerCompileCollector
             case definedElsewhere:
                 break;
         }
+    }
+
+    // An SBC file holds each datum that its root modules define, as an
+    // object file does, also a datum that no code of the compile uses:
+    // another file of the program can use it by name (ADR-0021).
+    override void visitVarDecl(VarDeclaration variable) {
+        import snakebite.frontend.declarationcollector: hasStorageInObject;
+        import snakebite.frontend.typefacts: isThreadLocalStorage;
+
+        super.visitVarDecl(variable);
+        if (!variable.hasStorageInObject || !definedHere(variable))
+            return;
+        if (variable.isThreadLocalStorage)
+            _bytecode._world.data.tlsDescriptorOf(variable);
+        else
+            _bytecode._world.data.storageOf(variable);
+    }
+
+    override void visit(StructDeclaration declaration) {
+        import snakebite.frontend.declarationcollector: hasTypeInfoInObject;
+
+        super.visit(declaration);
+        if (declaration.hasTypeInfoInObject && definedHere(declaration))
+            _bytecode._world.types.get(declaration.type);
+    }
+
+    // The code generator of dmd emits no class information of a class that
+    // is only declared.
+    override void visit(ClassDeclaration declaration) {
+        super.visit(declaration);
+        if (declaration.members !is null && definedHere(declaration))
+            _bytecode._world.classRuntimeInfo(declaration);
+    }
+
+    override void visit(InterfaceDeclaration declaration) {
+        visit(cast(ClassDeclaration) declaration);
+    }
+
+    private bool definedHere(Dsymbol declaration) {
+        return _program.whereDefined(declaration) == Definition.rootOwned;
     }
 
     // Compiles each function found, then walks its body and compiles the
@@ -206,8 +252,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
     // Compiles the whole program and writes it to `path`. The compile is the
     // one a run makes, except that every function of the root modules with a
-    // body compiles, not only those that run, the compiler records the
-    // relocations, and no
+    // body compiles, not only those that run, each datum that the root
+    // modules define is made, the compiler records the relocations, and no
     // function is made ready to run (`Program.complete`). What a
     // first run fills lazily is filled first: each start handle, and the callee
     // of each guest call site. A template instance that the frontend adds
@@ -226,7 +272,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         // Under the frontend lock: another thread's semantic analysis can
         // append template instances to a member list that the walks iterate.
         withCompilerLock({
-            scope collector = new EagerCompileCollector(this);
+            scope collector = new EagerCompileCollector(this, _program);
             foreach (module_; _program.rootModules)
                 (cast() module_).accept(collector); // DMD visitors need mutable nodes.
             collector.compileFound;
@@ -827,11 +873,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             // modules define, as an object file does, so that the other
             // files of a program reach it by name (ADR-0021).
             if (compiledProgram.recordsAddresses) {
+                import snakebite.ffi.names: DefinitionHere;
+
                 const where = _world.callSelection.whereDefined(function_);
                 if (where == Definition.rootOwned)
                     compiledProgram.plans.names.defineHere(
                         function_.mangledNameOf.idup,
-                        placeholder,
+                        DefinitionHere(placeholder),
                     );
             }
             if (outermost)

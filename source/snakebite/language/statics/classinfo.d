@@ -37,10 +37,10 @@ public struct Hooks {
     // Whether the program and another object can both define the class
     // information of a class (`RuntimeTypes.hasOwnCopy`).
     public bool delegate(ClassDeclaration declaration) hasOwnCopy;
-    // The name of the class information of such a class, with the one that
-    // the program built as its own copy (`RuntimeTypes.ownClassInfo`).
+    // The class information that the program built for a class, as the
+    // program refers to it (`RuntimeTypes.builtClassInfo`).
     public Linked!TypeInfo_Class delegate(
-        ClassDeclaration declaration, TypeInfo_Class info) ownClassInfo;
+        ClassDeclaration declaration, TypeInfo_Class info) builtClassInfo;
 }
 
 // How many pointers `typeid(object)` follows from the object reference
@@ -224,10 +224,10 @@ public Linked!TypeInfo_Class classRuntimeInfo(
             declaration), (void*).sizeof);
 
     // Register before resolving methods: their bodies can refer to this
-    // same class while its metadata is being built. The name is made with
-    // its own copy.
-    auto result = ownCopy ? hooks.ownClassInfo(declaration, info)
-        : Linked!TypeInfo_Class.held(info);
+    // same class while its metadata is being built.
+    // `auto`: a `const` result would make the name that it holds const, and
+    // the cache keeps a mutable one.
+    auto result = hooks.builtClassInfo(declaration, info);
     cache[declaration] = result;
     if (hooks.registerGenerated !is null)
         hooks.registerGenerated(declaration, info);

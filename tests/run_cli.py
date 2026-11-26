@@ -4073,6 +4073,71 @@ def test_build_module_call_to_a_name_runs_as_native_code(
     assert guest_lines(built) == native.stdout.splitlines(), output(built)
 
 
+# With `--build=module`, data that one module defines and another module uses
+# are one datum, as in native code built one module at a time: a `__gshared`
+# variable that both modules read and write, a thread-local variable of which
+# each thread has its own copy, the class information, the vtable and the
+# initial image of a class that only the other module uses, and the type
+# information of a struct.
+def test_build_module_data_of_another_module_run_as_native_code(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl",
+          f'name "{dub_name("build-module-data")}"\ntargetType "library"\n')
+    write(app / "source" / "b.d", """
+        module b;
+        __gshared int total = 10;
+        int perThread = 1;
+        class Base { int value() { return 0; } }
+        class C : Base {
+            int x;
+            this(int x) { this.x = x; }
+            override int value() { return x; }
+        }
+        struct S { int a = 7; long b = 9; }
+        void bump() { total += 1; }
+        int totalInB() { return total; }
+        int perThreadInB() { return perThread; }
+        TypeInfo structInfoInB() { return typeid(S); }
+        """)
+    write(app / "source" / "a.d", """
+        module a;
+        import b;
+        import core.thread: Thread;
+        import std.stdio: writeln;
+        unittest {
+            total += 5;
+            bump;
+            writeln(total, " ", totalInB);
+            perThread = 2;
+            int other;
+            auto thread = new Thread({
+                other = perThread;
+                perThread = 3;
+                other = other * 10 + perThreadInB;
+            });
+            thread.start;
+            thread.join;
+            writeln(perThread, " ", perThreadInB, " ", other);
+            Base base = new C(5);
+            writeln(base.value);
+            auto c = cast(C) base;
+            writeln(c !is null, " ", c.x, " ", typeid(base).name);
+            writeln(typeid(base) is typeid(C));
+            writeln(typeid(S).name, " ", typeid(S) is structInfoInB);
+            writeln(S.init.a, " ", S.init.b, " ", typeid(S).initializer.length);
+        }
+        """)
+    native = subprocess.run(
+        ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
+        capture_output=True, check=False, text=True, timeout=300, cwd=app)
+    assert native.returncode == 0, output(native)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert built.returncode == 0, output(built)
+    assert guest_lines(built) == native.stdout.splitlines(), output(built)
+
+
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(
