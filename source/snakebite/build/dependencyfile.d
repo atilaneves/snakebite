@@ -33,21 +33,31 @@ public void writeDependencyFile(
 
 // Writes to `path` the rule of the file `compilerRule`, which a host compiler
 // wrote with `-makedeps` for its output `compilerTarget`, with `target` in
-// place of that output.
+// place of that output and without the files `intermediates`. An
+// intermediate file is one that the command writes and removes: it is no
+// input of the build.
 public void writeRetargetedDependencyFile(
     in string path,
     in string target,
     in string compilerRule,
     in string compilerTarget,
+    in string[] intermediates,
 ) {
     import snakebite.failure.report: internalFailure;
     import snakebite.frontend.compiler: escapedMakePath;
+    import std.algorithm.iteration: fold;
     import std.algorithm.searching: startsWith;
     import std.file: readText, write;
+    import std.string: replace;
 
     const rule = compilerRule.readText;
     const named = escapedMakePath(compilerTarget) ~ ":";
     if (!rule.startsWith(named))
         internalFailure("the compiler's dependency file names another target");
-    path.write(escapedMakePath(target) ~ ":" ~ rule[named.length .. $]);
+    // Each input has this form in the file that `-makedeps` writes.
+    const inputs = intermediates.fold!((text, intermediate) => text.replace(
+        " \\\n  " ~ escapedMakePath(intermediate),
+        "",
+    ))(rule[named.length .. $]);
+    path.write(escapedMakePath(target) ~ ":" ~ inputs);
 }

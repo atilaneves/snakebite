@@ -12,10 +12,10 @@ private:
 // It runs in the project directory DIR, where the host compiler finds the
 // configuration of the project. As for a D compiler, a file whose name ends
 // in `.d` is an image source and any other file is a linker file. It writes
-// the image module of the image sources (`imageModuleText`) to `FILE.d`,
-// compiles it and the image sources with the host compiler, links them with
-// the linker files to FILE, and writes `FILE.dep`: the files that the host
-// compiler read.
+// the image module of the image sources (`imageModuleText`), compiles it and
+// the image sources with the host compiler, links them with the linker files
+// to FILE, and writes `FILE.dep`: the files that the host compiler read, but
+// the image module, which the command removes.
 public int image(string[] args) {
     import snakebite.build.dependencyfile: writeRetargetedDependencyFile;
     import snakebite.image.preparation:
@@ -63,11 +63,11 @@ public int image(string[] args) {
         deferStartup,
     );
 
-    const modulePath = output ~ ".d";
-    modulePath.write(imageModuleText(sources, deferStartup));
     const staging = output ~ ".staging";
     staging.mkdirRecurse;
     scope(exit) staging.rmdirRecurse;
+    const modulePath = staging.buildPath("image.d");
+    modulePath.write(imageModuleText(sources, deferStartup));
     const compilerRule = staging.buildPath("image.o.dep");
     const objectPath = build.make(
         [modulePath] ~ sources,
@@ -75,7 +75,12 @@ public int image(string[] args) {
         output,
         compilerRule,
     );
-    writeRetargetedDependencyFile(output ~ ".dep", output, compilerRule,
-        objectPath);
+    writeRetargetedDependencyFile(
+        output ~ ".dep",
+        output,
+        compilerRule,
+        objectPath,
+        [modulePath],
+    );
     return 0;
 }
