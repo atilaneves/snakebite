@@ -20,7 +20,7 @@ public int run(
     ref StartData start,
     ref const imported!"snakebite.backends.statistics".CompilationStatistics
         compilation,
-    in string[] hostArguments = null,
+    in string[] hostArguments,
 ) {
     import snakebite.run.modules: GuestModules;
 

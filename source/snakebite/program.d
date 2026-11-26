@@ -32,10 +32,6 @@ public struct Program {
     private HostActions _actions;
     // Prepared for this project's execution before any guest code runs.
     const(DependencyImage)* dependencyImage;
-    // Whether the program is a snippet: a program from the REPL or from a
-    // unit test of `sb`, which has no native equivalent. A snippet runs its
-    // module constructors and `main` directly, with no unit tests.
-    bool isSnippet = true;
 
     // The entry point is the module-level `main` of the root modules, which
     // can be one at most. `checks` are the ones the frontend analysed

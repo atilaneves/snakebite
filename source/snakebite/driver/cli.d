@@ -35,14 +35,14 @@ public int run(string[] args) {
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
         executeBackend, executeLoaded, PreparationReport, prepareSources,
-        programName, runProject, saveProgram;
+        runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.build: Build, buildFiles, buildProject, isCommand,
         runCommand;
     import snakebite.memory.gc: selectFrontendMemory;
     import std.file: chdir, exists, isDir;
-    import std.path: absolutePath, buildNormalizedPath;
+    import std.path: absolutePath, baseName, buildNormalizedPath;
     import std.stdio: stderr, stdout, write;
     import std.typecons: nullable;
 
@@ -77,19 +77,20 @@ public int run(string[] args) {
             projectDirectory = fetchProject(projectDirectory);
         if (parsed.options.build == Build.project) {
             const directory = projectDirectory.absolutePath.buildNormalizedPath;
-            // Mutable: the report keeps its duration.
             auto ninja = buildProject(directory);
-            if (ninja.status != 0)
+            if (ninja.isNull)
                 return 1;
-            chdir(ninja.workingDirectory);
+            // Mutable: the loaded program closes the file.
+            auto built = ninja.get;
+            chdir(built.workingDirectory);
             const report = executeLoaded(
-                ninja.program,
-                [programName(directory)] ~ parsed.options.programArguments,
+                built.program,
+                [directory.baseName] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit),
-                buildFiles(directory).image,
+                nullable(buildFiles(directory).image),
             );
             _statistics = Statistics(true, PreparationReport.init, report,
-                nullable(ninja.duration));
+                nullable(built.duration));
             return report.status;
         }
         return runProject(
@@ -119,7 +120,7 @@ public int run(string[] args) {
                 const report = executeBackend(
                     parsed.options.backend,
                     preparation.project.program,
-                    [programName(preparation.project.directory)]
+                    [preparation.project.directory.baseName]
                         ~ parsed.options.programArguments,
                     false,
                     true,

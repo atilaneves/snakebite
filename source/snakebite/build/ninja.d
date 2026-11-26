@@ -20,8 +20,7 @@ public void writeBuildFile(in string directory) {
     const text = buildFileText(directory, sources,
         dubBuildInputs(description, sources.files));
     files.directory.mkdirRecurse;
-    writeChanged(files.workingDirectory, sources.workingDirectory.length
-        ? sources.workingDirectory : directory);
+    writeChanged(files.workingDirectory, sources.runDirectory(directory));
     if (writeChanged(files.ninjaFile, text))
         return;
     // The run that makes the text can make an input of it, as dub makes its
@@ -120,7 +119,7 @@ private string buildFileText(
             ~ sources.files ~ frontendConfiguration ~ sources.linkerFiles)
         .filter!(path => !libraries.canFind(path)).array.dup.sort.uniq.array;
 
-    text ~= statement([files.ninjaFile], "generate", null, generatorInputs);
+    text ~= statement([files.ninjaFile, files.workingDirectory], "generate", null, generatorInputs);
     text ~= statement(sourceInputs, "phony", null, null);
     if (libraries.length)
         text ~= "\n" ~ statement(libraries, "dependencies", null, dependencyInputs);

@@ -26,6 +26,8 @@ unittest {
             program,
             0,
             1,
+            enterWorkingDirectory: null,
+            arguments: ["benchmark"],
         );
 
         report.passed.should == true;

@@ -7,6 +7,9 @@ module snakebite.build;
 private:
 
 
+import std.typecons: Nullable;
+
+
 // What `--build` selects: no build, or one compile of the root package.
 public enum Build { off, project }
 
@@ -82,16 +85,16 @@ public BuildFiles buildFiles(in string directory) {
 }
 
 
+// What a ninja run that succeeded gives.
 public struct NinjaRun {
     import core.time: Duration;
 
-    public int status;
     public Duration duration;
-    // The program file that the build wrote, open, when `status` is 0. A
-    // later build replaces the file under its name, so the open file keeps
-    // the program of this build.
+    // The program file that the build wrote, open. A later build replaces
+    // the file under its name, so the open file keeps the program of this
+    // build.
     public imported!"std.stdio".File program;
-    // The directory that the program runs in, when `status` is 0.
+    // The directory that the program runs in.
     public string workingDirectory;
 }
 
@@ -135,13 +138,15 @@ private struct BuildLock {
 // `directory`, and writes the file first when it does not exist. ninja
 // starts the commands that make the program, if they must run. The run holds
 // the lock of the build from before it checks `build.ninja` until it has the
-// program file open, so no other run changes a build file in between.
-public NinjaRun buildProject(in string directory) {
+// program file open, so no other run changes a build file in between. The
+// result is null when ninja fails.
+public Nullable!NinjaRun buildProject(in string directory) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.file: exists, mkdirRecurse, readText;
     import std.process: spawnProcess, wait;
     import std.stdio: File, stderr, stdout;
+    import std.typecons: nullable;
 
     const files = buildFiles(directory);
     files.directory.mkdirRecurse;
@@ -156,9 +161,9 @@ public NinjaRun buildProject(in string directory) {
         .wait;
     const duration = stopWatch.peek;
     if (status != 0)
-        return NinjaRun(status, duration);
-    return NinjaRun(status, duration, File(files.program, "rb"),
-        files.workingDirectory.readText);
+        return Nullable!NinjaRun();
+    return nullable(NinjaRun(duration, File(files.program, "rb"),
+        files.workingDirectory.readText));
 }
 
 

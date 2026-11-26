@@ -38,7 +38,7 @@ import snakebite.language.call.druntimehook: DruntimeHook, planOf;
 import snakebite.language.storage.resolver: planSlice;
 import snakebite.ffi: CallbackCall, PlanCache;
 import snakebite.ffi.callplan: CallPlan;
-import std.typecons: Flag, No, Yes;
+import std.typecons: Flag, No, Nullable, nullable, Yes;
 
 
 // A pointer-sized temporary's facts: the shape every address this compiler
@@ -230,7 +230,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
         const image = _program.dependencyImage;
         saveProgram(compiledProgram,
-            Header(generatorKey, image is null ? "" : image.path), path);
+            Header(generatorKey, image is null
+                ? Nullable!string() : nullable(image.path)), path);
     }
 
     // Fills the callee of every guest call site, compiling the callees, until

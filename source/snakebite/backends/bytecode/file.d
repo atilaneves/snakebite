@@ -47,9 +47,10 @@ public struct Header {
     // Names the build that wrote the file (`generatorKey`).
     public string buildKey;
     // The dependency image that the program was compiled with, as an
-    // executable names the libraries that it needs. Empty for none, and in an
-    // SBC file: the run that puts a program together gives the image.
-    public string imagePath;
+    // executable names the libraries that it needs. Null for a program with
+    // none, and in an SBC file: the run that puts a program together gives
+    // the image.
+    public Nullable!string imagePath;
 }
 
 
@@ -68,6 +69,8 @@ public void saveProgram(
 
     auto file = Archive.writing(program);
     file.text(magic);
+    // The walk takes a mutable record, and `auto` keeps `const` of `header`;
+    // a write changes nothing in it.
     Header written = header;
     transferHeader(file, written);
     // The memory that the load of the rest takes, before the rest: the save

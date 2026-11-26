@@ -226,7 +226,7 @@ private BackendReport[] benchmarkAll(
 ) {
     import bench.oracle: oracleName, oracleReport;
     import snakebite.backends: Backends, backendIdentity;
-    import snakebite.driver.execution: programName;
+    import std.path: baseName;
 
     BackendReport[] reports;
     static foreach (BackendType; Backends)
@@ -238,7 +238,7 @@ private BackendReport[] benchmarkAll(
                 options.warmup,
                 options.runs,
                 enterWorkingDirectory,
-                [programName(project.directory)] ~ options.programArguments,
+                [project.directory.baseName] ~ options.programArguments,
                 imported!"snakebite.backends.bytecode.vm".JitSetting(
                     !options.noJit),
             );
@@ -275,8 +275,8 @@ public BackendReport benchmark(
     imported!"snakebite.backends".Program program,
     in uint warmup,
     in uint runs,
-    in void delegate() enterWorkingDirectory = null,
-    in string[] arguments = null,
+    in void delegate() enterWorkingDirectory,
+    in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit =
         imported!"snakebite.backends.bytecode.vm".JitSetting.init,
 ) {
@@ -356,13 +356,14 @@ private string headerLine(
     in Options options,
 ) {
     import bench.report: milliseconds;
-    import snakebite.driver.execution: discoveryLabel, programName;
+    import snakebite.driver.execution: discoveryLabel;
     import std.conv: text;
+    import std.path: baseName;
 
     // Both one-off costs a user pays before any backend runs: finding out
     // what to run the frontend on, then the frontend itself.
     return text(
-        programName(preparation.project.directory),
+        preparation.project.directory.baseName,
         "   ", discoveryLabel(preparation), " ",
         milliseconds(preparation.discovery),
         "   frontend ", milliseconds(preparation.duration),

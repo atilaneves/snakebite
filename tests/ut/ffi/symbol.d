@@ -581,7 +581,6 @@ static foreach (backend; Matrix!()) {
                 "module live_preparation;\n" ~ code);
             auto project = prepareProject(sandbox.inSandboxPath("app"),
                 nativeDependencies: false).project;
-            project.program.isSnippet = true;
             size_t analyses;
             Program liveProgram() {
                 ++analyses;
@@ -592,14 +591,16 @@ static foreach (backend; Matrix!()) {
             (cold is null).should == true;
             analyses.should == 1;
             executeBackend(backendIdentity!backend, project.program,
-                collectGarbage: false).status.should == 42;
+                ["live_preparation"], collectGarbage: false,
+                isSnippet: true).status.should == 42;
 
             const warm = prepareDependencies(project.directory,
                 project.sources, &liveProgram, Optimise.no);
             (warm is null).should == true;
             analyses.should == 1;
             executeBackend(backendIdentity!backend, project.program,
-                collectGarbage: false).status.should == 42;
+                ["live_preparation"], collectGarbage: false,
+                isSnippet: true).status.should == 42;
 
             // Entry startup settings differ from a live session. A separate
             // record must still preserve this program and reuse its analysis.
@@ -612,7 +613,8 @@ static foreach (backend; Matrix!()) {
             (liveHit is null).should == true;
             analyses.should == 2;
             executeBackend(backendIdentity!backend, project.program,
-                collectGarbage: false).status.should == 42;
+                ["live_preparation"], collectGarbage: false,
+                isSnippet: true).status.should == 42;
         }
     }
 }

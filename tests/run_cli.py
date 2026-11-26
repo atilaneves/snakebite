@@ -3163,10 +3163,14 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
 
 
 # The offset of the first of the two memory sizes of a program file: after
-# the magic text and the two strings of the header.
+# the magic text, the build key and the optional image path of the header.
 def memory_size_offset(contents: bytes) -> int:
     offset = len(b"snakebite-program-v1\n")
-    for _ in range(2):
+    length = int.from_bytes(contents[offset:offset + 8], "little")
+    offset += 8 + length
+    named = contents[offset]
+    offset += 1
+    if named:
         length = int.from_bytes(contents[offset:offset + 8], "little")
         offset += 8 + length
     return offset
@@ -3339,6 +3343,33 @@ def test_build_project_starts_the_program_as_bin_sb(tmp_path: Path) -> None:
         assert_runs_as_bin_sb(built, direct)
         assert f"app in {(app / 'views').resolve()}" in guest_lines(built), \
             output(built)
+
+
+# A state directory from before the working directory was written: the
+# `build.ninja` is up to date and the file is missing. The run writes it again
+# and the program runs in the `workingDirectory` of the recipe.
+def test_build_project_writes_missing_working_directory_again(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project(tmp_path, "build-project-old-state", """
+        unittest {
+            import std.file: getcwd;
+            const cwd = getcwd;
+            printf("in %.*s\\n", cast(int) cwd.length, cwd.ptr);
+        }
+        """)
+    with (app / "dub.sdl").open("a") as recipe:
+        recipe.write('workingDirectory "views"\n')
+    first = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert first.returncode == 0, output(first)
+    states = list(tmp_path.rglob("working-directory"))
+    assert len(states) == 1, states
+    states[0].unlink()
+
+    again = run_sb("--build=project", str(app), cwd=tmp_path)
+    assert again.returncode == 0, output(again)
+    assert f"in {(app / 'views').resolve()}" in guest_lines(again), \
+        output(again)
 
 
 # The frontend runs, and prints the message of the `pragma(msg)`, only in a

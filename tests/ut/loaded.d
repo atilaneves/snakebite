@@ -9,6 +9,7 @@ import snakebite.driver.execution: LoadedProgram, loadProgramFile;
 import snakebite.frontend.ast: FuncDeclaration;
 import snakebite.program: Program;
 import snakebite.start.data: StartData;
+import std.typecons: Nullable;
 import std.conv: text;
 
 
@@ -78,8 +79,8 @@ public struct LoadedOwner {
         import std.range: chunks;
 
         _backend = LoadedBytecode(loadProgramFile(
-            saved.bytes.chunks(partSize), saved.bytes.length, saved.jit),
-            saved);
+            saved.bytes.chunks(partSize), saved.bytes.length, saved.jit,
+            Nullable!string()), saved);
     }
 
     ~this() {

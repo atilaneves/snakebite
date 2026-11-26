@@ -172,7 +172,8 @@ private int programStatus(Backend)(in Sandbox sandbox, in string code) {
         ~ crtTrace ~ code;
     auto program = Program([parseSnippet(source)]);
     auto instance = ownedBackend!Backend(program);
-    return run(instance.startData, instance.compilationStatistics);
+    return run(instance.startData, instance.compilationStatistics,
+        ["snakebite"]);
 }
 
 
