@@ -512,7 +512,7 @@ private extern(C++) class Collector
             // A backend executes every other instance (docs/adr/0009); the
             // walk of the body comes after the cheap tests.
             if (instance.tempdecl !is null
-                    && !_program.isRootOwned(instance.tempdecl)
+                    && !onlyRootDefines(instance.tempdecl)
                     && !isImportCBuiltins(instance.tempdecl.getModule)
                     && !function_.needThis && !function_.isNested
                     && !hasFunctionLocalType(instance)
@@ -565,6 +565,19 @@ private extern(C++) class Collector
             return named;
         });
         return named;
+    }
+
+    // Whether only the root modules define `declaration`.
+    private extern(D) bool onlyRootDefines(Dsymbol declaration) {
+        import snakebite.language.definition: Definition;
+
+        final switch (_program.whereDefined(declaration)) with (Definition) {
+            case rootOwned:
+                return true;
+            case rootOrElsewhere:
+            case definedElsewhere:
+                return false;
+        }
     }
 
     override void visit(CallExp expression) {

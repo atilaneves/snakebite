@@ -21,13 +21,13 @@ public struct RuntimeTypes {
     import object:
         TypeInfo, TypeInfo_Class, TypeInfo_Interface, TypeInfo_Struct;
     import snakebite.ffi.callplanstore: CallPlanStore;
+    import snakebite.language.definition: Definition;
     import snakebite.ffi.names: Linked, Name;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.language.statics.data: NativeData;
     import snakebite.native.value: TypeFacts;
 
-    private bool delegate(Dsymbol) const _isRootOwned;
-    private bool delegate(Dsymbol) const _isDefinedElsewhere;
+    private Definition delegate(Dsymbol) const _whereDefined;
     private Linked!TypeInfo_Class _throwableInfo;
     private Linked!(void*) delegate(FuncDeclaration, ptrdiff_t) _methodAddress;
     private Linked!TypeInfo_Class delegate(ClassDeclaration) _classInfo;
@@ -55,20 +55,18 @@ public struct RuntimeTypes {
         return _data.planStore;
     }
 
-    // `isRootOwned` is the owning `Program`'s own decision
-    // (`Program.isRootOwned`), not a copy of its root module list: a
+    // `whereDefined` is the owning `Program`'s own decision
+    // (`Program.whereDefined`), not a copy of its root module list: a
     // guest class or struct's `TypeInfo` and a guest function's call
-    // target ask the one question "does this program itself declare
-    // `declaration`" the same way.
+    // target ask the one question "where is `declaration` defined" the same
+    // way.
     public this(
-        bool delegate(Dsymbol) const isRootOwned,
-        bool delegate(Dsymbol) const isDefinedElsewhere,
+        Definition delegate(Dsymbol) const whereDefined,
         Linked!(void*) delegate(FuncDeclaration, ptrdiff_t) methodAddress,
         Linked!TypeInfo_Class delegate(ClassDeclaration) classInfo,
         NativeData* data,
     ) {
-        _isRootOwned = isRootOwned;
-        _isDefinedElsewhere = isDefinedElsewhere;
+        _whereDefined = whereDefined;
         enum throwable = "_D" ~ Throwable.mangleof[1 .. $] ~ "7__ClassZ";
         _methodAddress = methodAddress;
         _classInfo = classInfo;
@@ -272,11 +270,7 @@ public struct RuntimeTypes {
         if (inFrontend!"builtinTypeInfo"(type))
             return druntimeTypeInfo(type.deco.toDString);
         auto own = ownInfo(type);
-        auto classType = type.isTypeClass;
-        auto structType = type.isTypeStruct;
-        const rootOwned = classType !is null && isRootOwned(classType.sym)
-            || structType !is null && isRootOwned(structType.sym);
-        if (rootOwned || own.name !is null || type.vtinfo is null)
+        if (isRootOwned(type) || own.name !is null || type.vtinfo is null)
             return own;
         // dmd emits this type information in each object that needs it, so
         // the program and another object can both define it: its name, with
@@ -285,6 +279,25 @@ public struct RuntimeTypes {
         return Linked!TypeInfo.named(plans.names.namedWithOwn(
             type.vtinfo.ident.toString, 0, string.init, start,
             _data.addressOfData(start).target.datum));
+    }
+
+    // Whether `type` is a struct or a class that only the root modules
+    // define.
+    private bool isRootOwned(Type type) const {
+        Dsymbol declaration;
+        if (auto classType = type.isTypeClass)
+            declaration = classType.sym;
+        else if (auto structType = type.isTypeStruct)
+            declaration = structType.sym;
+        if (declaration is null)
+            return false;
+        final switch (_whereDefined(declaration)) with (Definition) {
+            case rootOwned:
+                return true;
+            case rootOrElsewhere:
+            case definedElsewhere:
+                return false;
+        }
     }
 
     // The type information of `type` that the program builds, or for a class
@@ -409,10 +422,6 @@ public struct RuntimeTypes {
             }
         }
         return Linked!TypeInfo.held(info);
-    }
-
-    public bool isRootOwned(Dsymbol declaration) const {
-        return _isRootOwned(declaration);
     }
 
     // The type information that druntime defines for the type whose mangled
@@ -547,12 +556,20 @@ public struct RuntimeTypes {
     }
 
     private LinkedClass findLinkedClass(ClassDeclaration declaration) {
-        if (_isDefinedElsewhere(declaration))
-            return LinkedClass(Linked!TypeInfo_Class.named(plans.names.named(
-                classInfoSymbol(declaration), 0, declaration.toString)));
-        if (isRootOwned(declaration))
-            return LinkedClass.init;
-        return LinkedClass(Linked!TypeInfo_Class.init, true);
+        final switch (_whereDefined(declaration)) with (Definition) {
+            case definedElsewhere:
+                // `auto`: `const` makes the `Name*` that `named` takes const.
+                auto symbol = plans.names.named(
+                    classInfoSymbol(declaration),
+                    0,
+                    declaration.toString,
+                );
+                return LinkedClass(Linked!TypeInfo_Class.named(symbol));
+            case rootOwned:
+                return LinkedClass.init;
+            case rootOrElsewhere:
+                return LinkedClass(Linked!TypeInfo_Class.init, true);
+        }
     }
 
     private TypeInfo_Enum enumInfo(EnumDeclaration declaration) {
