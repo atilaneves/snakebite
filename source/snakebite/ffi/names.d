@@ -13,26 +13,29 @@ module snakebite.ffi.names;
 //
 // A datum that the program and another object can both define (a static
 // variable of a template instance, the type information that dmd emits in
-// each object that needs it) is a name with the program's own copy
-// (`Names.defineOwn`). `CallPlanStore.chosenCopy` decides which copy is used
-// when the program is made ready to run.
+// each object that needs it) is, in a compile to memory, a name with the
+// program's own copy (`Names.namedWithOwn`). `CallPlanStore.chosenCopy`
+// decides which copy is used when the program is made ready to run.
 //
 // In a program of several SBC files (a build of each module, issue #1015), a
 // function or a datum that only one compile defines (`Definition.rootOwned`)
 // has its symbol in the SBC file of that compile (`Names.defineHere`), as an
 // object file has the symbol of each of its definitions. A reference to the
-// symbol from any SBC file reaches it. Two definitions of one symbol are an
-// error. A symbol that an SBC file defines goes before the process, as a
+// symbol from any SBC file reaches it. Two such definitions of one symbol are
+// an error. A symbol that an SBC file defines goes before the process, as a
 // linker takes object files before libraries
-// (`CallPlanStore.addressIfPresent`). A datum or a template instance that
-// more than one SBC file defines has one copy in each SBC file, where native
-// code has one copy in the program (issue #1115).
+// (`CallPlanStore.addressIfPresent`). A function or a datum that more than
+// one compile can define (`Definition.rootOrElsewhere`: what a template
+// instance holds) has a weak definition in each SBC file that holds it, as a
+// native object file has: the program uses the copy of the process when
+// there is one, else the copy of the first SBC file (issue #1115).
 private:
 
 import snakebite.ffi.callplan: NativeSignature;
 import snakebite.host.sharedtable: SharedTable;
 import snakebite.native.address: DatumRef;
 import std.sumtype: SumType;
+import std.typecons: Flag;
 
 
 // A symbol, as the program refers to it.
@@ -44,7 +47,6 @@ public struct Name {
     private string _declaredBy;
     private Adjusted* _adjusted;
     private const(void)* _own;
-    private DatumRef _ownDatum;
 
     // The symbol, as the linker names it. Empty for an adjusted entry.
     public string symbol() const @safe pure nothrow @nogc {
@@ -73,12 +75,6 @@ public struct Name {
     // the program and another object can both define, or null.
     public const(void)* own() const @safe pure nothrow @nogc {
         return _own;
-    }
-
-    // The datum of the static data of the program that `own` is the start
-    // of.
-    public DatumRef ownDatum() const @safe pure nothrow @nogc {
-        return _ownDatum;
     }
 
     // What `CallPlanStore.addressIfPresent` found: the address, `absent`, or
@@ -202,11 +198,23 @@ public struct GuestFunction {
 }
 
 
-// The definition of a symbol that only one compile defines
-// (`Names.defineHere`): a guest function, or a datum of the static data of
-// the program. The datum of a thread-local variable is its descriptor
+// What defines a symbol in an SBC file (`Names.defineHere`): a guest
+// function, or a datum of the static data of the program. The datum of a
+// thread-local variable is its descriptor
 // (`snakebite.stack.tls.TlsSlots.descriptorOf`).
 public alias DefinitionHere = SumType!(GuestFunction, DatumRef);
+
+
+// A definition of a symbol in an SBC file (`Names.defineHere`).
+public struct SymbolDefinition {
+    // What defines the symbol.
+    public DefinitionHere definition;
+    // Whether other SBC files can define the symbol too, as a linker has a
+    // weak definition: a template instance is in each object that uses it.
+    // The program uses one of the copies, and the copy of the process goes
+    // before it (`CallPlanStore.usedDefinitionHere`).
+    public Flag!"weak" weak;
+}
 
 
 // The names of one program. A `Name` never moves, so that its address can
@@ -246,11 +254,11 @@ public struct Names {
     private bool _fromFile;
     // The names of each SBC file, when SBC files made the names.
     private Name[][] _fileChunks;
-    // The definition of each symbol that only one compile defines
+    // The definition of each symbol that an SBC file defines
     // (`defineHere`). Written by a compile to an SBC file, which does not run
     // the program, and by a load, before the program runs: a read takes no
     // lock.
-    private DefinitionHere[string] _definedHere;
+    private SymbolDefinition[string] _definedHere;
 
     // The name of the symbol `symbol`, `distance` bytes after its start.
     // `declaredBy` is the declaration of the symbol, kept with a new name. A
@@ -266,34 +274,34 @@ public struct Names {
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
-        return make(symbol, distance, declaredBy, null, DatumRef.init);
+        return make(symbol, distance, declaredBy, null);
     }
 
-    // As `named`, with `start`, the datum `datum` of the static data of the
-    // program, as the program's own copy of the symbol (`defineOwn`). A new
-    // name has its copy before any thread can find it.
+    // As `named`, with `start`, a datum of the static data of the program,
+    // as the program's own copy of the symbol (`defineOwnLocked`). A new name
+    // has its copy before any thread can find it.
     public Name* namedWithOwn(
         Symbol: const(char)[], Declaration: const(char)[] = string,
     )(
         Symbol symbol, in size_t distance, Declaration declaredBy,
-        const(void)* start, in DatumRef datum,
+        const(void)* start,
     ) {
         refuseAfterFile;
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
-        return make(symbol, distance, declaredBy, start, datum);
+        return make(symbol, distance, declaredBy, start);
     }
 
     // The name of `symbol` and `distance`, found or made, with the own copy
     // `start` unless that is null. Under `_lock`.
     private Name* make(Symbol, Declaration)(
         Symbol symbol, in size_t distance, Declaration declaredBy,
-        const(void)* start, in DatumRef datum,
+        const(void)* start,
     ) {
         if (auto found = Key(cast(string) symbol, distance) in _plain) {
             if (start !is null)
-                defineOwnLocked(*found, start, datum);
+                defineOwnLocked(*found, start);
             return *found;
         }
         auto name = reserve;
@@ -301,7 +309,7 @@ public struct Names {
         name._distance = distance;
         name._declaredBy = owned(declaredBy);
         if (start !is null)
-            defineOwnLocked(name, start, datum);
+            defineOwnLocked(name, start);
         return *_plain.insert(Key(name._symbol, distance), name);
     }
 
@@ -382,27 +390,16 @@ public struct Names {
             return named(name.symbol, name.distance + distance,
                 name.declaredBy);
         return namedWithOwn(name.symbol, name.distance + distance,
-            name.declaredBy, name.own, name.ownDatum);
+            name.declaredBy, name.own);
     }
 
-    // `start`, the datum `datum` of the static data of the program, becomes
-    // the program's own copy of the symbol of `name`, unless it has one: the
+    // `start`, a datum of the static data of the program, becomes the
+    // program's own copy of the symbol of `name`, unless it has one: the
     // copy that the program uses when the process does not have the symbol
-    // (`CallPlanStore.chosenCopy`). For a load, which gives each name its
-    // copy before it makes the program ready to run; a compile names a
-    // symbol with its copy in one step (`namedWithOwn`).
-    public void defineOwn(Name* name, const(void)* start, in DatumRef datum) {
-        auto lock = this.lock;
-        lock.lock;
-        scope(exit) lock.unlock;
-        defineOwnLocked(name, start, datum);
-    }
-
-    // Under `_lock`. A copy that comes after the copy that the program uses
-    // was chosen (`keep`) would not be used: that is a failure of snakebite.
-    private void defineOwnLocked(
-        Name* name, const(void)* start, in DatumRef datum,
-    ) {
+    // (`CallPlanStore.chosenCopy`). Under `_lock`. A copy that comes after
+    // the copy that the program uses was chosen (`keep`) would not be used:
+    // that is a failure of snakebite.
+    private void defineOwnLocked(Name* name, const(void)* start) {
         import core.atomic: atomicLoad, MemoryOrder;
         import snakebite.failure.report: internalFailure;
 
@@ -415,13 +412,12 @@ public struct Names {
             internalFailure("an own copy of `" ~ name._symbol
                 ~ "` comes after the copy that the program uses was chosen");
         name._own = start;
-        name._ownDatum = datum;
     }
 
     // The address that `name` keeps: the one it has, or the one that
     // `choose` gives from the own copy of `name`, which is `Name.absent` for
     // a symbol that no object defines. The own copy is read and the answer
-    // kept in one step, under the lock of `defineOwn`.
+    // kept in one step, under the lock of `defineOwnLocked`.
     package void* keep(
         Name* name, scope void* delegate(const(void)* own) choose,
     ) {
@@ -437,19 +433,23 @@ public struct Names {
         return made;
     }
 
-    // `definition` is the definition of `symbol`, which only one compile
-    // defines: a compile to an SBC file gives each such function and datum of
-    // its root modules, and a load each that an SBC file holds. A second
-    // definition of one symbol is an error that names the symbol, as a
-    // linker reports it.
-    public void defineHere(in string symbol, in DefinitionHere definition) {
+    // `definition` is the definition of `symbol` in an SBC file: a compile
+    // to an SBC file gives each function and datum that it defines, and a
+    // load each that an SBC file holds. As a linker does, a definition that
+    // is not weak goes before a weak one, the first of two weak definitions
+    // is kept, and a second definition that is not weak is an error that
+    // names the symbol.
+    public void defineHere(in string symbol, in SymbolDefinition definition) {
         import snakebite.failure.report: SnakebiteException;
 
         // `auto`: `Mutex.lock` is not `const`.
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
-        if (symbol in _definedHere)
+        const found = symbol in _definedHere;
+        if (found !is null && definition.weak)
+            return;
+        if (found !is null && !found.weak)
             throw new SnakebiteException(
                 "multiple definition of the symbol `" ~ symbol ~ "`",
             );
@@ -457,26 +457,15 @@ public struct Names {
     }
 
     // The definition of `symbol` (`defineHere`), or null.
-    public const(DefinitionHere)* definitionHere(in char[] symbol) const
+    public const(SymbolDefinition)* definitionHere(in char[] symbol) const
             @safe pure nothrow @nogc {
         return symbol in _definedHere;
     }
 
-    // Each symbol that only one compile defines, with its definition.
+    // Each symbol that an SBC file defines, with its definition.
     public void eachDefinitionHere(Visit)(scope Visit visit) const {
         foreach (symbol, ref definition; _definedHere)
             visit(symbol, definition);
-    }
-
-    // Each name that has an own copy (`defineOwn`).
-    public void eachOwn(scope void delegate(Name*) visit) {
-        import core.atomic: atomicLoad, MemoryOrder;
-
-        const count = atomicLoad!(MemoryOrder.acq)(_chunkCount);
-        foreach (index, chunk; _chunks[0 .. count])
-            foreach (ref name; index + 1 == count ? chunk[0 .. _used] : chunk)
-                if (name._own !is null)
-                    visit(&name);
     }
 
     private void refuseAfterFile() const {

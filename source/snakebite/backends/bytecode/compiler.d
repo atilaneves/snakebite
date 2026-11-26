@@ -890,18 +890,36 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                     text(reason, " in `", function_.toString, "`"));
             }
             _complete.insert(function_, placeholder);
-            // A file holds the symbol of each function that only its root
-            // modules define, as an object file does, so that the other
-            // files of a program reach it by name (ADR-0021).
+            // A file holds the symbol of each function that it defines, as
+            // an object file does, so that the other files of a program reach
+            // it by name (ADR-0021). The definition of a function that other
+            // files can define too, as a template instance, is weak.
             if (compiledProgram.recordsAddresses) {
-                import snakebite.ffi.names: DefinitionHere, GuestFunction;
+                import snakebite.ffi.names: DefinitionHere, GuestFunction,
+                    SymbolDefinition;
+                import std.typecons: Flag, No, Yes;
 
-                const where = _world.callSelection.whereDefined(function_);
-                if (where == Definition.rootOwned)
+                void define(in Flag!"weak" weak) {
                     compiledProgram.plans.names.defineHere(
                         function_.mangledNameOf.idup,
-                        DefinitionHere(GuestFunction(placeholder)),
+                        SymbolDefinition(
+                            DefinitionHere(GuestFunction(placeholder)),
+                            weak,
+                        ),
                     );
+                }
+
+                const where = _world.callSelection.whereDefined(function_);
+                final switch (where) with (Definition) {
+                    case rootOwned:
+                        define(No.weak);
+                        break;
+                    case rootOrElsewhere:
+                        define(Yes.weak);
+                        break;
+                    case definedElsewhere:
+                        break;
+                }
             }
             if (outermost)
                 prepareCallbackBodies;

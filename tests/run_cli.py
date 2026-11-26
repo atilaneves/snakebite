@@ -4156,6 +4156,66 @@ def test_build_module_data_of_another_module_run_as_native_code(
     assert guest_lines(built) == expected, output(built)
 
 
+# With `--build=module`, a template instance that two modules make exists one
+# time in the program, as in native code built one module at a time: the
+# calls of `f!int` from `a` and from `b` count on one static variable, `&f!int`
+# is one address, and the class information of `Box!int` is one object. The
+# unit test inside `Box` does not run: dmd parses the body of a unit test only
+# in a root module, and the compile of `t` makes no instance of `Box`. The
+# expected lines are those of `dub test --compiler=dmd --build-mode=singleFile`.
+def test_build_module_template_instance_exists_one_time(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl",
+          f'name "{dub_name("build-module-instances")}"\n'
+          'targetType "library"\n')
+    write(app / "source" / "t.d", """
+        module t;
+        int f(T)(T step) {
+            static int counter;
+            counter += step;
+            return counter;
+        }
+        class Box(T) {
+            T value;
+            unittest {
+                import std.stdio: writeln;
+                writeln("test inside Box");
+            }
+        }
+        """)
+    write(app / "source" / "a.d", """
+        module a;
+        import t;
+        int countInA() { return f(1); }
+        int function(int) addressInA() { return &f!int; }
+        TypeInfo boxInA() { return typeid(Box!int); }
+        """)
+    write(app / "source" / "b.d", """
+        module b;
+        import a;
+        import t;
+        import std.stdio: writeln;
+        unittest {
+            writeln(countInA);
+            writeln(f(1));
+            writeln(countInA);
+            writeln(addressInA is &f!int);
+            writeln(boxInA is typeid(Box!int));
+        }
+        """)
+    expected = ["1", "2", "3", "true", "true"]
+    native = subprocess.run(
+        ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
+        capture_output=True, check=False, text=True, timeout=300, cwd=app)
+    assert native.returncode == 0, output(native)
+    assert native.stdout.splitlines() == expected, output(native)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert built.returncode == 0, output(built)
+    assert guest_lines(built) == expected, output(built)
+
+
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(

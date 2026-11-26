@@ -182,7 +182,7 @@ public struct RuntimeTypes {
             if (variable is null)
                 return Info.init;
             return Info.named(plans.names.further(
-                _data.namedWithOwnCopy(variable), offset));
+                _data.storageNameWithOwnCopy(variable), offset));
         }
 
         Info flag(in size_t value) {
@@ -287,9 +287,11 @@ public struct RuntimeTypes {
         // the program and another object can both define it: its name, with
         // the program's own copy.
         const start = cast(const(void)*) own.held;
-        return Linked!TypeInfo.named(plans.names.namedWithOwn(
-            type.vtinfo.ident.toString, 0, string.init, start,
-            _data.addressOfData(start).target.datum));
+        return Linked!TypeInfo.named(_data.namedWithOwnCopy(
+            type.vtinfo.ident.toString,
+            string.init,
+            start,
+        ));
     }
 
     // Whether `type` is a struct, an enum or a class that only the root
@@ -538,12 +540,10 @@ public struct RuntimeTypes {
     // The name of the class information of `declaration` (`hasOwnCopy`),
     // with `info`, which the program built, as its own copy, and the names
     // of its vtable and its initial image with theirs. Each name has its
-    // copy from the step that makes it (`Names.namedWithOwn`).
+    // copy from the step that makes it (`NativeData.namedWithOwnCopy`).
     public Linked!TypeInfo_Class ownClassInfo(
         ClassDeclaration declaration, TypeInfo_Class info,
     ) {
-        // Each name is of the start of its symbol.
-        enum distance = 0;
         Name* classInfoName;
         eachClassDatum(
             declaration,
@@ -551,12 +551,10 @@ public struct RuntimeTypes {
             (string symbol, const(void)* start, NativeNames* table) {
                 // `auto`: `const` makes the `Name*` that the table keeps
                 // const.
-                auto name = plans.names.namedWithOwn(
+                auto name = _data.namedWithOwnCopy(
                     symbol,
-                    distance,
                     declaration.toString,
                     start,
-                    _data.addressOfData(start).target.datum,
                 );
                 if (table is null)
                     classInfoName = name;
@@ -602,13 +600,15 @@ public struct RuntimeTypes {
     // vtable and its initial image in the SBC file, so that the other SBC
     // files of the program reach them by name (ADR-0021).
     public void makeAndDefineClassInfo(ClassDeclaration declaration) {
+        import std.typecons: No;
+
         if (_whereDefined(declaration) != Definition.rootOwned)
             return;
         eachClassDatum(
             declaration,
             _classInfo(declaration).held,
             (string symbol, const(void)* start, NativeNames* table) {
-                _data.defineSymbol(symbol, start);
+                _data.defineSymbol(symbol, start, No.weak);
             },
         );
     }
@@ -622,13 +622,18 @@ public struct RuntimeTypes {
     if (is(Declaration == StructDeclaration)
             || is(Declaration == EnumDeclaration)) {
         import snakebite.frontend.ast: toDString;
+        import std.typecons: No;
 
         // `auto`: `isRootOwned` and `get` take a mutable `Type`.
         auto type = declaration.type;
         if (!isRootOwned(type))
             return;
         const info = cast(const(void)*) get(type).held;
-        _data.defineSymbol(typeInfoSymbol(type.deco.toDString), info);
+        _data.defineSymbol(
+            typeInfoSymbol(type.deco.toDString),
+            info,
+            No.weak,
+        );
     }
 
     // What `linkedClassInfo` needs of `declaration`, decided once.

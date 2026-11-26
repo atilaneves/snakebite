@@ -183,9 +183,13 @@ public struct StaticWorld {
         if (callSelection.usesNativeVariadicAddress(method))
             return Linked!(void*).named(plans.nameOf(method));
         if (callSelection.usesGuestBody(method)) {
+            // The body is ready to run also when the address is the name of
+            // its symbol: the compile defines the function.
             word = _backend.guestWord(method);
             if (callSelection.storesGuestWord(method, adjustment))
                 return Linked!(void*).held(cast(void*) word);
+            if (isNamedInFile(method, adjustment))
+                return Linked!(void*).named(plans.nameOf(method));
         }
         auto address = plans.callableAddress(word, method, adjustment);
         // An adjusted address is the entry of a vtable slot. Only a virtual
@@ -193,6 +197,24 @@ public struct StaticWorld {
         if (adjustment == 0 && _backend.addressGiven !is null)
             _backend.addressGiven(method, address);
         return address;
+    }
+
+    // Whether the address of `method`, which has a guest body, with
+    // `adjustment` is the name of its symbol: in a compile to an SBC file,
+    // for a function that other SBC files can define too, as a template
+    // instance. Each SBC file that holds the function defines it weakly, and
+    // the program uses one of the copies for the address, as a native linker
+    // keeps one (`Names.defineHere`). An address with an adjustment is the
+    // entry of a vtable slot, which only a virtual call reaches: no code
+    // compares it, and it stays the entry of the copy of the file.
+    private bool isNamedInFile(
+        FuncDeclaration method,
+        in ptrdiff_t adjustment,
+    ) {
+        import snakebite.language.definition: Definition;
+
+        return data.recordRelocs && adjustment == 0
+            && callSelection.whereDefined(method) == Definition.rootOrElsewhere;
     }
 
     // `linked` as a backend that reads it as it runs, and does not save,

@@ -109,13 +109,21 @@ public struct TlsSlots {
         // A variable that an SBC file defines has one copy on each thread,
         // made from the descriptor of the definition, as a linker gives a
         // thread-local symbol one place in the thread-local block of the
-        // process. It goes before the process, as `CallPlanStore.addressOf`
-        // does for any other symbol.
+        // process. The program uses that definition as
+        // `CallPlanStore.addressOf` does for any other symbol
+        // (`CallPlanStore.usedDefinitionHere`). The descriptor of the
+        // definition makes its copy from its own template.
         const here = descriptor.nativeName.length
-            ? _store.names.definitionHere(descriptor.nativeName)
+            ? _store.usedDefinitionHere(
+                descriptor.nativeName,
+                () => _store.threadLocalAddressIfPresent(descriptor.nativeName),
+            )
             : null;
-        if (here !is null)
-            native = slotFor(descriptorOf(*here)).ptr;
+        const defining = here is null ? null : descriptorOf(*here);
+        if (defining !is null) {
+            if (defining !is descriptor)
+                native = slotFor(defining).ptr;
+        }
         else if (descriptor.nativeName.length) {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer

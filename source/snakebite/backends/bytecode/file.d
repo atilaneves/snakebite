@@ -28,7 +28,8 @@ import snakebite.image.dependency: DependencyImage;
 import snakebite.memory.program: bytesFor, MemoryNeed, pageAlignment,
     ProgramMemory;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
-import snakebite.ffi.names: DefinitionHere, GuestFunction, Name;
+import snakebite.ffi.names: DefinitionHere, GuestFunction, Name,
+    SymbolDefinition;
 import snakebite.native.staticstore: startOf, StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
@@ -39,7 +40,7 @@ import std.conv: text;
 import std.meta: AliasSeq;
 import std.traits: FieldNameTuple, Unqual;
 import std.sumtype: match;
-import std.typecons: Nullable;
+import std.typecons: Flag, Nullable;
 
 
 // What precedes the program in a file. The key comes first: a load checks it
@@ -371,16 +372,8 @@ private struct DefinedSymbol(Position) {
     size_t symbol;
     // Where the definition is in the file.
     Position place;
-}
-
-
-// A name that has the program's own copy of its symbol (`Names.defineOwn`),
-// as the file holds it.
-private struct OwnCopy {
-    // The index of the name (`Archive.nameIndexOf`).
-    size_t name;
-    // Where the copy is in the file.
-    DatumPosition place;
+    // Whether the definition is weak (`SymbolDefinition.weak`).
+    Flag!"weak" weak;
 }
 
 
@@ -1186,7 +1179,6 @@ private void transferBody(
     foreach (m; 0 .. numBlockSets)
         transferBlocks(archive, *archive.blocksAt(m));
     transferStrings(archive, program.store);
-    transferOwnCopies(archive, program);
     transferDefinitionsHere(archive, program);
     foreach (m; 0 .. numBlockSets)
         transferAddresses(archive, *archive.blocksAt(m));
@@ -1322,53 +1314,29 @@ private void transferStrings(ref Archive archive, ref StaticStore store) {
 }
 
 
-// The names that have the program's own copy of their symbol
-// (`Names.defineOwn`): the index of each and the place of its copy. A load
-// gives each name its copy before any word is made ready to run, so the
-// decision of a load (`CallPlanStore.chosenCopy`) is that of a compile to
-// RAM.
-private void transferOwnCopies(ref Archive archive, ref Program program) {
-    OwnCopy[] copies;
-    if (archive.isWriting)
-        program.plans.names.eachOwn((name) {
-            const place = archive.positionOf(name.ownDatum);
-            copies ~= OwnCopy(archive.nameIndexOf(name), place);
-        });
-    archive.transfer(copies);
-    if (archive.isWriting)
-        return;
-    foreach (copy; copies) {
-        const datum = archive.datumAt(copy.place);
-        program.plans.names.defineOwn(
-            archive.nameOfIndex(copy.name),
-            startOf(datum),
-            datum,
-        );
-    }
-}
-
-
-// The symbols that only the compile of the file defines (`Names.defineHere`):
+// The symbols that the compile of the file defines (`Names.defineHere`):
 // the functions, then the data.
 private void transferDefinitionsHere(ref Archive archive, ref Program program) {
     DefinedSymbol!FunctionPosition[] functions;
     DefinedSymbol!DatumPosition[] data;
     if (archive.isWriting)
         program.plans.names.eachDefinitionHere(
-            (string symbol, ref const DefinitionHere definition) {
+            (string symbol, ref const SymbolDefinition defined) {
                 const symbolIndex = archive.symbolIndexOfName(symbol);
-                definition.match!(
+                defined.definition.match!(
                     (in GuestFunction guest) {
                         const function_ = cast(const(Function)*) guest.code;
                         functions ~= DefinedSymbol!FunctionPosition(
                             symbolIndex,
                             archive.positionOf(function_),
+                            defined.weak,
                         );
                     },
                     (in DatumRef datum) {
                         data ~= DefinedSymbol!DatumPosition(
                             symbolIndex,
                             archive.positionOf(datum),
+                            defined.weak,
                         );
                     },
                 );
@@ -1386,13 +1354,19 @@ private void transferDefinitionsHere(ref Archive archive, ref Program program) {
         );
         program.plans.names.defineHere(
             archive.symbolNameAt(defined.symbol),
-            DefinitionHere(GuestFunction(function_)),
+            SymbolDefinition(
+                DefinitionHere(GuestFunction(function_)),
+                defined.weak,
+            ),
         );
     }
     foreach (defined; data)
         program.plans.names.defineHere(
             archive.symbolNameAt(defined.symbol),
-            DefinitionHere(archive.datumAt(defined.place)),
+            SymbolDefinition(
+                DefinitionHere(archive.datumAt(defined.place)),
+                defined.weak,
+            ),
         );
 }
 
