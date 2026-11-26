@@ -2,6 +2,8 @@
 
 ## General
 
+* All code is a liability and must justify its existence. Code that
+  doesn't exist to make a test pass should probably be deleted.
 * One True Brace Style. For functions with many attributes, `{` on its
   own line is acceptable.
 * Use UFCS liberally.
@@ -37,6 +39,34 @@
   and TLS data is suspect and must have its existence justified.
 * Downcasts are a code smell - use virtual dispatch instead unless
   justified.
+* Our helpers return D types. A helper returns `string`, not
+  `const(char)*`. Convert one time inside the helper, never at each call
+  site.
+* Do not `idup` a `string`. It is immutable already.
+* Use `new` for a GC object, not `GC.calloc` and a cast. If `new` cannot
+  work, say why in a comment.
+* A parameter list that fits on one line stays on one line. A parameter
+  list that is split over several lines has one parameter per line.
+* Use Phobos before a hand-written equivalent, for example `std.conv.to`
+  for an enum from a string.
+* A struct with a flag that says if its other fields mean anything is an
+  optional value: use `Nullable` or a pointer, not a flag.
+* Do not take a value apart to pass its fields to a function that can take
+  the value.
+* Do not add a `static assert` that repeats the field names of a struct to
+  guard a hand-written walk over its fields. Write the walk with
+  compile-time reflection, so that it needs no list.
+* Prefer a template parameter for a callback, so that the function's
+  attributes are deduced from it.
+
+## Names and comments
+
+* Use the terms of `CONTEXT.md` in names and comments. A word that is not
+  in `CONTEXT.md`, and is not a D or dmd term, gets a definition at its
+  first use.
+* A comment is a sentence that a reader who has not seen the PR can
+  understand. When a change makes part of a comment false, rewrite the
+  whole comment.
 
 ## Production code (in `source`)
 
@@ -72,6 +102,16 @@
 * In the bytecode backend, only `snakebite.backends.bytecode.compiler` may
   import frontend modules. The bytecode VM and all project modules that it
   imports must compile without DMD frontend import paths.
+* Code goes in the module that owns its concept.
+* A PR holds only what its requirement needs. A new option, environment
+  variable, field or file that the requirement does not name is a question
+  for the owner before it is code.
+
+# Decision records
+
+- A decision record (`docs/adr/`) states what was decided and why, at a
+  high level. It has no names of functions, types, fields or files of the
+  code, and no description of how the code does a thing.
 
 # Runtime semantics
 
@@ -159,6 +199,18 @@ review must-fix.
 - Use `shouldThrowWithMessage`, not `shouldThrow`.
 - Use `.should ==`, not `.shouldEqual`.
 - Use `"...".should.be in foo`, not `.canFind("...").should == true`.
+- State an expectation with the assertion library of the test framework
+  (unit-threaded), on the values themselves: `x.should == y`,
+  `x.should.be in y`, `shouldThrowWithMessage`. Do not use plain `assert`,
+  and do not hand-write a check and wrap it in `.should == true`. Write
+  `name[0 .. expected.length].should == expected;`, not
+  `(name[0 .. expected.length] == expected).should == true;`, and
+  `"only one entry point `main` is allowed".should.be in thrown.msg;`, not
+  `assert(thrown.msg.canFind("..."))`.
+- A test does not import types of the dmd frontend and does not call an
+  internal helper. It states a behaviour through what the tests of that
+  area already use to compile and run a guest program. If a behaviour
+  cannot be reached that way, the test is at the wrong level.
 - The `ut` binary should be the first safety net; its dual mandate is
   to be fast and catch *most* things. It can't catch everything, and
   that's what the other tests are for.

@@ -55,8 +55,12 @@ reintroduces the compile step snakebite exists to remove.
 
 Each compiler family needs its own dependency build on disk.
 `snakebite.project.dub` must ask `dub describe` for `linker-files`.
-Module constructors of dependencies run when druntime loads the
-image, not when snakebite decides to run them.
+Module constructors of dependencies run when the guest program starts, in
+one order with the constructors of the program's own modules, as in the
+native binary that `dub test` builds, where the dependencies are linked
+statically. They do not run when the image is loaded. A program with a C
+`main` that never starts the D runtime runs none of them, as its native
+binary does.
 
 ## Supersedes
 

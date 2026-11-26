@@ -433,9 +433,16 @@ Target[] dubTarget(string compiler, string config, string objectSet,
         // 2.36 or newer.
         info.packages[0].lflags ~= "-L-zpack-relative-relocs";
     }
-    // The executable and loaded D images must share one runtime.
-    info.packages[0].lflags ~= compiler == "dmd"
-        ? "-defaultlib=libphobos2.so" : "-link-defaultlib-shared";
+    // The executable and loaded D images must share one runtime. dmd stores
+    // no library path: without the installer's `activate` the loader does
+    // not find the shared Phobos. LDC stores its own.
+    if (compiler == "dmd")
+        info.packages[0].lflags ~= [
+            "-defaultlib=" ~ sharedPhobos,
+            "-L-rpath=" ~ dmdPhobosDirectory(buildOptions.dCompiler),
+        ];
+    else
+        info.packages[0].lflags ~= "-link-defaultlib-shared";
     info.options = buildOptions;
     info.packages[0].stringImportPaths ~=
         hostCompilerRecordDirectory(buildOptions.dCompiler, objectSet);
@@ -490,6 +497,32 @@ Target[] dubTarget(string compiler, string config, string objectSet,
     return testHost
         ? [target, boundary, testFixtureObject(objectSet, exportMap,
             unitHost ? testFixtureLibraries : [])] : [target, boundary];
+}
+
+// The shared Phobos that the dmd targets link.
+enum sharedPhobos = "libphobos2.so";
+
+// The directory of `sharedPhobos` of the dmd `compiler`, the one that builds
+// the dmd targets.
+string dmdPhobosDirectory(in string compiler) {
+    import core.stdc.stdlib: free;
+    import core.sys.posix.stdlib: realpath;
+    import std.file: exists;
+    import std.string: fromStringz, toStringz;
+
+    const path = executablePath(compiler);
+    // A link to dmd in a `bin` directory is not the installation.
+    auto resolved = realpath(path.toStringz, null);
+    enforce(resolved !is null, "cannot resolve the path of " ~ compiler ~ ": " ~ path);
+    scope(exit) free(resolved);
+    const executable = resolved.fromStringz.idup;
+    const root = executable.dirName.dirName;
+    foreach (name; ["lib64", "lib"]) {
+        const directory = buildPath(root, name);
+        if (exists(buildPath(directory, sharedPhobos)))
+            return directory;
+    }
+    throw new Exception("no " ~ sharedPhobos ~ " under " ~ root ~ " for " ~ compiler ~ " at " ~ executable);
 }
 
 Build reggaeBuild() {
