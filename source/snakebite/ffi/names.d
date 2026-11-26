@@ -229,10 +229,11 @@ public struct Names {
     private bool _fromFile;
     // The names of each program file, when program files made the names.
     private Name[][] _fileChunks;
-    // The word of the guest function of each symbol that only one compile
-    // defines (`defineHere`). Written by a compile to a file, which does not
-    // run the program, and by a load, before the program runs: a read takes
-    // no lock.
+    // The guest function of each symbol that only one compile defines
+    // (`defineHere`). Written by a compile to a file, which does not run the
+    // program, and by a load, before the program runs: a read takes no lock.
+    // A guest function is a `const(void)*`, because this module does not
+    // know the type that a backend has for it.
     private const(void)*[string] _definedHere;
 
     // The name of the symbol `symbol`, `distance` bytes after its start.
@@ -420,12 +421,11 @@ public struct Names {
         return made;
     }
 
-    // `word`, a guest function, is the definition of `symbol`, which only
-    // one compile defines: a compile to a file gives each such function of
-    // its root modules, and a load each that a file holds. A second
-    // definition of one symbol is an error that names the symbol, as a
-    // linker reports it.
-    public void defineHere(in string symbol, const(void)* word) {
+    // `guestFunction` is the definition of `symbol`, which only one compile
+    // defines: a compile to a file gives each such function of its root
+    // modules, and a load each that a file holds. A second definition of one
+    // symbol is an error that names the symbol, as a linker reports it.
+    public void defineHere(in string symbol, const(void)* guestFunction) {
         import snakebite.failure.report: SnakebiteException;
 
         // `auto`: `Mutex.lock` is not `const`.
@@ -434,8 +434,9 @@ public struct Names {
         scope(exit) lock.unlock;
         if (symbol in _definedHere)
             throw new SnakebiteException(
-                "multiple definition of the symbol `" ~ symbol ~ "`");
-        _definedHere[symbol] = word;
+                "multiple definition of the symbol `" ~ symbol ~ "`",
+            );
+        _definedHere[symbol] = guestFunction;
     }
 
     // The guest function that defines `symbol` (`defineHere`), or null.
@@ -448,8 +449,8 @@ public struct Names {
 
     // Each symbol that only one compile defines, with its definition.
     public void eachDefinitionHere(Visit)(scope Visit visit) const {
-        foreach (symbol, word; _definedHere)
-            visit(symbol, word);
+        foreach (symbol, guestFunction; _definedHere)
+            visit(symbol, guestFunction);
     }
 
     // Each name that has an own copy (`defineOwn`).

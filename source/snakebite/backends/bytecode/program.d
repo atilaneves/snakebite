@@ -89,7 +89,8 @@ public struct Program {
     // it have.
     public void newModules(in size_t count) {
         foreach (_; 0 .. count) {
-            // `auto`: the load fills the module.
+            // `auto`, not `const`: the load writes the fields of the module
+            // after this function returns.
             auto module_ = memory.data.make!Module;
             module_.blocks.takeFrom(&memory);
             _modules ~= module_;

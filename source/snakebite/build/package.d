@@ -110,8 +110,8 @@ public BuildFiles buildFiles(in string directory, in Build build) {
     import snakebite.project.state: projectStateDirectory;
     import std.path: buildPath;
 
-    return BuildFiles(projectStateDirectory(directory)
-        .buildPath("build", buildName(build)));
+    const stateDirectory = projectStateDirectory(directory);
+    return BuildFiles(stateDirectory.buildPath("build", buildName(build)));
 }
 
 
@@ -172,7 +172,8 @@ private struct BuildLock {
 // `build.ninja` until it has the program files open, so no other run changes
 // a build file in between. The result is null when ninja fails.
 public imported!"std.typecons".Nullable!NinjaRun buildProject(
-    in string directory, in Build build,
+    in string directory,
+    in Build build,
 ) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
@@ -199,10 +200,12 @@ public imported!"std.typecons".Nullable!NinjaRun buildProject(
     if (status != 0)
         return Nullable!NinjaRun();
     const imagePath = buildsDependencyImage(build) ? files.image : "";
+    const programNames = files.programListFileName.readText.splitLines;
+    // `auto`: `NinjaRun` holds the files as mutable.
+    auto programs = programNames.map!(program => File(program, "rb")).array;
     return nullable(NinjaRun(
         duration,
-        files.programListFileName.readText.splitLines
-            .map!(program => File(program, "rb")).array,
+        programs,
         files.workingDirectoryFileName.readText,
         imagePath,
     ));
@@ -257,8 +260,9 @@ private int generate(string[] args) {
     getopt(args, "build", &name, "generate", &generates);
     Build build;
     if (!parseBuildName(name, build) || build == Build.off || args.length != 2)
-        throw new Exception("--generate takes a --build mode that is not off "
-            ~ "and one directory");
+        throw new Exception(
+            "--generate takes a --build mode other than off and one directory",
+        );
     writeBuildFile(args[1], build);
     return 0;
 }

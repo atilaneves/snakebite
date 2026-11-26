@@ -112,17 +112,15 @@ public void saveProgram(
 
 
 // A program file that is read front to back, one time: first its header,
-// then its program (`load`). `next` gives the next part of the bytes of the
-// file, and an empty part at the end; `size` is the number of bytes of the
-// file.
+// then its program (`load`).
 public struct ProgramReader {
     @disable this(this);
 
     private Archive _file;
 
-    public this(
-        return scope const(ubyte)[] delegate() next, in size_t size,
-    ) {
+    // `next` gives the next part of the bytes of the file, and an empty part
+    // at the end; `size` is the number of bytes of the file.
+    public this(return scope const(ubyte)[] delegate() next, in size_t size) {
         _file = Archive.reading(next, size);
     }
 
@@ -136,15 +134,17 @@ public struct ProgramReader {
 }
 
 
-// Reads the programs of the files of `readers`, each after its header, into
+// Reads the program files of `readers`, each after its header, into
 // `program`: one program, as a linker makes one executable of object files.
 // `program` is a new program made with `image` (the dependency image that
 // the files were made with, or null) and wired to `runner`. Once the load is
 // done, they are as a compile to RAM leaves them: `Program.complete` binds
-// every function. A word that names a symbol is made ready to run only after
-// the last file, so that it can name a definition of any file.
+// every function. An address of a symbol is written only after the last file,
+// so that the symbol can be defined by any file.
 public void load(
-    ProgramReader[] readers, ref Program program, ref Runner runner,
+    ProgramReader[] readers,
+    ref Program program,
+    ref Runner runner,
     in DependencyImage* image,
 ) {
     import std.algorithm.iteration: map;
@@ -156,18 +156,23 @@ public void load(
     foreach (ref reader; readers)
         loadProgram(reader._file, program, runner, image);
     foreach (ref reader; readers)
-        reader._file.writeSymbolWords;
-    // A word of an interface of a class information reads the class
+        reader._file.writeSymbolAddresses;
+    // The address of an interface of a class information reads the class
     // information, which can be the program's own copy: it is written once
-    // every other word of the data is ready.
+    // every other address in the data is written.
     foreach (ref reader; readers)
-        reader._file.writeWords(reader._file._interfaceWords);
+        reader._file.writeAddresses(reader._file._interfaceAddresses);
 
     program.eachFunction((function_) {
-        if (const reason = Program.complete(function_, program.plans,
-                runner.jitSetting, runner.jitInstance))
+        if (const reason = Program.complete(
+                function_,
+                program.plans,
+                runner.jitSetting,
+                runner.jitInstance,
+            ))
             throw new SnakebiteException(
-                "the program file is not valid: " ~ reason);
+                "the program file is not valid: " ~ reason,
+            );
     });
     program.memory.checkFull;
 }
@@ -191,7 +196,9 @@ private MemoryNeed memoryNeed(ref Archive file) {
 
 // Reads the program of `file`, after its memory need, into `program`.
 private void loadProgram(
-    ref Archive file, ref Program program, ref Runner runner,
+    ref Archive file,
+    ref Program program,
+    ref Runner runner,
     in DependencyImage* image,
 ) {
     file._image = image;
@@ -306,21 +313,31 @@ private void transferHeader(ref Archive archive, ref Header header) {
 }
 
 
-// A word of the data at `place` that names the symbol `target`
-// (`snakebite.ffi.names`).
-private struct NamedWord {
+// A place in the data where a load writes the address of a name
+// (`snakebite.ffi.names`) after the last file.
+private struct PendingAddress {
+    // Where the address is written.
     ubyte* place;
+    // The name whose address it is.
     Target target;
 }
 
 
-// A gate (`GateStorage`) whose storage is the symbol `target`, of `length`
-// bytes.
-private struct NamedGate {
+// A gate that is the data of a name. A load gives it its bytes after the last
+// file.
+private struct PendingGate {
+    // The storage of the gate.
     GateStorage* gate;
+    // The name whose data the gate is.
     Target target;
+    // The number of bytes of the data.
     size_t length;
 }
+
+
+// Where a function is in a file: the index of its module, then its index in
+// the functions of the module.
+private alias FunctionPosition = size_t[2];
 
 
 // The bytes of a file as they are written or read, and the places that the
@@ -343,7 +360,7 @@ private struct Archive {
     private const(Signature)*[] _signatures;
     private size_t[const(Signature)*] _signatureIndex;
     // Writing: the place of each function. Reading: the function at a place.
-    private size_t[2][const(Function)*] _positionOf;
+    private FunctionPosition[const(Function)*] _positionOf;
     private size_t[const(ModuleStart)*] _moduleOfStart;
     // Writing: the place of each plan of the store. Reading: the plan at a
     // place.
@@ -366,19 +383,22 @@ private struct Archive {
     private string _declarations;
     private NativeSignature[] _adjustedSignatures;
     private Name[] _names;
-    // Reading: the words of the data and the gates that name a symbol, and
-    // the words that refer to an interface of a class information, which
-    // `load` makes ready after the last file.
-    private NamedWord[] _symbolWords;
-    private NamedGate[] _symbolGates;
-    private NamedWord[] _interfaceWords;
-    // The modules of the program that are of this file: `_moduleCount` from
-    // `_firstModule`. A load gives the data that no D module of the file owns
-    // to one more module after them. Writing: all modules of the program.
+    // A load writes these after the last file (`load`), because a symbol
+    // can be defined by any file and a class information can be the program's
+    // own copy. The places in the data that hold the address of a symbol, the
+    // gates whose bytes are the data of a symbol, and the places in the data
+    // that hold the address of an interface of a class information.
+    private PendingAddress[] _symbolAddresses;
+    private PendingGate[] _symbolGates;
+    private PendingAddress[] _interfaceAddresses;
+    // The modules of this file are the `_numModules` modules of the program
+    // that start at `_firstModule`. A save writes all modules of the program.
+    // A load gives the data that no D module owns to one more module after
+    // them (`numBlockSets`).
     private size_t _firstModule;
-    private size_t _moduleCount;
-    // Reading: the index in the strings of the process store of the first
-    // string of this file.
+    private size_t _numModules;
+    // The index, in the strings of the store of the program, of the first
+    // string of this file. A load sets it.
     private size_t _firstStringIndexInStore;
     private Runner* _runner;
     private Program* _program;
@@ -411,8 +431,14 @@ private struct Archive {
             foreach (f, function_; module_._functions)
                 archive._positionOf[function_] = [m, f];
         }
-        archive._moduleCount = program._modules.length;
+        archive._numModules = program._modules.length;
         return archive;
+    }
+
+    // The sets of blocks of this file: one for each module, then one for the
+    // data that no D module owns.
+    size_t numBlockSets() const {
+        return _numModules + 1;
     }
 
     // Module `index` of this file.
@@ -422,23 +448,26 @@ private struct Archive {
 
     // Each function of the modules of this file.
     void eachFunction(Visit)(scope Visit visit) {
-        foreach (m; 0 .. _moduleCount)
+        foreach (m; 0 .. _numModules)
             foreach (function_; moduleAt(m)._functions)
                 visit(function_);
     }
 
-    // Makes ready the words of the data and the gates that name a symbol.
-    void writeSymbolWords() {
-        writeWords(_symbolWords);
-        foreach (named; _symbolGates)
-            named.gate.bytes = (cast(ubyte*) _program.plans.wordOfName(
-                named.target))[0 .. named.length];
+    // Writes the addresses of the symbols that the places in the data and the
+    // gates name.
+    void writeSymbolAddresses() {
+        writeAddresses(_symbolAddresses);
+        foreach (named; _symbolGates) {
+            // `auto`: the bytes of a gate are mutable.
+            auto data = cast(ubyte*) _program.plans.wordOfName(named.target);
+            named.gate.bytes = data[0 .. named.length];
+        }
     }
 
-    // Makes ready the words `words`, which name a symbol or an interface.
-    void writeWords(NamedWord[] words) {
-        foreach (word; words)
-            writeWord(word.place, _program.plans.wordOfName(word.target));
+    // Writes at each of `pending` the address of its name.
+    void writeAddresses(PendingAddress[] pending) {
+        foreach (address; pending)
+            writeWord(address.place, _program.plans.wordOfName(address.target));
     }
 
     static Archive reading(
@@ -550,7 +579,7 @@ private struct Archive {
         return _signatures[index];
     }
 
-    size_t[2] positionOf(const(Function)* function_) {
+    FunctionPosition positionOf(const(Function)* function_) {
         if (auto found = function_ in _positionOf)
             return *found;
         internalFailure("a function points at a function that no module holds");
@@ -561,9 +590,9 @@ private struct Archive {
     // for any other. A save takes those of the process store; a load gives
     // them to the module after the modules of the file.
     StaticBlocks* blocksAt(in size_t index) {
-        if (index < _moduleCount)
+        if (index < _numModules)
             return &moduleAt(index).blocks;
-        if (index == _moduleCount)
+        if (index == _numModules)
             return isWriting ? _program.store.blocks : &moduleAt(index).blocks;
         return null;
     }
@@ -574,7 +603,7 @@ private struct Archive {
         in const(void)* set, in size_t block, in size_t offset,
     ) {
         if (set !is null)
-            foreach (m; 0 .. _moduleCount + 1)
+            foreach (m; 0 .. numBlockSets)
                 if (blocksAt(m) is set)
                     return [m, block, offset];
         internalFailure("a word points at data that the program does not hold");
@@ -695,7 +724,7 @@ private struct Archive {
     }
 
     Function* functionAt(in size_t module_, in size_t index) {
-        if (module_ >= _moduleCount
+        if (module_ >= _numModules
                 || index >= moduleAt(module_)._functions.length)
             throw new SnakebiteException(
                 "the program file names a function that it does not hold");
@@ -1075,23 +1104,25 @@ private void transferBody(
     ref Archive archive, ref Program program, Runner* runner,
 ) {
     // The shape first, so that a function can refer to any other.
-    const moduleCount = archive.length(archive._moduleCount);
-    // The modules of the file, and the one that takes the data that no D
-    // module owns.
-    const blockSetCount = moduleCount + 1;
+    const numModules = archive.length(archive._numModules);
+    if (!archive.isWriting) {
+        archive._firstModule = program._modules.length;
+        archive._numModules = numModules;
+        archive._firstStringIndexInStore = program.store.strings.length;
+    }
+    // One module for each module of the file, and the one that takes the data
+    // that no D module owns.
+    const numBlockSets = archive.numBlockSets;
     if (archive.isWriting)
         // As `Program.newModules` and `Module.newFunctions` take them.
-        archive._need.data += blockSetCount * bytesFor(Module.sizeof);
-    else {
-        archive._firstModule = program._modules.length;
-        archive._moduleCount = moduleCount;
-        archive._firstStringIndexInStore = program.store.strings.length;
-        program.newModules(blockSetCount);
-    }
-    foreach (m; 0 .. moduleCount) {
-        size_t functionCount =
-            archive.length(archive.isWriting
-                ? archive.moduleAt(m)._functions.length : 0);
+        archive._need.data += numBlockSets * bytesFor(Module.sizeof);
+    else
+        program.newModules(numBlockSets);
+    foreach (m; 0 .. numModules) {
+        const numWritten = archive.isWriting
+            ? archive.moduleAt(m)._functions.length
+            : 0;
+        size_t functionCount = archive.length(numWritten);
         if (archive.isWriting) {
             archive.need!Function(functionCount);
             archive.need!(Function*)(functionCount);
@@ -1105,16 +1136,16 @@ private void transferBody(
     // The bytes of all data come before the addresses in them: a datum can
     // point into any block or string.
     if (archive.isWriting)
-        foreach (m; 0 .. blockSetCount)
+        foreach (m; 0 .. numBlockSets)
             archive.blocksAt(m).addLoadNeed(archive._need);
-    foreach (m; 0 .. blockSetCount)
+    foreach (m; 0 .. numBlockSets)
         transferBlocks(archive, *archive.blocksAt(m));
     transferStrings(archive, program.store);
     transferOwnCopies(archive, program);
     transferDefinitionsHere(archive, program);
-    foreach (m; 0 .. blockSetCount)
+    foreach (m; 0 .. numBlockSets)
         transferAddresses(archive, *archive.blocksAt(m));
-    foreach (m; 0 .. moduleCount)
+    foreach (m; 0 .. numModules)
         transferModule(archive, program, *archive.moduleAt(m));
 }
 
@@ -1279,13 +1310,15 @@ private void transferOwnCopies(ref Archive archive, ref Program program) {
 // the index of each in the table of symbols and the place of its function.
 private void transferDefinitionsHere(ref Archive archive, ref Program program) {
     size_t[] symbols;
-    size_t[2][] places;
+    FunctionPosition[] places;
     if (archive.isWriting)
         program.plans.names.eachDefinitionHere(
-            (string symbol, const(void)* word) {
-            symbols ~= archive.symbolIndexOfName(symbol);
-            places ~= archive.positionOf(cast(const(Function)*) word);
-        });
+            (string symbol, const(void)* guestFunction) {
+                symbols ~= archive.symbolIndexOfName(symbol);
+                const function_ = cast(const(Function)*) guestFunction;
+                places ~= archive.positionOf(function_);
+            },
+        );
     // The load needs the lists only while it runs.
     transferTemporary(archive, symbols);
     transferTemporary(archive, places);
@@ -1293,10 +1326,13 @@ private void transferDefinitionsHere(ref Archive archive, ref Program program) {
         return;
     if (places.length != symbols.length)
         throw new SnakebiteException(
-            "the program file holds definitions that do not match");
+            "the program file holds definitions that do not match",
+        );
     foreach (index, place; places)
-        program.plans.names.defineHere(archive.symbolNameAt(symbols[index]),
-            archive.functionAt(place[0], place[1]));
+        program.plans.names.defineHere(
+            archive.symbolNameAt(symbols[index]),
+            archive.functionAt(place[0], place[1]),
+        );
 }
 
 
@@ -1323,15 +1359,15 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
                 throw new SnakebiteException(
                     "the program file holds a relocation with no place");
             // A datum is ready to run once it is written, as after a compile
-            // to RAM. A word that names a symbol is written after the last
-            // file (`load`).
+            // to RAM. The address of a symbol is written after the last file
+            // (`load`).
             const target = targetOf(archive, link.kind, reference);
             auto place = &bytes[link.wordOffset];
             if (link.kind == Target.Kind.interfaceTable
                     || link.kind == Target.Kind.interfaceRecord)
-                archive._interfaceWords ~= NamedWord(place, target);
+                archive._interfaceAddresses ~= PendingAddress(place, target);
             else if (isName(link.kind))
-                archive._symbolWords ~= NamedWord(place, target);
+                archive._symbolAddresses ~= PendingAddress(place, target);
             else
                 writeWord(place, target.address);
         }
@@ -1403,7 +1439,7 @@ private void transfer(
     }
     archive.scalar(position);
     if (!archive.isWriting) {
-        if (position >= archive._moduleCount)
+        if (position >= archive._numModules)
             throw new SnakebiteException(
                 "the program file names a module that it does not hold");
         start = &archive.moduleAt(position).start;
@@ -1428,7 +1464,7 @@ private void transfer(ref Archive archive, ref GateStorage gate) {
         // (`load`).
         const target = targetOf(archive, kind, reference);
         if (isName(kind))
-            archive._symbolGates ~= NamedGate(&gate, target, length);
+            archive._symbolGates ~= PendingGate(&gate, target, length);
         else
             gate.bytes = (cast(ubyte*) target.address)[0 .. length];
         if (kind == Target.Kind.staticData)
@@ -1440,7 +1476,7 @@ private void transfer(ref Archive archive, ref GateStorage gate) {
 
 // A handle is a compiled function of the program, named by its place.
 private void transfer(ref Archive archive, ref FunctionHandle handle) {
-    size_t[2] position;
+    FunctionPosition position;
     if (archive.isWriting) {
         const compiled = cast(const(Function)*) handle.compiledCode;
         if (compiled is null)

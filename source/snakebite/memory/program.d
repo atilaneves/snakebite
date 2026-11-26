@@ -12,9 +12,10 @@
 // the callback bridge holds). A loaded program does not grow
 // (`loadedProgramGrows`), so no GC array grows from a record in `data`.
 //
-// The first word of the memory of each file in `scanned` points to the
-// `Program`, so a pointer into `scanned` keeps the `Program`, its stores and
-// both blocks. A pointer into `data` keeps `data` only. Each holder of a
+// The memory of each file in `scanned` starts with a pointer to the
+// `Program`. The GC scans `scanned`, so a pointer into `scanned` keeps the
+// `Program`, its stores and both blocks. A pointer into `data` keeps `data`
+// only. Each holder of a
 // pointer into `data` holds the `Program` too: the `Program` itself; its
 // `Runner`, which holds the `Program`, and with it each frame of a run and
 // each `Function.jit`; a start function, in `scanned`; and a slot of a
@@ -139,8 +140,8 @@ public struct ProgramMemory {
         scanned.take(scannedBytes, 0);
     }
 
-    // Starts the memory of the next file, with `owner` in its first word of
-    // `scanned`.
+    // Starts the memory of the next file at a page of `scanned`. The first
+    // pointer of that memory is `owner`.
     public void startFile(const(void)* owner) {
         scanned._used = fileStart(scanned._used);
         *cast(const(void)**) scanned.allocate(ownerBytes).ptr = owner;
