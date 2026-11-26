@@ -72,8 +72,8 @@ string nativeFixture(in string name) {
 // that are the callback pool's memory file: what the chunks of callback
 // entries occupy, and whatever else maps executable memory without a file.
 // It reads the whole process, so another thread that maps executable memory
-// changes it: use it only where no such thread runs (`bin/at` runs its tests
-// one at a time).
+// changes it: use it only where no such thread runs (`bin/alone` runs its
+// tests one at a time).
 size_t executableChunkBytes() {
     import std.algorithm: canFind;
     import std.conv: to;

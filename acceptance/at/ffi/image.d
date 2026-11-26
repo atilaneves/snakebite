@@ -132,7 +132,6 @@ private extern(C) void startupImageWorker() {
 // reset after load would remove the worker's module. Scratch cannot share
 // a process with another test's live frontend session. Bound the entire child
 // process so a blocked frontend worker cannot hang the acceptance runner.
-@Tags("alone")
 @("image.startupAnalysisEndsBeforeImageConstructor")
 unittest {
     const sandbox = Sandbox();
