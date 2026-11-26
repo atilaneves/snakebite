@@ -38,7 +38,13 @@ public bool parseBuildName(in string name, out Build build) {
 }
 
 
-public enum validBuildNames = "off, project, module, package";
+public enum validBuildNames = {
+    import std.algorithm.iteration: map;
+    import std.array: join;
+    import std.traits: EnumMembers;
+
+    return [EnumMembers!Build].map!buildName.join(", ");
+}();
 
 
 // The files of the build of one project in one mode, in its project state

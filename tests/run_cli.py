@@ -4156,6 +4156,27 @@ def test_build_module_data_of_another_module_run_as_native_code(
     assert guest_lines(built) == expected, output(built)
 
 
+# The text of a template function with a static variable, and of a class
+# template with a unit test, that the tests of `--build=module` and of
+# `--build=package` put in a guest module.
+GUEST_COUNTER_TEMPLATE = """
+        int f(T)(T step) {
+            static int counter;
+            counter += step;
+            return counter;
+        }
+"""
+GUEST_BOX_TEMPLATE = """
+        class Box(T) {
+            T value;
+            unittest {
+                import std.stdio: writeln;
+                writeln("test inside Box");
+            }
+        }
+"""
+
+
 # With `--build=module`, a template instance that several modules make exists
 # one time in the program, as in native code built one module at a time: the
 # calls of `f!int` from `a`, `b` and `t`, the module that declares `f`, count
@@ -4176,24 +4197,14 @@ def test_build_module_template_instance_exists_one_time(
     write(app / "dub.sdl",
           f'name "{dub_name("build-module-instances")}"\n'
           'targetType "library"\n')
-    write(app / "source" / "t.d", """
+    write(app / "source" / "t.d", f"""
         module t;
-        int f(T)(T step) {
-            static int counter;
-            counter += step;
-            return counter;
-        }
-        int countInT() { return f(1); }
-        struct Shared(T) {
+        {GUEST_COUNTER_TEMPLATE}
+        int countInT() {{ return f(1); }}
+        struct Shared(T) {{
             __gshared T value;
-        }
-        class Box(T) {
-            T value;
-            unittest {
-                import std.stdio: writeln;
-                writeln("test inside Box");
-            }
-        }
+        }}
+        {GUEST_BOX_TEMPLATE}
         """)
     write(app / "source" / "a.d", """
         module a;
@@ -4336,20 +4347,16 @@ def test_build_package_runs_as_native_code_built_by_package(
                 sum(2, 3));
         }
         """)
-    write(app / "source" / "q" / "c.d", """
+    write(app / "source" / "q" / "c.d", f"""
         module q.c;
         __gshared int total = 10;
-        int plusInQ(int x) { return x + 1; }
-        T sum(T)(T a, T b) { return a + b; }
-        int f(T)(T step) {
-            static int counter;
-            counter += step;
-            return counter;
-        }
-        int countInC() { return f(1); }
+        int plusInQ(int x) {{ return x + 1; }}
+        T sum(T)(T a, T b) {{ return a + b; }}
+        {GUEST_COUNTER_TEMPLATE}
+        int countInC() {{ return f(1); }}
         """)
-    messageOfP = "the frontend read p.b"
-    messageOfQ = "the frontend read q.d"
+    message_of_p = "the frontend read p.b"
+    message_of_q = "the frontend read q.d"
     write(app / "source" / "q" / "d.d", f"""
         module q.d;
         import p.b: twiceInP;
@@ -4361,22 +4368,22 @@ def test_build_package_runs_as_native_code_built_by_package(
             writeln("q.d ", countInC, " ", countInD, " ", f(1), " ",
                 twiceInP(total), " ", plusInQ(1));
         }}
-        pragma(msg, "{messageOfQ}");
+        pragma(msg, "{message_of_q}");
         """)
+
+    def without_messages(
+        result: subprocess.CompletedProcess[str],
+    ) -> list[str]:
+        return [line for line in guest_lines(result)
+                if line not in (message_of_p, message_of_q)]
 
     for factor in (2, 3):
         write(app / "source" / "p" / "b.d", f"""
             module p.b;
             __gshared int factor = {factor};
             T twiceInP(T)(T x) {{ return 2 * x; }}
-            class Box(T) {{
-                T value;
-                unittest {{
-                    import std.stdio: writeln;
-                    writeln("test inside Box");
-                }}
-            }}
-            pragma(msg, "{messageOfP}");
+            {GUEST_BOX_TEMPLATE}
+            pragma(msg, "{message_of_p}");
             """)
         expected = [
             "p.a ctor",
@@ -4389,18 +4396,16 @@ def test_build_package_runs_as_native_code_built_by_package(
         direct = run_sb(str(app), cwd=tmp_path)
         assert built.returncode == 0, output(built)
         assert direct.returncode == 0, output(direct)
-        lines = [line for line in guest_lines(built)
-                 if line not in (messageOfP, messageOfQ)]
-        directLines = [line for line in guest_lines(direct)
-                       if line not in (messageOfP, messageOfQ)]
-        assert sorted(lines) == sorted(expected), output(built)
-        assert sorted(directLines) == sorted(expected), output(direct)
+        assert sorted(without_messages(built)) == sorted(expected), \
+            output(built)
+        assert sorted(without_messages(direct)) == sorted(expected), \
+            output(direct)
 
     def messages() -> tuple[int, int]:
         result = run_sb("--build=package", str(app), cwd=tmp_path)
         assert result.returncode == 0, output(result)
-        return output(result).count(messageOfP), \
-            output(result).count(messageOfQ)
+        return output(result).count(message_of_p), \
+            output(result).count(message_of_q)
 
     assert messages() == (0, 0)
     touch(app / "source" / "q" / "d.d")
