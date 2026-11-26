@@ -14,6 +14,7 @@ public struct Program {
     import snakebite.failure.halt: HaltAction, HostActions;
     import snakebite.frontend.checks: Checks;
     import snakebite.frontend.dmd.linking: LinkMap;
+    import snakebite.language.definition: Definition;
 
     // `func` is null when the program has no `main`, which is not an error: a
     // bare directory of `.d` files can be a library.
@@ -118,9 +119,10 @@ public struct Program {
     }
 
     // Whether `declaration` belongs to one of this program's own root
-    // modules, rather than one dmd only reached through an `import`. The
-    // source of the dependency image asks it: that source cannot name what a
-    // root module declares.
+    // modules, rather than one dmd only reached through an `import`. A
+    // declaration with no body or an `extern` one is root-owned too, and
+    // `whereDefined` says it is defined elsewhere. The source of the
+    // dependency image asks it, where that difference matters.
     public bool isRootOwned(
         Dsymbol declaration,
     ) const {
@@ -133,7 +135,7 @@ public struct Program {
     // Where `declaration` is defined: the one decision that the call
     // selection and the static data, TypeInfo and class information take
     // for a declaration (`snakebite.frontend.dmd.functions`).
-    public imported!"snakebite.frontend.dmd.functions".Defined whereDefined(
+    public Definition whereDefined(
         Dsymbol declaration,
     ) const {
         import snakebite.frontend.dmd.functions:

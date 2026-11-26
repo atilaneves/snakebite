@@ -5,7 +5,8 @@ import ut;
 import snakebite.program: Program;
 import snakebite.backends.interpreter: Interpreter;
 import snakebite.frontend.compiler: parseSnippet;
-import snakebite.frontend.dmd.functions: Defined, findFunction;
+import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.language.definition: Definition;
 import snakebite.frontend.ast: Dsymbol, FuncDeclaration, Module, VarDeclaration;
 import snakebite.language.layout.variables: forEachRuntimeVariable;
 import snakebite.native.staticstore: StaticStore;
@@ -27,9 +28,9 @@ static foreach (rootOwned; [true, false]) {
     unittest {
         struct Ownership {
             bool* available;
-            Defined whereDefined(Dsymbol) const {
+            Definition whereDefined(Dsymbol) const {
                 assert(*available, "ownership queried after preparation");
-                return rootOwned ? Defined.onlyHere : Defined.notHere;
+                return rootOwned ? Definition.rootOwned : Definition.definedElsewhere;
             }
         }
         bool available = true;

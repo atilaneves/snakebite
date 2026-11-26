@@ -54,6 +54,9 @@ import cost = ut.backends.interpreter.cost;
 import routing = ut.backends.call.routing;
 
 mixin Export!(routing, "snakebite_ut_variadic_instance_sum", "instanceVariadic.directAndAddressAgree");
+mixin Export!(routing, "snakebite_ut_nested_shared", "sharedDefinition.instanceNestedInRootFunction");
+mixin Export!(routing, "snakebite_ut_nested_thread", "sharedDefinition.instanceNestedInRootFunction");
+mixin Export!(routing, "snakebite_ut_extern_body", "rootOwned.externWithBody");
 mixin Export!(routing, "routingSharedCount", "dependencyData.sharedAndThreadLocal.bothSides");
 mixin Export!(routing, "routingThreadCount", "dependencyData.sharedAndThreadLocal.bothSides");
 mixin Export!(routing, "routingBump", "dependencyData.sharedAndThreadLocal.bothSides");

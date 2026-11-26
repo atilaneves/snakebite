@@ -33,12 +33,12 @@ public struct NativeData {
         StructLiteralExp, Type, VarDeclaration;
 
     import snakebite.ffi: PlanCache;
-    import snakebite.frontend.dmd.functions: Defined;
+    import snakebite.language.definition: Definition;
     import snakebite.ffi.callplanstore: CallPlanStore;
     import snakebite.host.sharedtable: SharedTable;
     import snakebite.stack.tls: TlsDescriptor, TlsSlots;
 
-    private Defined delegate(Dsymbol) const _whereDefined;
+    private Definition delegate(Dsymbol) const _whereDefined;
     private VarDeclaration delegate(VarDeclaration) _linkedVariable;
     // An `extern` variable's definition, found once for each variable.
     private SharedTable!(VarDeclaration, VarDeclaration) _definitions;
@@ -93,7 +93,7 @@ public struct NativeData {
     public this(
         StaticStore* store,
         PlanCache* plans,
-        Defined delegate(Dsymbol) const whereDefined,
+        Definition delegate(Dsymbol) const whereDefined,
         VarDeclaration delegate(VarDeclaration) linkedVariable,
         SymbolAddress symbolAddress,
         void delegate(ClassDeclaration, void*) classImage,
@@ -597,15 +597,18 @@ public struct NativeData {
 
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
-        final switch (_whereDefined(variable)) with (Defined) {
-            case onlyHere:
+        final switch (_whereDefined(variable)) with (Definition) {
+            case rootOwned:
                 return *_storageNames.insert(variable, null);
-            case notHere:
+            // Native code reads and writes the variable there, so one storage
+            // serves both sides. A missing symbol is an error, as at the link
+            // of a native build, never a reason to use the program's copy.
+            case definedElsewhere:
                 return *_storageNames.insert(variable,
                     named(nativeSymbolName(variable), variable.toString));
             // A native build keeps one copy, so the native copy is used when
             // the process has one.
-            case hereAndPossiblyElsewhere:
+            case rootOrElsewhere:
                 return namedWithOwnCopy(variable);
         }
     }
@@ -662,19 +665,32 @@ public struct NativeData {
             const facts = typeFacts(variable.type);
             string nativeName;
             const(char)[] declaredBy;
-            const defined = _whereDefined(variable);
             // Another object defines a native variable, and can define one
             // of a template instance: its symbol is found on each thread
             // (`TlsSlots.slotFor`). The program has its own copy of each
             // other variable.
-            if (defined != Defined.onlyHere) {
+            bool named;
+            bool ownCopy;
+            final switch (_whereDefined(variable)) with (Definition) {
+                case rootOwned:
+                    ownCopy = true;
+                    break;
+                case rootOrElsewhere:
+                    named = true;
+                    ownCopy = true;
+                    break;
+                case definedElsewhere:
+                    named = true;
+                    break;
+            }
+            if (named) {
                 import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
                 nativeName = nativeSymbolName(variable);
                 declaredBy = variable.toString;
             }
             Placed template_;
-            if (defined != Defined.notHere)
+            if (ownCopy)
                 template_ = buildInitialBytes(variable, facts);
 
             TypeFacts descriptorFacts;
@@ -689,7 +705,7 @@ public struct NativeData {
                 storeString(bytes + TlsDescriptor.declaredBy.offsetof,
                     declaredBy);
             }
-            if (defined != Defined.notHere)
+            if (ownCopy)
                 storeAddress(&this, bytes + TlsDescriptor.templateBytes.offsetof,
                     Address(Target.Kind.staticData, template_.ptr,
                         template_.where));

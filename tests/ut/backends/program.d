@@ -9,30 +9,10 @@ import snakebite.backends.ctfe: Ctfe;
 import snakebite.failure.report: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
-    Defined,
     findFunction,
     findModuleConstructors;
 import std.algorithm: map;
 import ut;
-
-
-@("isInterpreted.rootModule")
-unittest {
-    auto modules = parseSnippets([
-        q{
-            module rootModule;
-            int rootFunction() { return 1; }
-        },
-        q{
-            module importedModule;
-            int importedFunction() { return 2; }
-        },
-    ]);
-    auto program = Program([modules[0]]);
-
-    program.whereDefined(findFunction(modules[0], "rootFunction"))
-        .should == Defined.onlyHere;
-}
 
 
 @("compilationStatistics.noCompiler")
@@ -199,38 +179,4 @@ unittest {
         "ns.shared static this",
         "ns.static this",
     ];
-}
-
-
-@("isInterpreted.nonRootModule")
-unittest {
-    auto modules = parseSnippets([
-        q{
-            module anotherRootModule;
-            int rootFunction() { return 1; }
-        },
-        q{
-            module anotherImportedModule;
-            int importedFunction() { return 2; }
-        },
-    ]);
-    auto program = Program([modules[0]]);
-
-    program.whereDefined(findFunction(modules[1], "importedFunction"))
-        .should.not == Defined.onlyHere;
-}
-
-
-@("isInterpreted.compilerGeneratedName")
-unittest {
-    auto module_ = parseSnippets([
-        q{
-            module generatedNameRootModule;
-            int _d_runtimeGenerated() { return 1; }
-        },
-    ])[0];
-    auto program = Program([module_]);
-
-    program.whereDefined(findFunction(module_, "_d_runtimeGenerated"))
-        .should == Defined.onlyHere;
 }

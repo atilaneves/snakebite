@@ -64,7 +64,6 @@ host templates. Library-first order still prevents a test fixture from
 replacing an independent library definition with the same name.
 
 Call selection asks the resolver no question. Whether another object
-defines a symbol comes from its declaration (ADR-0009,
-`Program.isDefinedElsewhere`), and the resolver only finds the address of a
-symbol that another object defines. The export boundary does not make a
-root-owned body a host body.
+defines a symbol comes from its declaration (ADR-0009), and the resolver only
+finds the address of a symbol that another object defines. The export
+boundary does not make a root-owned body a host body.

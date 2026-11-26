@@ -66,56 +66,48 @@ public bool isRootOwned(
     return (moduleOf(declaration) in rootModules) !is null;
 }
 
-// Where a declaration is defined, as the linker of a native build sees it
-// (ADR-0009). "Here" is the compile of the root modules.
-public enum Defined {
-    // Only this compile defines it: what a root module declares.
-    onlyHere,
-    // This compile defines it, and another object can define it too: what a
-    // template instance holds, because a native build emits an instance into
-    // each object that uses it. One copy is kept.
-    hereAndPossiblyElsewhere,
-    // Another object defines it: a declaration with no body or an `extern`
-    // one, and each declaration of a dependency module that its archive
-    // defines. A missing symbol for it is a link error, never a reason to use
-    // the body.
-    notHere,
-}
-
 // The one decision of where `declaration` is defined. A function literal and
-// what a template instance holds are defined here. The exception is an
-// instance whose body no backend executes: the dependency image holds it
-// (ADR-0009, decision 1). What is nested in a function (its static locals and
-// nested functions) is defined where that function is: in the archive for a
-// function of a dependency that is not in a template instance. The answer
-// comes from the declaration alone, never from a loaded image, so a compile
-// with no image gives the same answer.
-public Defined whereDefined(
+// what a template instance holds are defined by the root modules and possibly
+// elsewhere. The exception is an instance whose body no backend executes: the
+// dependency image holds it (ADR-0009, decision 1). What is nested in a
+// function (its static locals and nested functions) is defined where that
+// function is: in the archive for a function of a dependency that is not in a
+// template instance. A declaration that a dependency module declares is never
+// `rootOwned`, even when it is nested in a root function (a dependency
+// template instance with a lambda that captures a local): another object can
+// define it too. The answer comes from the declaration alone, never from a
+// loaded image, so a compile with no image gives the same answer.
+public imported!"snakebite.language.definition".Definition whereDefined(
+
     imported!"dmd.dsymbol".Dsymbol declaration,
     in bool[imported!"dmd.dmodule".Module] rootModules,
 ) {
     import dmd.astenums: STC;
+    import snakebite.language.definition: Definition;
 
     auto function_ = declaration.isFuncDeclaration;
     if (function_ !is null && function_.fbody is null)
-        return Defined.notHere;
+        return Definition.definedElsewhere;
     if (auto named = declaration.isDeclaration)
         if (named.storage_class & STC.extern_)
-            return Defined.notHere;
+            return Definition.definedElsewhere;
     if (isRootOwned(declaration, rootModules))
-        return Defined.onlyHere;
+        return Definition.rootOwned;
 
     auto owner = function_ is null ? ownerOf(declaration)
         : Owner(contextOf(function_).outerFunction,
             contextOf(function_).instantiated);
-    if (owner.outer !is null)
-        return whereDefined(owner.outer, rootModules);
+    if (owner.outer !is null) {
+        const outer = whereDefined(owner.outer, rootModules);
+        return outer == Definition.rootOwned
+            ? Definition.rootOrElsewhere : outer;
+    }
     if (function_ !is null && function_.isFuncLiteralDeclaration !is null)
-        return Defined.hereAndPossiblyElsewhere;
+        return Definition.rootOrElsewhere;
     if (!owner.instantiated)
-        return Defined.notHere;
+        return Definition.definedElsewhere;
     return function_ is null || backendExecutes(function_)
-        ? Defined.hereAndPossiblyElsewhere : Defined.notHere;
+        ? Definition.rootOrElsewhere : Definition.definedElsewhere;
 }
 
 private struct Owner {
