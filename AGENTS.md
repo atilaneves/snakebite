@@ -125,13 +125,6 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   explicitly with `public`/`private`.
 - Do not use exceptions for control flow.
 
-## Test modules (in `tests`)
-
-- Use module-scope imports to avoid repeating the same import in every
-  test block. Unit test modules should not use `imported`.
-- Use package modules liberally to avoid imports in test modules - see
-  `import ut;` for a good example.
-
 ## Code organisation
 
 * Backends must not import each other: nothing in one backend's package
@@ -161,10 +154,9 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   high level. It has no names of functions, types, fields or files of the
   code, and no description of how the code does a thing.
 
-## Runtime semantics
-
-druntime is not be emulated or reimplemented. It is either interpreted,
-compiled, or called via FFI.
+A rule of behaviour in the code that native code does not have, or that gives
+a different result from native code, needs its reason in a decision record
+(`docs/adr/`). With no such record it is a defect.
 
 ## Shared layer
 
@@ -243,28 +235,6 @@ review must-fix.
 - Fix the full concept: cover every case the same reasoning applies
   to, not only the case that made a project fail.
 
-## Tests
-- Use `shouldThrowWithMessage`, not `shouldThrow`.
-- Use `.should ==`, not `.shouldEqual`.
-- Use `"...".should.be in foo`, not `.canFind("...").should == true`.
-- State an expectation with the assertion library of the test framework
-  (unit-threaded), on the values themselves: `x.should == y`,
-  `x.should.be in y`, `shouldThrowWithMessage`. Do not use plain `assert`,
-  and do not hand-write a check and wrap it in `.should == true`. Write
-  `name[0 .. expected.length].should == expected;`, not
-  `(name[0 .. expected.length] == expected).should == true;`, and
-  `"only one entry point `main` is allowed".should.be in thrown.msg;`, not
-  `assert(thrown.msg.canFind("..."))`.
-- A test does not import types of the dmd frontend and does not call an
-  internal helper. It states a behaviour through what the tests of that
-  area already use to compile and run a guest program. If a behaviour
-  cannot be reached that way, the test is at the wrong level.
-- The `ut` binary should be the first safety net; its dual mandate is
-  to be fast and catch *most* things. It can't catch everything, and
-  that's what the other tests are for.
-- Tests must have positive ROI. Tests are not free, even merely
-  existing has a cost, as well as the actual cost of running them.
-
 ## Git worktrees
 
 Do work in a git worktree in .worktrees unless instructed otherwise.
@@ -306,6 +276,32 @@ instead of writing a new test.
 
 A new test should always be attempted on the full matrix of backends
 and only have `Omit` for the ones verified to fail.
+
+- Use `shouldThrowWithMessage`, not `shouldThrow`.
+- Use `.should ==`, not `.shouldEqual`.
+- Use `"...".should.be in foo`, not `.canFind("...").should == true`.
+- State an expectation with the assertion library of the test framework
+  (unit-threaded), on the values themselves: `x.should == y`,
+  `x.should.be in y`, `shouldThrowWithMessage`. Do not use plain `assert`,
+  and do not hand-write a check and wrap it in `.should == true`. Write
+  `name[0 .. expected.length].should == expected;`, not
+  `(name[0 .. expected.length] == expected).should == true;`, and
+  `"only one entry point `main` is allowed".should.be in thrown.msg;`, not
+  `assert(thrown.msg.canFind("..."))`.
+- A test does not import types of the dmd frontend and does not call an
+  internal helper. It states a behaviour through what the tests of that
+  area already use to compile and run a guest program. If a behaviour
+  cannot be reached that way, the test is at the wrong level.
+- The `ut` binary should be the first safety net; its dual mandate is
+  to be fast and catch *most* things. It can't catch everything, and
+  that's what the other tests are for.
+- Tests must have positive ROI. Tests are not free, even merely
+  existing has a cost, as well as the actual cost of running them.
+
+- Use module-scope imports to avoid repeating the same import in every
+  test block. Unit test modules should not use `imported`.
+- Use package modules liberally to avoid imports in test modules - see
+  `import ut;` for a good example.
 
 ## Performance work
 
@@ -380,10 +376,6 @@ This means there is no need to marshall or unmarshall when doing FFI.
 
 `bin/sb` does what native code does: the compiler, the linker and the D
 runtime decide the behaviour.
-
-A rule of behaviour in the code that native code does not have, or that gives
-a different result from native code, needs its reason in a decision record
-(`docs/adr/`). With no such record it is a defect.
 
 Before a fix for a difference between two ways of running a program, find
 what native code and the D specification do in that case. That decides which
