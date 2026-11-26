@@ -4078,7 +4078,7 @@ def test_build_module_call_to_a_name_runs_as_native_code(
 # variable that both modules read and write, a thread-local variable of which
 # each thread has its own copy, the class information, the vtable and the
 # initial image of a class that only the other module uses, and the type
-# information of a struct.
+# information of a struct, an enum and a union.
 def test_build_module_data_of_another_module_run_as_native_code(
     tmp_path: Path,
 ) -> None:
@@ -4096,10 +4096,14 @@ def test_build_module_data_of_another_module_run_as_native_code(
             override int value() { return x; }
         }
         struct S { int a = 7; long b = 9; }
+        enum E { x = 3, y }
+        union U { int i; float f; }
         void bump() { total += 1; }
         int totalInB() { return total; }
         int perThreadInB() { return perThread; }
         TypeInfo structInfoInB() { return typeid(S); }
+        TypeInfo enumInfoInB() { return typeid(E); }
+        TypeInfo unionInfoInB() { return typeid(U); }
         """)
     write(app / "source" / "a.d", """
         module a;
@@ -4127,15 +4131,29 @@ def test_build_module_data_of_another_module_run_as_native_code(
             writeln(typeid(base) is typeid(C));
             writeln(typeid(S).name, " ", typeid(S) is structInfoInB);
             writeln(S.init.a, " ", S.init.b, " ", typeid(S).initializer.length);
+            writeln(typeid(E), " ", typeid(E) is enumInfoInB);
+            writeln(typeid(U), " ", typeid(U) is unionInfoInB);
         }
         """)
+    expected = [
+        "16 16",
+        "2 2 13",
+        "5",
+        "true 5 b.C",
+        "true",
+        "b.S true",
+        "7 9 16",
+        "b.E true",
+        "b.U true",
+    ]
     native = subprocess.run(
         ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
         capture_output=True, check=False, text=True, timeout=300, cwd=app)
     assert native.returncode == 0, output(native)
+    assert native.stdout.splitlines() == expected, output(native)
     built = run_sb("--build=module", str(app), cwd=tmp_path)
     assert built.returncode == 0, output(built)
-    assert guest_lines(built) == native.stdout.splitlines(), output(built)
+    assert guest_lines(built) == expected, output(built)
 
 
 # A program saved with the perf map on names its JIT code in the perf map

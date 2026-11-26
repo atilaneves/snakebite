@@ -118,7 +118,7 @@ public struct StaticBlocks {
     }
 
     // The address `offset` bytes into block `block`, or null.
-    public void* addressOf(in size_t block, in size_t offset)
+    public inout(void)* addressOf(in size_t block, in size_t offset) inout
             @trusted pure nothrow @nogc {
         if (block >= _blocks.length || offset > _blocks[block].length)
             return null;
@@ -242,6 +242,12 @@ public struct StaticBlocks {
         return Placed(bytes, DatumRef(&this, _data[$ - 1].block,
             _data[$ - 1].offset));
     }
+}
+
+// The start of `datum`, which blocks of a program hold.
+public const(void)* startOf(in DatumRef datum) @trusted pure nothrow @nogc {
+    const blocks = cast(const(StaticBlocks)*) datum.set;
+    return blocks.addressOf(datum.block, datum.offset);
 }
 
 

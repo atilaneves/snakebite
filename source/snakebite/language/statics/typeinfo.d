@@ -7,6 +7,17 @@ private:
 import snakebite.failure.report: internalFailure;
 
 
+// The suffixes of the symbols that dmd gives the data of a type: the initial
+// image of a class, its vtable, its class information, the class information
+// of an interface, and the type information of any other type (with the
+// prefix `TypeInfo_` and the mangled name of the type before it).
+private enum initSuffix = "6__initZ";
+private enum vtableSuffix = "6__vtblZ";
+private enum classInfoSuffix = "7__ClassZ";
+private enum interfaceInfoSuffix = "11__InterfaceZ";
+private enum typeInfoSuffix = initSuffix;
+
+
 // DMD emits no linked metadata for guest declarations. Keep their fallback
 // metadata and its identity for the backend's lifetime, while reusing real
 // host metadata whenever it is available.
@@ -103,7 +114,7 @@ public struct RuntimeTypes {
             return Linked!(const(void)[]).held(
                 _classInfo(declaration).held.m_init);
         return Linked!(const(void)[]).named(nativeClassSymbol(
-            _nativeImages, declaration, "6__initZ"), declaration.structsize);
+            _nativeImages, declaration, initSuffix), declaration.structsize);
     }
 
     // The class information of `declaration`: native, or built by the
@@ -121,7 +132,7 @@ public struct RuntimeTypes {
     // The name of the vtable of the native class `declaration`.
     public Linked!(const(void)*) nativeVtable(ClassDeclaration declaration) {
         return Linked!(const(void)*).named(nativeClassSymbol(
-            _nativeVtables, declaration, "6__vtblZ"));
+            _nativeVtables, declaration, vtableSuffix));
     }
 
     // The name of the datum `suffix` of the native class `declaration`, made
@@ -281,14 +292,17 @@ public struct RuntimeTypes {
             _data.addressOfData(start).target.datum));
     }
 
-    // Whether `type` is a struct or a class that only the root modules
-    // define.
+    // Whether `type` is a struct, an enum or a class that only the root
+    // modules define. dmd emits the type information of such a type in the
+    // object of the module that declares it.
     private bool isRootOwned(Type type) const {
         Dsymbol declaration;
         if (auto classType = type.isTypeClass)
             declaration = classType.sym;
         else if (auto structType = type.isTypeStruct)
             declaration = structType.sym;
+        else if (auto enumType = type.isTypeEnum)
+            declaration = enumType.sym;
         if (declaration is null)
             return false;
         final switch (_whereDefined(declaration)) with (Definition) {
@@ -433,8 +447,8 @@ public struct RuntimeTypes {
     }
 
     // The symbol of the type information of the type with the mangled name
-    // `mangled`, as dmd names it.
-    private static string typeInfoSymbol(in char[] mangled) {
+    // `mangled`, as dmd names it (`TypeInfoDeclaration`).
+    private static string typeInfoSymbol(in char[] mangled) @safe pure nothrow {
         import std.conv: text;
 
         enum prefix = "TypeInfo_";
@@ -443,15 +457,16 @@ public struct RuntimeTypes {
             prefix.length + mangled.length,
             prefix,
             mangled,
-            "6__initZ",
+            typeInfoSuffix,
         );
     }
 
     // The symbol of the class information of `declaration`.
     private static string classInfoSymbol(ClassDeclaration declaration) {
-        return classSymbol(declaration,
-            declaration.isInterfaceDeclaration is null
-                ? "7__ClassZ" : "11__InterfaceZ");
+        const suffix = declaration.isInterfaceDeclaration is null
+            ? classInfoSuffix
+            : interfaceInfoSuffix;
+        return classSymbol(declaration, suffix);
     }
 
     // The symbol of the datum `suffix` of the class `declaration`, as the
@@ -520,59 +535,100 @@ public struct RuntimeTypes {
         return linkedClass(declaration).name;
     }
 
-    // The class information `info` that the program built for
-    // `declaration`, as the program refers to it. For a class that only the
-    // root modules define, it is `info`, and an SBC file defines the symbols
-    // of the class information, the vtable and the initial image with them.
-    // For a class that the program and another object can both define
-    // (`hasOwnCopy`), it is the name of the class information
-    // (`ownClassInfo`).
-    public Linked!TypeInfo_Class builtClassInfo(
-        ClassDeclaration declaration,
-        TypeInfo_Class info,
-    ) {
-        if (hasOwnCopy(declaration))
-            return ownClassInfo(declaration, info);
-        // An interface has neither an initial image nor a vtable.
-        if (info.m_init.ptr !is null)
-            _data.defineHere(
-                classSymbol(declaration, "6__initZ"),
-                info.m_init.ptr,
-            );
-        if (info.vtbl.ptr !is null)
-            _data.defineHere(classSymbol(declaration, "6__vtblZ"), info.vtbl.ptr);
-        _data.defineHere(classInfoSymbol(declaration), cast(const(void)*) info);
-        return Linked!TypeInfo_Class.held(info);
-    }
-
     // The name of the class information of `declaration` (`hasOwnCopy`),
     // with `info`, which the program built, as its own copy, and the names
     // of its vtable and its initial image with theirs. Each name has its
     // copy from the step that makes it (`Names.namedWithOwn`).
-    private Linked!TypeInfo_Class ownClassInfo(
+    public Linked!TypeInfo_Class ownClassInfo(
         ClassDeclaration declaration, TypeInfo_Class info,
     ) {
-        Name* named(string symbol, const(void)* start) {
-            return plans.names.namedWithOwn(symbol, 0, declaration.toString,
-                start, _data.addressOfData(start).target.datum);
-        }
+        // Each name is of the start of its symbol.
+        enum distance = 0;
+        Name* classInfoName;
+        eachClassDatum(
+            declaration,
+            info,
+            (string symbol, const(void)* start, NativeNames* table) {
+                // `auto`: `const` makes the `Name*` that the table keeps
+                // const.
+                auto name = plans.names.namedWithOwn(
+                    symbol,
+                    distance,
+                    declaration.toString,
+                    start,
+                    _data.addressOfData(start).target.datum,
+                );
+                if (table is null)
+                    classInfoName = name;
+                else if (!(declaration in *table))
+                    table.insert(declaration, name);
+            },
+        );
+        return Linked!TypeInfo_Class.named(classInfoName);
+    }
 
-        void nameData(
-            ref SharedTable!(ClassDeclaration, Name*) table,
-            in string suffix, const(void)* start,
-        ) {
-            auto name = named(classSymbol(declaration, suffix), start);
-            if (!(declaration in table))
-                table.insert(declaration, name);
-        }
+    // The names of a datum of each native class: `_nativeImages` or
+    // `_nativeVtables`.
+    private alias NativeNames = SharedTable!(ClassDeclaration, Name*);
 
-        // An interface has neither.
+    // Calls `visit` for each datum that dmd emits with the class information
+    // `info` of `declaration`, with its symbol, its start and the names of
+    // that datum of native classes: the initial image and the vtable, which
+    // an interface does not have, then the class information, which has no
+    // such names (null).
+    private void eachClassDatum(Visit)(
+        ClassDeclaration declaration,
+        TypeInfo_Class info,
+        scope Visit visit,
+    ) {
         if (info.m_init.ptr !is null)
-            nameData(_nativeImages, "6__initZ", info.m_init.ptr);
+            visit(
+                classSymbol(declaration, initSuffix),
+                info.m_init.ptr,
+                &_nativeImages,
+            );
         if (info.vtbl.ptr !is null)
-            nameData(_nativeVtables, "6__vtblZ", info.vtbl.ptr);
-        return Linked!TypeInfo_Class.named(named(
-            classInfoSymbol(declaration), cast(const(void)*) info));
+            visit(
+                classSymbol(declaration, vtableSuffix),
+                cast(const(void)*) info.vtbl.ptr,
+                &_nativeVtables,
+            );
+        visit(classInfoSymbol(declaration), cast(const(void)*) info, null);
+    }
+
+    // Makes the class information of `declaration`, which the object of its
+    // module holds (`hasClassInfoInObject`), and, when only the root modules
+    // define the class, defines the symbols of the class information, its
+    // vtable and its initial image in the SBC file, so that the other SBC
+    // files of the program reach them by name (ADR-0021).
+    public void makeAndDefineClassInfo(ClassDeclaration declaration) {
+        if (_whereDefined(declaration) != Definition.rootOwned)
+            return;
+        eachClassDatum(
+            declaration,
+            _classInfo(declaration).held,
+            (string symbol, const(void)* start, NativeNames* table) {
+                _data.defineSymbol(symbol, start);
+            },
+        );
+    }
+
+    // Makes the type information of the struct or the enum `declaration`,
+    // which the object of its module holds (`hasTypeInfoInObject`), and,
+    // when only the root modules define the type, defines its symbol in the
+    // SBC file, so that the other SBC files of the program reach it by name
+    // (ADR-0021).
+    public void makeAndDefineTypeInfo(Declaration)(Declaration declaration)
+    if (is(Declaration == StructDeclaration)
+            || is(Declaration == EnumDeclaration)) {
+        import snakebite.frontend.ast: toDString;
+
+        // `auto`: `isRootOwned` and `get` take a mutable `Type`.
+        auto type = declaration.type;
+        if (!isRootOwned(type))
+            return;
+        const info = cast(const(void)*) get(type).held;
+        _data.defineSymbol(typeInfoSymbol(type.deco.toDString), info);
     }
 
     // What `linkedClassInfo` needs of `declaration`, decided once.
@@ -614,9 +670,15 @@ public struct RuntimeTypes {
         import snakebite.frontend.dmd.functions: prettyNameOf;
         auto info = _data.newObject!TypeInfo_Enum(declaration);
         _data.storeString(&info.name, prettyNameOf(declaration));
-        reference(&info.base, get(declaration.memtype));
-        _data.storeSlice(&info.m_init, _data.initialValue(
-            declaration.type, declaration.loc).bytes);
+        // As the glue of dmd: an enum that is only declared has no base type
+        // (`enum E;`) and no initial value.
+        if (declaration.memtype !is null)
+            reference(&info.base, get(declaration.memtype));
+        if (declaration.members !is null)
+            _data.storeSlice(
+                &info.m_init,
+                _data.initialValue(declaration.type, declaration.loc).bytes,
+            );
         return info;
     }
 
@@ -711,13 +773,6 @@ public struct RuntimeTypes {
             if (auto arg = declaration.argType(1))
                 reference(&info.m_arg2, get(arg));
         }
-        // dmd emits the type information of a struct in the object of the
-        // module that declares it.
-        if (_whereDefined(declaration) == Definition.rootOwned)
-            _data.defineHere(
-                typeInfoSymbol(declaration.type.deco.toDString),
-                cast(const(void)*) info,
-            );
         return *_structs.insert(declaration, info);
     }
 }

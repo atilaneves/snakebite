@@ -28,8 +28,8 @@ import snakebite.image.dependency: DependencyImage;
 import snakebite.memory.program: bytesFor, MemoryNeed, pageAlignment,
     ProgramMemory;
 import snakebite.ffi.callplan: CallPlan, NativeSignature;
-import snakebite.ffi.names: DefinitionHere, Name;
-import snakebite.native.staticstore: StaticBlocks, StaticStore;
+import snakebite.ffi.names: DefinitionHere, GuestFunction, Name;
+import snakebite.native.staticstore: startOf, StaticBlocks, StaticStore;
 import snakebite.native.value: TypeFacts;
 import snakebite.native.signature: Signature;
 import snakebite.start.data:
@@ -38,6 +38,7 @@ import snakebite.start.data:
 import std.conv: text;
 import std.meta: AliasSeq;
 import std.traits: FieldNameTuple, Unqual;
+import std.sumtype: match;
 import std.typecons: Nullable;
 
 
@@ -340,9 +341,47 @@ private struct PendingGate {
 private alias FunctionPosition = size_t[2];
 
 
-// Where a datum is in a file: the index of the set of blocks that hold it
-// (`Archive.blocksAt`), then the block and the offset in the block.
-private alias DatumPosition = size_t[3];
+// Where a datum is in a file.
+private struct DatumPosition {
+    // The index of the set of blocks that hold the datum (`Archive.blocksAt`).
+    size_t blockSet;
+    // The block of the set that holds the datum.
+    size_t block;
+    // Where the datum starts in the block.
+    size_t offset;
+
+    // The position that the reference of a word to a datum names
+    // (`referenceOf`).
+    static DatumPosition of(in size_t[3] reference) @safe pure nothrow @nogc {
+        return DatumPosition(reference[0], reference[1], reference[2]);
+    }
+
+    // The reference of a word to the datum (`referenceOf`).
+    size_t[3] reference() const @safe pure nothrow @nogc {
+        return [blockSet, block, offset];
+    }
+}
+
+
+// A symbol that the compile of a file defines (`Names.defineHere`), as the
+// file holds it.
+private struct DefinedSymbol(Position) {
+    // The index of the symbol in the table of symbols
+    // (`Archive.symbolIndexOfName`).
+    size_t symbol;
+    // Where the definition is in the file.
+    Position place;
+}
+
+
+// A name that has the program's own copy of its symbol (`Names.defineOwn`),
+// as the file holds it.
+private struct OwnCopy {
+    // The index of the name (`Archive.nameIndexOf`).
+    size_t name;
+    // Where the copy is in the file.
+    DatumPosition place;
+}
 
 
 // The bytes of a file as they are written or read, and the places that the
@@ -602,24 +641,30 @@ private struct Archive {
         return null;
     }
 
-    // The module, block and offset of a place in the blocks `set`, when the
-    // program holds them.
-    size_t[3] blocksPosition(
-        in const(void)* set, in size_t block, in size_t offset,
-    ) {
-        if (set !is null)
+    // Where `datum` is in the file, when the program holds it.
+    DatumPosition positionOf(in DatumRef datum) {
+        if (datum.set !is null)
             foreach (m; 0 .. numBlockSets)
-                if (blocksAt(m) is set)
-                    return [m, block, offset];
+                if (blocksAt(m) is datum.set)
+                    return DatumPosition(m, datum.block, datum.offset);
         internalFailure("a word points at data that the program does not hold");
+    }
+
+    // The datum at `position`, which the file names.
+    DatumRef datumAt(in DatumPosition position) {
+        if (auto blocks = blocksAt(position.blockSet))
+            if (blocks.addressOf(position.block, position.offset) !is null)
+                return DatumRef(blocks, position.block, position.offset);
+        throw new SnakebiteException(
+            "the program file names data that it does not hold",
+        );
     }
 
     // What a gate (storage of a variable of the program, as `GateStorage`
     // holds) is: its datum in the blocks of the program, or a host symbol.
     Target.Kind gateTarget(in GateStorage gate, out size_t[3] reference) {
         if (gate.where.set !is null) {
-            reference = blocksPosition(
-                gate.where.set, gate.where.block, gate.where.offset);
+            reference = positionOf(gate.where).reference;
             return Target.Kind.staticData;
         }
         // Storage that another object defines: the name of its symbol.
@@ -627,12 +672,8 @@ private struct Archive {
         return Target.Kind.hostSymbol;
     }
 
-    void* dataAt(in size_t[3] position) {
-        if (auto blocks = blocksAt(position[0]))
-            if (auto address = blocks.addressOf(position[1], position[2]))
-                return address;
-        throw new SnakebiteException(
-            "the program file names data that it does not hold");
+    void* dataAt(in DatumPosition position) {
+        return cast(void*) startOf(datumAt(position));
     }
 
     // String and offset of an address in a string of the process store.
@@ -963,8 +1004,7 @@ private size_t[3] referenceOf(ref Archive archive, in Target target) {
                 cast(const(CallPlan)*) target.address), 0, 0];
         case staticData:
         case constantPool:
-            return archive.blocksPosition(
-                target.datum.set, target.datum.block, target.datum.offset);
+            return archive.positionOf(target.datum).reference;
         case adoptedString:
             return archive.stringPosition(cast(const(void)*) target.address);
         case hostSymbol:
@@ -997,7 +1037,7 @@ private size_t addressOf(
             return cast(size_t) archive.planAt(reference[0]);
         case staticData:
         case constantPool:
-            return cast(size_t) archive.dataAt(reference);
+            return cast(size_t) archive.dataAt(DatumPosition.of(reference));
         case adoptedString:
             return cast(size_t) archive.stringAt(reference);
         case interfaceTable:
@@ -1288,83 +1328,72 @@ private void transferStrings(ref Archive archive, ref StaticStore store) {
 // decision of a load (`CallPlanStore.chosenCopy`) is that of a compile to
 // RAM.
 private void transferOwnCopies(ref Archive archive, ref Program program) {
-    size_t[] names;
-    size_t[3][] places;
+    OwnCopy[] copies;
     if (archive.isWriting)
         program.plans.names.eachOwn((name) {
-            const datum = name.ownDatum;
-            names ~= archive.nameIndexOf(name);
-            places ~= archive.blocksPosition(
-                datum.set, datum.block, datum.offset);
+            const place = archive.positionOf(name.ownDatum);
+            copies ~= OwnCopy(archive.nameIndexOf(name), place);
         });
-    archive.transfer(names);
-    archive.transfer(places);
+    archive.transfer(copies);
     if (archive.isWriting)
         return;
-    if (places.length != names.length)
-        throw new SnakebiteException(
-            "the program file holds own copies that do not match");
-    foreach (index, place; places)
-        program.plans.names.defineOwn(archive.nameOfIndex(names[index]),
-            archive.dataAt(place), DatumRef(archive.blocksAt(place[0]),
-                place[1], place[2]));
+    foreach (copy; copies) {
+        const datum = archive.datumAt(copy.place);
+        program.plans.names.defineOwn(
+            archive.nameOfIndex(copy.name),
+            startOf(datum),
+            datum,
+        );
+    }
 }
 
 
 // The symbols that only the compile of the file defines (`Names.defineHere`):
-// for each function, the index of the symbol in the table of symbols and the
-// place of the function, then for each datum, the index of the symbol and the
-// place of the datum.
+// the functions, then the data.
 private void transferDefinitionsHere(ref Archive archive, ref Program program) {
-    size_t[] functionSymbols;
-    FunctionPosition[] functionPlaces;
-    size_t[] datumSymbols;
-    DatumPosition[] datumPlaces;
+    DefinedSymbol!FunctionPosition[] functions;
+    DefinedSymbol!DatumPosition[] data;
     if (archive.isWriting)
         program.plans.names.eachDefinitionHere(
             (string symbol, ref const DefinitionHere definition) {
                 const symbolIndex = archive.symbolIndexOfName(symbol);
-                if (const guestFunction = definition.guestFunction) {
-                    functionSymbols ~= symbolIndex;
-                    const function_ = cast(const(Function)*) guestFunction;
-                    functionPlaces ~= archive.positionOf(function_);
-                    return;
-                }
-                const datum = definition.datum;
-                datumSymbols ~= symbolIndex;
-                datumPlaces ~= archive.blocksPosition(
-                    datum.set,
-                    datum.block,
-                    datum.offset,
+                definition.match!(
+                    (in GuestFunction guest) {
+                        const function_ = cast(const(Function)*) guest.code;
+                        functions ~= DefinedSymbol!FunctionPosition(
+                            symbolIndex,
+                            archive.positionOf(function_),
+                        );
+                    },
+                    (in DatumRef datum) {
+                        data ~= DefinedSymbol!DatumPosition(
+                            symbolIndex,
+                            archive.positionOf(datum),
+                        );
+                    },
                 );
             },
         );
     // The load needs the lists only while it runs.
-    transferTemporary(archive, functionSymbols);
-    transferTemporary(archive, functionPlaces);
-    transferTemporary(archive, datumSymbols);
-    transferTemporary(archive, datumPlaces);
+    transferTemporary(archive, functions);
+    transferTemporary(archive, data);
     if (archive.isWriting)
         return;
-    if (functionPlaces.length != functionSymbols.length
-            || datumPlaces.length != datumSymbols.length)
-        throw new SnakebiteException(
-            "the program file holds definitions that do not match",
+    foreach (defined; functions) {
+        const function_ = archive.functionAt(
+            defined.place[0],
+            defined.place[1],
         );
-    foreach (index, place; functionPlaces) {
-        const guestFunction = archive.functionAt(place[0], place[1]);
         program.plans.names.defineHere(
-            archive.symbolNameAt(functionSymbols[index]),
-            DefinitionHere(guestFunction),
+            archive.symbolNameAt(defined.symbol),
+            DefinitionHere(GuestFunction(function_)),
         );
     }
-    foreach (index, place; datumPlaces) {
-        const datum = DatumRef(archive.blocksAt(place[0]), place[1], place[2]);
+    foreach (defined; data)
         program.plans.names.defineHere(
-            archive.symbolNameAt(datumSymbols[index]),
-            DefinitionHere(null, archive.dataAt(place), datum),
+            archive.symbolNameAt(defined.symbol),
+            DefinitionHere(archive.datumAt(defined.place)),
         );
-    }
 }
 
 
@@ -1418,7 +1447,8 @@ private size_t[3] linkReference(ref Archive archive, in StaticBlocks.Link link) 
     if (link.kind != Target.Kind.staticData)
         return referenceOf(archive,
             Target(link.kind, link.address, DatumRef.init, link.index));
-    return archive.blocksPosition(link.set, link.block, link.offset);
+    const datum = DatumRef(link.set, link.block, link.offset);
+    return archive.positionOf(datum).reference;
 }
 
 
@@ -1500,8 +1530,7 @@ private void transfer(ref Archive archive, ref GateStorage gate) {
         else
             gate.bytes = (cast(ubyte*) target.address)[0 .. length];
         if (kind == Target.Kind.staticData)
-            gate.where = DatumRef(archive.blocksAt(reference[0]),
-                reference[1], reference[2]);
+            gate.where = archive.datumAt(DatumPosition.of(reference));
     }
 }
 

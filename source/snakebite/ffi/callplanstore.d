@@ -5,10 +5,13 @@ private:
 
 import snakebite.ffi.callback: CallbackBridge, CallbackHandler;
 import snakebite.ffi.callplan: CallPlan, NativeSignature, Pending, planOf;
-import snakebite.ffi.names: DefinitionHere, Linked, Name, Names;
+import snakebite.ffi.names: DefinitionHere, GuestFunction, Linked, Name,
+    Names;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.image.dependency: DependencyImage;
-import snakebite.native.address: Target;
+import snakebite.native.address: DatumRef, Target;
+import snakebite.native.staticstore: startOf;
+import std.sumtype: match;
 import std.typecons: Flag, No, Yes;
 
 
@@ -83,9 +86,11 @@ public struct CallPlanStore {
     // The address of `definition`, which an SBC file holds: host code calls
     // a guest function through its callback entry.
     private void* addressOfDefinition(in DefinitionHere definition) {
-        if (definition.guestFunction is null)
-            return cast(void*) definition.datumStart;
-        return cast(void*) callbacks.entryOf(definition.guestFunction);
+        return definition.match!(
+            (in GuestFunction guest) =>
+                cast(void*) callbacks.entryOf(guest.code),
+            (in DatumRef datum) => cast(void*) startOf(datum),
+        );
     }
 
     // The guest function that an SBC file defines for the code that `plan`
@@ -96,7 +101,12 @@ public struct CallPlanStore {
         if (name is null)
             return null;
         const here = names.definitionHere(name.symbol);
-        return here is null ? null : here.guestFunction;
+        if (here is null)
+            return null;
+        return (*here).match!(
+            (in GuestFunction guest) => guest.code,
+            (in DatumRef datum) => cast(const(void)*) null,
+        );
     }
 
     // The name of the symbol that `name` reaches: an entry that host code

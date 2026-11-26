@@ -81,11 +81,39 @@ package(snakebite) bool hasStorageInObject(
 package(snakebite) bool hasTypeInfoInObject(
     imported!"dmd.dstruct".StructDeclaration declaration,
 ) {
+    return !declaration.isAnonymous && declaration.members !is null
+        && compilesTypeInfo;
+}
+
+// Whether the code generator of dmd emits the type information of the enum
+// `declaration` in the object of the module that declares it
+// (`dmd.glue.toobj`, the visit of an `EnumDeclaration`): an enum that is not
+// anonymous, in a compile with type information. An enum that is only
+// declared (`enum E;`) has type information too.
+package(snakebite) bool hasTypeInfoInObject(
+    imported!"dmd.denum".EnumDeclaration declaration,
+) {
+    return !declaration.isAnonymous && compilesTypeInfo;
+}
+
+// Whether the compile makes type information (`-betterC` does not), as the
+// code generator of dmd decides it.
+private bool compilesTypeInfo() nothrow @nogc {
     import dmd.globals: global;
     import dmd.mtype: Type;
 
-    return !declaration.isAnonymous && declaration.members !is null
-        && global.params.useTypeInfo && Type.dtypeinfo !is null;
+    return global.params.useTypeInfo && Type.dtypeinfo !is null;
+}
+
+// Whether the code generator of dmd emits the class information of the
+// class or interface `declaration`, with its vtable and its initial image,
+// in the object of the module that declares it (`dmd.glue.toobj`, the visits
+// of a `ClassDeclaration` and an `InterfaceDeclaration`): a class that is
+// not only declared.
+package(snakebite) bool hasClassInfoInObject(
+    imported!"dmd.dclass".ClassDeclaration declaration,
+) @safe pure nothrow @nogc {
+    return declaration.members !is null;
 }
 
 // Named distinctly from every class that extends it (`Collector` in

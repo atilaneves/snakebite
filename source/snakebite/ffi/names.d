@@ -21,16 +21,18 @@ module snakebite.ffi.names;
 // function or a datum that only one compile defines (`Definition.rootOwned`)
 // has its symbol in the SBC file of that compile (`Names.defineHere`), as an
 // object file has the symbol of each of its definitions. A reference to the
-// symbol from any file reaches it. Two definitions of one symbol are an
-// error. A symbol that a file defines goes before the process, as a linker
-// takes object files before libraries (`CallPlanStore.addressIfPresent`). A
-// datum or a template instance that more than one file defines is not
-// covered yet.
+// symbol from any SBC file reaches it. Two definitions of one symbol are an
+// error. A symbol that an SBC file defines goes before the process, as a
+// linker takes object files before libraries
+// (`CallPlanStore.addressIfPresent`). A datum or a template instance that
+// more than one SBC file defines has one copy in each SBC file, where native
+// code has one copy in the program (issue #1115).
 private:
 
 import snakebite.ffi.callplan: NativeSignature;
 import snakebite.host.sharedtable: SharedTable;
 import snakebite.native.address: DatumRef;
+import std.sumtype: SumType;
 
 
 // A symbol, as the program refers to it.
@@ -192,23 +194,19 @@ public struct FileName {
 }
 
 
-// The definition of a symbol that only one compile defines
-// (`Names.defineHere`): a guest function or a datum of the static data of the
-// program.
-public struct DefinitionHere {
-    // The guest function, or null for a datum. A guest function is a
-    // `const(void)*`, because this module does not know the type that a
-    // backend has for it.
-    public const(void)* guestFunction;
-    // The start of the datum, or null for a guest function. For a
-    // thread-local variable, the datum is the descriptor of the variable
-    // (`snakebite.stack.tls.TlsDescriptor`), from which each thread makes
-    // its own copy.
-    public const(void)* datumStart;
-    // The datum of the static data of the program that `datumStart` is the
-    // start of.
-    public DatumRef datum;
+// A guest function that an SBC file defines.
+public struct GuestFunction {
+    // A `const(void)*`, because this module does not know the type that a
+    // backend has for a guest function.
+    public const(void)* code;
 }
+
+
+// The definition of a symbol that only one compile defines
+// (`Names.defineHere`): a guest function, or a datum of the static data of
+// the program. The datum of a thread-local variable is its descriptor
+// (`snakebite.stack.tls.TlsSlots.descriptorOf`).
+public alias DefinitionHere = SumType!(GuestFunction, DatumRef);
 
 
 // The names of one program. A `Name` never moves, so that its address can
@@ -244,13 +242,14 @@ public struct Names {
     // Names are made rarely and never on a path whose time matters, so the
     // tables of names share one lock. Made at the first new name.
     private shared Mutex _lock;
-    // Whether program files made the names (`fromFile`).
+    // Whether SBC files made the names (`fromFile`).
     private bool _fromFile;
-    // The names of each program file, when program files made the names.
+    // The names of each SBC file, when SBC files made the names.
     private Name[][] _fileChunks;
     // The definition of each symbol that only one compile defines
-    // (`defineHere`). Written by a compile to a file, which does not run the
-    // program, and by a load, before the program runs: a read takes no lock.
+    // (`defineHere`). Written by a compile to an SBC file, which does not run
+    // the program, and by a load, before the program runs: a read takes no
+    // lock.
     private DefinitionHere[string] _definedHere;
 
     // The name of the symbol `symbol`, `distance` bytes after its start.
@@ -439,10 +438,10 @@ public struct Names {
     }
 
     // `definition` is the definition of `symbol`, which only one compile
-    // defines: a compile to a file gives each such function and datum of its
-    // root modules, and a load each that a file holds. A second definition
-    // of one symbol is an error that names the symbol, as a linker reports
-    // it.
+    // defines: a compile to an SBC file gives each such function and datum of
+    // its root modules, and a load each that an SBC file holds. A second
+    // definition of one symbol is an error that names the symbol, as a
+    // linker reports it.
     public void defineHere(in string symbol, in DefinitionHere definition) {
         import snakebite.failure.report: SnakebiteException;
 
