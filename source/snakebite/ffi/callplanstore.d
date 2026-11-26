@@ -62,11 +62,21 @@ public struct CallPlanStore {
                     name.address, cast(shared(void*)) found);
             }
             else {
-                auto processCopy = resolver.resolve(name.symbol);
-                found = names.keep(name, (own) {
-                    auto copy = chosenCopy(processCopy, own);
-                    return copy is null ? Name.absent : copy + name.distance;
-                });
+                // As a linker takes the object files before the libraries:
+                // a function that a program file defines before the process.
+                // Host code calls a guest function through its callback
+                // entry.
+                if (auto here = names.definitionHere(name.symbol))
+                    found = names.keep(name, (own) =>
+                        cast(void*) callbacks.entryOf(here) + name.distance);
+                else {
+                    auto processCopy = resolver.resolve(name.symbol);
+                    found = names.keep(name, (own) {
+                        auto copy = chosenCopy(processCopy, own);
+                        return copy is null ? Name.absent
+                            : copy + name.distance;
+                    });
+                }
             }
         }
         return found is Name.absent ? null : found;

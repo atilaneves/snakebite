@@ -16,6 +16,11 @@ module snakebite.ffi.names;
 // each object that needs it) is a name with the program's own copy
 // (`Names.defineOwn`). `CallPlanStore.chosenCopy` decides which copy is used
 // when the program is made ready to run.
+//
+// A function that only one compile defines (`Definition.rootOwned`) has its
+// symbol in the program file of that compile (`Names.defineHere`), as an
+// object file has the symbol of each of its definitions. A reference to the
+// symbol from any file of the program reaches it.
 private:
 
 import snakebite.ffi.callplan: NativeSignature;
@@ -219,6 +224,11 @@ public struct Names {
     private bool _fromFile;
     // The names of each program file, when program files made the names.
     private Name[][] _fileChunks;
+    // The word of the guest function of each symbol that only one compile
+    // defines (`defineHere`). Written by a compile to a file, which does not
+    // run the program, and by a load, before the program runs: a read takes
+    // no lock.
+    private const(void)*[string] _definedHere;
 
     // The name of the symbol `symbol`, `distance` bytes after its start.
     // `declaredBy` is the declaration of the symbol, kept with a new name. A
@@ -403,6 +413,38 @@ public struct Names {
         auto made = choose(name._own);
         atomicStore!(MemoryOrder.rel)(name.address, cast(shared(void*)) made);
         return made;
+    }
+
+    // `word`, a guest function, is the definition of `symbol`, which only
+    // one compile defines: a compile to a file gives each such function of
+    // its root modules, and a load each that a file holds. A second
+    // definition of one symbol is an error that names the symbol, as a
+    // linker reports it.
+    public void defineHere(string symbol, const(void)* word) {
+        import snakebite.failure.report: SnakebiteException;
+
+        auto lock = this.lock;
+        lock.lock;
+        scope(exit) lock.unlock;
+        if (symbol in _definedHere)
+            throw new SnakebiteException(
+                "multiple definition of the symbol `" ~ symbol ~ "`");
+        _definedHere[symbol] = word;
+    }
+
+    // The guest function that defines `symbol` (`defineHere`), or null.
+    public const(void)* definitionHere(in char[] symbol) const {
+        if (auto found = symbol in _definedHere)
+            return *found;
+        return null;
+    }
+
+    // Each symbol that only one compile defines, with its definition.
+    public void eachDefinitionHere(
+        scope void delegate(string, const(void)*) visit,
+    ) const {
+        foreach (symbol, word; _definedHere)
+            visit(symbol, word);
     }
 
     // Each name that has an own copy (`defineOwn`).

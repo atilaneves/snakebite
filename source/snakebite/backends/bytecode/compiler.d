@@ -823,6 +823,14 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                     text(reason, " in `", function_.toString, "`"));
             }
             _complete.insert(function_, placeholder);
+            // A file holds the symbol of each function that only its root
+            // modules define, as an object file does, so that the other
+            // files of a program reach it by name (ADR-0021).
+            if (compiledProgram.recordsAddresses
+                    && _world.callSelection.whereDefined(function_)
+                        == Definition.rootOwned)
+                compiledProgram.plans.names.defineHere(
+                    function_.mangledNameOf.idup, placeholder);
             if (outermost)
                 prepareCallbackBodies;
 

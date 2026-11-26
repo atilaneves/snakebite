@@ -1110,6 +1110,7 @@ private void transferBody(
         transferBlocks(archive, *archive.blocksAt(m));
     transferStrings(archive, program.store);
     transferOwnCopies(archive, program);
+    transferDefinitionsHere(archive, program);
     foreach (m; 0 .. blockSetCount)
         transferAddresses(archive, *archive.blocksAt(m));
     foreach (m; 0 .. moduleCount)
@@ -1270,6 +1271,30 @@ private void transferOwnCopies(ref Archive archive, ref Program program) {
         program.plans.names.defineOwn(archive.nameOfIndex(names[index]),
             archive.dataAt(place), DatumRef(archive.blocksAt(place[0]),
                 place[1], place[2]));
+}
+
+
+// The symbols that only the compile of the file defines (`Names.defineHere`):
+// the index of each in the table of symbols and the place of its function.
+private void transferDefinitionsHere(ref Archive archive, ref Program program) {
+    size_t[] symbols;
+    size_t[2][] places;
+    if (archive.isWriting)
+        program.plans.names.eachDefinitionHere((symbol, word) {
+            symbols ~= archive.symbolIndexOfName(symbol);
+            places ~= archive.positionOf(cast(const(Function)*) word);
+        });
+    // The load needs the lists only while it runs.
+    transferTemporary(archive, symbols);
+    transferTemporary(archive, places);
+    if (archive.isWriting)
+        return;
+    if (places.length != symbols.length)
+        throw new SnakebiteException(
+            "the program file holds definitions that do not match");
+    foreach (index, place; places)
+        program.plans.names.defineHere(archive.symbolNameAt(symbols[index]),
+            archive.functionAt(place[0], place[1]));
 }
 
 
