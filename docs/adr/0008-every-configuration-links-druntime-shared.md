@@ -18,8 +18,8 @@ data and TLS ranges to the GC, through its DSO registry, only when
 druntime itself is the shared library.
 
 Every snakebite configuration (`unittest`, `arena-validation`,
-`acceptance-test`, `sb`, `sb-repl`, `bench`) links druntime and phobos
-shared: LDC uses `-link-defaultlib-shared`, dmd uses
+`acceptance-test`, `alone-test`, `sb`, `sb-repl`, `bench`) links druntime and
+phobos shared: LDC uses `-link-defaultlib-shared`, dmd uses
 `-defaultlib=libphobos2.so`. The
 image links against the same shared libraries. The resulting binary
 needs the compiler's shared libraries when it runs.
@@ -45,7 +45,8 @@ the host's GC settings. Hiding it changes the selected cleanup policy.
 
 Test hosts add only the native fixtures designated in
 `build/host_exports.d`: `bin/ut` and `bin/arena` use the unit-test manifest;
-`bin/at` uses the acceptance-test manifest. The same compiler that builds each
+`bin/at` uses the acceptance-test manifest. `bin/alone` has no native
+fixtures and exports only `rt_options`. The same compiler that builds each
 host produces the fixtures' exact linker names. The manifest is not a
 module scan or a guest-language whitelist. All other host definitions,
 including ordinary Phobos template instances, remain private. Otherwise,

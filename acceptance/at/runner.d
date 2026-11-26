@@ -12,13 +12,11 @@ int run(string[] args) {
 
     return args.runTests!(
         "at.ffi.dvariadic", "at.ffi.dabi", "at.ffi.image",
-        "at.bench.timing",
-        "at.dub", "at.runtime.registration",
+        "at.dub",
         "ut.process", "ut.backends.call.intrinsics",
         "ut.backends.call.windowtierup",
         "ut.backends.call.arrayoperations", "ut.backends.run.hostfrontend", "ut.backends.run.inlineasm",
         "at.process",
         "at.stackrelease",
-        "at.runtime.faultregistration",
     );
 }

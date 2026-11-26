@@ -1,4 +1,4 @@
-module at.runtime.registration;
+module alone.runtime.registration;
 
 
 import core.memory: GC;
@@ -15,7 +15,7 @@ import std.conv: text;
 // no registry image and no chunk of callback entries mapped. A D
 // thread that starts while a program runs keeps the registration of that
 // program until the thread ends, so the count is exact only in a process in
-// which no other test starts a thread: the serial run of `bin/at`.
+// which no other test starts a thread: `bin/alone`.
 private size_t runsThatGiveBack(Backend)(
     in string code,
     in int status,
@@ -53,7 +53,7 @@ static foreach (backend; Matrix!(
     Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
 )) {
     @("registrationOfEndedProgramIsGivenBack." ~ backend.stringof)
-    @Tags(backend.stringof, "alone")
+    @Tags(backend.stringof)
     unittest {
         enum runs = 20;
         runsThatGiveBack!backend(q{
@@ -64,7 +64,7 @@ static foreach (backend; Matrix!(
     }
 
     @("registrationOfProgramThatFailedToStartIsGivenBack." ~ backend.stringof)
-    @Tags(backend.stringof, "alone")
+    @Tags(backend.stringof)
     unittest {
         enum runs = 20;
         runsThatGiveBack!backend(q{
@@ -86,7 +86,6 @@ private extern(C) void ignoreCallback(void*, CallbackCall*) {
 // chunks, so this fails when `release` leaves a mapping behind.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
     @("releasedBridgeUnmapsItsChunks." ~ text(strategy))
-    @Tags("alone")
     unittest {
         GC.collect;
         const before = executableChunkBytes;

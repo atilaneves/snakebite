@@ -1,4 +1,4 @@
-module at.bench.timing;
+module alone.bench.timing;
 
 
 import bench.benchmark: benchmark;
@@ -29,8 +29,6 @@ import unit_threaded;
 // contention spike.
 @("runTime.isConsistentAcrossRunCounts")
 @Flaky(3)
-@Serial
-@Tags("alone")
 unittest {
     string source = "module benchmarkTimingConsistency; int main() { ";
     source ~= "int sum; for (int i; i < 10_000; ++i) sum += i; ";
@@ -78,8 +76,6 @@ unittest {
 // costs.
 @("dub.cycle.matchesTouchedTestCycle")
 @Flaky(5)
-@Serial
-@Tags("alone")
 unittest {
     const directory = buildPath(getcwd, "examples", "ct-full");
     const objectFile = buildPath(directory, "ct-full-test-application.o");
@@ -112,7 +108,7 @@ unittest {
     );
 
     enum tolerance = 1.5;
-    // `-release` strips `assert`, and `bin/at` is always built with it,
+    // `-release` strips `assert`, and `bin/alone` is always built with it,
     // so this stays a `should` check: the numbers above already give the
     // diagnostic an `assert` message would have repeated.
     (ratio >= 1.0 / tolerance && ratio <= tolerance).should == true;
@@ -132,7 +128,7 @@ private Duration directDubTest(in string directory) {
         directory,
     );
     const elapsed = stopWatch.peek;
-    // `-release` strips `assert`, and `bin/at` is always built with it, so
+    // `-release` strips `assert`, and `bin/alone` is always built with it, so
     // this stays a `fail` call, not an `assert`: without it, a failed
     // `dub test` run would still time out and pass a bogus latency
     // through. `fail` over `should`, to keep `result.output` in the

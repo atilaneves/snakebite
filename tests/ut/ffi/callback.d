@@ -422,7 +422,8 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
 
 // A released bridge gives back its chunks: it has none left, however many it
 // had. That every chunk is also unmapped is measured on the whole process in
-// `bin/at` (`at.runtime.registration`), where no other thread maps memory.
+// `bin/alone` (`alone.runtime.registration`), where no other thread maps
+// memory.
 static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
     @("release.givesBackChunks." ~ text(strategy))
     unittest {
