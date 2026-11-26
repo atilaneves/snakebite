@@ -92,8 +92,12 @@ public int run(string[] args) {
                 JitSetting(!parsed.options.noJit),
                 buildFiles(directory).image,
             );
-            _statistics = Statistics(true, PreparationReport.init, report,
-                nullable(built.duration));
+            _statistics = Statistics(
+                true,
+                PreparationReport.init,
+                report,
+                nullable(built.duration),
+            );
             return report.status;
         }
         return runProject(
