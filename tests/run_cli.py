@@ -3863,6 +3863,27 @@ def test_build_project_runs_after_a_removed_compiler_configuration(
         assert_prints_dependency_lines(built, 42)
 
 
+# `DFLAGS` set and `LFLAGS` not set: the first `--build=project` run succeeds,
+# and the flag of `DFLAGS` reaches the compile.
+def test_build_project_runs_with_dflags_and_no_lflags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = write_build_project(tmp_path, "build-project-dflags", """
+        version (FromDflags) enum source = "from DFLAGS";
+        else enum source = "not from DFLAGS";
+        unittest {
+            printf("%.*s\\n", cast(int) source.length, source.ptr);
+        }
+        """)
+    monkeypatch.delenv("LFLAGS", raising=False)
+
+    built = run_sb("--build=project", str(app), cwd=tmp_path,
+                   env={"DFLAGS": "-version=FromDflags"})
+
+    assert built.returncode == 0, output(built)
+    assert "from DFLAGS" in guest_lines(built), output(built)
+
+
 # A compile error ends the run with status 1 and the error text of
 # `bin/sb DIR`. The run after the correction gives the result of `bin/sb DIR`.
 def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
