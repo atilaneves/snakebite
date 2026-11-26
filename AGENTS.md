@@ -124,6 +124,9 @@ Use ASD-STE100 - Simplified Technical English in all communication.
 * A comment is a sentence that a reader who has not seen the PR can
   understand. When a change makes part of a comment false, rewrite the
   whole comment.
+* A comment on a type says what the type is. A parameter of its constructor
+  is explained at the constructor or at the function that takes it, and a
+  field is explained at the field.
 * A name says what the thing is: `fileName`, not `file`, for a string.
   A function that returns the name or path of a file is named for the name
   or path.
