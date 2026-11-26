@@ -8391,6 +8391,542 @@ def test_fork_keeps_compiled_functions_in_both_processes(
     assert result.returncode == 0, output(result)
 
 
+# The tests from here to the helpers start `bin/sb` on a program and check
+# what the process gives. Each expected value is what the same program gives
+# when it is compiled by dmd and run, unless its comment says otherwise.
+
+
+# A class object that the program leaves to the collector does not stop the
+# process from ending normally.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_class_object_left_to_the_collector_at_shutdown(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "probe.d",
+        """
+        import core.stdc.stdio: puts;
+        class Resource {
+            ~this() { puts("resource finalized"); }
+        }
+        void allocate() { auto resource = new Resource; }
+        void main() { allocate(); }
+        """,
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# The default test runner calls a module unittest with the context that its
+# nested delegate reads.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_module_unittest_with_a_nested_delegate(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "probe.d",
+        """
+        unittest {
+            int value = 42;
+            auto read = () { return value; };
+            assert(read() == 42);
+        }
+        void main() {}
+        """,
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# The comparison of a static array with an array literal calls a druntime
+# template that the dependency image selects by the types of the call.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_static_array_comparison_with_an_array_literal(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "probe.d",
+        """
+        unittest {
+            ubyte[4] values = [23, 13, 42, 71];
+            assert(values == [23, 13, 42, 71]);
+            assert(values != [23, 13, 42, 72]);
+        }
+        void main() {}
+        """,
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# The import paths of druntime and Phobos come from the configuration file
+# of the compiler that built `bin/sb`: the binary the build recorded. A file
+# with a compiler's name earlier on `PATH`, and a configuration file beside
+# it, are not that compiler. There is no compiled program to compare with.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_host_compiler_is_the_recorded_binary(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(tmp_path / "app" / "probe.d", "void main() {}\n")
+    decoys = tmp_path / "decoys"
+    for name in ("ldc2", "dmd"):
+        write(decoys / name, "#!/bin/sh\n")
+        (decoys / name).chmod(0o755)
+        write(decoys / f"{name}.conf", 'switches = ["-I/nonexistent"];\n')
+
+    result = run_sb(
+        f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path,
+        env={"PATH": f"{decoys}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 0, output(result)
+
+
+# `--help` needs no compiler.
+def test_help_needs_no_compiler(tmp_path: Path) -> None:
+    result = run_sb("--help", cwd=tmp_path, env={"PATH": "/nonexistent"})
+
+    assert result.returncode == 0, output(result)
+    assert "Usage" in output(result)
+
+
+# A call of a compiler intrinsic that no wrapper covers is a native call of
+# a symbol that the process does not have, and the run ends naming the
+# intrinsic. `bin/sb` is built with LDC, which calls its LLVM intrinsics
+# through `ldc.gccbuiltins_x86`. Compiled D has the instruction, so the
+# expected values are those of `bin/sb`. CTFE has no source for the
+# intrinsic.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_intrinsic_without_a_wrapper_names_itself(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "probe.d",
+        """
+        import core.simd;
+        import ldc.gccbuiltins_x86: __builtin_ia32_rsqrtps;
+        void main(string[] args) {
+            if (args.length == 1)
+                return;
+            float4 a = 1;
+            float4 c = __builtin_ia32_rsqrtps(a);
+        }
+        """,
+    )
+    arguments = (f"--backend={backend}", str(tmp_path / "app"))
+
+    assert run_sb(*arguments, cwd=tmp_path).returncode == 0
+    result = run_sb(*arguments, "--", "call", cwd=tmp_path)
+
+    assert result.returncode != 0
+    assert (
+        "no host wrapper serves the LDC intrinsic `llvm.x86.sse.rsqrt.ps` "
+        "declared by `__builtin_ia32_rsqrtps`"
+    ) in output(result)
+
+
+# CTFE cannot modify the pool, a variable of the module, at compile time.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_task_pool_reduce_runs_to_completion(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "app.d",
+        """
+        module app;
+        import std.parallelism;
+        import std.range : iota;
+        unittest {
+            auto s = taskPool.reduce!"a + b"(iota(1, 101));
+            assert(s == 5050);
+        }
+        """,
+    )
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+
+
+# A failed copy between slices of different lengths, or between slices that
+# overlap, throws and leaves the destination as it was: druntime's checks of
+# the copy stay on in the release build of `bin/sb`.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_invalid_slice_copies_throw(tmp_path: Path, backend: str) -> None:
+    write(
+        tmp_path / "app" / "probe.d",
+        """
+        module probe;
+        void main() {
+            int[2] sourceStorage = [1, 2];
+            int[3] storage = [3, 4, 5];
+            int[] source = sourceStorage[];
+            int[] destination = storage[];
+            bool caught;
+            try destination[] = source[];
+            catch (Throwable) caught = true;
+            assert(caught);
+            assert(storage == [3, 4, 5]);
+            int[3] overlap = [1, 2, 3];
+            int* overlapPtr = overlap.ptr;
+            source = overlapPtr[0 .. 2];
+            destination = overlapPtr[1 .. 3];
+            caught = false;
+            try destination[] = source[];
+            catch (Throwable) caught = true;
+            assert(caught);
+            assert(overlap == [1, 2, 3]);
+        }
+        """,
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# A thread that `std.concurrency` started receives a message that one of
+# several handlers takes, and writes it. CTFE cannot start a thread.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_thread_receives_a_message_with_several_handlers(
+    tmp_path: Path, backend: str,
+) -> None:
+    write(
+        tmp_path / "app" / "probe.d",
+        """
+        import core.time: seconds;
+        import std.concurrency;
+        import std.stdio: stdout, write;
+
+        struct Flush {}
+
+        void writer(Tid parent) {
+            const received = receiveTimeout(2.seconds,
+                (string message, Tid origin) {
+                    assert(origin == parent);
+                    write(message);
+                    stdout.flush;
+                    parent.send(true);
+                },
+                (Flush message, Tid origin) { assert(false); },
+            );
+            assert(received);
+        }
+
+        void main(string[] args) {
+            assert(args.length == 1);
+            auto thread = spawn(&writer, thisTid);
+            thread.send("worker output\\n", thisTid);
+            bool finished;
+            assert(receiveTimeout(3.seconds,
+                (bool success) { finished = success; },
+            ));
+            assert(finished);
+        }
+        """,
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+    assert guest_lines(result)[:1] == ["worker output"], output(result)
+
+
+# The test suite of `unit-threaded` runs its tests on worker threads that
+# can still be alive when the run returns. Such a thread must not end the
+# process with a fault when the dependency image goes away. The version is
+# the one that this project uses (`dub.selections.json`), which dub has
+# already fetched. A backend may disagree with compiled D, which gives 0, on
+# a few of the suite's own tests, so status 1 is a pass here too. The suite
+# deletes `tmp/unit-threaded` below its working directory, so the run is in
+# the copy. CTFE cannot start a thread.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_guest_thread_outlives_the_dependency_image(
+    tmp_path: Path, backend: str,
+) -> None:
+    selections = json.loads(Path("dub.selections.json").read_text())
+    version = selections["versions"]["unit-threaded"]
+    package = (
+        Path.home() / ".dub" / "packages" / "unit-threaded" / version
+        / "unit-threaded"
+    )
+    copy = tmp_path / "unit-threaded"
+    shutil.copytree(package, copy)
+
+    result = run_sb(
+        f"--backend={backend}", "--no-optimise-image", str(copy), cwd=copy,
+        timeout_seconds=600,
+    )
+
+    assert result.returncode in (0, 1), output(result)
+
+
+# Each start of a project sees the edits of its source files since the
+# start before.
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_each_start_sees_the_source_edits(tmp_path: Path, backend: str) -> None:
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        f'name "{dub_name("edited-app")}"\n'
+        'configuration "unittest" {\n'
+        '    targetType "executable"\n'
+        '    mainSourceFile "source/main.d"\n'
+        '}\n',
+    )
+    write(app / "source" / "main.d", "module main; void main() {}\n")
+
+    statuses = []
+    for answer in (42, 42, 0):
+        write(
+            app / "source" / "app.d",
+            f"module app; int answer() {{ return {answer}; }} "
+            "unittest { assert(answer() == 42); }\n",
+        )
+        result = run_sb(f"--backend={backend}", str(app), cwd=tmp_path)
+        statuses.append(result.returncode)
+
+    assert statuses == [0, 0, 1]
+
+
+# A guest call of a Phobos template instance that `bin/sb` also has, here
+# `dirEntries`, runs the guest code of the instance: the closure that the
+# call makes has the layout that the guest reads. The project has no
+# dependency, so the only native code for the instance is in `bin/sb`.
+# CTFE cannot use files.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+def test_guest_template_instance_that_the_host_also_has(
+    tmp_path: Path, backend: str,
+) -> None:
+    scanned = tmp_path / "scanned"
+    write(
+        tmp_path / "app" / "source" / "app.d",
+        f"""
+        module app;
+        import std.file: dirEntries, mkdirRecurse, rmdirRecurse, write, SpanMode;
+        void main() {{
+            mkdirRecurse("{scanned}");
+            scope(exit) rmdirRecurse("{scanned}");
+            write("{scanned}/foo.d", "");
+            size_t count;
+            foreach (entry; dirEntries("{scanned}", "*.d", SpanMode.depth))
+                ++count;
+            assert(count == 1, "expected exactly one *.d entry");
+        }}
+        """,
+    )
+
+    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+
+    assert result.returncode == 0, output(result)
+
+
+# The guest shares the druntime of `bin/sb`, so it reads the GC configuration
+# that `bin/sb` set. `--lowmem` puts the memory of the frontend back in the
+# GC heap, where the guest sees the AST of a program that imports Phobos,
+# tens of megabytes, as used bytes. The expected values are those of
+# `bin/sb`: compiled D has its own configuration.
+@pytest.mark.parametrize("lowmem", [False, True], ids=["default", "lowmem"])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_guest_reads_the_gc_configuration_of_the_process(
+    tmp_path: Path, backend: str, lowmem: bool,
+) -> None:
+    write(
+        tmp_path / "app" / "probe.d",
+        """
+        import core.gc.config: config;
+        import core.memory: GC;
+        import std.stdio: writeln;
+
+        void main() {
+            enum frontendBytes = 16 << 20;
+            version (Lowmem)
+                assert(GC.stats.usedSize > frontendBytes);
+            else
+                assert(GC.stats.usedSize < frontendBytes);
+            assert(config.gc == "snakebite");
+            assert(config.cleanup == "none");
+            assert(config.heapSizeFactor == 4);
+        }
+        """,
+    )
+    flags = ["--lowmem", "--version=Lowmem"] if lowmem else []
+
+    result = run_sb(
+        f"--backend={backend}", *flags, str(tmp_path / "app"), cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, output(result)
+
+
+# A library project that the default test runner of druntime, or a runner
+# that the project installs, tests. `status` and the lines in `present` are
+# what the test program that dub builds from the same project gives.
+class StartupCase(NamedTuple):
+    sources: tuple[str, ...]
+    status: int
+    present: tuple[str, ...]
+    absent: tuple[str, ...] = ("All unit tests have been run successfully.",)
+    arguments: tuple[str, ...] = ()
+    # CTFE cannot change the hooks of druntime or count the runs of the
+    # module constructors.
+    backends: tuple[str, ...] = tuple(BACKENDS)
+
+
+STARTUP_CASES: dict[str, StartupCase] = {
+    "module_constructors_run_once": StartupCase(
+        ("""
+        module probe;
+        __gshared int sharedCalls;
+        int threadCalls;
+        shared static this() {
+            ++sharedCalls;
+        }
+        static this() {
+            assert(sharedCalls == 1);
+            ++threadCalls;
+        }
+        unittest {
+            assert(sharedCalls == 1);
+            assert(threadCalls == 1);
+        }
+        """,),
+        0, ("1 modules passed unittests",), (),
+    ),
+    "template_mixin_tests_run": StartupCase(
+        ("""
+        module probe;
+        mixin template Tests() {
+            unittest { assert(false, "mixin unittest ran"); }
+        }
+        mixin Tests!();
+        """,),
+        1, ("mixin unittest ran", "1/1 modules FAILED unittests"),
+    ),
+    # `Nullable` declares unittests inside the template. DMD only parses
+    # those in a root module; a Phobos instance carries empty placeholders
+    # that compiled D never runs.
+    "phobos_template_instance_tests_do_not_run": StartupCase(
+        ("""
+        module probe;
+        import std.typecons: Nullable;
+        struct Probe { int value; }
+        unittest { Nullable!Probe maybe; assert(maybe.isNull); }
+        """,),
+        0, ("1 modules passed unittests",),
+    ),
+    "default_test_runner": StartupCase(
+        ("""
+        module probe;
+        unittest { assert(2 + 2 == 4); }
+        """,),
+        0, ("1 modules passed unittests",),
+    ),
+    "default_runner_continues_after_a_failed_module": StartupCase(
+        ("""
+        module probe;
+        unittest { assert(false, "first module failed"); }
+        """, """
+        module second;
+        unittest { assert(false, "second module failed"); }
+        """),
+        1, ("first module failed", "second module failed",
+            "2/2 modules FAILED unittests"),
+    ),
+    # The runner closes the streams of the program, and `bin/sb` still
+    # writes its timing report. Compiled D writes no such report.
+    "runner_output_does_not_hide_the_timing_report": StartupCase(
+        ("""
+        module probe;
+        import core.runtime: Runtime, UnitTestResult;
+        import std.stdio: File, stdout, stderr;
+        shared static this() {
+            Runtime.extendedModuleUnitTester = () {
+                stdout = File("/dev/null", "w");
+                stderr = File("/dev/null", "w");
+                return UnitTestResult(1, 1, false, false);
+            };
+        }
+        """,),
+        0, ("frontend time:", "backend latency:"), (),
+    ),
+    "extended_test_runner_gets_the_arguments": StartupCase(
+        ("""
+        module probe;
+        import core.runtime: Runtime, UnitTestResult;
+        import std.stdio: writeln;
+        shared static this() {
+            Runtime.extendedModuleUnitTester = () {
+                assert(Runtime.args[1 .. $] == ["-d", "selected test"]);
+                writeln("custom runner called");
+                return UnitTestResult(1, 1, false, false);
+            };
+        }
+        unittest { assert(false, "custom runner must select tests"); }
+        """,),
+        0, ("custom runner called",),
+        arguments=("-d", "selected test"),
+    ),
+    "failed_test_runner_skips_main": StartupCase(
+        ("""
+        module probe;
+        import core.runtime: Runtime, UnitTestResult;
+        shared static this() {
+            Runtime.extendedModuleUnitTester = () {
+                return UnitTestResult(2, 1, true, true);
+            };
+        }
+        """,),
+        1, ("1/2 modules FAILED unittests",),
+    ),
+}
+
+
+def startup_cases() -> list[tuple[str, str]]:
+    return [
+        (name, backend)
+        for name, case in STARTUP_CASES.items()
+        for backend in case.backends
+    ]
+
+
+@pytest.mark.parametrize(
+    "name, backend", startup_cases(),
+    ids=[f"{name}-{backend}" for name, backend in startup_cases()],
+)
+def test_test_runner_of_a_library(
+    tmp_path: Path, name: str, backend: str,
+) -> None:
+    case = STARTUP_CASES[name]
+    app = tmp_path / "app"
+    write(
+        app / "dub.sdl",
+        f'name "{dub_name("startup-probe")}"\ntargetType "library"\n'
+        'configuration "unittest" {\n}\n',
+    )
+    for index, source in enumerate(case.sources):
+        write(app / "source" / ("probe.d" if index == 0 else "second.d"), source)
+
+    result = run_sb(
+        f"--backend={backend}", str(app), "--", *case.arguments, cwd=tmp_path,
+    )
+
+    assert result.returncode == case.status, output(result)
+    for line in case.present:
+        assert line in output(result)
+    for line in case.absent:
+        assert line not in output(result)
+
+
 def write(path: Path, text: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

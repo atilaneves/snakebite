@@ -34,17 +34,6 @@ private enum probe = q{
 
 
 static foreach (lowmem; [false, true]) {
-    @("options.sb." ~ (lowmem ? "lowmem" : "default"))
-    unittest {
-        const sandbox = Sandbox();
-        sandbox.writeFile("probe.d", probe);
-
-        const result = execute(["bin/sb".absolutePath, "-b", "bytecode"]
-            ~ lowmemArguments(lowmem) ~ sandbox.sandboxPath);
-        if (result.status != 0)
-            fail(result.output, __FILE__, __LINE__);
-    }
-
     @("options.bench." ~ (lowmem ? "lowmem" : "default"))
     unittest {
         const sandbox = Sandbox();

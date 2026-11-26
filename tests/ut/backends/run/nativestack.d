@@ -529,3 +529,165 @@ static foreach (backend; Matrix!(
         }, ["compare"]);
     }
 }
+
+
+// A host `Fiber` runs a guest delegate that captures a local of its caller.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call native functions such as the constructors of "
+        ~ "`core.thread.Fiber` and `core.thread.Thread`"),
+)) {
+    @("nativeStack.fiberRunsCapturingDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            void main() {
+                int value;
+                auto fiber = new Fiber({
+                    value = 17;
+                    value += 25;
+                }, 64 * 1024, 0);
+                fiber.call();
+                assert(value == 42);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // Each `Fiber` keeps its own guest execution state across a yield.
+    @("nativeStack.fibersYieldWithOwnState." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            int threadCount;
+
+            int useStack(int value) {
+                int[128] values;
+                values[127] = value;
+                return values[127];
+            }
+
+            void main() {
+                int first, second;
+                auto a = new Fiber({
+                    int local = 17;
+                    ++threadCount;
+                    first = local;
+                    Fiber.yield();
+                    first = local + 25;
+                });
+                auto b = new Fiber({
+                    int local = 31;
+                    ++threadCount;
+                    second = local;
+                    Fiber.yield();
+                    second = local + 26;
+                });
+                a.call();
+                b.call();
+                assert(first == 17 && second == 31);
+                assert(threadCount == 2);
+                a.call();
+                assert(first == 42);
+                assert(useStack(73) == 73);
+                b.call();
+                assert(second == 57);
+                assert(a.state == Fiber.State.TERM);
+                assert(b.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // A `Fiber` yields from the deepest of several guest interface calls.
+    @("nativeStack.fiberYieldsUnderInterfaceRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            interface Walker { void walk(uint depth); }
+
+            class RecursiveWalker: Walker {
+                int count;
+                override void walk(uint depth) {
+                    ++count;
+                    if (depth) {
+                        Walker next = this;
+                        next.walk(depth - 1);
+                    } else {
+                        Fiber.yield();
+                    }
+                }
+            }
+
+            void main() {
+                auto walker = new RecursiveWalker;
+                auto fiber = new Fiber({ walker.walk(6); });
+                fiber.call();
+                assert(walker.count == 7);
+                assert(fiber.state == Fiber.State.HOLD);
+                fiber.call();
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // A `Fiber` yields from the deepest of many guest calls, and the
+    // `scope(exit)` of each call runs only after the resume.
+    @("nativeStack.fiberYieldsUnderDeepRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            int finished;
+
+            int descend(int depth) {
+                scope(exit) ++finished;
+                if (depth == 0) {
+                    Fiber.yield();
+                    return 3;
+                }
+                return descend(depth - 1) + depth;
+            }
+
+            void main() {
+                int result;
+                auto fiber = new Fiber({ result = descend(64); });
+                fiber.call();
+                assert(finished == 0);
+                assert(fiber.state == Fiber.State.HOLD);
+                fiber.call();
+                assert(result == 2083);
+                assert(finished == 65);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // As `nativeStack.finiteRecursionHasNoWalkerStackBound`, in a guest
+    // thread.
+    @("nativeStack.deepRecursionInAGuestThread." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Thread;
+
+            int depth(int n) {
+                return n == 0 ? 0 : 1 + depth(n - 1);
+            }
+
+            void main() {
+                int result;
+                auto thread = new Thread({ result = depth(100_000); });
+                thread.start;
+                thread.join;
+                assert(result == 100_000);
+            }
+        });
+    }
+}
