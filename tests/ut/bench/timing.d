@@ -65,8 +65,8 @@ static foreach (BackendType; Matrix!(
             program,
             0,
             1,
-            null,
-            ["benchmarkArguments", "a", "-b"],
+            enterWorkingDirectory: null,
+            arguments: ["benchmarkArguments", "a", "-b"],
             isSnippet: true,
         );
 

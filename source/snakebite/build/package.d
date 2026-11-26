@@ -7,9 +7,6 @@ module snakebite.build;
 private:
 
 
-import std.typecons: Nullable;
-
-
 // What `--build` selects: no build, or one compile of the root package.
 public enum Build { off, project }
 
@@ -62,7 +59,7 @@ public struct BuildFiles {
     // The directory that the program runs in, which only the dub recipe
     // gives. The step that reads the recipe writes it, so that a run with no
     // change does not read the recipe.
-    public string workingDirectory() const {
+    public string workingDirectoryFileName() const {
         return fileName("working-directory");
     }
 
@@ -139,13 +136,13 @@ private struct BuildLock {
 // the lock of the build from before it checks `build.ninja` until it has the
 // program file open, so no other run changes a build file in between. The
 // result is null when ninja fails.
-public Nullable!NinjaRun buildProject(in string directory) {
+public imported!"std.typecons".Nullable!NinjaRun buildProject(in string directory) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
     import std.file: exists, mkdirRecurse, readText;
     import std.process: spawnProcess, wait;
     import std.stdio: File, stderr, stdout;
-    import std.typecons: nullable;
+    import std.typecons: Nullable, nullable;
 
     const files = buildFiles(directory);
     files.directory.mkdirRecurse;
@@ -164,7 +161,7 @@ public Nullable!NinjaRun buildProject(in string directory) {
     return nullable(NinjaRun(
         duration,
         File(files.program, "rb"),
-        files.workingDirectory.readText,
+        files.workingDirectoryFileName.readText,
     ));
 }
 
