@@ -108,10 +108,8 @@ unittest {
     );
 
     enum tolerance = 1.5;
-    // `-release` strips `assert`, and `bin/alone` is always built with it,
-    // so this stays a `should` check: the numbers above already give the
-    // diagnostic an `assert` message would have repeated.
-    (ratio >= 1.0 / tolerance && ratio <= tolerance).should == true;
+    ratio.shouldBeGreaterThan(1.0 / tolerance);
+    ratio.shouldBeSmallerThan(tolerance);
 }
 
 

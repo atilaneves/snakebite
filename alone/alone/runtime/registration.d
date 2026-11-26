@@ -48,9 +48,16 @@ private size_t runsThatGiveBack(Backend)(
 // alive, what its registration took is given back. So does a program whose
 // startup failed, which is not run.
 static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the Native arm runs no guest program in the test process, so no registration exists"),
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+    Omit!(
+        Native,
+        Because.inexpressible,
+        "the Native arm runs no guest program in the test process, so no registration exists",
+    ),
+    Omit!(
+        Ctfe,
+        Because.inexpressible,
+        "CTFE cannot run module destructors",
+    ),
 )) {
     @("registrationOfEndedProgramIsGivenBack." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -94,7 +101,7 @@ static foreach (strategy; [ChunkStrategy.protect, ChunkStrategy.dualMapping]) {
             auto bridge = new CallbackBridge(&ignoreCallback, null);
             bridge.beginChunk(ChunkStrategy.protect);
             bridge.beginChunk(strategy);
-            (executableChunkBytes > before).should == true;
+            executableChunkBytes.shouldBeGreaterThan(before);
             bridge.release;
         }
 

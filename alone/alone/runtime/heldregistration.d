@@ -1,4 +1,4 @@
-module alone.runtime.faultregistration;
+module alone.runtime.heldregistration;
 
 import core.memory: GC;
 import core.thread: Thread;
@@ -10,19 +10,25 @@ import snakebite.frontend.compiler: parseSnippet;
 import std.file: exists;
 import ut.backends;
 
-// A live thread keeps the registration of its ended program. The handshake
-// keeps that thread alive until the count is checked. A thread that another
-// test starts would keep its own registration and change the count.
-//
-// The registration belongs to the process, not to the thread that ran the
-// program, so another thread sees it in `held` too. The program runs on the
-// test's own thread: druntime warns at the end of the process about a DSO
-// that a joined thread registered.
 static foreach (backend; Matrix!(
-    Omit!(Native, Because.inexpressible,
-        "the Native arm runs no guest program in the test process, so no registration exists"),
-    Omit!(Ctfe, Because.inexpressible, "CTFE cannot run module destructors"),
+    Omit!(
+        Native,
+        Because.inexpressible,
+        "the Native arm runs no guest program in the test process, so no registration exists",
+    ),
+    Omit!(
+        Ctfe,
+        Because.inexpressible,
+        "CTFE cannot run module destructors",
+    ),
 )) {
+    // A live thread keeps the registration of its ended program, so the
+    // count of registrations that wait for the end of the process rises by
+    // one. The handshake keeps that thread alive until the count is checked.
+    // A thread that another test starts would keep its own registration and
+    // change the count. The program runs on the test's own thread: druntime
+    // warns at the end of the process about a DSO that a joined thread
+    // registered.
     @("registrationHeldByThreadIsLeftToTheEndOfTheProcess." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
@@ -42,6 +48,9 @@ static foreach (backend; Matrix!(
         GuestModules.held.leftToExit.should == before + 1;
     }
 
+    // The registration belongs to the process, not to the thread that ran the
+    // program, so a thread that did not run the program sees it in the count
+    // too.
     @("registrationLeftToTheEndOfTheProcessIsHeldForOtherThreads." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {

@@ -9,8 +9,9 @@ Usage: frontend_boundary.py FILE...
        frontend_boundary.py --selftest DIRECTORY
 
 Each FILE must be own code: a file under `source/`, `tests/`, `bench/`,
-`validation/`, `acceptance/` or `alone/` of the project. The frontend package and the
-`dmd.iasm` shim (`source/dmd/`) may import dmd; every other file may not.
+`validation/`, `acceptance/` or `alone/` of the project. The frontend
+package and the `dmd.iasm` shim (`source/dmd/`) may import dmd; every other
+file may not.
 The vendored code in `vendor/` is the one named exception: it is skipped.
 A FILE in no known directory is an error, not a skip: the check cannot say
 anything about a file it does not know, and a build that passes it with

@@ -123,7 +123,9 @@ Target frontendBoundaryObject() {
     }
     const fixtureFiles = ownFiles(frontendBoundaryFixture);
     string[] files;
-    foreach (directory; ["source", "tests", "bench", "validation", "acceptance", "alone"])
+    foreach (directory; [
+        "source", "tests", "bench", "validation", "acceptance", "alone",
+    ])
         files ~= ownFiles(directory);
     const check = "python3 $project/build/frontend_boundary.py";
     return Target(

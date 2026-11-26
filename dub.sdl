@@ -123,8 +123,6 @@ configuration "alone-test" {
     importPaths "tests"
 
     dependency "unit-threaded" version="*"
-    // The REPL's console loop is library code (`snakebite.repl.cli`),
-    // and every configuration compiles the whole library.
     dependency "readline" version="0.3.0"
 }
 
