@@ -4156,13 +4156,19 @@ def test_build_module_data_of_another_module_run_as_native_code(
     assert guest_lines(built) == expected, output(built)
 
 
-# With `--build=module`, a template instance that two modules make exists one
-# time in the program, as in native code built one module at a time: the
-# calls of `f!int` from `a` and from `b` count on one static variable, `&f!int`
-# is one address, and the class information of `Box!int` is one object. The
-# unit test inside `Box` does not run: dmd parses the body of a unit test only
-# in a root module, and the compile of `t` makes no instance of `Box`. The
-# expected lines are those of `dub test --compiler=dmd --build-mode=singleFile`.
+# With `--build=module`, a template instance that several modules make exists
+# one time in the program, as in native code built one module at a time: the
+# calls of `f!int` from `a`, `b` and `t`, the module that declares `f`, count
+# on one static variable; `&f!int` is one address, also in a static
+# initialiser; the type information of `Box!int` and of `Shared!int` is one
+# object each; and `Shared!int.value` is one variable. A program's own copy of
+# an instance that the Phobos library in the process also holds is the one
+# that runs, through a pointer and in a direct call: the copy of the program
+# was built with assertions on. The unit test inside `Box` does not run: dmd
+# parses the body of a unit test only in a root module, and the compile of `t`
+# makes no instance of `Box`. That line states behaviour that the program had
+# before one copy of an instance was kept. The expected lines are those of
+# `dub test --compiler=dmd --build-mode=singleFile`.
 def test_build_module_template_instance_exists_one_time(
     tmp_path: Path,
 ) -> None:
@@ -4177,6 +4183,10 @@ def test_build_module_template_instance_exists_one_time(
             counter += step;
             return counter;
         }
+        int countInT() { return f(1); }
+        struct Shared(T) {
+            __gshared T value;
+        }
         class Box(T) {
             T value;
             unittest {
@@ -4190,22 +4200,53 @@ def test_build_module_template_instance_exists_one_time(
         import t;
         int countInA() { return f(1); }
         int function(int) addressInA() { return &f!int; }
+        __gshared int function(int) heldInA = &f!int;
         TypeInfo boxInA() { return typeid(Box!int); }
+        TypeInfo sharedInA() { return typeid(Shared!int); }
+        void setSharedInA(int value) { Shared!int.value = value; }
         """)
     write(app / "source" / "b.d", """
         module b;
         import a;
         import t;
+        import core.exception: AssertError;
+        import std.range.primitives: front;
         import std.stdio: writeln;
         unittest {
             writeln(countInA);
             writeln(f(1));
+            writeln(countInT);
             writeln(countInA);
             writeln(addressInA is &f!int);
+            writeln(heldInA is &f!int);
             writeln(boxInA is typeid(Box!int));
+            writeln(sharedInA is typeid(Shared!int));
+            setSharedInA(42);
+            writeln(Shared!int.value);
+            try {
+                auto pointer = &front!char;
+                pointer("");
+                writeln("no assert through a pointer");
+            } catch (AssertError) writeln("assert through a pointer");
+            try {
+                front("");
+                writeln("no assert in a direct call");
+            } catch (AssertError) writeln("assert in a direct call");
         }
         """)
-    expected = ["1", "2", "3", "true", "true"]
+    expected = [
+        "1",
+        "2",
+        "3",
+        "4",
+        "true",
+        "true",
+        "true",
+        "true",
+        "42",
+        "assert through a pointer",
+        "assert in a direct call",
+    ]
     native = subprocess.run(
         ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
         capture_output=True, check=False, text=True, timeout=300, cwd=app)

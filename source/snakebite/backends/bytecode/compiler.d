@@ -892,34 +892,22 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
             _complete.insert(function_, placeholder);
             // A file holds the symbol of each function that it defines, as
             // an object file does, so that the other files of a program reach
-            // it by name (ADR-0021). The definition of a function that other
-            // files can define too, as a template instance, is weak.
-            if (compiledProgram.recordsAddresses) {
+            // it by name (ADR-0021).
+            if (_world.data.compilesToFile) {
                 import snakebite.ffi.names: DefinitionHere, GuestFunction,
                     SymbolDefinition;
-                import std.typecons: Flag, No, Yes;
+                import snakebite.language.definition: definitionInFile;
 
-                void define(in Flag!"weak" weak) {
+                const where = _world.callSelection.whereDefined(function_);
+                const weak = definitionInFile(where);
+                if (!weak.isNull)
                     compiledProgram.plans.names.defineHere(
                         function_.mangledNameOf.idup,
                         SymbolDefinition(
                             DefinitionHere(GuestFunction(placeholder)),
-                            weak,
+                            weak.get,
                         ),
                     );
-                }
-
-                const where = _world.callSelection.whereDefined(function_);
-                final switch (where) with (Definition) {
-                    case rootOwned:
-                        define(No.weak);
-                        break;
-                    case rootOrElsewhere:
-                        define(Yes.weak);
-                        break;
-                    case definedElsewhere:
-                        break;
-                }
             }
             if (outermost)
                 prepareCallbackBodies;

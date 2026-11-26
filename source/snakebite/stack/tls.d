@@ -105,39 +105,39 @@ public struct TlsSlots {
             return found.bytes[0 .. found.size];
 
         Entry entry = Entry(key);
-        void* native;
         // A variable that an SBC file defines has one copy on each thread,
         // made from the descriptor of the definition, as a linker gives a
         // thread-local symbol one place in the thread-local block of the
-        // process. The program uses that definition as
-        // `CallPlanStore.addressOf` does for any other symbol
-        // (`CallPlanStore.usedDefinitionHere`). The descriptor of the
-        // definition makes its copy from its own template.
-        const here = descriptor.nativeName.length
-            ? _store.usedDefinitionHere(
-                descriptor.nativeName,
-                () => _store.threadLocalAddressIfPresent(descriptor.nativeName),
-            )
+        // process. The copy of the process goes first for a variable that
+        // no SBC file defines or that other objects can define too
+        // (`SymbolDefinition.usesProcessCopyFirst`), as for any other datum
+        // (`CallPlanStore.chosenCopy`). It is resolved on this thread: a
+        // thread-local symbol's address is the calling thread's own, so
+        // another thread's answer would be that thread's copy.
+        const name = descriptor.nativeName;
+        const here = name.length ? _store.names.definitionHere(name) : null;
+        const asksProcess = name.length
+            && (here is null || here.usesProcessCopyFirst);
+        // `auto`: the copy of a thread is written through `native`.
+        auto processCopy = asksProcess
+            ? _store.threadLocalAddressIfPresent(name)
             : null;
-        const defining = here is null ? null : descriptorOf(*here);
-        if (defining !is null) {
-            if (defining !is descriptor)
-                native = slotFor(defining).ptr;
+        const defining = here is null ? null : descriptorOf(here.definition);
+        void* native;
+        if (processCopy !is null)
+            native = processCopy;
+        // No SBC file defines the variable: the program's own copy is made
+        // below from the template, and a variable with no template is a
+        // symbol that no object defines.
+        else if (defining is null) {
+            if (name.length && descriptor.templateBytes is null)
+                throw CallPlanStore.missing(name, descriptor.declaredBy);
         }
-        else if (descriptor.nativeName.length) {
-            // Resolved on this thread: a thread-local symbol's address
-            // is the calling thread's own, so another thread's answer
-            // would be that thread's copy. A variable that the program
-            // can define too has a template: its own copy.
-            native = CallPlanStore.chosenCopy(
-                _store.threadLocalAddressIfPresent(descriptor.nativeName),
-                descriptor.templateBytes);
-            if (native is null)
-                throw CallPlanStore.missing(
-                    descriptor.nativeName, descriptor.declaredBy);
-            if (native is descriptor.templateBytes)
-                native = null;
-        }
+        // Another descriptor is the definition: its copy is the one copy.
+        else if (defining !is descriptor)
+            native = slotFor(defining).ptr;
+        // Else this descriptor is the definition: its copy is made below from
+        // its own template.
         if (native !is null)
             entry.bytes = native;
         else {

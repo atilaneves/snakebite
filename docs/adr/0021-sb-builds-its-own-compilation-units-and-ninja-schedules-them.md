@@ -118,7 +118,10 @@ that gives `sb` a rule for it, does not follow the model.
 11. The function of item 10 gives a name its definition first from an
     `.sbc` file, then from native code, as a native linker takes object
     files before libraries. A template instance that several files hold is
-    kept one time. Two other definitions of one name are an error that
+    kept one time. A datum of such an instance that native code in the
+    process also holds is taken from native code: that native code cannot
+    be made to use the copy of a file, and the program keeps one copy of the
+    datum. Two other definitions of one name are an error that
     names the symbol, and so are two `main` functions, as a native linker
     reports. A name with no definition is an error only when code that uses
     it runs (ADR-0017). The order of module constructors and of unit tests

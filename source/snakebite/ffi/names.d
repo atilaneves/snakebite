@@ -13,22 +13,21 @@ module snakebite.ffi.names;
 //
 // A datum that the program and another object can both define (a static
 // variable of a template instance, the type information that dmd emits in
-// each object that needs it) is, in a compile to memory, a name with the
+// each object that needs it) is, in a compile to RAM, a name with the
 // program's own copy (`Names.namedWithOwn`). `CallPlanStore.chosenCopy`
 // decides which copy is used when the program is made ready to run.
 //
 // In a program of several SBC files (a build of each module, issue #1015), a
-// function or a datum that only one compile defines (`Definition.rootOwned`)
-// has its symbol in the SBC file of that compile (`Names.defineHere`), as an
-// object file has the symbol of each of its definitions. A reference to the
-// symbol from any SBC file reaches it. Two such definitions of one symbol are
-// an error. A symbol that an SBC file defines goes before the process, as a
-// linker takes object files before libraries
-// (`CallPlanStore.addressIfPresent`). A function or a datum that more than
-// one compile can define (`Definition.rootOrElsewhere`: what a template
-// instance holds) has a weak definition in each SBC file that holds it, as a
-// native object file has: the program uses the copy of the process when
-// there is one, else the copy of the first SBC file (issue #1115).
+// function or a datum that a compile defines has its symbol in the SBC file
+// of that compile (`Names.defineHere`), as an object file has the symbol of
+// each of its definitions. A reference to the symbol from any SBC file
+// reaches it. A function or a datum that more than one compile can define
+// (`Definition.rootOrElsewhere`: what a template instance holds) has a weak
+// definition in each SBC file that holds it, and the program keeps one of
+// them (issue #1115). Two strong definitions of one symbol are an error. A
+// symbol that an SBC file defines goes before the process, as a linker takes
+// object files before libraries, except a weak datum
+// (`SymbolDefinition.usesProcessCopyFirst`).
 private:
 
 import snakebite.ffi.callplan: NativeSignature;
@@ -209,11 +208,23 @@ public alias DefinitionHere = SumType!(GuestFunction, DatumRef);
 public struct SymbolDefinition {
     // What defines the symbol.
     public DefinitionHere definition;
-    // Whether other SBC files can define the symbol too, as a linker has a
-    // weak definition: a template instance is in each object that uses it.
-    // The program uses one of the copies, and the copy of the process goes
-    // before it (`CallPlanStore.usedDefinitionHere`).
+    // Whether the definition is weak, as the glossary says.
     public Flag!"weak" weak;
+
+    // Whether the program uses the copy of the process, when the process has
+    // the symbol, before this definition: only for a weak datum. Native code
+    // in the process uses its own copy of a datum and cannot be made to use
+    // the copy of the program, so one copy of the datum is the copy of the
+    // process. A function has no state: the program runs its own copy, as a
+    // linker takes object files before libraries (ADR-0021).
+    public bool usesProcessCopyFirst() const @safe pure nothrow @nogc {
+        import std.sumtype: match;
+
+        return weak && definition.match!(
+            (in GuestFunction guest) => false,
+            (in DatumRef datum) => true,
+        );
+    }
 }
 
 
@@ -274,7 +285,9 @@ public struct Names {
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
-        return make(symbol, distance, declaredBy, null);
+        // The name has no own copy.
+        enum noOwnCopy = null;
+        return make(symbol, distance, declaredBy, noOwnCopy);
     }
 
     // As `named`, with `start`, a datum of the static data of the program,
@@ -433,27 +446,27 @@ public struct Names {
         return made;
     }
 
-    // `definition` is the definition of `symbol` in an SBC file: a compile
-    // to an SBC file gives each function and datum that it defines, and a
-    // load each that an SBC file holds. As a linker does, a definition that
-    // is not weak goes before a weak one, the first of two weak definitions
-    // is kept, and a second definition that is not weak is an error that
-    // names the symbol.
-    public void defineHere(in string symbol, in SymbolDefinition definition) {
+    // `defined` is the definition of `symbol` in an SBC file: a compile to
+    // an SBC file gives each function and datum that it defines, and a load
+    // each that an SBC file holds. As a linker does, a strong definition goes
+    // before a weak one, the first of two weak definitions is kept, and a
+    // second strong definition is an error that names the symbol.
+    public void defineHere(in string symbol, in SymbolDefinition defined) {
         import snakebite.failure.report: SnakebiteException;
 
         // `auto`: `Mutex.lock` is not `const`.
         auto lock = this.lock;
         lock.lock;
         scope(exit) lock.unlock;
-        const found = symbol in _definedHere;
-        if (found !is null && definition.weak)
-            return;
-        if (found !is null && !found.weak)
-            throw new SnakebiteException(
-                "multiple definition of the symbol `" ~ symbol ~ "`",
-            );
-        _definedHere[symbol] = definition;
+        if (const found = symbol in _definedHere) {
+            if (defined.weak)
+                return;
+            if (!found.weak)
+                throw new SnakebiteException(
+                    "multiple definition of the symbol `" ~ symbol ~ "`",
+                );
+        }
+        _definedHere[symbol] = defined;
     }
 
     // The definition of `symbol` (`defineHere`), or null.

@@ -176,13 +176,14 @@ public struct RuntimeTypes {
 
         // The type information that dmd makes for a type is a variable of a
         // template instance, which the program and another object can both
-        // define: its name, with the program's own copy.
+        // define: its name, with the program's copy.
         Info resolve(Declaration symbol, ptrdiff_t offset) {
             auto variable = symbol.isVarDeclaration;
             if (variable is null)
                 return Info.init;
-            return Info.named(plans.names.further(
-                _data.storageNameWithOwnCopy(variable), offset));
+            // `auto`: `const` makes the `Name*` that this returns const.
+            auto name = _data.storageNameWithProgramCopy(variable);
+            return Info.named(plans.names.further(name, offset));
         }
 
         Info flag(in size_t value) {
@@ -285,15 +286,17 @@ public struct RuntimeTypes {
             return own;
         // dmd emits this type information in each object that needs it, so
         // the program and another object can both define it: its name, with
-        // the program's own copy.
+        // the program's copy.
         const start = cast(const(void)*) own.held;
         // No declaration states the type information.
         const declaredBy = string.init;
-        return Linked!TypeInfo.named(_data.namedWithOwnCopy(
+        // `auto`: `const` makes the `Name*` that this returns const.
+        auto name = _data.nameWithProgramCopy(
             type.vtinfo.ident.toString,
             declaredBy,
             start,
-        ));
+        );
+        return Linked!TypeInfo.named(name);
     }
 
     // Whether `type` is a struct, an enum or a class that only the root
@@ -514,9 +517,9 @@ public struct RuntimeTypes {
     // is an error, as at the link of a native build. The program defines it
     // for a class of its own. The program and another object can both
     // define it for a class of a dependency template instance
-    // (`hasOwnCopy`): the name has the program's own copy, which this makes
-    // first (`_classInfo`), and with it the program's own vtable and initial
-    // image.
+    // (`hasOwnCopy`): the name has the program's copy
+    // (`NativeData.nameWithProgramCopy`), which this makes first
+    // (`_classInfo`), and with it the program's vtable and initial image.
     public Linked!TypeInfo_Class linkedClassInfo(
         ClassDeclaration declaration,
     ) {
@@ -542,7 +545,7 @@ public struct RuntimeTypes {
     // The name of the class information of `declaration` (`hasOwnCopy`),
     // with `info`, which the program built, as its own copy, and the names
     // of its vtable and its initial image with theirs. Each name has its
-    // copy from the step that makes it (`NativeData.namedWithOwnCopy`).
+    // copy from the step that makes it (`NativeData.nameWithProgramCopy`).
     public Linked!TypeInfo_Class ownClassInfo(
         ClassDeclaration declaration, TypeInfo_Class info,
     ) {
@@ -553,7 +556,7 @@ public struct RuntimeTypes {
             (string symbol, const(void)* start, NativeNames* table) {
                 // `auto`: `const` makes the `Name*` that the table keeps
                 // const.
-                auto name = _data.namedWithOwnCopy(
+                auto name = _data.nameWithProgramCopy(
                     symbol,
                     declaration.toString,
                     start,
@@ -602,15 +605,14 @@ public struct RuntimeTypes {
     // vtable and its initial image in the SBC file, so that the other SBC
     // files of the program reach them by name (ADR-0021).
     public void makeAndDefineClassInfo(ClassDeclaration declaration) {
-        import std.typecons: No;
-
-        if (_whereDefined(declaration) != Definition.rootOwned)
+        const where = _whereDefined(declaration);
+        if (where != Definition.rootOwned)
             return;
         eachClassDatum(
             declaration,
             _classInfo(declaration).held,
             (string symbol, const(void)* start, NativeNames* table) {
-                _data.defineSymbol(symbol, start, No.weak);
+                _data.defineSymbol(symbol, start, where);
             },
         );
     }
@@ -624,14 +626,14 @@ public struct RuntimeTypes {
     if (is(Declaration == StructDeclaration)
             || is(Declaration == EnumDeclaration)) {
         import snakebite.frontend.ast: toDString;
-        import std.typecons: No;
 
         // `auto`: `isRootOwned` and `get` take a mutable `Type`.
         auto type = declaration.type;
         if (!isRootOwned(type))
             return;
         const info = cast(const(void)*) get(type).held;
-        _data.defineSymbol(typeInfoSymbol(type.deco.toDString), info, No.weak);
+        const symbol = typeInfoSymbol(type.deco.toDString);
+        _data.defineSymbol(symbol, info, Definition.rootOwned);
     }
 
     // What `linkedClassInfo` needs of `declaration`, decided once.

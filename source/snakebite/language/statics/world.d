@@ -188,7 +188,11 @@ public struct StaticWorld {
             word = _backend.guestWord(method);
             if (callSelection.storesGuestWord(method, adjustment))
                 return Linked!(void*).held(cast(void*) word);
-            if (isNamedInFile(method, adjustment))
+            // An address with an adjustment is the entry of a slot of an
+            // interface virtual table, which the class information of the
+            // instance holds. That datum is weak too: the program keeps one
+            // table, and so one entry for each slot.
+            if (adjustment == 0 && hasWeakDefinition(method))
                 return Linked!(void*).named(plans.nameOf(method));
         }
         auto address = plans.callableAddress(word, method, adjustment);
@@ -199,22 +203,20 @@ public struct StaticWorld {
         return address;
     }
 
-    // Whether the address of `method`, which has a guest body, with
-    // `adjustment` is the name of its symbol: in a compile to an SBC file,
-    // for a function that other SBC files can define too, as a template
-    // instance. Each SBC file that holds the function defines it weakly, and
-    // the program uses one of the copies for the address, as a native linker
-    // keeps one (`Names.defineHere`). An address with an adjustment is the
-    // entry of a vtable slot, which only a virtual call reaches: no code
-    // compares it, and it stays the entry of the copy of the file.
-    private bool isNamedInFile(
-        FuncDeclaration method,
-        in ptrdiff_t adjustment,
-    ) {
-        import snakebite.language.definition: Definition;
+    // Whether a compile to an SBC file gives `method`, which has a guest
+    // body, a weak definition (`definitionInFile`), as a template instance
+    // has. The program then keeps one of the copies of the SBC files
+    // (`Names.defineHere`), and the address of the function is the name of
+    // its symbol, so that it is one address in the program, as a native
+    // linker gives.
+    private bool hasWeakDefinition(FuncDeclaration method) {
+        import snakebite.language.definition: definitionInFile;
+        import std.typecons: No;
 
-        return data.recordRelocs && adjustment == 0
-            && callSelection.whereDefined(method) == Definition.rootOrElsewhere;
+        if (!data.compilesToFile)
+            return false;
+        const where = callSelection.whereDefined(method);
+        return definitionInFile(where).get(No.weak);
     }
 
     // `linked` as a backend that reads it as it runs, and does not save,

@@ -256,7 +256,7 @@ public struct CallSite {
     // by itself, such as a call to a bounds failure function of druntime,
     // can call a name that an SBC file defines: its plan is bound here,
     // because `bindNewPlans` does not bind the plan of such a name.
-    package void connect(ref CallPlanStore plans) {
+    package void connect(ref const CallPlanStore plans) {
         final switch (kind) with (Kind) {
         case native:
             CallPlanStore.bindDefinedHere(nativePlan);

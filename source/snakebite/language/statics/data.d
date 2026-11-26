@@ -67,7 +67,11 @@ public struct NativeData {
     // Whether a write of an address into a datum is recorded in the datum
     // (`StaticBlocks.recordAddress`), so that the data can be stored in a
     // file.
-    public bool recordRelocs() const @safe pure nothrow @nogc {
+    private bool recordRelocs() const @safe pure nothrow @nogc {
+        return _store.recordsAddresses;
+    }
+    // Whether this is a compile to an SBC file, not a compile to RAM.
+    public bool compilesToFile() const @safe pure nothrow @nogc {
         return _store.recordsAddresses;
     }
     // The blocks that hold a datum of this, for `recordRelocs`. Under the
@@ -565,56 +569,61 @@ public struct NativeData {
     // only the root modules define the variable, so that the other SBC files
     // of the program reach the storage by name (ADR-0021). The definition of
     // a thread-local variable is its descriptor, from which each thread
-    // makes its own copy (`TlsSlots.slotFor`).
+    // makes its own copy (`TlsSlots.slotFor`). The storage of a variable
+    // that other objects can define too is made, and defined, when the
+    // program uses it (`storageNameWithProgramCopy`, `tlsDescriptorOf`), as
+    // a native object file holds an instance only where it is used.
     public void makeAndDefineStorage(VarDeclaration variable) {
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
-        import std.typecons: No;
-
-        if (_whereDefined(variable) != Definition.rootOwned)
+        const where = _whereDefined(variable);
+        if (where != Definition.rootOwned)
             return;
         const placed = variable.isThreadLocalStorage
             ? tlsDescriptorOf(variable)
             : storageOf(variable);
-        defineSymbol(nativeSymbolName(variable), placed.ptr, No.weak);
+        defineSymbol(nativeSymbolName(variable), placed.ptr, where);
     }
 
     // The datum that starts at `start` is the definition of `symbol` in the
-    // SBC file, a weak one (`SymbolDefinition.weak`) if `weak`. Only a
-    // compile to an SBC file defines symbols: a compile to memory refers to
-    // each datum by its address, and no other SBC file needs its name.
+    // SBC file, as a compile to a file defines the symbol of a declaration
+    // that is defined as `where` says (`definitionInFile`). Only a compile to
+    // an SBC file defines symbols: a compile to RAM refers to each datum by
+    // its address, and no other SBC file needs its name.
     public void defineSymbol(
         in string symbol,
         const(void)* start,
-        in imported!"std.typecons".Flag!"weak" weak,
+        in Definition where,
     ) {
         import snakebite.ffi.names: DefinitionHere, SymbolDefinition;
+        import snakebite.language.definition: definitionInFile;
 
-        if (!recordRelocs)
-            internalFailure("a compile to memory defines a symbol");
+        if (!compilesToFile)
+            internalFailure("a compile to RAM defines a symbol");
+        const weak = definitionInFile(where);
+        if (weak.isNull)
+            return;
         const datum = addressOfData(start).target.datum;
         planStore.names.defineHere(
             symbol,
-            SymbolDefinition(DefinitionHere(datum), weak),
+            SymbolDefinition(DefinitionHere(datum), weak.get),
         );
     }
 
     // The name of `symbol`, a datum that the program and another object can
     // both define, with the datum at `start` as the program's copy.
-    // `declaredBy` is the declaration of the symbol. A compile to memory
-    // makes the copy the own copy of the name (`Names.namedWithOwn`). A
-    // compile to an SBC file makes it a weak definition of the symbol in the
-    // file (`defineSymbol`), so that all the SBC files of the program use one
-    // copy, as a native linker keeps one.
-    public Name* namedWithOwnCopy(
+    // `declaredBy` is the declaration of the symbol. A compile to RAM makes
+    // the copy the own copy of the name (`Names.namedWithOwn`). A compile to
+    // an SBC file defines the symbol with the copy (`defineSymbol`), so that
+    // all the SBC files of the program use one copy, as a native linker
+    // keeps one.
+    public Name* nameWithProgramCopy(
         Symbol: const(char)[],
         Declaration: const(char)[],
     )(Symbol symbol, Declaration declaredBy, const(void)* start) {
-        import std.typecons: Yes;
-
         // Each name is of the start of its symbol.
         enum distance = 0;
-        if (!recordRelocs)
+        if (!compilesToFile)
             return planStore.names.namedWithOwn(
                 symbol,
                 distance,
@@ -623,7 +632,7 @@ public struct NativeData {
             );
         // `auto`: `const` makes the `Name*` that this returns const.
         auto name = planStore.names.named(symbol, distance, declaredBy);
-        defineSymbol(name.symbol, start, Yes.weak);
+        defineSymbol(name.symbol, start, Definition.rootOrElsewhere);
         return name;
     }
 
@@ -655,7 +664,7 @@ public struct NativeData {
     // thread-local, or null when only the program holds the storage. The
     // declaration decides that another object defines the variable. A
     // variable that the program and another object can both define is the
-    // name with the program's own copy (`storageNameWithOwnCopy`).
+    // name with the program's copy (`storageNameWithProgramCopy`).
     private Name* storageName(VarDeclaration variable) {
         if (auto found = variable in _storageNames)
             return *found;
@@ -674,16 +683,16 @@ public struct NativeData {
             // A native build keeps one copy, so the native copy is used when
             // the process has one.
             case rootOrElsewhere:
-                return storageNameWithOwnCopy(variable);
+                return storageNameWithProgramCopy(variable);
         }
     }
 
     // The name of the storage of `variable`, which is not thread-local and
     // which the program and another object can both define, with the
-    // program's own storage as its copy (`namedWithOwnCopy`). The process is
-    // not asked: the program chooses the copy that it uses when it is made
+    // program's own storage as its copy (`nameWithProgramCopy`). The process
+    // is not asked: the program chooses the copy that it uses when it is made
     // ready to run (`CallPlanStore.addressIfPresent`).
-    public Name* storageNameWithOwnCopy(VarDeclaration variable) {
+    public Name* storageNameWithProgramCopy(VarDeclaration variable) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
@@ -699,7 +708,7 @@ public struct NativeData {
             // An initializer that refers to its own variable reaches this
             // again, and finds the storage that `buildInitialBytes` holds.
             const own = buildInitialBytes(variable, typeFacts(variable.type));
-            name = namedWithOwnCopy(
+            name = nameWithProgramCopy(
                 nativeSymbolName(variable),
                 variable.toString,
                 own.ptr,
@@ -718,8 +727,6 @@ public struct NativeData {
     // resolved address (finding 1.3): a thread-local variable's address is
     // never a compile-time constant, the same way it never is in compiled D.
     public Placed tlsDescriptorOf(VarDeclaration declaration) {
-        import std.typecons: Yes;
-
         auto variable = definitionOf(declaration);
         if (auto found = variable in _tlsDescriptors)
             return *found;
@@ -741,7 +748,8 @@ public struct NativeData {
             // other variable.
             bool named;
             bool ownCopy;
-            final switch (_whereDefined(variable)) with (Definition) {
+            const where = _whereDefined(variable);
+            final switch (where) with (Definition) {
                 case rootOwned:
                     ownCopy = true;
                     break;
@@ -780,12 +788,10 @@ public struct NativeData {
                     Address(Target.Kind.staticData, template_.ptr,
                         template_.where));
             // In a compile to an SBC file, the descriptor of a variable that
-            // the program and another object can both define is a weak
-            // definition of its symbol, so that all the SBC files of the
-            // program use one copy, as for any other such datum
-            // (`namedWithOwnCopy`).
-            if (named && ownCopy && recordRelocs)
-                defineSymbol(nativeName, descriptor.ptr, Yes.weak);
+            // has a symbol name is the definition of the symbol, as
+            // `defineSymbol` decides for any datum.
+            if (named && compilesToFile)
+                defineSymbol(nativeName, descriptor.ptr, where);
             _tlsDescriptors.insert(variable, descriptor);
         });
         return descriptor;
