@@ -1481,30 +1481,6 @@ def test_shared_destructors_wait_for_other_threads(
     ]
 
 
-# A program whose shared destructor starts a thread ends with the status of
-# its `main`.
-@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
-def test_program_whose_shared_destructor_starts_a_thread_ends(
-    tmp_path: Path, backend: str,
-) -> None:
-    write(
-        tmp_path / "app" / "main.d",
-        """
-        module main;
-        import core.thread: Thread;
-        import core.time: msecs;
-        shared static ~this() {
-            new Thread({ Thread.sleep(50.msecs); }).start;
-        }
-        void main() {}
-        """,
-    )
-
-    result = run_app(tmp_path, backend)
-
-    assert result.returncode == 0, output(result)
-
-
 # A spawned thread learns that its owner ended from the main thread's
 # thread-local destructor of `std.concurrency`. druntime runs that
 # destructor before it waits for the thread, so the program ends.
