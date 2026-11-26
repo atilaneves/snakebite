@@ -83,9 +83,22 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   per line. Then a later removal or addition changes one line only: "The
   diff is bigger than it should have been because `"snakebite"` wasn't on
   its own line." Follow this rule over existing code that breaks it.
-* Give a ternary expression that is part of another expression, such as a
-  call argument, a name on its own line: "don't break up ternary
+* A ternary expression that fits on one line stays on one line. One that
+  does not fit has the condition, the `?` part and the `:` part each on
+  its own line, as the owner says: "formatting, ternaries should *usually*
+  be, if they don't fit in one line,"
+  ```
+  cond
+      ? valIfTrue
+      : valIfFalse
+  ```
+  Give a ternary expression that is part of another expression, such as a
+  call argument, a name on its own line first: "don't break up ternary
   expressions like this, it's ugly."
+* Break a line only when the text does not fit. An operator and its right
+  operand stay on the line of the left operand when they fit there: "this
+  formatting is silly, `== VarArg.variadic` and `== Route.native` clearly
+  fit in the lines above them."
 * When a function needs its own mutable copy of a parameter, take the
   parameter by value. A copy in the body that works around the type of the
   parameter is the fault: "What's with the explicit type declaration on the
