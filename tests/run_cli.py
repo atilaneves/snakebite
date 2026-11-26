@@ -8559,8 +8559,9 @@ def test_task_pool_reduce_runs_to_completion(
 
 # A failed copy between slices of different lengths, or between slices that
 # overlap, throws and leaves the destination as it was: druntime's checks of
-# the copy stay on in the release build of `bin/sb`.
-@pytest.mark.parametrize("backend", BACKENDS)
+# the copy stay on in the release build of `bin/sb`. CTFE reports the copy as
+# an error of the compile, which the program cannot catch.
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
 def test_invalid_slice_copies_throw(tmp_path: Path, backend: str) -> None:
     write(
         tmp_path / "app" / "probe.d",
@@ -8645,10 +8646,11 @@ def test_thread_receives_a_message_with_several_handlers(
 # can still be alive when the run returns. Such a thread must not end the
 # process with a fault when the dependency image goes away. The version is
 # the one that this project uses (`dub.selections.json`), which dub has
-# already fetched. A backend may disagree with compiled D, which gives 0, on
-# a few of the suite's own tests, so status 1 is a pass here too. The suite
-# deletes `tmp/unit-threaded` below its working directory, so the run is in
-# the copy. CTFE cannot start a thread.
+# already fetched. The copy has a name from `dub_name`, so that its dub cache
+# record goes when the test ends. A backend may disagree with compiled D,
+# which gives 0, on a few of the suite's own tests, so status 1 is a pass
+# here too. The suite deletes `tmp/unit-threaded` below its working
+# directory, so the run is in the copy. CTFE cannot start a thread.
 @pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
 def test_guest_thread_outlives_the_dependency_image(
     tmp_path: Path, backend: str,
@@ -8661,6 +8663,11 @@ def test_guest_thread_outlives_the_dependency_image(
     )
     copy = tmp_path / "unit-threaded"
     shutil.copytree(package, copy)
+    for recipe in [*copy.rglob("dub.json"), *copy.rglob("dub.sdl")]:
+        recipe.write_text(re.sub(
+            r'"unit-threaded(?=[":])', f'"{dub_name("unit-threaded")}',
+            recipe.read_text(),
+        ))
 
     result = run_sb(
         f"--backend={backend}", "--no-optimise-image", str(copy), cwd=copy,
@@ -8734,9 +8741,10 @@ def test_guest_template_instance_that_the_host_also_has(
 # that `bin/sb` set. `--lowmem` puts the memory of the frontend back in the
 # GC heap, where the guest sees the AST of a program that imports Phobos,
 # tens of megabytes, as used bytes. The expected values are those of
-# `bin/sb`: compiled D has its own configuration.
+# `bin/sb`: compiled D has its own configuration. CTFE has no source for
+# `gc_stats`.
 @pytest.mark.parametrize("lowmem", [False, True], ids=["default", "lowmem"])
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
 def test_guest_reads_the_gc_configuration_of_the_process(
     tmp_path: Path, backend: str, lowmem: bool,
 ) -> None:
@@ -8777,8 +8785,8 @@ class StartupCase(NamedTuple):
     present: tuple[str, ...]
     absent: tuple[str, ...] = ("All unit tests have been run successfully.",)
     arguments: tuple[str, ...] = ()
-    # CTFE cannot change the hooks of druntime or count the runs of the
-    # module constructors.
+    # CTFE cannot read a static variable that changes at run time: a counter
+    # of the module constructors, or the test runner hook of druntime.
     backends: tuple[str, ...] = tuple(BACKENDS)
 
 
@@ -8801,6 +8809,7 @@ STARTUP_CASES: dict[str, StartupCase] = {
         }
         """,),
         0, ("1 modules passed unittests",), (),
+        backends=("interpreter", "bytecode"),
     ),
     "template_mixin_tests_run": StartupCase(
         ("""
@@ -8858,6 +8867,7 @@ STARTUP_CASES: dict[str, StartupCase] = {
         }
         """,),
         0, ("frontend time:", "backend latency:"), (),
+        backends=("interpreter", "bytecode"),
     ),
     "extended_test_runner_gets_the_arguments": StartupCase(
         ("""
@@ -8875,6 +8885,7 @@ STARTUP_CASES: dict[str, StartupCase] = {
         """,),
         0, ("custom runner called",),
         arguments=("-d", "selected test"),
+        backends=("interpreter", "bytecode"),
     ),
     "failed_test_runner_skips_main": StartupCase(
         ("""
@@ -8887,6 +8898,7 @@ STARTUP_CASES: dict[str, StartupCase] = {
         }
         """,),
         1, ("1/2 modules FAILED unittests",),
+        backends=("interpreter", "bytecode"),
     ),
 }
 
