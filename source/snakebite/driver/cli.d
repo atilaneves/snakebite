@@ -62,8 +62,11 @@ public int run(string[] args) {
             const report = executeLoaded(
                 parsed.options.load,
                 [parsed.options.load] ~ parsed.options.programArguments,
-                JitSetting(!parsed.options.noJit,
-                    /*eager*/ false, parsed.options.jitPerfMap),
+                JitSetting(
+                    !parsed.options.noJit,
+                    /*eager*/ false,
+                    parsed.options.jitPerfMap,
+                ),
             );
             _statistics = Statistics(true, PreparationReport.init, report);
             return report.status;
@@ -84,10 +87,9 @@ public int run(string[] args) {
             // Mutable: the loaded program closes the file.
             auto built = ninja.get;
             const report = executeBuilt(
-                built.program,
+                built,
                 [directory.baseName] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit),
-                built.workingDirectory,
                 buildFiles(directory).image,
             );
             _statistics = Statistics(true, PreparationReport.init, report,
@@ -112,8 +114,11 @@ public int run(string[] args) {
                     saveProgram(
                         preparation.project.program,
                         savePath,
-                        JitSetting(!parsed.options.noJit,
-                            /*eager*/ false, parsed.options.jitPerfMap),
+                        JitSetting(
+                            !parsed.options.noJit,
+                            /*eager*/ false,
+                            parsed.options.jitPerfMap,
+                        ),
                     );
                     return 0;
                 }
@@ -124,10 +129,13 @@ public int run(string[] args) {
                     [preparation.project.directory.baseName]
                         ~ parsed.options.programArguments,
                     preparation.project.program.dependencyImage.testHooksOf,
-                    false,
-                    true,
-                    JitSetting(!parsed.options.noJit,
-                        /*eager*/ false, parsed.options.jitPerfMap),
+                    collectGarbage: false,
+                    endsProcess: true,
+                    jit: JitSetting(
+                        !parsed.options.noJit,
+                        /*eager*/ false,
+                        parsed.options.jitPerfMap,
+                    ),
                 );
                 _statistics = Statistics(true, preparation, report);
                 return report.status;

@@ -20,7 +20,7 @@ public void writeBuildFile(in string directory) {
     const text = buildFileText(directory, sources,
         dubBuildInputs(description, sources.files));
     files.directory.mkdirRecurse;
-    writeChanged(files.workingDirectory, sources.runDirectory(directory));
+    writeChanged(files.workingDirectoryFileName, sources.runDirectory(directory));
     if (writeChanged(files.ninjaFile, text))
         return;
     // The run that makes the text can make an input of it, as dub makes its
@@ -120,7 +120,7 @@ private string buildFileText(
         .filter!(path => !libraries.canFind(path)).array.dup.sort.uniq.array;
 
     text ~= statement(
-        [files.ninjaFile, files.workingDirectory],
+        [files.ninjaFile, files.workingDirectoryFileName],
         "generate",
         null,
         generatorInputs,
