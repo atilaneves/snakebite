@@ -2263,39 +2263,61 @@ def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_progr
 # uses it runs, with a failure that names the symbol. A use is a read or a
 # write of a variable, or a call through the address of a function, and the
 # failure names the symbol at any part of a variable.
-@pytest.mark.parametrize(("symbol", "program"), [
-    ("snakebite_test_no_such_variable", """
+@pytest.mark.parametrize(("symbol", "declared", "program", "dependency"), [
+    ("snakebite_test_no_such_variable", "snakebite_test_no_such_variable", """
         module main;
         extern(C) extern __gshared int snakebite_test_no_such_variable;
         int main() { return snakebite_test_no_such_variable; }
-        """),
-    ("snakebite_test_no_such_variable", """
+        """, ""),
+    ("snakebite_test_no_such_variable", "snakebite_test_no_such_variable", """
         module main;
         extern(C) extern __gshared int snakebite_test_no_such_variable;
         int main() {
             snakebite_test_no_such_variable = 3;
             return 4;
         }
-        """),
-    ("snakebite_test_no_such_function", """
+        """, ""),
+    ("snakebite_test_no_such_function", "snakebite_test_no_such_function", """
         module main;
         extern(C) int snakebite_test_no_such_function(int);
         int main() {
             auto function_ = &snakebite_test_no_such_function;
             return function_(1);
         }
-        """),
-    ("snakebite_test_no_such_array", """
+        """, ""),
+    ("snakebite_test_no_such_array", "snakebite_test_no_such_array", """
         module main;
         extern(C) extern __gshared int[1 << 20] snakebite_test_no_such_array;
         int main() { return snakebite_test_no_such_array[300_000]; }
+        """, ""),
+    # A `__gshared` variable and a class of a dependency that has no object
+    # code: the `.di` file declares them, and nothing defines them.
+    ("_D7missing11sharedValuei", "sharedValue", """
+        module main;
+        import missing;
+        int main() { return sharedValue; }
+        """, """
+        module missing;
+        __gshared int sharedValue = 3;
         """),
-], ids=["read", "write", "call_through_address", "read_far_into_array"])
+    ("_D7missing7Missing6__initZ", "Missing", """
+        module main;
+        import missing;
+        int main() { return (new Missing).field; }
+        """, """
+        module missing;
+        class Missing { int field; }
+        """),
+], ids=["read", "write", "call_through_address", "read_far_into_array",
+        "read_shared_variable_of_a_dependency", "new_class_of_a_dependency"])
 def test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs(
-    tmp_path: Path, symbol: str, program: str,
+    tmp_path: Path, symbol: str, declared: str, program: str,
+    dependency: str,
 ) -> None:
     write(tmp_path / "app" / "main.d", program)
-    common = ("--backend=bytecode", "--no-optimise-image")
+    write(tmp_path / "deps" / "missing.di", dependency)
+    common = ("--backend=bytecode", "--no-optimise-image", "-I",
+              str(tmp_path / "deps"))
     app = str(tmp_path / "app")
     from_ram = run_sb(*common, app, cwd=tmp_path)
     saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
@@ -2304,7 +2326,7 @@ def test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs(
     loaded = run_sb(f"--load={tmp_path / 'program.sbc'}", cwd=tmp_path)
     for result in (from_ram, loaded):
         assert result.returncode != 0, output(result)
-        assert f"symbol `{symbol}` declared by `{symbol}`" in result.stderr, (
+        assert f"symbol `{symbol}` declared by `{declared}`" in result.stderr, (
             output(result))
 
 
