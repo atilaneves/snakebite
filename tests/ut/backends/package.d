@@ -164,9 +164,14 @@ public void shouldBeStatusOf(
         auto program = Program([parsedProgram(program_)]);
         auto backend = ownedBackend!BackendType(program);
         asTestFailure(
-            run(backend.startData, backend.compilationStatistics,
-                ["snakebite"]),
-            file, line).should == expected;
+            run(
+                backend.startData,
+                backend.compilationStatistics,
+                ["snakebite"],
+            ),
+            file,
+            line,
+        ).should == expected;
     }
 }
 
@@ -191,9 +196,14 @@ public void shouldBeStatusOfWithJitCode(
         auto program = Program([parsedProgram(program_)]);
         auto backend = ownedBackend!BackendType(program);
         asTestFailure(
-            run(backend.startData, backend.compilationStatistics,
-                ["snakebite"]),
-            file, line).should == expected;
+            run(
+                backend.startData,
+                backend.compilationStatistics,
+                ["snakebite"],
+            ),
+            file,
+            line,
+        ).should == expected;
         if (!testJit.enabled)
             return;
         foreach (name; jitted) {

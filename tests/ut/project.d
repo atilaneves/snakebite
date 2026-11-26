@@ -294,8 +294,13 @@ private UnitTestResult throwingInnerRunner() {
 }
 
 private UnitTestResult successfulOuterRunner() {
-    executeBackend(_nestedBackend, _innerProgram, ["inner"], _innerHooks,
-        false).status.should == 1;
+    executeBackend(
+        _nestedBackend,
+        _innerProgram,
+        ["inner"],
+        _innerHooks,
+        collectGarbage: false,
+    ).status.should == 1;
     return UnitTestResult(1, 1, false, false);
 }
 
@@ -336,8 +341,13 @@ static foreach (backend; Matrix!()) {
                         rt_init;
                     rt_term;
                 }
-                executeBackend(_nestedBackend, outer, ["outer"],
-                    TestHooks.of(null, &successfulOuterRunner), false).status.should == 0;
+                executeBackend(
+                    _nestedBackend,
+                    outer,
+                    ["outer"],
+                    TestHooks.of(null, &successfulOuterRunner),
+                    collectGarbage: false,
+                ).status.should == 0;
                 atomicLoad(runtimeInitDepth).should == depth;
             }
         }

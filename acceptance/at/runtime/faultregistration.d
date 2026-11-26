@@ -129,8 +129,11 @@ private int programStatus(Backend)(in Sandbox sandbox, in string code) {
     } else {
         auto program = Program([parseSnippet(code)]);
         auto backend = ownedBackend!Backend(program);
-        return run(backend.startData, backend.compilationStatistics,
-            ["snakebite"]);
+        return run(
+            backend.startData,
+            backend.compilationStatistics,
+            ["snakebite"],
+        );
     }
 }
 

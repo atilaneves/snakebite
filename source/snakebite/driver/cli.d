@@ -35,14 +35,14 @@ public int run(string[] args) {
     import snakebite.image.preparation: Optimise;
     import snakebite.project.dub: fetchProject;
     import snakebite.driver.execution:
-        executeBackend, executeBuilt, executeLoaded, PreparationReport, prepareSources,
-        runProject, saveProgram;
+        executeBackend, executeBuilt, executeLoaded, PreparationReport,
+        prepareSources, runProject, saveProgram;
     import snakebite.project.loading: EndsProcess;
     import snakebite.backends.bytecode.vm: JitSetting;
     import snakebite.build: Build, buildFiles, buildProject, isCommand,
         runCommand;
     import snakebite.memory.gc: selectFrontendMemory;
-    import std.file: chdir, exists, isDir;
+    import std.file: exists, isDir;
     import std.path: absolutePath, baseName, buildNormalizedPath;
     import std.stdio: stderr, stdout, write;
     import std.typecons: nullable;
@@ -83,11 +83,11 @@ public int run(string[] args) {
                 return 1;
             // Mutable: the loaded program closes the file.
             auto built = ninja.get;
-            chdir(built.workingDirectory);
             const report = executeBuilt(
                 built.program,
                 [directory.baseName] ~ parsed.options.programArguments,
                 JitSetting(!parsed.options.noJit),
+                built.workingDirectory,
                 buildFiles(directory).image,
             );
             _statistics = Statistics(true, PreparationReport.init, report,

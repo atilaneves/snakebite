@@ -4,10 +4,6 @@ module snakebite.driver.execution;
 private:
 
 
-import std.functional: toDelegate;
-import std.typecons: Nullable, nullable;
-
-
 public struct ExecutionReport {
     import core.time: Duration;
     import snakebite.backends.statistics: CompilationStatistics;
@@ -198,9 +194,16 @@ public ExecutionReport executeBackend(
     const running = ExecutionClock.start(backend.compilationStatistics);
     auto start = &backend.startData();
     return runStartData(
-        *start, backend.compilationStatistics, running, stopWatch,
-        testHooks, isSnippet, hostArguments,
-        collectGarbage, endsProcess);
+        *start,
+        backend.compilationStatistics,
+        running,
+        stopWatch,
+        testHooks,
+        isSnippet,
+        hostArguments,
+        collectGarbage,
+        endsProcess,
+    );
 }
 
 // Compiles all of `program` and writes it to `path`; it runs nothing.
@@ -231,40 +234,44 @@ public ExecutionReport executeLoaded(
 ) {
     import std.stdio: File;
 
-    return runLoaded(File(path, "rb"), arguments, jit, toDelegate(&imageOfFile));
+    return runLoaded(File(path, "rb"), arguments, jit, &imageOfFile);
 }
 
 
-// As `executeLoaded`, for the open program file `file` that a build wrote. A
-// build gives the dependency image `imagePath`; the file names none.
+// As `executeLoaded`, for the open program file `file` that a build wrote,
+// in the working directory `workingDirectory`. A build gives the dependency
+// image `imagePath`; the file names none.
 public ExecutionReport executeBuilt(
     imported!"std.stdio".File file,
     in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
+    in string workingDirectory,
     in string imagePath,
 ) {
-    return runLoaded(file, arguments, jit,
-        (in Header header) => nullable(imagePath));
+    import snakebite.project.loading: EndsProcess, ProjectDirectory;
+
+    scope entered = ProjectDirectory(
+        workingDirectory, workingDirectory, EndsProcess.yes);
+    return runLoaded(file, arguments, jit, (in Header header) => imagePath);
 }
 
 
 private alias Header = imported!"snakebite.backends.bytecode.file".Header;
-private alias ImageOf = Nullable!string delegate(in Header);
 
 
-// The dependency image that a program file names.
-private Nullable!string imageOfFile(in Header header) {
+// The dependency image that a program file names, empty for none.
+private string imageOfFile(in Header header) {
     return header.imagePath;
 }
 
 
 // Runs the program of the open file `file`, from its start. `imageOf` says
 // where the dependency image of the program is.
-private ExecutionReport runLoaded(
+private ExecutionReport runLoaded(ImageOf)(
     imported!"std.stdio".File file,
     in string[] arguments,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
-    scope ImageOf imageOf,
+    ImageOf imageOf,
 ) {
     import snakebite.backends.statistics: CompilationStatistics, ExecutionClock;
     import snakebite.image.dependency: testHooksOf;
@@ -291,9 +298,16 @@ private ExecutionReport runLoaded(
     const collectGarbage = false;
     const endsProcess = true;
     return runStartData(
-        loaded.program.startData, compilation, running, stopWatch,
-        loaded.image.testHooksOf, isSnippet, arguments, collectGarbage,
-        endsProcess);
+        loaded.program.startData,
+        compilation,
+        running,
+        stopWatch,
+        loaded.image.testHooksOf,
+        isSnippet,
+        arguments,
+        collectGarbage,
+        endsProcess,
+    );
 }
 
 
@@ -320,14 +334,14 @@ public LoadedProgram loadProgramFile(
     imported!"std.stdio".File file,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
-    return loadFile(file, jit, toDelegate(&imageOfFile));
+    return loadFile(file, jit, &imageOfFile);
 }
 
 
-private LoadedProgram loadFile(
+private LoadedProgram loadFile(ImageOf)(
     imported!"std.stdio".File file,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
-    scope ImageOf imageOf,
+    ImageOf imageOf,
 ) {
     import snakebite.failure.report: SnakebiteException;
 
@@ -364,17 +378,19 @@ public LoadedProgram loadProgramFile(
 // dependency image that the file names (`--save` writes it, as an executable
 // names its libraries), or on none.
 public LoadedProgram loadProgramFile(Parts)(
-    Parts parts, in size_t size,
+    Parts parts,
+    in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
-    return loadParts(parts, size, jit, toDelegate(&imageOfFile));
+    return loadParts(parts, size, jit, &imageOfFile);
 }
 
 
-private LoadedProgram loadParts(Parts)(
-    Parts parts, in size_t size,
+private LoadedProgram loadParts(Parts, ImageOf)(
+    Parts parts,
+    in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
-    scope ImageOf imageOf,
+    ImageOf imageOf,
 ) {
     import core.memory: GC;
     import snakebite.backends.bytecode.file: ProgramReader;
@@ -414,10 +430,10 @@ private LoadedProgram loadParts(Parts)(
     // On the GC heap, as the image of a compile is: the program and its call
     // plans and tables of thread-local variables refer to it until the
     // module destructors have run, after a run returns.
-    const image = imageOf(loaded.header);
-    if (!image.isNull) {
+    const imagePath = imageOf(loaded.header);
+    if (imagePath.length) {
         loaded.image = new DependencyImage;
-        *loaded.image = loadImage(image.get);
+        *loaded.image = loadImage(imagePath);
     }
 
     // On the GC heap, as the backend of a compile is: the module destructors
