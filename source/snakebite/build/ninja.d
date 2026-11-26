@@ -34,8 +34,10 @@ public void writeBuildFile(
     );
     files.directory.mkdirRecurse;
     writeChanged(files.workingDirectoryFileName, sources.runDirectory(directory));
-    writeChanged(files.programListFileName,
-        compiles.map!(compile => compile.program ~ "\n").join);
+    writeChanged(
+        files.programListFileName,
+        compiles.map!(compile => compile.program ~ "\n").join,
+    );
     if (writeChanged(files.ninjaFile, text))
         return;
     // The run that makes the text can make an input of it, as dub makes its
@@ -112,7 +114,9 @@ private string programOfSource(
         setExtension;
 
     static string spelled(in string part) {
-        return part == ".." ? "_" : part.startsWith("_") ? "_" ~ part : part;
+        if (part == "..")
+            return "_";
+        return part.startsWith("_") ? "_" ~ part : part;
     }
 
     const relative = source.absolutePath(directory).relativePath(directory);
@@ -223,6 +227,9 @@ private string buildFileText(
         generatorInputs,
     );
     text ~= statement(sourceInputs, "phony", null, null);
+    const compileOptions = sources.importedCFilesAreRoots
+        ? ["--c-imports-are-roots"]
+        : null;
     // The compile statements depend on no other statement: an edit of an
     // imported module starts each compile whose dependency file names it.
     foreach (compile; compiles) {
@@ -235,10 +242,7 @@ private string buildFileText(
         );
         foreach (name; compilerVariables)
             text ~= statementVariable(name, variables[name]);
-        text ~= statementVariable(
-            "options",
-            sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null,
-        );
+        text ~= statementVariable("options", compileOptions);
     }
     const imageTargets = buildsDependencyImage(build) ? [files.image] : null;
     if (imageTargets.length) {
@@ -333,14 +337,12 @@ private string statement(
     const implicitOutputsText = implicitOutputs.length
         ? " |" ~ implicitOutputs.map!(output => " " ~ output.ninjaPath).join
         : "";
-    return "build " ~ outputs.map!ninjaPath.join(" ")
-        ~ implicitOutputsText
-        ~ ": " ~ rule
-        ~ inputs.map!(input => " " ~ input.ninjaPath).join
-        ~ (implicitInputs.length
-            ? " |" ~ implicitInputs.map!(input => " " ~ input.ninjaPath).join
-            : "")
-        ~ "\n";
+    const implicitInputsText = implicitInputs.length
+        ? " |" ~ implicitInputs.map!(input => " " ~ input.ninjaPath).join
+        : "";
+    return "build " ~ outputs.map!ninjaPath.join(" ") ~ implicitOutputsText
+        ~ ": " ~ rule ~ inputs.map!(input => " " ~ input.ninjaPath).join
+        ~ implicitInputsText ~ "\n";
 }
 
 

@@ -66,8 +66,9 @@ public struct CallPlanStore {
             else if (auto here = names.definitionHere(name.symbol)) {
                 // Host code calls a guest function through its callback
                 // entry.
-                found = names.keep(name, (own) =>
-                    cast(void*) callbacks.entryOf(here) + name.distance);
+                found = names.keep(name, (own) {
+                    return cast(void*) callbacks.entryOf(here) + name.distance;
+                });
             }
             else {
                 auto processCopy = resolver.resolve(name.symbol);

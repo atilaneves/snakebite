@@ -830,7 +830,9 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                 const where = _world.callSelection.whereDefined(function_);
                 if (where == Definition.rootOwned)
                     compiledProgram.plans.names.defineHere(
-                        function_.mangledNameOf.idup, placeholder);
+                        function_.mangledNameOf.idup,
+                        placeholder,
+                    );
             }
             if (outermost)
                 prepareCallbackBodies;

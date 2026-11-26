@@ -356,13 +356,15 @@ private LoadedProgram loadFiles(ImagePathOf)(
     import std.array: array;
     import std.stdio: File;
 
+    // Each file goes through a buffer of this size.
+    enum bufferBytes = 64 * 1024;
     const sizes = files.map!programFileSize.array;
     // `auto`: the ranges are set in the loop below, and `loadParts` reads
     // them. The parts of a file go one after the other through its buffer.
     alias Parts = typeof(File.init.byChunk(new ubyte[1]));
     auto parts = new Parts[files.length];
     foreach (index, ref file; files)
-        parts[index] = file.byChunk(new ubyte[64 * 1024]);
+        parts[index] = file.byChunk(new ubyte[bufferBytes]);
     return loadParts(parts, sizes, jit, imagePathOf);
 }
 
@@ -459,7 +461,8 @@ private LoadedProgram loadParts(Parts, ImagePathOf)(
         const header = reader.header;
         if (header.buildKey != generatorKey)
             throw new SnakebiteException(
-                "the program file was written by another build of snakebite");
+                "the program file was written by another build of snakebite",
+            );
         if (index == 0)
             first = header;
     }
