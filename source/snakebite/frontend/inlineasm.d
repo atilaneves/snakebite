@@ -50,9 +50,9 @@ public void disableInlineAsmVersion(
 }
 
 
-// Named distinctly from `imagesource.d`'s own `Collector` and from
-// `DeclarationCollector` (`declarationcollector.d`), the shared base both
-// extend: all three are plain `extern(C++) class`es with no explicit C++
+// Named distinctly from `DeclarationCollector` (`declarationcollector.d`),
+// the base of this class, and from the other classes that extend it (see
+// there): all are plain `extern(C++) class`es with no explicit C++
 // namespace, so identical class names mangle to the identical C++ symbol
 // and the linker keeps only one definition - silently routing calls meant
 // for this class into another one's vtable instead of a link error.

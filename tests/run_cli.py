@@ -4019,9 +4019,9 @@ def test_build_module_runs_as_native_code_built_by_module(
 # another hidden `this` than the definition, the definition reads its
 # parameters from the registers that the caller fills. The call also reaches a
 # definition that needs a closure, a D-variadic definition that reads its
-# extra arguments, and a function that a template mixin and a string mixin
-# declare: native code defines each of them in the object of the module that
-# mixes it in.
+# extra arguments, a function that a template mixin declares and a function
+# that a string mixin declares: native code defines each of them in the object
+# of the module that mixes it in.
 def test_build_module_call_to_a_name_runs_as_native_code(
     tmp_path: Path,
 ) -> None:
