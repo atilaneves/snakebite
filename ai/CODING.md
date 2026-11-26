@@ -36,7 +36,9 @@
   Either name them with a variable or add a comment.
 * Do not use `__gshared` unless absolutely necessary. Shared code
   should be `immutable` if it can be, `shared` otherwise. All global
-  and TLS data is suspect and must have its existence justified.
+  and TLS data is suspect and must have its existence justified. Mutable
+  global state includes the state of the process: the working directory
+  (`chdir`) and the environment.
 * Downcasts are a code smell - use virtual dispatch instead unless
   justified.
 * Our helpers return D types. A helper returns `string`, not
@@ -58,11 +60,6 @@
   parameter by value. Do not make a copy in the body to work around the
   type of the parameter: "What's with the explicit type declaration on the
   lhs?"
-* Pass a value down as an argument. Do not change global process state
-  (`chdir`, the environment) to give a value to code that is called later:
-  "Why are we doing this instead of passing the working directory down?
-  `execute` et al all take the working directory, why change global
-  process state??"
 * Use Phobos before a hand-written equivalent, for example `std.conv.to`
   for an enum from a string.
 * A struct with a flag that says if its other fields mean anything is an
