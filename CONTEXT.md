@@ -41,7 +41,8 @@ except in a compile to a file: there it is a call to its name, which the
 program connects to the bytecode of an **SBC file** that defines the name,
 else to native code, when the program is made ready to run. A missing symbol
 for it is an error when code that uses it runs, not when the program is made
-ready to run, where the link of a native build fails (ADR-0017). Compare **Definition**.
+ready to run, where the link of a native build fails (ADR-0017). Compare
+**Definition**.
 
 **Definition**:
 The one decision, made for each declaration, of where it is defined

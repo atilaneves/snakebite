@@ -5,7 +5,7 @@ private:
 
 import snakebite.backends.bytecode.relocation: plain, setBy;
 import snakebite.backends.bytecode.vm: bindHostCode,
-    bindInstructionReferences, CallSite, Function,
+    bindInstructionReferences, Function,
     JitSetting, prepareForExecution;
 import snakebite.ffi.callplanstore: CallPlanStore;
 import snakebite.host.threads: heapNew;
@@ -132,10 +132,9 @@ public struct Program {
             *word = plans.wordOfName(reloc.target);
         }
         function_.relocs = null;
-        plans.bindNewPlans;
         foreach (ref site; function_.callSites)
-            if (site.kind == CallSite.Kind.named)
-                site.connect(plans);
+            site.connect(plans);
+        plans.bindNewPlans;
         function_.fixWindowFacts;
         if (const reason = bindInstructionReferences(*function_))
             return reason;

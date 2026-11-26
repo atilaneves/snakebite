@@ -82,15 +82,12 @@ public struct CallPlanStore {
         return found is Name.absent ? null : found;
     }
 
-    // The guest function that a program file defines for the code that
-    // `plan` names (`Names.defineHere`), or null.
-    public const(void)* guestDefinitionOf(
-        const(CallPlan)* plan,
-    ) const {
-        const pending = plan.pending;
-        if (pending is null || pending.name is null)
-            return null;
-        return names.definitionHere(pending.name.symbol);
+    // The guest function that an SBC file defines for the code that `plan`
+    // names (`Names.defineHere`), or null.
+    public const(void)* guestDefinitionOf(const(CallPlan)* plan) const
+            @safe pure nothrow @nogc {
+        const name = plan.name;
+        return name is null ? null : names.definitionHere(name.symbol);
     }
 
     // The name of the symbol that `name` reaches: an entry that host code
@@ -317,8 +314,11 @@ public struct CallPlanStore {
     // symbol that it names, as a function that calls it is made ready to
     // run: a first call can then run where no allocation is allowed, in a
     // finalizer. A plan whose symbol no object defines stays unbound, and
-    // its call throws the failure. A plan is bound once; threads that bind
-    // the same plan write the same word.
+    // its call throws the failure. A plan of a symbol that an SBC file
+    // defines is not bound here: a call to that name is connected to the
+    // bytecode of the definition (`CallSite.connect`), so no call uses its
+    // native entry. A plan is bound once; threads that bind the same plan
+    // write the same word.
     pragma(inline, true)
     public void bindNewPlans() {
         import core.atomic: atomicLoad, MemoryOrder;
@@ -347,10 +347,10 @@ public struct CallPlanStore {
         if (plan.address !is null || plan.pending is null)
             return;
         const pending = plan.pending;
-        if (pending.name is null)
+        auto store = cast(CallPlanStore*) pending.store;
+        if (pending.name is null || store.guestDefinitionOf(plan) !is null)
             return;
-        if (auto address = (cast(CallPlanStore*) pending.store)
-                .addressIfPresent(cast(Name*) pending.name))
+        if (auto address = store.addressIfPresent(cast(Name*) pending.name))
             plan.bindAddress(address);
     }
 
