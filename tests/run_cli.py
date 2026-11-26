@@ -3163,14 +3163,10 @@ def test_load_of_file_from_another_build_fails_and_runs_nothing(
 
 
 # The offset of the first of the two memory sizes of a program file: after
-# the magic text, the build key and the optional image path of the header.
+# the magic text, the build key and the image path of the header.
 def memory_size_offset(contents: bytes) -> int:
     offset = len(b"snakebite-program-v1\n")
-    length = int.from_bytes(contents[offset:offset + 8], "little")
-    offset += 8 + length
-    named = contents[offset]
-    offset += 1
-    if named:
+    for _ in range(2):
         length = int.from_bytes(contents[offset:offset + 8], "little")
         offset += 8 + length
     return offset

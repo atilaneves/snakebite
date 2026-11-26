@@ -47,10 +47,10 @@ public struct Header {
     // Names the build that wrote the file (`generatorKey`).
     public string buildKey;
     // The dependency image that the program was compiled with, as an
-    // executable names the libraries that it needs. Null for a program with
-    // none, and in an SBC file: the run that puts a program together gives
-    // the image.
-    public Nullable!string imagePath;
+    // executable names the libraries that it needs. Empty for a program with
+    // none, and in a file that a build wrote: the run that puts a program
+    // together gives the image.
+    public string imagePath;
 }
 
 
@@ -60,7 +60,7 @@ private enum magic = "snakebite-program-v1\n";
 // Writes `program`, whole and compiled, to `path`. The file is complete or it
 // does not exist: it is written under another name and renamed.
 public void saveProgram(
-    ref Program program, in Header header, in string path,
+    ref Program program, Header header, in string path,
 ) {
     import std.file: remove, rename, write;
 
@@ -69,10 +69,7 @@ public void saveProgram(
 
     auto file = Archive.writing(program);
     file.text(magic);
-    // The walk takes a mutable record, and `auto` keeps `const` of `header`;
-    // a write changes nothing in it.
-    Header written = header;
-    transferHeader(file, written);
+    transferHeader(file, header);
     // The memory that the load of the rest takes, before the rest: the save
     // counts it as it writes the rest (`Archive.need`).
     const needAt = file._written.data.length;

@@ -590,17 +590,27 @@ static foreach (backend; Matrix!()) {
                 project.sources, &liveProgram, Optimise.no);
             (cold is null).should == true;
             analyses.should == 1;
-            executeBackend(backendIdentity!backend, project.program,
-                ["live_preparation"], TestHooks.init, collectGarbage: false,
-                isSnippet: true).status.should == 42;
+            executeBackend(
+                backendIdentity!backend,
+                project.program,
+                ["live_preparation"],
+                TestHooks.init,
+                collectGarbage: false,
+                isSnippet: true,
+            ).status.should == 42;
 
             const warm = prepareDependencies(project.directory,
                 project.sources, &liveProgram, Optimise.no);
             (warm is null).should == true;
             analyses.should == 1;
-            executeBackend(backendIdentity!backend, project.program,
-                ["live_preparation"], TestHooks.init, collectGarbage: false,
-                isSnippet: true).status.should == 42;
+            executeBackend(
+                backendIdentity!backend,
+                project.program,
+                ["live_preparation"],
+                TestHooks.init,
+                collectGarbage: false,
+                isSnippet: true,
+            ).status.should == 42;
 
             // Entry startup settings differ from a live session. A separate
             // record must still preserve this program and reuse its analysis.
@@ -612,9 +622,14 @@ static foreach (backend; Matrix!()) {
                 project.sources, &liveProgram, Optimise.no, projectEntry: false);
             (liveHit is null).should == true;
             analyses.should == 2;
-            executeBackend(backendIdentity!backend, project.program,
-                ["live_preparation"], TestHooks.init, collectGarbage: false,
-                isSnippet: true).status.should == 42;
+            executeBackend(
+                backendIdentity!backend,
+                project.program,
+                ["live_preparation"],
+                TestHooks.init,
+                collectGarbage: false,
+                isSnippet: true,
+            ).status.should == 42;
         }
     }
 }

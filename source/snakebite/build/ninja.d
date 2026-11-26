@@ -119,7 +119,12 @@ private string buildFileText(
             ~ sources.files ~ frontendConfiguration ~ sources.linkerFiles)
         .filter!(path => !libraries.canFind(path)).array.dup.sort.uniq.array;
 
-    text ~= statement([files.ninjaFile, files.workingDirectory], "generate", null, generatorInputs);
+    text ~= statement(
+        [files.ninjaFile, files.workingDirectory],
+        "generate",
+        null,
+        generatorInputs,
+    );
     text ~= statement(sourceInputs, "phony", null, null);
     if (libraries.length)
         text ~= "\n" ~ statement(libraries, "dependencies", null, dependencyInputs);

@@ -36,37 +36,37 @@ public struct BuildFiles {
     public string directory;
 
     public string ninjaFile() const {
-        return file("build.ninja");
+        return fileName("build.ninja");
     }
 
     // The saved Bytecode program.
     public string program() const {
-        return file("project.sbc");
+        return fileName("project.sbc");
     }
 
     // What the dependency image needs from the root code, which the compile
     // writes beside the program.
     public string imageSource() const {
-        return file("image.d");
+        return fileName("image.d");
     }
 
     // The lock of the build: one run at a time changes the files.
     public string lockFile() const {
-        return file("lock");
+        return fileName("lock");
     }
 
     public string image() const {
-        return file("image.so");
+        return fileName("image.so");
     }
 
     // The directory that the program runs in, which only the dub recipe
     // gives. The step that reads the recipe writes it, so that a run with no
     // change does not read the recipe.
     public string workingDirectory() const {
-        return file("working-directory");
+        return fileName("working-directory");
     }
 
-    private string file(in string name) const {
+    private string fileName(in string name) const {
         import std.path: buildPath;
 
         return directory.buildPath(name);
@@ -85,7 +85,6 @@ public BuildFiles buildFiles(in string directory) {
 }
 
 
-// What a ninja run that succeeded gives.
 public struct NinjaRun {
     import core.time: Duration;
 
