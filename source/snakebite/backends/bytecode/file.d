@@ -147,20 +147,21 @@ public void load(
     ProgramReader[] readers, ref Program program, ref Runner runner,
     in DependencyImage* image,
 ) {
-    auto needs = new MemoryNeed[readers.length];
-    foreach (index, ref reader; readers)
-        needs[index] = memoryNeed(reader._file);
+    import std.algorithm.iteration: map;
+    import std.array: array;
+
+    const needs = readers.map!((ref reader) => memoryNeed(reader._file)).array;
     program.memory.reserve(needs);
     program.store.takeFrom(&program.memory);
     foreach (ref reader; readers)
         loadProgram(reader._file, program, runner, image);
     foreach (ref reader; readers)
-        reader._file.writeNamedWords;
+        reader._file.writeSymbolWords;
     // A word of an interface of a class information reads the class
     // information, which can be the program's own copy: it is written once
     // every other word of the data is ready.
     foreach (ref reader; readers)
-        reader._file.writeInterfaceWords;
+        reader._file.writeWords(reader._file._interfaceWords);
 
     program.eachFunction((function_) {
         if (const reason = Program.complete(function_, program.plans,
@@ -368,17 +369,17 @@ private struct Archive {
     // Reading: the words of the data and the gates that name a symbol, and
     // the words that refer to an interface of a class information, which
     // `load` makes ready after the last file.
-    private NamedWord[] _namedWords;
-    private NamedGate[] _namedGates;
+    private NamedWord[] _symbolWords;
+    private NamedGate[] _symbolGates;
     private NamedWord[] _interfaceWords;
     // The modules of the program that are of this file: `_moduleCount` from
     // `_firstModule`. A load gives the data that no D module of the file owns
     // to one more module after them. Writing: all modules of the program.
     private size_t _firstModule;
     private size_t _moduleCount;
-    // Reading: the index of the first string of this file in the process
-    // store.
-    private size_t _firstString;
+    // Reading: the index in the strings of the process store of the first
+    // string of this file.
+    private size_t _firstStringIndexInStore;
     private Runner* _runner;
     private Program* _program;
     private const(DependencyImage)* _image;
@@ -420,23 +421,23 @@ private struct Archive {
     }
 
     // Each function of the modules of this file.
-    void eachFunction(scope void delegate(Function*) visit) {
+    void eachFunction(Visit)(scope Visit visit) {
         foreach (m; 0 .. _moduleCount)
             foreach (function_; moduleAt(m)._functions)
                 visit(function_);
     }
 
     // Makes ready the words of the data and the gates that name a symbol.
-    void writeNamedWords() {
-        foreach (word; _namedWords)
-            writeWord(word.place, _program.plans.wordOfName(word.target));
-        foreach (named; _namedGates)
+    void writeSymbolWords() {
+        writeWords(_symbolWords);
+        foreach (named; _symbolGates)
             named.gate.bytes = (cast(ubyte*) _program.plans.wordOfName(
                 named.target))[0 .. named.length];
     }
 
-    void writeInterfaceWords() {
-        foreach (word; _interfaceWords)
+    // Makes ready the words `words`, which name a symbol or an interface.
+    void writeWords(NamedWord[] words) {
+        foreach (word; words)
             writeWord(word.place, _program.plans.wordOfName(word.target));
     }
 
@@ -610,7 +611,7 @@ private struct Archive {
 
     void* stringAt(in size_t[3] position) {
         if (auto address = _program.store.addressInString(
-                _firstString + position[0], position[1]))
+                _firstStringIndexInStore + position[0], position[1]))
             return address;
         throw new SnakebiteException(
             "the program file names a string that it does not hold");
@@ -1084,7 +1085,7 @@ private void transferBody(
     else {
         archive._firstModule = program._modules.length;
         archive._moduleCount = moduleCount;
-        archive._firstString = program.store.strings.length;
+        archive._firstStringIndexInStore = program.store.strings.length;
         program.newModules(blockSetCount);
     }
     foreach (m; 0 .. moduleCount) {
@@ -1170,7 +1171,7 @@ private void transferPlans(ref Archive archive, ref Program program) {
 // callback bridge, before any function is read: a word that refers to the entry
 // of a function needs the signature.
 private void transferSignatures(ref Archive archive, ref Program program) {
-    archive.eachFunction((function_) {
+    archive.eachFunction((Function* function_) {
         NativeSignature signature;
         if (archive.isWriting) {
             const registered =
@@ -1280,7 +1281,8 @@ private void transferDefinitionsHere(ref Archive archive, ref Program program) {
     size_t[] symbols;
     size_t[2][] places;
     if (archive.isWriting)
-        program.plans.names.eachDefinitionHere((symbol, word) {
+        program.plans.names.eachDefinitionHere(
+            (string symbol, const(void)* word) {
             symbols ~= archive.symbolIndexOfName(symbol);
             places ~= archive.positionOf(cast(const(Function)*) word);
         });
@@ -1329,7 +1331,7 @@ private void transferAddresses(ref Archive archive, ref StaticBlocks blocks) {
                     || link.kind == Target.Kind.interfaceRecord)
                 archive._interfaceWords ~= NamedWord(place, target);
             else if (isName(link.kind))
-                archive._namedWords ~= NamedWord(place, target);
+                archive._symbolWords ~= NamedWord(place, target);
             else
                 writeWord(place, target.address);
         }
@@ -1426,7 +1428,7 @@ private void transfer(ref Archive archive, ref GateStorage gate) {
         // (`load`).
         const target = targetOf(archive, kind, reference);
         if (isName(kind))
-            archive._namedGates ~= NamedGate(&gate, target, length);
+            archive._symbolGates ~= NamedGate(&gate, target, length);
         else
             gate.bytes = (cast(ubyte*) target.address)[0 .. length];
         if (kind == Target.Kind.staticData)

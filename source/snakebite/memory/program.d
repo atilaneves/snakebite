@@ -14,12 +14,11 @@
 //
 // The first word of the memory of each file in `scanned` points to the
 // `Program`, so a pointer into `scanned` keeps the `Program`, its stores and
-// both blocks. A pointer into
-// `data` keeps `data` only. Each holder of a pointer into `data` holds the
-// `Program` too: the `Program` itself; its `Runner`, which holds the
-// `Program`, and with it each frame of a run and each `Function.jit`; a
-// start function, in `scanned`; and a slot of a callback entry, a GC root
-// that holds the runner.
+// both blocks. A pointer into `data` keeps `data` only. Each holder of a
+// pointer into `data` holds the `Program` too: the `Program` itself; its
+// `Runner`, which holds the `Program`, and with it each frame of a run and
+// each `Function.jit`; a start function, in `scanned`; and a slot of a
+// callback entry, a GC root that holds the runner.
 module snakebite.memory.program;
 
 

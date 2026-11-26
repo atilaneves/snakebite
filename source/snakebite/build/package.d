@@ -15,8 +15,17 @@ private:
 public enum Build { off, project, module_ }
 
 
+// Whether a build of mode `build` builds the dependency image. The present
+// limit of module mode is that it builds none: the image of a build of each
+// module needs the native template instances of all its compiles, which the
+// program files do not carry yet (#1015).
+public bool buildsDependencyImage(in Build build) @safe pure nothrow @nogc {
+    return build == Build.project;
+}
+
+
 // The name of `build` on the command line.
-public string buildName(in Build build) {
+public string buildName(in Build build) @safe pure {
     import std.conv: text;
     import std.string: chomp;
 
@@ -87,7 +96,7 @@ public struct BuildFiles {
 
 // What the dependency image needs from the root code of the compile that
 // writes the program file `program`, which the compile writes beside it.
-public string imageSourceOf(in string program) {
+public string imageSourceOf(in string program) @safe pure nothrow {
     import std.path: setExtension;
 
     return program.setExtension("image.d");
@@ -189,10 +198,7 @@ public imported!"std.typecons".Nullable!NinjaRun buildProject(
     const duration = stopWatch.peek;
     if (status != 0)
         return Nullable!NinjaRun();
-    // The dependency image of a build of each module, from the native
-    // template instances of all its compiles, is not built yet (ADR-0021,
-    // item 14): that build runs on none.
-    const imagePath = build == Build.project ? files.image : "";
+    const imagePath = buildsDependencyImage(build) ? files.image : "";
     return nullable(NinjaRun(
         duration,
         files.programListFileName.readText.splitLines

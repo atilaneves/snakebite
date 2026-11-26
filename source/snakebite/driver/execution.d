@@ -352,27 +352,35 @@ private LoadedProgram loadFiles(ImagePathOf)(
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
     ImagePathOf imagePathOf,
 ) {
-    import snakebite.failure.report: SnakebiteException;
+    import std.algorithm.iteration: map;
+    import std.array: array;
     import std.stdio: File;
 
+    const sizes = files.map!programFileSize.array;
+    // `auto`: the ranges are set in the loop below, and `loadParts` reads
+    // them. The parts of a file go one after the other through its buffer.
     alias Parts = typeof(File.init.byChunk(new ubyte[1]));
     auto parts = new Parts[files.length];
-    auto sizes = new size_t[files.length];
-    foreach (index, ref file; files) {
-        // `File.size` gives `ulong.max` for a file that cannot seek, such as
-        // a pipe: the load checks each count against the size.
-        const size = file.size;
-        if (size == ulong.max)
-            throw new SnakebiteException(
-                "the program file has no size: it is not a file that can seek");
-        static if (size_t.sizeof < ulong.sizeof)
-            if (size > size_t.max)
-                throw new SnakebiteException("the program file is too large");
-        sizes[index] = cast(size_t) size;
-        // The parts of the file go one after the other through this buffer.
+    foreach (index, ref file; files)
         parts[index] = file.byChunk(new ubyte[64 * 1024]);
-    }
     return loadParts(parts, sizes, jit, imagePathOf);
+}
+
+
+// The number of bytes of the program file `file`.
+private size_t programFileSize(imported!"std.stdio".File file) {
+    import snakebite.failure.report: SnakebiteException;
+
+    // `File.size` gives `ulong.max` for a file that cannot seek, such as a
+    // pipe: the load checks each count against the size.
+    const size = file.size;
+    if (size == ulong.max)
+        throw new SnakebiteException(
+            "the program file has no size: it is not a file that can seek");
+    static if (size_t.sizeof < ulong.sizeof)
+        if (size > size_t.max)
+            throw new SnakebiteException("the program file is too large");
+    return cast(size_t) size;
 }
 
 
@@ -439,7 +447,9 @@ private LoadedProgram loadParts(Parts, ImagePathOf)(
     // needs a new pool until its first collection has set its thresholds.
     GC.disable;
     scope(exit) GC.enable;
-    // Neither array grows: a reader keeps the address of its source.
+    // `auto` for both: each element is set in the loop below, and a reader
+    // cannot be copied. Neither array grows: a reader keeps the address of
+    // its source.
     auto sources = new Source[parts.length];
     auto readers = new ProgramReader[parts.length];
     Header first;

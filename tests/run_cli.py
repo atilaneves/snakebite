@@ -3934,7 +3934,13 @@ def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
 # its constant, and the module constructor runs. The result is that of native
 # code built the same way. Native code fixes no order of the constructors and
 # unit tests of modules that do not import each other: the lines are a set.
-# An edit of the constant gives the new number.
+# An edit of the constant gives the new number. A compile of a module reads
+# the modules that it imports, and the frontend prints the message of a
+# `pragma(msg)` of each module that it reads: the number of messages of `b` is
+# the number of compiles that read `b`. The test runner module of dub imports
+# `a` and `b`. An edit of `b` starts the compiles of `b`, of `a`, which
+# imports `b`, and of the runner; an edit of `a` starts those of `a` and of
+# the runner, and not that of `b`.
 def test_build_module_runs_as_native_code_built_by_module(
     tmp_path: Path,
 ) -> None:
@@ -3951,6 +3957,7 @@ def test_build_module_runs_as_native_code_built_by_module(
         }
         """)
 
+    message = "the frontend read b"
     for factor in (2, 3):
         write(app / "source" / "b.d", f"""
             module b;
@@ -3959,6 +3966,7 @@ def test_build_module_runs_as_native_code_built_by_module(
             int twice(int x) {{ return 2 * x; }}
             shared static this() {{ writeln("b ctor"); }}
             unittest {{ writeln("b test"); }}
+            pragma(msg, "{message}");
             """)
         native = subprocess.run(
             ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
@@ -3966,9 +3974,21 @@ def test_build_module_runs_as_native_code_built_by_module(
         assert native.returncode == 0, output(native)
         built = run_sb("--build=module", str(app), cwd=tmp_path)
         assert built.returncode == 0, output(built)
-        assert sorted(guest_lines(built)) == sorted(native.stdout.splitlines()), \
+        lines = [line for line in guest_lines(built) if line != message]
+        assert sorted(lines) == sorted(native.stdout.splitlines()), \
             output(built)
-        assert str(42 * factor) in guest_lines(built), output(built)
+        assert str(42 * factor) in lines, output(built)
+
+    def messages() -> int:
+        result = run_sb("--build=module", str(app), cwd=tmp_path)
+        assert result.returncode == 0, output(result)
+        return output(result).count(message)
+
+    assert messages() == 0
+    touch(app / "source" / "b.d")
+    assert messages() == 3
+    touch(app / "source" / "a.d")
+    assert messages() == 2
 
 
 # A program saved with the perf map on names its JIT code in the perf map
