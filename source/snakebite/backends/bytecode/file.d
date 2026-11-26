@@ -60,7 +60,9 @@ private enum magic = "snakebite-program-v1\n";
 // Writes `program`, whole and compiled, to `path`. The file is complete or it
 // does not exist: it is written under another name and renamed.
 public void saveProgram(
-    ref Program program, Header header, in string path,
+    ref Program program,
+    Header header,
+    in string path,
 ) {
     import std.file: remove, rename, write;
 

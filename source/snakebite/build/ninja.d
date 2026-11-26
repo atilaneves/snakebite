@@ -132,14 +132,18 @@ private string buildFileText(
         sources.files, [sb] ~ frontendConfiguration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
-    text ~= statementVariable("options",
-        sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null);
+    text ~= statementVariable(
+        "options",
+        sources.importedCFilesAreRoots ? ["--c-imports-are-roots"] : null,
+    );
     text ~= "\n" ~ statement([files.image], "image",
         [files.imageSource] ~ sources.linkerFiles, [sb, compiler] ~ compilerConfiguration);
     foreach (name; compilerVariables)
         text ~= statementVariable(name, variables[name]);
-    text ~= statementVariable("options",
-        sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array);
+    text ~= statementVariable(
+        "options",
+        sources.linkerFlags.map!(flag => "--lflag=" ~ flag).array,
+    );
     text ~= "\ndefault " ~ [files.program, files.image].map!ninjaPath.join(" ")
         ~ "\n";
     return text;

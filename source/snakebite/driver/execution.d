@@ -194,9 +194,16 @@ public ExecutionReport executeBackend(
     const running = ExecutionClock.start(backend.compilationStatistics);
     auto start = &backend.startData();
     return runStartData(
-        *start, backend.compilationStatistics, running, stopWatch,
-        testHooks, isSnippet, hostArguments,
-        collectGarbage, endsProcess);
+        *start,
+        backend.compilationStatistics,
+        running,
+        stopWatch,
+        testHooks,
+        isSnippet,
+        hostArguments,
+        collectGarbage,
+        endsProcess,
+    );
 }
 
 // Compiles all of `program` and writes it to `path`; it runs nothing.
@@ -371,7 +378,8 @@ public LoadedProgram loadProgramFile(
 // dependency image that the file names (`--save` writes it, as an executable
 // names its libraries), or on none.
 public LoadedProgram loadProgramFile(Parts)(
-    Parts parts, in size_t size,
+    Parts parts,
+    in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
 ) {
     return loadParts(parts, size, jit, &imageOfFile);
@@ -379,7 +387,8 @@ public LoadedProgram loadProgramFile(Parts)(
 
 
 private LoadedProgram loadParts(Parts, ImageOf)(
-    Parts parts, in size_t size,
+    Parts parts,
+    in size_t size,
     in imported!"snakebite.backends.bytecode.vm".JitSetting jit,
     ImageOf imageOf,
 ) {

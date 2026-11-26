@@ -161,8 +161,11 @@ public Nullable!NinjaRun buildProject(in string directory) {
     const duration = stopWatch.peek;
     if (status != 0)
         return Nullable!NinjaRun();
-    return nullable(NinjaRun(duration, File(files.program, "rb"),
-        files.workingDirectory.readText));
+    return nullable(NinjaRun(
+        duration,
+        File(files.program, "rb"),
+        files.workingDirectory.readText,
+    ));
 }
 
 
