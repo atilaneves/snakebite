@@ -31,7 +31,7 @@ Use ASD-STE100 - Simplified Technical English in all communication.
 
 # Coding Guidelines
 
-See ai/CODING.md.
+Read `ai/CODING.md` before you write or review D code.
 
 ## Git worktrees
 
