@@ -45,6 +45,10 @@ make all the edits first, then build and test one time. Run only the focussed
 tests for the code that changed, while you work and when the change is
 complete: pass the relevant test names to `bin/ut`.
 
+When a change is complete, build all the default targets with plain `ninja`,
+so that each binary compiles. A focussed test run does not show a binary that
+nobody built.
+
 By default, write unit tests, put them in `bin/ut`, and run them in
 parallel. The separate `bin/arena` validates ownership across the shared
 frontend arena. Its scans need stable process state and hold the frontend
