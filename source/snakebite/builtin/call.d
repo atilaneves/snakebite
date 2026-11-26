@@ -81,7 +81,7 @@ version (DigitalMars):
 
 // `name` is a string key, not dmd's `BUILTIN` enum value, so this
 // module and the bytecode VM that calls into it need no DMD frontend
-// import path (CODING.md, "Code organisation"). `null` means that no
+// import path (AGENTS.md, "Code organisation"). `null` means that no
 // wrapper takes this name with exactly these parameter types and this
 // result type: a wrapper writes its result at the size of its own result
 // type, and reads each argument at the size of its own parameter type.
