@@ -9,8 +9,9 @@ Usage: frontend_boundary.py FILE...
        frontend_boundary.py --selftest DIRECTORY
 
 Each FILE must be own code: a file under `source/`, `tests/`, `bench/`,
-`validation/` or `acceptance/` of the project. The frontend package and the
-`dmd.iasm` shim (`source/dmd/`) may import dmd; every other file may not.
+`validation/`, `acceptance/` or `alone/` of the project. The frontend
+package and the `dmd.iasm` shim (`source/dmd/`) may import dmd; every other
+file may not.
 The vendored code in `vendor/` is the one named exception: it is skipped.
 A FILE in no known directory is an error, not a skip: the check cannot say
 anything about a file it does not know, and a build that passes it with
@@ -33,7 +34,7 @@ import re
 import sys
 
 PROJECT = pathlib.Path(__file__).resolve().parent.parent
-OWN = ("source/", "tests/", "bench/", "validation/", "acceptance/")
+OWN = ("source/", "tests/", "bench/", "validation/", "acceptance/", "alone/")
 ALLOWED = ("source/snakebite/frontend/", "source/dmd/")
 # Vendored third-party D code that dub puts on the compile line of each
 # binary. It is not ours to constrain, and it is the only such directory.

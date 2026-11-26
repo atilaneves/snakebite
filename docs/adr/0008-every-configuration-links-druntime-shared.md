@@ -18,8 +18,8 @@ data and TLS ranges to the GC, through its DSO registry, only when
 druntime itself is the shared library.
 
 Every snakebite configuration (`unittest`, `arena-validation`,
-`acceptance-test`, `sb`, `sb-repl`, `bench`) links druntime and phobos
-shared: LDC uses `-link-defaultlib-shared`, dmd uses
+`acceptance-test`, `alone-test`, `sb`, `sb-repl`, `bench`) links druntime and
+phobos shared: LDC uses `-link-defaultlib-shared`, dmd uses
 `-defaultlib=libphobos2.so`. The
 image links against the same shared libraries. The resulting binary
 needs the compiler's shared libraries when it runs.
