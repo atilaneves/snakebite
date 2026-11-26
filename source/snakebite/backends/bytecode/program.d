@@ -115,10 +115,10 @@ public struct Program {
     // Makes a function in the form that the compiler builds and a file holds
     // ready to run on the runner that has `jit` and `jitInstance`: a compile
     // to RAM and a load both end with this, and a save does not call it.
-    // Each word that names a symbol (`snakebite.ffi.names`) gets the address
-    // that `plans` finds for it, and each call to a name is connected to the
-    // definition of the name (`CallSite.connect`). Returns null, or the
-    // reason why the function is not valid.
+    // Each word that refers to a symbol by its name (`snakebite.ffi.names`)
+    // gets the address that `plans` finds for the name, and each call to a
+    // name is connected to the definition of the name (`CallSite.connect`).
+    // Returns null, or the reason why the function is not valid.
     public static string complete(JitInstance)(
         Function* function_, ref CallPlanStore plans, in JitSetting jit,
         JitInstance jitInstance,

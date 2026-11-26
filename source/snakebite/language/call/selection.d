@@ -1282,13 +1282,18 @@ public struct ValueCall {
     }
 
     // Where each argument of a call goes for a callee with `callee` as its
-    // signature, given the shapes of the variadic arguments of the call.
+    // signature, given the shapes of the variadic arguments of the call. A
+    // context goes to a callee that reads one, and only then (`layoutFor`).
     public ArgumentFlow flowTo(
         in Signature callee, in Shape[] surplus, in bool calleeHasContext,
     ) const {
+        const context = hasContext && calleeHasContext;
         return ArgumentFlow(
-            signature.parameters, surplus, callee.parameters,
-            hasContext && calleeHasContext,
+            signature.parameters,
+            surplus,
+            callee.parameters,
+            context,
+            context,
         );
     }
 }

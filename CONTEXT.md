@@ -108,7 +108,9 @@ is the one that it has in dmd. Compare **Root-owned**.
 **Bytecode modules**:
 All the modules of the program that `sb` compiles to bytecode. The other
 modules are native code. A call to a function of a bytecode module is a call
-to bytecode; a call to a function of any other module is a native call.
+to bytecode, and a call to a function of any other module is a native call. A
+compile to RAM decides this. In a compile to a file, the program decides it
+when it is made ready to run (**Defined elsewhere**).
 _Avoid_: project modules
 
 **Static world**:

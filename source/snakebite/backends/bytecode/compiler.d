@@ -9456,7 +9456,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto args = receiverArguments(calleeLayout, hasThis, receiverOffset);
 
         const inlinable = type.parameterList.varargs == VarArg.none
-            ? inlinableBodyOf(callee) : null;
+            ? inlinableBodyOf(callee)
+            : null;
         if (inlinable is null && type.parameterList.varargs == VarArg.none
                 && windowFits(callee, calleeLayout))
             return compileWindowCall(
@@ -9493,6 +9494,49 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             returnShape.returnFacts.size,
         );
         emit(&opCall, destOffset, siteIndex, 0);
+        emitReceiverResult(returnShape, destOffset, receiverOffset);
+    }
+
+    // A call that a compile to a file makes to `callee`, which the compile
+    // does not define: a call to the name of `callee`, laid out from its
+    // declaration alone. When the program is made ready to run, the call is
+    // connected to the definition of the name (`CallSite.connect`), whether
+    // an SBC file or native code has it. Nothing of a definition is read
+    // here, so no body is copied in place of the call.
+    private void compileNamedCall(
+        FuncDeclaration callee,
+        TypeFunction type,
+        Expressions* arguments,
+        in bool hasThis,
+        in size_t receiverOffset,
+        in size_t destOffset,
+    ) {
+        const returnShape = checkedReturnShape(type, arguments, destOffset);
+        const layout = FrameLayout.ofParameters(
+            callee,
+            _bytecode.compiledProgram.signatures,
+        );
+        auto args = receiverArguments(layout, hasThis, receiverOffset);
+        const hasContext = args.length != 0;
+        auto preparation = CallAdapter.Arguments.of(type, arguments);
+        auto parts = compileSignatureArguments(
+            type,
+            preparation,
+            arguments,
+            layout,
+            args,
+            /* mayUseWindow */ true,
+        );
+        auto site = CallSite.named(
+            preparation.plan(_bytecode._world.plans, callee),
+            layout.signature,
+            parts.guest,
+            parts.native,
+            returnShape.returnFacts.size,
+            hasContext,
+        );
+        parts.applyTo(site);
+        emitSiteCall!windowCallHandler(site, destOffset, returnShape);
         emitReceiverResult(returnShape, destOffset, receiverOffset);
     }
 
@@ -10130,13 +10174,27 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             isDelegateCall, /* mayUseWindow */ true);
         site.kind = CallSite.Kind.value;
         site.value.signature = valueCall.signature;
+        emitSiteCall!indirectWindowCallHandler(site, destOffset, returnShape);
+    }
+
+    // Appends `site` and emits its call, whose result of `returnShape` goes
+    // to `destOffset`. `windowHandler` chooses the handler of a site with a
+    // call window.
+    private void emitSiteCall(alias windowHandler)(
+        CallSite site,
+        in size_t destOffset,
+        in CallAdapter returnShape,
+    ) {
         const siteIndex = _code.callSites.length;
         const windowed = site.windowSlot != size_t.max;
         _code.callSites ~= site;
         const place = nativeResultPlace(
-            destOffset, isVoidCallee, returnShape.returnFacts);
-        emit(windowed ? indirectWindowCallHandler(place) : &opCall,
-            place, siteIndex, 0);
+            destOffset,
+            returnShape.isVoid,
+            returnShape.returnFacts,
+        );
+        const handler = windowed ? windowHandler(place) : &opCall;
+        emit(handler, place, siteIndex, 0);
     }
 
     // The arguments and call site of a call whose callee address is read
@@ -10154,7 +10212,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in bool mayUseWindow,
     ) {
         import snakebite.frontend.ast: VarArg;
-        import snakebite.language.layout.frame: shapeOf;
 
         auto preparation = CallAdapter.Arguments.of(functionType, arguments);
         auto parts = compileSignatureArguments(
@@ -10163,7 +10220,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             arguments,
             calleeLayout,
             args,
-            hasContext,
             mayUseWindow,
         );
         auto plans = &_bytecode._world.plans;
@@ -10178,102 +10234,55 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             nativePlan,
             hasContext,
         );
-        // A callee with another signature than the value reads the extra
-        // values of a variadic call by their shapes (`redirectArguments`).
-        // They are the last arguments of the native order.
-        Shape[] surplusShapes;
-        preparation.eachExtra((value) {
-            surplusShapes ~= shapeOf(value.expression.type, value.facts);
-        });
-        site.value.surplus = parts.native[$ - surplusShapes.length .. $];
-        site.value.surplusShapes = surplusShapes;
-        if (!parts.window.isNull)
-            site.useWindow(parts.window.get);
+        parts.applyTo(site);
         return site;
-    }
-
-    // A call that a compile to a file makes to `callee`, which the compile
-    // does not define: a call to the name of `callee`, laid out from its
-    // signature alone. When the program is made ready to run, the call is
-    // connected to the definition of the name (`CallSite.connect`), whether
-    // an SBC file or native code has it. Nothing of a definition is read
-    // here, so no body is copied in place of the call. The callee has the
-    // signature of the call, so the extra values of a variadic call need no
-    // shapes.
-    private void compileNamedCall(
-        FuncDeclaration callee,
-        TypeFunction type,
-        Expressions* arguments,
-        in bool hasThis,
-        in size_t receiverOffset,
-        in size_t destOffset,
-    ) {
-        const returnShape = checkedReturnShape(type, arguments, destOffset);
-        const layout = FrameLayout.ofParameters(
-            callee,
-            _bytecode.compiledProgram.signatures,
-        );
-        auto args = receiverArguments(layout, hasThis, receiverOffset);
-        auto preparation = CallAdapter.Arguments.of(type, arguments);
-        auto parts = compileSignatureArguments(
-            type,
-            preparation,
-            arguments,
-            layout,
-            args,
-            /* hasContext */ args.length != 0,
-            /* mayUseWindow */ true,
-        );
-        auto site = CallSite.named(
-            preparation.plan(_bytecode._world.plans, callee),
-            parts.guest,
-            parts.native,
-            returnShape.returnFacts.size,
-        );
-        if (!parts.window.isNull)
-            site.useWindow(parts.window.get);
-        const siteIndex = _code.callSites.length;
-        _code.callSites ~= site;
-        const place = nativeResultPlace(
-            destOffset,
-            returnShape.isVoid,
-            returnShape.returnFacts,
-        );
-        const handler = parts.window.isNull
-            ? &opCall
-            : windowCallHandler(place);
-        emit(handler, place, siteIndex, 0);
-        emitReceiverResult(returnShape, destOffset, receiverOffset);
     }
 
     // The arguments of a call that is laid out from the signature of its
     // callee alone, because the callee is not known when the call compiles.
-    // `guest` is what a guest callee reads and `native` what a native plan
-    // reads. A call with a `window` has one list for both.
     private struct SignatureArguments {
+        // What a guest callee reads in its frame.
         Arg[] guest;
+        // What a native plan reads. It is the same slice as `guest` but for
+        // a variadic call, which has no window: the frame of a variadic
+        // guest callee takes the `TypeInfo` tuple of a D variadic and a
+        // cursor over the extra values, and a native plan takes the extra
+        // values themselves, which are the last arguments of `native`.
         Arg[] native;
+        // The shapes of the extra values of a variadic call, which a callee
+        // with another signature reads by register (`redirectArguments`).
+        Shape[] surplusShapes;
+        // The call window that holds the context and the arguments, if any.
         Nullable!(CallSite.Window) window;
+
+        // Gives `site`, which has `guest` and `native`, the extra values
+        // and the window.
+        void applyTo(ref CallSite site) {
+            site.value.surplus = native[$ - surplusShapes.length .. $];
+            site.value.surplusShapes = surplusShapes;
+            if (!window.isNull)
+                site.useWindow(window.get);
+        }
     }
 
     // Every callee that a call laid out from `functionType` can reach shares
     // its parameters, so one argument plan covers declared parameters, the
     // `TypeInfo` and cursor of a D variadic, and the extra values of a C
     // variadic. `preparation` is of `functionType` and `arguments`. `args`
-    // is empty or holds the context or receiver (`hasContext`), which goes
-    // to the slot of `calleeLayout.hiddenThis`. `mayUseWindow` puts the
-    // context and arguments in a call window.
+    // is empty or holds the context or receiver, which goes to the slot of
+    // `calleeLayout.hiddenThis`. `mayUseWindow` puts the context and
+    // arguments in a call window.
     private SignatureArguments compileSignatureArguments(
         TypeFunction functionType,
         ref CallAdapter.Arguments preparation,
         Expressions* arguments,
         in FrameLayout calleeLayout,
         Arg[] args,
-        in bool hasContext,
         in bool mayUseWindow,
     ) {
         import core.memory: pageSize;
         import snakebite.frontend.ast: VarArg;
+        import snakebite.language.layout.frame: shapeOf;
 
         // A frame that asks for a page of alignment is called the generic
         // way, as `windowFits` decides for a known callee.
@@ -10285,7 +10294,6 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 preparation,
                 calleeLayout,
                 args,
-                hasContext,
             );
         const numInitial = args.length;
         args ~= compileGuestArguments(preparation, calleeLayout);
@@ -10308,24 +10316,28 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 declared,
                 variadic.values,
             );
+            preparation.eachExtra((value) {
+                result.surplusShapes ~=
+                    shapeOf(value.expression.type, value.facts);
+            });
         }
         return result;
     }
 
     // `compileSignatureArguments` for a call that is not variadic: the
     // context and each argument go straight into their slot of a window laid
-    // out from the signature, as a call to a known callee does.
+    // out from the signature, as a call to a known callee does. `args` is
+    // empty or holds the context.
     private SignatureArguments compileWindowArguments(
         TypeFunction functionType,
         ref CallAdapter.Arguments preparation,
         in FrameLayout calleeLayout,
         Arg[] args,
-        in bool hasContext,
     ) {
         import snakebite.ffi.call: CallAdapter;
 
         const window = windowOf(calleeLayout, CallAdapter.ofType(functionType));
-        if (hasContext) {
+        if (args.length != 0) {
             const offset = calleeLayout.hiddenThis.parameter.offset;
             const slot = inWindow(window, offset);
             emit(&opCopy, slot, args[0].callerOffset, size_t.sizeof);
