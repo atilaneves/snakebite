@@ -6,8 +6,10 @@ module snakebite.ffi.names;
 // another object defines, or that the process holds (the host executable,
 // druntime and the dependency image): the compile needs no address of such
 // a symbol. The address of the symbol is found when a word of the program is
-// made ready to run, by `CallPlanStore.addressOf`, after a compile to RAM and
-// after a load alike.
+// made ready to run, by `CallPlanStore.wordOfName`, after a compile to RAM
+// and after a load alike. A symbol that no object defines is no error then:
+// the word is an address where a use of the symbol fails
+// (`absentAddressOf`).
 //
 // A datum that the program and another object can both define (a static
 // variable of a template instance, the type information that dmd emits in
@@ -67,10 +69,13 @@ public struct Name {
         return _ownDatum;
     }
 
-    // What `CallPlanStore.addressOf` found, or null before the first
-    // question. For a symbol that no object defines it is an address that no
-    // access can use (`snakebite.failure.fault.reserveAbsent`).
+    // What `CallPlanStore.addressIfPresent` found: the address, `absent`, or
+    // null before the first question. A word of a program that refers to a
+    // symbol that no object defines holds an address in the span of the
+    // symbol (`absentAddressOf`), which this does not keep: the spans are of
+    // the process.
     package shared(void*) address;
+    package enum absent = cast(void*) size_t.max;
 }
 
 // The entry that host code calls to reach host code with a receiver
@@ -380,8 +385,9 @@ public struct Names {
     }
 
     // The address that `name` keeps: the one it has, or the one that
-    // `choose` gives from the own copy of `name`, or null. The own copy is
-    // read and the answer kept in one step, under the lock of `defineOwn`.
+    // `choose` gives from the own copy of `name`, which is `Name.absent` for
+    // a symbol that no object defines. The own copy is read and the answer
+    // kept in one step, under the lock of `defineOwn`.
     package void* keep(
         Name* name, scope void* delegate(const(void)* own) choose,
     ) {
@@ -433,12 +439,7 @@ public struct Names {
     }
 
     private Mutex lock() {
-        import core.atomic: atomicLoad, cas, MemoryOrder;
-
-        if (auto made = atomicLoad!(MemoryOrder.acq)(_lock))
-            return cast(Mutex) made;
-        cas(&_lock, cast(shared(Mutex)) null, cast(shared) new Mutex);
-        return cast(Mutex) atomicLoad!(MemoryOrder.acq)(_lock);
+        return madeLock(_lock);
     }
 
     // A new name. Under `_lock`.
@@ -454,4 +455,132 @@ public struct Names {
         }
         return &_chunks[count - 1][_used++];
     }
+}
+
+// `lock`, made at the first call.
+private imported!"core.sync.mutex".Mutex madeLock(
+    ref shared imported!"core.sync.mutex".Mutex lock,
+) {
+    import core.atomic: atomicLoad, cas, MemoryOrder;
+    import core.sync.mutex: Mutex;
+
+    if (auto made = atomicLoad!(MemoryOrder.acq)(lock))
+        return cast(Mutex) made;
+    cas(&lock, cast(shared(Mutex)) null, cast(shared) new Mutex);
+    return cast(Mutex) atomicLoad!(MemoryOrder.acq)(lock);
+}
+
+
+// A symbol that no object defines is an error only when code uses it, not
+// when a program that refers to it is made ready to run. A reference to such
+// a symbol holds an address in the span of the symbol: address space that
+// the process maps with no access. A read, a write or a call through the
+// reference faults there, and the fault line is the failure of the symbol
+// (`absentFailureAt`).
+//
+// The spans are of the process, as the addresses of symbols are: one symbol
+// has one span, whichever program refers to it. A span is 2 GiB, more than
+// the largest variable that dmd accepts (static data is at most `int.max`
+// bytes), so that an access to any part of a variable is in its span.
+// Address space with no access takes no memory.
+private enum absentSpanSize = size_t(1) << 31;
+// 2 TiB of the 128 TiB of address space of a process. The last span is
+// shared by the symbols that come after the others have their spans.
+private enum absentSpanCount = 1024;
+// The failure of a use of an address in the shared span.
+private enum sharedSpanFailure =
+    "a symbol that no object defines was used";
+
+private struct AbsentSymbol {
+    string symbol;
+    string failure;
+}
+
+// A fault handler reads these with no lock: a symbol's entry is written
+// before `_absentCount` makes it visible, and the spans are mapped before
+// `_absentStart` is set. They change under `_absentLock` only.
+private shared(void*) _absentStart;
+// The spans that are mapped: `absentSpanCount`, or one shared span when the
+// process had no address space for more.
+private shared size_t _absentSpans;
+// The symbols with a span of their own: the first spans, in order.
+private shared size_t _absentCount;
+private shared AbsentSymbol[absentSpanCount - 1] _absentSymbols;
+private shared imported!"core.sync.mutex".Mutex _absentLock;
+
+// The start of the span of `symbol`, which no object defines. `failure` gives
+// the failure of a use of the symbol, for a symbol with no span yet.
+public void* absentAddressOf(
+    string symbol, scope string delegate() failure,
+) {
+    import core.atomic: atomicLoad, atomicStore, MemoryOrder;
+
+    auto lock = madeLock(_absentLock);
+    lock.lock;
+    scope(exit) lock.unlock;
+    auto start = cast(void*) atomicLoad!(MemoryOrder.raw)(_absentStart);
+    if (start is null)
+        start = mapAbsentSpans;
+    const count = atomicLoad!(MemoryOrder.raw)(_absentCount);
+    foreach (index, ref absent; _absentSymbols[0 .. count])
+        if (absent.symbol == symbol)
+            return start + index * absentSpanSize;
+    const sharedSpan = atomicLoad!(MemoryOrder.raw)(_absentSpans) - 1;
+    if (count == sharedSpan)
+        return start + sharedSpan * absentSpanSize;
+    _absentSymbols[count] = AbsentSymbol(symbol, failure());
+    atomicStore!(MemoryOrder.rel)(_absentCount, count + 1);
+    return start + count * absentSpanSize;
+}
+
+// Maps the spans, or one shared span when the process has no address space
+// for all of them: a failure to map is no error of the program, which only
+// refers to the symbol. Under `_absentLock`.
+private void* mapAbsentSpans() nothrow @nogc {
+    import core.atomic: atomicStore, MemoryOrder;
+    import core.sys.linux.sys.mman: MAP_NORESERVE;
+    import core.sys.posix.sys.mman:
+        MAP_ANON, MAP_FAILED, MAP_PRIVATE, mmap, PROT_NONE;
+    import snakebite.failure.report: internalFailure;
+    import std.range: only;
+
+    enum flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+    enum noFile = -1;
+    enum offset = 0;
+    enum oneSpan = 1;
+
+    foreach (spans; only(absentSpanCount, oneSpan)) {
+        auto start = mmap(
+            null,
+            spans * absentSpanSize,
+            PROT_NONE,
+            flags,
+            noFile,
+            offset,
+        );
+        if (start is MAP_FAILED)
+            continue;
+        atomicStore!(MemoryOrder.raw)(_absentSpans, spans);
+        atomicStore!(MemoryOrder.rel)(_absentStart, cast(shared(void*)) start);
+        return start;
+    }
+    internalFailure("no address space for a symbol that no object defines");
+}
+
+// The failure of a use of `address`, when it is in the span of a symbol that
+// no object defines, else null. A fault handler calls this: it takes no lock
+// and makes no allocation.
+public string absentFailureAt(in void* address) @trusted nothrow @nogc {
+    import core.atomic: atomicLoad, MemoryOrder;
+
+    const start = cast(const(void)*) atomicLoad!(MemoryOrder.acq)(
+        _absentStart);
+    if (start is null || address < start)
+        return null;
+    const index = cast(size_t) (address - start) / absentSpanSize;
+    if (index >= atomicLoad!(MemoryOrder.raw)(_absentSpans))
+        return null;
+    return index < atomicLoad!(MemoryOrder.acq)(_absentCount)
+        ? cast(string) _absentSymbols[index].failure
+        : sharedSpanFailure;
 }

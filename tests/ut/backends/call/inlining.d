@@ -185,6 +185,51 @@ static foreach (backend; Matrix!(
 }
 
 
+// A variable that no object defines is an error only when code uses it: a
+// program with a function that reads it and is never called runs, also after
+// a save and a load (`LoadedBytecode`).
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the native link fails on an undefined `extern(C)` symbol"),
+)) {
+    @("inlining.callee.neverCalledReaderOfUnresolvedVariableDoesNotFailProgram." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        4.shouldBeStatusOf!(backend, q{
+            extern(C) extern __gshared int snakebite_ut_missing_variable;
+
+            int neverCalled() { return snakebite_ut_missing_variable; }
+
+            int main() { return 4; }
+        });
+    }
+}
+
+
+// A function that is called, with a read of a variable that no object
+// defines on a branch that never runs, runs.
+static foreach (backend; Matrix!(
+    Omit!(Native, Because.inexpressible,
+        "the native link fails on an undefined `extern(C)` symbol"),
+)) {
+    @("inlining.callee.neverRunReadOfUnresolvedVariableDoesNotFailCaller." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        4.shouldBeStatusOf!(backend, q{
+            extern(C) extern __gshared int snakebite_ut_missing_variable;
+
+            int read(bool use) {
+                if (use)
+                    return snakebite_ut_missing_variable;
+                return 4;
+            }
+
+            int main() { return read(false); }
+        });
+    }
+}
+
+
 static foreach (backend; Matrix!()) {
     @("inlining.branch.conditionalExpressionCalleeTakesBothArms." ~ backend.stringof)
     @Tags(backend.stringof)

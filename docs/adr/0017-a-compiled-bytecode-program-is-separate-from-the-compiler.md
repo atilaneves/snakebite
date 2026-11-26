@@ -140,6 +140,20 @@ Decided by the owner on 2026-11-18.
   the perf map reads it. The owner: "Why not save it only if perf map is on
   as well?"
 
+### A symbol with no definition
+
+Decided by the owner (issue #1109).
+
+- A symbol that no object defines is not an error when a program is made
+  ready to execute, after a compile to RAM and after a load alike. It is an
+  error when code that uses it executes: a call, or a read, a write or a
+  jump through the address of the symbol. The failure names the symbol and
+  its declaration. The owner: "We should not fail due to a missing function
+  that isn't even called." And for variables: "there's no difference,
+  they're both symbols. If they're not even used, who cares?"
+- This differs from native code, where the link fails for each undefined
+  symbol, also for one that no code that runs uses.
+
 ## Consequences
 
 - The code that executes does not depend on the compiler. A test or a tool

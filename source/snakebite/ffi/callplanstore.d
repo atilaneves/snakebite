@@ -37,51 +37,45 @@ public struct CallPlanStore {
     public void* addressOf(Name* name) {
         if (auto address = addressIfPresent(name))
             return address;
-        // An adjusted entry is absent when the code it reaches is.
-        const named = name.adjusted ? name.adjusted.code : name;
-        throw missing(named.symbol, named.declaredBy);
+        const symbol = symbolOf(name);
+        throw missing(symbol.symbol, symbol.declaredBy);
     }
 
     // As `addressOf`, but null for a symbol that no object defines. A name
     // with an own copy (`Names.defineOwn`) gives the copy that
     // `chosenCopy` decides.
     public void* addressIfPresent(Name* name) {
-        import snakebite.failure.fault: isAbsent;
-
-        auto found = keptAddressOf(name);
-        return isAbsent(found) ? null : found;
-    }
-
-    // The address that the name `name` keeps: the address of its symbol, or,
-    // for a symbol that no object defines, an address that no access can
-    // use, where a fault names the symbol and its declaration
-    // (`snakebite.failure.fault.reserveAbsent`).
-    private void* keptAddressOf(Name* name) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
-        import snakebite.failure.fault: isAbsent, reserveAbsent;
 
         auto found = cast(void*) atomicLoad!(MemoryOrder.acq)(name.address);
-        if (found !is null)
-            return found;
-        if (auto adjusted = name.adjusted) {
-            found = keptAddressOf(adjusted.code);
-            if (!isAbsent(found))
-                found = cast(void*) callbacks.adjustedEntryOf(
-                    found,
-                    adjusted.signature,
-                    adjusted.adjustment,
-                );
-            atomicStore!(MemoryOrder.rel)(
-                name.address, cast(shared(void*)) found);
-            return found;
+        if (found is null) {
+            if (auto adjusted = name.adjusted) {
+                auto code = addressIfPresent(adjusted.code);
+                found = code is null
+                    ? Name.absent
+                    : cast(void*) callbacks.adjustedEntryOf(
+                        code,
+                        adjusted.signature,
+                        adjusted.adjustment,
+                    );
+                atomicStore!(MemoryOrder.rel)(
+                    name.address, cast(shared(void*)) found);
+            }
+            else {
+                auto processCopy = resolver.resolve(name.symbol);
+                found = names.keep(name, (own) {
+                    auto copy = chosenCopy(processCopy, own);
+                    return copy is null ? Name.absent : copy + name.distance;
+                });
+            }
         }
-        auto processCopy = resolver.resolve(name.symbol);
-        return names.keep(name, (own) {
-            auto copy = chosenCopy(processCopy, own);
-            return copy is null
-                ? reserveAbsent(missingText(name.symbol, name.declaredBy))
-                : copy + name.distance;
-        });
+        return found is Name.absent ? null : found;
+    }
+
+    // The name of the symbol that `name` reaches: an entry that host code
+    // calls with an adjustment reaches its code.
+    private static Name* symbolOf(Name* name) @safe pure nothrow @nogc {
+        return name.adjusted ? name.adjusted.code : name;
     }
 
     // The one decision for a datum that the program and another object can
@@ -121,17 +115,19 @@ public struct CallPlanStore {
 
     // The word that refers to `target`, which is a name (`isNamed`), in a
     // program made ready to run: the address of its symbol, or the table or
-    // the record of an interface of the class information that it names.
-    // A symbol that no object defines is no error here: the word is an
-    // address where a use of it fails (`keptAddressOf`), as a call of the
+    // the record of an interface of the class information that it names. A
+    // symbol that no object defines is no error here: the word is an address
+    // where a use of the symbol fails (`absentReferenceOf`), as a call of the
     // symbol fails only when it runs (`bound`).
     public size_t wordOfName(in Target target) {
-        import snakebite.failure.fault: isAbsent;
         import snakebite.failure.report: SnakebiteException;
         import snakebite.native.address: interfaceWordOf;
 
-        const address = keptAddressOf(cast(Name*) target.address);
-        if (target.kind == Target.Kind.hostSymbol || isAbsent(address))
+        auto name = cast(Name*) target.address;
+        const address = addressIfPresent(name);
+        if (address is null)
+            return cast(size_t) absentReferenceOf(name);
+        if (target.kind == Target.Kind.hostSymbol)
             return cast(size_t) address;
         const info = cast(const(TypeInfo_Class)) address;
         if (target.index >= info.interfaces.length)
@@ -139,6 +135,21 @@ public struct CallPlanStore {
                 "the program file names an interface that a class does not "
                 ~ "have");
         return interfaceWordOf(target.kind, info, target.index);
+    }
+
+    // The word that a reference to the symbol `name`, which no object
+    // defines, holds in a program made ready to run: an address where a use
+    // of the symbol fails with the failure that names the symbol and its
+    // declaration (`snakebite.ffi.names.absentAddressOf`).
+    private void* absentReferenceOf(Name* name) {
+        import snakebite.ffi.names: absentAddressOf;
+
+        auto symbol = symbolOf(name);
+        auto start = absentAddressOf(
+            symbol.symbol,
+            () => missingText(symbol.symbol, symbol.declaredBy),
+        );
+        return start + symbol.distance;
     }
 
     // Whether the word that refers to `target` is found only when the
@@ -167,8 +178,13 @@ public struct CallPlanStore {
         const declaration = declaredBy.length
             ? text(" declared by `", declaredBy, "`")
             : "";
-        return text("ffi cannot resolve the symbol `", symbol, "`",
-            declaration, ": it is not in this process");
+        return text(
+            "ffi cannot resolve the symbol `",
+            symbol,
+            "`",
+            declaration,
+            ": it is not in this process",
+        );
     }
 
     // The registry of the guest function words, and the owner of their

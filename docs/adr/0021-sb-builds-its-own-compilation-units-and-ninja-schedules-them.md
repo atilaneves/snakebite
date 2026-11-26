@@ -118,9 +118,7 @@ that gives `sb` a rule for it, does not follow the model.
     kept one time. Two other definitions of one name are an error that
     names the symbol, and so are two `main` functions, as a native linker
     reports. A name with no definition is an error only when code that uses
-    it runs, not when the program is made ready to run, where a native link
-    fails; the owner: "We should not fail due to a missing function that
-    isn't even called." The order of module constructors and of unit tests
+    it runs (ADR-0017). The order of module constructors and of unit tests
     of modules that do not import each other is not fixed. Native builds give
     different orders for different ways of building, and the D
     specification says "There is no other order imposed on the execution of
