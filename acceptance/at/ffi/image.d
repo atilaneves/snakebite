@@ -27,8 +27,6 @@ import snakebite.project.dependencies: prepareStartupDependencies;
 unittest {
     const sandbox = Sandbox();
     auto image = prepareImage(q{
-        module image;
-
         export extern(C) int answer() {
             int result;
             version (AtImageFlag)
@@ -87,7 +85,6 @@ unittest {
     compiled.status.shouldEqual(0, compiled.output);
 
     auto image = prepareImage(q{
-        module image;
         import image_unused_member;
 
         export extern(C) int answer() { return paintInt(42).get; }
