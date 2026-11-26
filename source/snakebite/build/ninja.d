@@ -89,6 +89,7 @@ private Compile[] compilesOf(
     import std.algorithm.sorting: sort;
     import std.array: array;
     import std.path: absolutePath, dirName;
+    import std.range.primitives: front;
 
     // The compiles of the compilation units: the source files for which
     // `unitPath` gives one path are one unit. The stable sort keeps the order
@@ -97,10 +98,10 @@ private Compile[] compilesOf(
         return sources.files
             .dup
             .sort!((a, b) => unitPath(a) < unitPath(b), SwapStrategy.stable)
-            .chunkBy!unitPath
-            .map!(group => group[1].array)
+            .chunkBy!((a, b) => unitPath(a) == unitPath(b))
+            .map!(unit => unit.array)
             .map!(unit => Compile(
-                programOfSource(files.directory, directory, unit[0]),
+                programOfSource(files.directory, directory, unit.front),
                 unit,
             ))
             .array;
