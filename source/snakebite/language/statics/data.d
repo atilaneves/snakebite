@@ -607,7 +607,8 @@ public struct NativeData {
     // file (`defineSymbol`), so that all the SBC files of the program use one
     // copy, as a native linker keeps one.
     public Name* namedWithOwnCopy(
-        Symbol: const(char)[], Declaration: const(char)[],
+        Symbol: const(char)[],
+        Declaration: const(char)[],
     )(Symbol symbol, Declaration declaredBy, const(void)* start) {
         import std.typecons: Yes;
 

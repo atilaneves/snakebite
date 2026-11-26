@@ -287,9 +287,11 @@ public struct RuntimeTypes {
         // the program and another object can both define it: its name, with
         // the program's own copy.
         const start = cast(const(void)*) own.held;
+        // No declaration states the type information.
+        const declaredBy = string.init;
         return Linked!TypeInfo.named(_data.namedWithOwnCopy(
             type.vtinfo.ident.toString,
-            string.init,
+            declaredBy,
             start,
         ));
     }
@@ -629,11 +631,7 @@ public struct RuntimeTypes {
         if (!isRootOwned(type))
             return;
         const info = cast(const(void)*) get(type).held;
-        _data.defineSymbol(
-            typeInfoSymbol(type.deco.toDString),
-            info,
-            No.weak,
-        );
+        _data.defineSymbol(typeInfoSymbol(type.deco.toDString), info, No.weak);
     }
 
     // What `linkedClassInfo` needs of `declaration`, decided once.
