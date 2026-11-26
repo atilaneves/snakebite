@@ -33,6 +33,7 @@ Use ASD-STE100 - Simplified Technical English in all communication.
 
 ## General
 
+* Existing code that breaks a rule is not a model to copy.
 * All code is a liability and must justify its existence. Code that
   doesn't exist to make a test pass should probably be deleted.
 * One True Brace Style. For functions with many attributes, `{` on its
@@ -80,35 +81,30 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   work, say why in a comment.
 * A parameter list or an argument list that fits on one line stays on one
   line. One that is split over several lines has one parameter or argument
-  per line. Then a later removal or addition changes one line only: "The
-  diff is bigger than it should have been because `"snakebite"` wasn't on
-  its own line." Follow this rule over existing code that breaks it.
+  per line, and the closing parenthesis and the semicolon are on their own
+  line. Then a later removal or addition changes one line only.
 * A ternary expression that fits on one line stays on one line. One that
   does not fit has the condition, the `?` part and the `:` part each on
-  its own line, as the owner says: "formatting, ternaries should *usually*
-  be, if they don't fit in one line,"
+  its own line:
   ```
   cond
       ? valIfTrue
       : valIfFalse
   ```
   Give a ternary expression that is part of another expression, such as a
-  call argument, a name on its own line first: "don't break up ternary
-  expressions like this, it's ugly."
+  call argument, a name on its own line first.
 * Break a line only when the text does not fit. An operator and its right
-  operand stay on the line of the left operand when they fit there: "this
-  formatting is silly, `== VarArg.variadic` and `== Route.native` clearly
-  fit in the lines above them."
+  operand stay on the line of the left operand when they fit there.
 * When a function needs its own mutable copy of a parameter, take the
   parameter by value. A copy in the body that works around the type of the
-  parameter is the fault: "What's with the explicit type declaration on the
-  lhs?"
+  parameter is the fault.
 * Use Phobos before a hand-written equivalent, for example `std.conv.to`
   for an enum from a string.
 * A struct with a flag that says if its other fields mean anything is an
   optional value: use `Nullable` or a pointer, not a flag.
-  A `string` is the exception: "A `string` is already nullable: the empty
-  string." The empty string says "none".
+  A type that is already nullable needs no `Nullable`: an array (so a
+  `string`), a pointer, a function pointer, a delegate, a class and an
+  interface. Its null or empty value says "none".
 * Do not take a value apart to pass its fields to a function that can take
   the value.
 * Do not add a `static assert` that repeats the field names of a struct to
@@ -125,7 +121,7 @@ Use ASD-STE100 - Simplified Technical English in all communication.
 * A comment is a sentence that a reader who has not seen the PR can
   understand. When a change makes part of a comment false, rewrite the
   whole comment.
-* A name says what the thing is: "`file` is not a string, `fileName` is."
+* A name says what the thing is: `fileName`, not `file`, for a string.
   A function that returns the name or path of a file is named for the name
   or path.
 
