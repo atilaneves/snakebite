@@ -3929,6 +3929,48 @@ def test_build_project_compile_error_reports_as_bin_sb(tmp_path: Path) -> None:
     assert_runs_as_bin_sb(built, direct)
 
 
+# `--build=module` compiles each source file alone and runs the files as one
+# program: a unit test of one module calls a function of another and reads
+# its constant, and the module constructor runs. The result is that of native
+# code built the same way. Native code fixes no order of the constructors and
+# unit tests of modules that do not import each other: the lines are a set.
+# An edit of the constant gives the new number.
+def test_build_module_runs_as_native_code_built_by_module(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl",
+          f'name "{dub_name("build-module-runs")}"\ntargetType "library"\n')
+    write(app / "source" / "a.d", """
+        module a;
+        import b;
+        import std.stdio: writeln;
+        unittest {
+            writeln("a test");
+            writeln(twice(21) * factor);
+        }
+        """)
+
+    for factor in (2, 3):
+        write(app / "source" / "b.d", f"""
+            module b;
+            import std.stdio: writeln;
+            enum factor = {factor};
+            int twice(int x) {{ return 2 * x; }}
+            shared static this() {{ writeln("b ctor"); }}
+            unittest {{ writeln("b test"); }}
+            """)
+        native = subprocess.run(
+            ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
+            capture_output=True, check=False, text=True, timeout=300, cwd=app)
+        assert native.returncode == 0, output(native)
+        built = run_sb("--build=module", str(app), cwd=tmp_path)
+        assert built.returncode == 0, output(built)
+        assert sorted(guest_lines(built)) == sorted(native.stdout.splitlines()), \
+            output(built)
+        assert str(42 * factor) in guest_lines(built), output(built)
+
+
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(
