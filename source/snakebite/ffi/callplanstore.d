@@ -73,9 +73,7 @@ public struct CallPlanStore {
                 auto processCopy = resolver.resolve(name.symbol);
                 found = names.keep(name, (own) {
                     auto copy = chosenCopy(processCopy, own);
-                    return copy is null
-                        ? Name.absent
-                        : copy + name.distance;
+                    return copy is null ? Name.absent : copy + name.distance;
                 });
             }
         }

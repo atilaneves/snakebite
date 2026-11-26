@@ -172,7 +172,8 @@ private struct BuildLock {
 // `build.ninja` until it has the program files open, so no other run changes
 // a build file in between. The result is null when ninja fails.
 public imported!"std.typecons".Nullable!NinjaRun buildProject(
-    in string directory, in Build build,
+    in string directory,
+    in Build build,
 ) {
     import snakebite.build.ninja: writeBuildFile;
     import std.datetime.stopwatch: AutoStart, StopWatch;
