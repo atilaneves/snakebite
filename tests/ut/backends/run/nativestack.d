@@ -529,3 +529,202 @@ static foreach (backend; Matrix!(
         }, ["compare"]);
     }
 }
+
+
+// A host `Fiber` runs a guest delegate that captures a local of its caller.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot call native functions such as the constructors of "
+        ~ "`core.thread.Fiber` and `core.thread.Thread`"),
+)) {
+    @("nativeStack.fiberRunsCapturingDelegate." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            void main() {
+                enum stackSize = 64 * 1024;
+                enum guardPageSize = 0;
+                int value;
+                auto fiber = new Fiber({
+                    value = 17;
+                    value += 25;
+                }, stackSize, guardPageSize);
+                fiber.call();
+                assert(value == 42);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // Each `Fiber` keeps its own guest execution state across a yield.
+    @("nativeStack.fibersYieldWithOwnState." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            int fiberStarts;
+
+            int useStack(int value) {
+                int[128] values;
+                values[127] = value;
+                return values[127];
+            }
+
+            void main() {
+                int first, second;
+                auto firstFiber = new Fiber({
+                    int local = 17;
+                    ++fiberStarts;
+                    first = local;
+                    Fiber.yield();
+                    first = local + 25;
+                });
+                auto secondFiber = new Fiber({
+                    int local = 31;
+                    ++fiberStarts;
+                    second = local;
+                    Fiber.yield();
+                    second = local + 26;
+                });
+                firstFiber.call();
+                secondFiber.call();
+                assert(first == 17 && second == 31);
+                assert(fiberStarts == 2);
+                firstFiber.call();
+                assert(first == 42);
+                assert(useStack(73) == 73);
+                secondFiber.call();
+                assert(second == 57);
+                assert(firstFiber.state == Fiber.State.TERM);
+                assert(secondFiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // A `Fiber` yields from the deepest of several guest interface calls.
+    @("nativeStack.fiberYieldsUnderInterfaceRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            interface Walker { void walk(uint depth); }
+
+            class RecursiveWalker: Walker {
+                int count;
+                override void walk(uint depth) {
+                    ++count;
+                    if (depth) {
+                        Walker next = this;
+                        next.walk(depth - 1);
+                    } else {
+                        Fiber.yield();
+                    }
+                }
+            }
+
+            void main() {
+                auto walker = new RecursiveWalker;
+                auto fiber = new Fiber({ walker.walk(6); });
+                fiber.call();
+                assert(walker.count == 7);
+                assert(fiber.state == Fiber.State.HOLD);
+                fiber.call();
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // A `Fiber` yields from the deepest of many guest calls, and the
+    // `scope(exit)` of each call runs only after the resume.
+    @("nativeStack.fiberYieldsUnderDeepRecursion." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            int finished;
+
+            int descend(int depth) {
+                scope(exit) ++finished;
+                if (depth == 0) {
+                    Fiber.yield();
+                    return 3;
+                }
+                return descend(depth - 1) + depth;
+            }
+
+            void main() {
+                int result;
+                auto fiber = new Fiber({ result = descend(64); });
+                fiber.call();
+                assert(finished == 0);
+                assert(fiber.state == Fiber.State.HOLD);
+                fiber.call();
+                assert(result == 2083);
+                assert(finished == 65);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    // As `nativeStack.finiteRecursionHasNoWalkerStackBound`, in a guest
+    // thread.
+    @("nativeStack.deepRecursionInAGuestThread." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Thread;
+
+            int depth(int n) {
+                return n == 0 ? 0 : 1 + depth(n - 1);
+            }
+
+            void main() {
+                int result;
+                auto thread = new Thread({ result = depth(100_000); });
+                thread.start();
+                thread.join();
+                assert(result == 100_000);
+            }
+        });
+    }
+
+    // A thread that `std.concurrency` started receives a message that one
+    // of several handlers takes.
+    @("nativeStack.threadReceivesAMessageWithSeveralHandlers."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.time: seconds;
+            import std.concurrency;
+
+            struct Flush {}
+
+            void writer(Tid parent) {
+                const received = receiveTimeout(2.seconds,
+                    (string message, Tid origin) {
+                        assert(origin == parent);
+                        parent.send(message);
+                    },
+                    (Flush message, Tid origin) { assert(false); },
+                );
+                assert(received);
+            }
+
+            void main() {
+                auto thread = spawn(&writer, thisTid);
+                thread.send("worker output", thisTid);
+                string echoed;
+                assert(receiveTimeout(3.seconds,
+                    (string message) { echoed = message; },
+                ));
+                assert(echoed == "worker output");
+            }
+        });
+    }
+}

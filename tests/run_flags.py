@@ -691,6 +691,55 @@ extern(C) int main() {{
     assert_passes_after_start(backend, outcome_of(result))
 
 
+# A `--version` of the command line reaches the modules of a dub dependency.
+# The test program that dub builds from the project with
+# `--d-version=AutomemAsan` gives status 0. On CTFE the function of the
+# dependency is analysed without the version, and returns 17.
+@pytest.mark.parametrize("backend", ["native", "bytecode", "interpreter"])
+def test_command_line_version_reaches_a_dub_dependency(
+    tmp_path: Path, backend: str,
+) -> None:
+    dependency = tmp_path / "dependency"
+    (dependency / "source").mkdir(parents=True)
+    (dependency / "dub.sdl").write_text(
+        f'name "{dub_name("version-dependency")}"\n'
+        'targetType "staticLibrary"\n',
+        encoding="utf-8",
+    )
+    (dependency / "source" / "dependency.d").write_text("""\
+module dependency;
+int answer() {
+    version (AutomemAsan) return 42;
+    else return 17;
+}
+""", encoding="utf-8")
+    app = tmp_path / "app"
+    (app / "source").mkdir(parents=True)
+    (app / "dub.sdl").write_text(
+        f'name "{dub_name("version-app")}"\ntargetType "library"\n'
+        f'dependency "{dub_name("version-dependency")}" path="../dependency"\n',
+        encoding="utf-8",
+    )
+    (app / "source" / "app.d").write_text("""\
+module app;
+import dependency;
+version (AutomemAsan) {} else static assert(false);
+unittest { assert(answer() == 42); }
+""", encoding="utf-8")
+
+    command = (
+        ["dub", "test", "--compiler=dmd", "--d-version=AutomemAsan"]
+        if backend == "native" else
+        [sb_path(), f"--backend={backend}", "--version=AutomemAsan", str(app)]
+    )
+    result = subprocess.run(
+        command, cwd=app if backend == "native" else tmp_path,
+        capture_output=True, check=False, text=True, timeout=TIMEOUT,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("backend", ["native", *BACKENDS, "native-ldc"])
 @pytest.mark.parametrize("entry", ["c", "d", "betterc", "explicit"])
 def test_dependency_entry_startup(

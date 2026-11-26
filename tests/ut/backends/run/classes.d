@@ -3941,3 +3941,158 @@ static foreach (backend; Matrix!()) {
         });
     }
 }
+
+
+// A class invariant of a base class runs when `destroy` calls the
+// destructor of a derived class that holds a delegate.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a class reference to void** in `destroy`"),
+)) {
+    @("invariantOfBaseAtDestroy." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            class Base {
+                invariant { assert(true); }
+            }
+
+            class Resource: Base {
+                bool delegate(out int) fetch;
+                this(bool delegate(out int) fetch) {
+                    this.fetch = fetch;
+                }
+                ~this() {}
+                int read() {
+                    int result;
+                    fetch(result);
+                    return result;
+                }
+            }
+
+            void main() {
+                auto resource = new Resource((out int value) {
+                    value = 42;
+                    return true;
+                });
+                assert(resource.read() == 42);
+                destroy(resource);
+            }
+        });
+    }
+}
+
+
+// A guest class derived from a host class has the layout of compiled D:
+// its fields start after the fields of the host base object.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot read the static data of `Fiber` and `Thread`, such as "
+        ~ "the page size and the `TypeInfo`"),
+)) {
+    @("fiberSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber;
+
+            class Tagged : Fiber {
+                int tag = 42;
+                bool seen;
+                this() { super(&run); }
+                void run() {
+                    auto current = cast(Tagged) Fiber.getThis();
+                    assert(current is this);
+                    assert(current.tag == 42);
+                    seen = true;
+                }
+            }
+
+            void main() {
+                auto fiber = new Tagged;
+                fiber.call();
+                assert(fiber.seen);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    @("threadSubclassKeepsNativeLayout." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Thread;
+
+            class Tagged : Thread {
+                int tag = 42;
+                int seen;
+                this() { super(&run); }
+                void run() { seen = tag; }
+            }
+
+            void main() {
+                auto thread = new Tagged;
+                thread.start();
+                thread.join();
+                assert(thread.seen == 42);
+                assert(thread.tag == 42);
+            }
+        });
+    }
+
+    @("hostClassSizeIsNativeSize." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.thread: Fiber, Thread;
+
+            void main() {
+                assert(__traits(classInstanceSize, Fiber)
+                    == typeid(Fiber).initializer.length);
+                assert(__traits(classInstanceSize, Thread)
+                    == typeid(Thread).initializer.length);
+            }
+        });
+    }
+
+    // An import inside a function brings the host class into the guest the
+    // same way as a module-scope import.
+    @("functionLocalFiberImport." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                import core.thread: Fiber;
+
+                bool ran;
+                auto fiber = new Fiber({ ran = true; });
+                fiber.call();
+                assert(ran);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+
+    @("functionLocalFiberSubclass." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                import core.thread: Fiber;
+
+                class Tagged : Fiber {
+                    int tag = 42;
+                    bool seen;
+                    this() { super(&run); }
+                    void run() { seen = tag == 42; }
+                }
+
+                auto fiber = new Tagged;
+                fiber.call();
+                assert(fiber.seen);
+                assert(fiber.tag == 42);
+                assert(fiber.state == Fiber.State.TERM);
+            }
+        });
+    }
+}
