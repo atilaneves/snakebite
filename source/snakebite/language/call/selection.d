@@ -18,6 +18,7 @@ public struct CallSelection {
     @disable this(this);
 
     import snakebite.frontend.ast: FuncDeclaration;
+    import snakebite.frontend.dmd.functions: Defined;
 
     import snakebite.builtin.call:
         BuiltinCall, ParameterType, startVariadicEntry;
@@ -217,13 +218,13 @@ public struct CallSelection {
     // pass can change a shared package parent after this callee is complete.
     public Decision decisionOf(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
+        scope Defined delegate(FuncDeclaration) whereDefined,
     ) {
         if (auto cached = function_ in _decisions)
             return *cached;
 
         return *_decisions.insert(
-            function_, buildDecision(function_, isDefinedElsewhere),
+            function_, buildDecision(function_, whereDefined),
         );
     }
 
@@ -235,9 +236,9 @@ public struct CallSelection {
     // and `decisionOf` both, which would pay the cache lookup twice.
     public bool usesGuestBody(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
+        scope Defined delegate(FuncDeclaration) whereDefined,
     ) {
-        return decisionOf(function_, isDefinedElsewhere).route == Route.guest;
+        return decisionOf(function_, whereDefined).route == Route.guest;
     }
 
     // A variadic function whose route is native must keep its host
@@ -245,14 +246,14 @@ public struct CallSelection {
     // call site. The route is the one that a direct call takes.
     public bool usesNativeVariadicAddress(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
+        scope Defined delegate(FuncDeclaration) whereDefined,
     ) {
         import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         return typeFunctionOf(function_).parameterList.varargs
                 == VarArg.variadic
-            && decisionOf(function_, isDefinedElsewhere).route
+            && decisionOf(function_, whereDefined).route
                 == Route.native;
     }
 
@@ -262,23 +263,23 @@ public struct CallSelection {
     // adjustment the vtable slot still needs an entry to carry the offset.
     public bool storesGuestWord(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
+        scope Defined delegate(FuncDeclaration) whereDefined,
         in ptrdiff_t adjustment,
     ) {
         return adjustment == 0
-            && isVariadicGuest(function_, isDefinedElsewhere);
+            && isVariadicGuest(function_, whereDefined);
     }
 
     public bool isVariadicGuest(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
+        scope Defined delegate(FuncDeclaration) whereDefined,
     ) {
         import snakebite.frontend.ast: VarArg;
         import snakebite.frontend.dmd.functions: typeFunctionOf;
 
         return typeFunctionOf(function_).parameterList.varargs
                 == VarArg.variadic
-            && usesGuestBody(function_, isDefinedElsewhere);
+            && usesGuestBody(function_, whereDefined);
     }
 
     // Whether another object defines the function decides between native
@@ -286,7 +287,7 @@ public struct CallSelection {
     // the error of the native call, as at the link of a native build.
     private Decision buildDecision(
         FuncDeclaration function_,
-        scope bool delegate(FuncDeclaration) isDefinedElsewhere,
+        scope Defined delegate(FuncDeclaration) whereDefined,
     ) {
         import snakebite.frontend.dmd.functions: contextOf;
 
@@ -311,7 +312,7 @@ public struct CallSelection {
         if (isVaCopy(function_, context))
             return Decision(Route.guest);
 
-        return Decision(isDefinedElsewhere(function_)
+        return Decision(whereDefined(function_) == Defined.notHere
             ? Route.native : Route.guest);
     }
 

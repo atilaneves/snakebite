@@ -18,6 +18,7 @@ public struct StaticWorld {
     import snakebite.ffi: PlanCache;
     import snakebite.ffi.callplanstore: CallPlanStore;
     import snakebite.ffi.names: Linked;
+    import snakebite.frontend.dmd.functions: Defined;
     import snakebite.language.call.selection: CallSelection;
     import snakebite.language.statics.classinfo: ClassRuntimeCache;
     import snakebite.language.statics.data: NativeData;
@@ -71,14 +72,12 @@ public struct StaticWorld {
         _backend = backend;
         plans = PlanCache(planStore);
         callSelection.linksFunctions = program.definesLinkableFunctions;
-        data = NativeData(store, &plans, &_program.isRootOwned,
-            &_program.isDefinedElsewhere,
+        data = NativeData(store, &plans, &_program.whereDefined,
             (variable) => _program.linkedVariableOf(variable),
             &constantSymbolAddress,
             &writeClassImage, (type) => types.get(type),
             backend.blocksOf, &callableKind);
-        types = RuntimeTypes(&_program.isRootOwned,
-            &_program.isDefinedElsewhere,
+        types = RuntimeTypes(&_program.whereDefined,
             &callableAddress,
             &classRuntimeInfo, &data);
     }
@@ -172,12 +171,12 @@ public struct StaticWorld {
 
         const(void)* word;
         if (callSelection.usesNativeVariadicAddress(
-                method, &isDefinedElsewhere))
+                method, &whereDefined))
             return Linked!(void*).named(plans.nameOf(method));
-        if (callSelection.usesGuestBody(method, &isDefinedElsewhere)) {
+        if (callSelection.usesGuestBody(method, &whereDefined)) {
             word = _backend.guestWord(method);
             if (callSelection.storesGuestWord(
-                    method, &isDefinedElsewhere, adjustment))
+                    method, &whereDefined, adjustment))
                 return Linked!(void*).held(cast(void*) word);
         }
         auto address = plans.callableAddress(word, method, adjustment);
@@ -188,8 +187,8 @@ public struct StaticWorld {
         return address;
     }
 
-    private bool isDefinedElsewhere(FuncDeclaration function_) const {
-        return _program.isDefinedElsewhere(function_);
+    private Defined whereDefined(FuncDeclaration function_) const {
+        return _program.whereDefined(function_);
     }
 
     // `linked` as a backend that reads it as it runs, and does not save,

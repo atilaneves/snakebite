@@ -22,8 +22,8 @@ public struct Program {
     }
 
     Module[] rootModules;
-    // Built once from `rootModules`, for `isRootOwned`'s `O(1)` lookup; see
-    // `snakebite.frontend.dmd.functions.isRootOwned`.
+    // Built once from `rootModules`, for the `O(1)` lookup of `isRootOwned`
+    // and `whereDefined`; see `snakebite.frontend.dmd.functions.isRootOwned`.
     private bool[Module] _rootModuleSet;
     // Built once from `rootModules`; see `linkedFunctionOf`.
     private LinkMap _links;
@@ -117,20 +117,10 @@ public struct Program {
         return main.func !is null && hasCLinkage(cast() main.func);
     }
 
-    public bool isInterpreted(
-        FuncDeclaration function_,
-    ) const {
-        return function_ !is null && isRootOwned(function_);
-    }
-
     // Whether `declaration` belongs to one of this program's own root
-    // modules, rather than one dmd only reached through an `import` - both
-    // a callee (`isInterpreted`) and a type's own runtime metadata
-    // (`RuntimeTypes`) need this same answer for the same reason: guest
-    // source gets no linked machine code or linked `TypeInfo` of its own.
-    // The frontend's own load-time walks (e.g. the inline-asm check) ask
-    // the identical question, so the predicate itself lives once in
-    // `snakebite.frontend.dmd.functions` and this forwards to it.
+    // modules, rather than one dmd only reached through an `import`. The
+    // source of the dependency image asks it: that source cannot name what a
+    // root module declares.
     public bool isRootOwned(
         Dsymbol declaration,
     ) const {
@@ -140,15 +130,15 @@ public struct Program {
         return frontendIsRootOwned(declaration, _rootModuleSet);
     }
 
-    // Whether another object defines `declaration`: the one decision that
-    // the call selection and the static data, TypeInfo and class information
-    // take for a declaration (`snakebite.frontend.dmd.functions`).
-    public bool isDefinedElsewhere(
+    // Where `declaration` is defined: the one decision that the call
+    // selection and the static data, TypeInfo and class information take
+    // for a declaration (`snakebite.frontend.dmd.functions`).
+    public imported!"snakebite.frontend.dmd.functions".Defined whereDefined(
         Dsymbol declaration,
     ) const {
         import snakebite.frontend.dmd.functions:
-            frontendIsDefinedElsewhere = isDefinedElsewhere;
+            frontendWhereDefined = whereDefined;
 
-        return frontendIsDefinedElsewhere(declaration, _rootModuleSet);
+        return frontendWhereDefined(declaration, _rootModuleSet);
     }
 }

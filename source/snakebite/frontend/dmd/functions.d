@@ -66,21 +66,31 @@ public bool isRootOwned(
     return (moduleOf(declaration) in rootModules) !is null;
 }
 
-// Whether another object defines `declaration`, as the linker of a native
-// build sees it: a declaration with no body or an `extern` one, and each
-// declaration of a dependency module that its archive defines (ADR-0009).
-// Such a declaration is native code or native data, and a missing symbol for
-// it is a link error, never a reason to use the body. The program defines
-// the rest: what a root module declares, a function literal, and what a
-// template instance holds, because a native build emits an instance into the
-// object that uses it. The exception is an instance whose body no backend
-// executes: the dependency image holds it (ADR-0009, decision 1). What is
-// nested in a function (its static locals and nested functions) is defined
-// where that function is: in the archive for a function of a dependency that
-// is not in a template instance. The answer comes from the declaration
-// alone, never from a loaded image, so a compile with no image gives the same
-// answer.
-public bool isDefinedElsewhere(
+// Where a declaration is defined, as the linker of a native build sees it
+// (ADR-0009). "Here" is the compile of the root modules.
+public enum Defined {
+    // Only this compile defines it: what a root module declares.
+    onlyHere,
+    // This compile defines it, and another object can define it too: what a
+    // template instance holds, because a native build emits an instance into
+    // each object that uses it. One copy is kept.
+    hereAndPossiblyElsewhere,
+    // Another object defines it: a declaration with no body or an `extern`
+    // one, and each declaration of a dependency module that its archive
+    // defines. A missing symbol for it is a link error, never a reason to use
+    // the body.
+    notHere,
+}
+
+// The one decision of where `declaration` is defined. A function literal and
+// what a template instance holds are defined here. The exception is an
+// instance whose body no backend executes: the dependency image holds it
+// (ADR-0009, decision 1). What is nested in a function (its static locals and
+// nested functions) is defined where that function is: in the archive for a
+// function of a dependency that is not in a template instance. The answer
+// comes from the declaration alone, never from a loaded image, so a compile
+// with no image gives the same answer.
+public Defined whereDefined(
     imported!"dmd.dsymbol".Dsymbol declaration,
     in bool[imported!"dmd.dmodule".Module] rootModules,
 ) {
@@ -88,24 +98,24 @@ public bool isDefinedElsewhere(
 
     auto function_ = declaration.isFuncDeclaration;
     if (function_ !is null && function_.fbody is null)
-        return true;
+        return Defined.notHere;
     if (auto named = declaration.isDeclaration)
         if (named.storage_class & STC.extern_)
-            return true;
+            return Defined.notHere;
     if (isRootOwned(declaration, rootModules))
-        return false;
+        return Defined.onlyHere;
 
     auto owner = function_ is null ? ownerOf(declaration)
         : Owner(contextOf(function_).outerFunction,
             contextOf(function_).instantiated);
-    // What is nested in a function is defined where that function is.
     if (owner.outer !is null)
-        return isDefinedElsewhere(owner.outer, rootModules);
-    if (function_ is null)
-        return !owner.instantiated;
-    if (function_.isFuncLiteralDeclaration !is null)
-        return false;
-    return !owner.instantiated || !backendExecutes(function_);
+        return whereDefined(owner.outer, rootModules);
+    if (function_ !is null && function_.isFuncLiteralDeclaration !is null)
+        return Defined.hereAndPossiblyElsewhere;
+    if (!owner.instantiated)
+        return Defined.notHere;
+    return function_ is null || backendExecutes(function_)
+        ? Defined.hereAndPossiblyElsewhere : Defined.notHere;
 }
 
 private struct Owner {

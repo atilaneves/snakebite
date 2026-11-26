@@ -9,6 +9,7 @@ import snakebite.backends.ctfe: Ctfe;
 import snakebite.failure.report: SnakebiteException;
 import snakebite.frontend.compiler: parseSnippets;
 import snakebite.frontend.dmd.functions:
+    Defined,
     findFunction,
     findModuleConstructors;
 import std.algorithm: map;
@@ -29,7 +30,8 @@ unittest {
     ]);
     auto program = Program([modules[0]]);
 
-    assert(program.isInterpreted(findFunction(modules[0], "rootFunction")));
+    program.whereDefined(findFunction(modules[0], "rootFunction"))
+        .should == Defined.onlyHere;
 }
 
 
@@ -214,9 +216,8 @@ unittest {
     ]);
     auto program = Program([modules[0]]);
 
-    assert(!program.isInterpreted(
-        findFunction(modules[1], "importedFunction"),
-    ));
+    program.whereDefined(findFunction(modules[1], "importedFunction"))
+        .should.not == Defined.onlyHere;
 }
 
 
@@ -230,7 +231,6 @@ unittest {
     ])[0];
     auto program = Program([module_]);
 
-    assert(program.isInterpreted(
-        findFunction(module_, "_d_runtimeGenerated"),
-    ));
+    program.whereDefined(findFunction(module_, "_d_runtimeGenerated"))
+        .should == Defined.onlyHere;
 }

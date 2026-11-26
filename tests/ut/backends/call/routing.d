@@ -9,7 +9,7 @@ module ut.backends.call.routing;
 import ut.backends;
 import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet, parseSnippets;
-import snakebite.frontend.dmd.functions: findFunction;
+import snakebite.frontend.dmd.functions: Defined, findFunction;
 import std.algorithm.searching: canFind;
 
 
@@ -189,7 +189,7 @@ static foreach (backend; Matrix!(
 // What is nested in a function is defined where that function is: another
 // object defines the static locals of a dependency function that is not in a
 // template instance. The program defines those of a function of its own.
-@("isDefinedElsewhere.nestedInAFunction")
+@("whereDefined.nestedInAFunction")
 unittest {
     import snakebite.frontend.ast: Identifier;
 
@@ -210,9 +210,9 @@ unittest {
     }
     auto plain = findFunction(modules[1], "plain");
 
-    program.isDefinedElsewhere(local(findFunction(modules[0], "own")))
-        .should == false;
-    program.isDefinedElsewhere(local(plain)).should == true;
+    program.whereDefined(local(findFunction(modules[0], "own")))
+        .should.not == Defined.notHere;
+    program.whereDefined(local(plain)).should == Defined.notHere;
 }
 
 

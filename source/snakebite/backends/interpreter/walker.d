@@ -288,7 +288,7 @@ private struct Shared {
     import snakebite.native.value: BitfieldAccess;
     import snakebite.host.sharedtable: SharedTable;
 
-    // The program being run: its `isDefinedElsewhere` is the one decision
+    // The program being run: its `whereDefined` is the one decision
     // for whether a callee is walked or called natively.
     const Program program;
     // Declared before what points into it, so that it is destroyed after.
@@ -581,7 +581,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private CStack!ActiveExceptionScope _activeExceptionScopes;
     private CStack!ExceptionCandidate _candidateScratch;
     package RuntimeTypes* _runtimeTypes;
-    // The program being run: its `isDefinedElsewhere` is the one decision
+    // The program being run: its `whereDefined` is the one decision
     // for whether a callee is walked here or called natively, made on every
     // call this evaluator makes.
     package const Program _program;
@@ -1001,7 +1001,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private const(FrameLayout)* callLayoutOf(FuncDeclaration function_) {
         const decision = _callSelection.decisionOf(
             function_,
-            (callee) => _program.isDefinedElsewhere(callee),
+            (callee) => _program.whereDefined(callee),
         );
         return layoutOf(function_, decision.route == CallSelection.Route.guest
             ? LayoutKind.body : LayoutKind.parameters);
@@ -1252,7 +1252,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         auto body_ = function_.fbody;
         const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             function_,
-            (callee) => _program.isDefinedElsewhere(callee),
+            (callee) => _program.whereDefined(callee),
         ), callSite);
         if (!callbackEntry) final switch (decision.route)
             with (CallSelection.Route) {
@@ -1551,7 +1551,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     private CallSelection.Decision decisionFor(FuncDeclaration function_) {
         return _callSelection.decisionOf(
             function_,
-            (callee) => _program.isDefinedElsewhere(callee),
+            (callee) => _program.whereDefined(callee),
         );
     }
 
@@ -2213,7 +2213,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
     ) {
         const decision = _callSelection.decisionOf(
             function_,
-            (callee) => _program.isDefinedElsewhere(callee),
+            (callee) => _program.whereDefined(callee),
         );
         if (decision.route != CallSelection.Route.guest)
             return;
@@ -2252,7 +2252,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
             calleeContextPlanOf(site.isCallExp, callee);
         const decision = CallSelection.atCallSite(_callSelection.decisionOf(
             callee,
-            (callee) => _program.isDefinedElsewhere(callee),
+            (callee) => _program.whereDefined(callee),
         ), site);
 
         if (decision.route == CallSelection.Route.guest
@@ -6786,7 +6786,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         const destination = function_.fbody is null
             ? _callSelection.decisionOf(
                 function_,
-                (callee) => _program.isDefinedElsewhere(callee),
+                (callee) => _program.whereDefined(callee),
             ).destinationParameter
             : size_t.max;
         _bindArguments(typeFunctionOf(function_), arguments, loc,
@@ -7358,7 +7358,7 @@ extern(C++) private final class Evaluator(bool nullChecks): LoweringVisitor {
         return typeFunctionOf(function_).parameterList.varargs
                 == VarArg.variadic
             && !_callSelection.isVariadicGuest(
-                function_, (callee) => _program.isDefinedElsewhere(callee));
+                function_, (callee) => _program.whereDefined(callee));
     }
 
     // The call plan depends on the types of the extra arguments at this

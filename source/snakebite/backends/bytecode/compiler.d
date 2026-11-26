@@ -59,6 +59,7 @@ private imported!"snakebite.native.value".TypeFacts pointerFactsOf() {
 private extern(C++) final class EagerCompileCollector
         : imported!"snakebite.frontend.declarationcollector".DeclarationCollector {
     import snakebite.frontend.ast: FuncDeclaration;
+    import snakebite.frontend.dmd.functions: Defined;
     import snakebite.frontend.declarationcollector: DeclarationCollector;
     alias visit = DeclarationCollector.visit;
 
@@ -75,7 +76,7 @@ private extern(C++) final class EagerCompileCollector
         if (function_ in _visited)
             return;
         _visited[function_] = true;
-        if (function_.fbody is null || !_bytecode.isGuestFunction(function_))
+        if (_bytecode.whereDefined(function_) != Defined.onlyHere)
             return;
         _found ~= function_;
     }
@@ -96,6 +97,7 @@ private extern(C++) final class EagerCompileCollector
 public final class Bytecode: imported!"snakebite.backends.api".Backend {
     import snakebite.frontend.ast: ClassDeclaration, Declaration,
         FuncDeclaration, SourceModule = Module;
+    import snakebite.frontend.dmd.functions: Defined;
     import snakebite.program: SourceProgram = Program;
     import snakebite.backends.bytecode.vm:
         Function, JitSetting, prepareForExecution;
@@ -349,12 +351,8 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         return result;
     }
 
-    package bool isDefinedElsewhere(FuncDeclaration function_) const {
-        return _program.isDefinedElsewhere(function_);
-    }
-
-    package bool isGuestFunction(FuncDeclaration function_) const {
-        return _program.isInterpreted(function_);
+    package Defined whereDefined(FuncDeclaration function_) const {
+        return _program.whereDefined(function_);
     }
 
     package FuncDeclaration definitionOf(FuncDeclaration function_) {
@@ -9394,7 +9392,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
-            callee, &_bytecode.isDefinedElsewhere,
+            callee, &_bytecode.whereDefined,
         ), site);
         final switch (decision.route) with (CallSelection.Route) {
         case native:
@@ -9604,7 +9602,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
         const decision = CallSelection.atCallSite(_bytecode._world.callSelection.decisionOf(
-            callee, &_bytecode.isDefinedElsewhere,
+            callee, &_bytecode.whereDefined,
         ), site);
         if (decision.route != CallSelection.Route.guest)
             return size_t.max;
