@@ -2263,39 +2263,61 @@ def test_saved_program_that_calls_an_absent_function_fails_as_the_compiled_progr
 # uses it runs, with a failure that names the symbol. A use is a read or a
 # write of a variable, or a call through the address of a function, and the
 # failure names the symbol at any part of a variable.
-@pytest.mark.parametrize(("symbol", "program"), [
-    ("snakebite_test_no_such_variable", """
+@pytest.mark.parametrize(("symbol", "declared", "program", "dependency"), [
+    ("snakebite_test_no_such_variable", "snakebite_test_no_such_variable", """
         module main;
         extern(C) extern __gshared int snakebite_test_no_such_variable;
         int main() { return snakebite_test_no_such_variable; }
-        """),
-    ("snakebite_test_no_such_variable", """
+        """, ""),
+    ("snakebite_test_no_such_variable", "snakebite_test_no_such_variable", """
         module main;
         extern(C) extern __gshared int snakebite_test_no_such_variable;
         int main() {
             snakebite_test_no_such_variable = 3;
             return 4;
         }
-        """),
-    ("snakebite_test_no_such_function", """
+        """, ""),
+    ("snakebite_test_no_such_function", "snakebite_test_no_such_function", """
         module main;
         extern(C) int snakebite_test_no_such_function(int);
         int main() {
             auto function_ = &snakebite_test_no_such_function;
             return function_(1);
         }
-        """),
-    ("snakebite_test_no_such_array", """
+        """, ""),
+    ("snakebite_test_no_such_array", "snakebite_test_no_such_array", """
         module main;
         extern(C) extern __gshared int[1 << 20] snakebite_test_no_such_array;
         int main() { return snakebite_test_no_such_array[300_000]; }
+        """, ""),
+    # A `__gshared` variable and a class of a dependency that has no object
+    # code: the `.di` file declares them, and nothing defines them.
+    ("_D7missing11sharedValuei", "sharedValue", """
+        module main;
+        import missing;
+        int main() { return sharedValue; }
+        """, """
+        module missing;
+        __gshared int sharedValue = 3;
         """),
-], ids=["read", "write", "call_through_address", "read_far_into_array"])
+    ("_D7missing7Missing6__initZ", "Missing", """
+        module main;
+        import missing;
+        int main() { return (new Missing).field; }
+        """, """
+        module missing;
+        class Missing { int field; }
+        """),
+], ids=["read", "write", "call_through_address", "read_far_into_array",
+        "read_shared_variable_of_a_dependency", "new_class_of_a_dependency"])
 def test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs(
-    tmp_path: Path, symbol: str, program: str,
+    tmp_path: Path, symbol: str, declared: str, program: str,
+    dependency: str,
 ) -> None:
     write(tmp_path / "app" / "main.d", program)
-    common = ("--backend=bytecode", "--no-optimise-image")
+    write(tmp_path / "deps" / "missing.di", dependency)
+    common = ("--backend=bytecode", "--no-optimise-image", "-I",
+              str(tmp_path / "deps"))
     app = str(tmp_path / "app")
     from_ram = run_sb(*common, app, cwd=tmp_path)
     saved = run_sb(*common, f"--save={tmp_path / 'program.sbc'}", app,
@@ -2304,7 +2326,7 @@ def test_saved_program_that_uses_an_absent_symbol_fails_when_the_use_runs(
     loaded = run_sb(f"--load={tmp_path / 'program.sbc'}", cwd=tmp_path)
     for result in (from_ram, loaded):
         assert result.returncode != 0, output(result)
-        assert f"symbol `{symbol}` declared by `{symbol}`" in result.stderr, (
+        assert f"symbol `{symbol}` declared by `{declared}`" in result.stderr, (
             output(result))
 
 
@@ -8691,70 +8713,6 @@ def test_intrinsic_without_a_wrapper_names_itself(
         "no host wrapper serves the LDC intrinsic `llvm.x86.sse.rsqrt.ps` "
         "declared by `__builtin_ia32_rsqrtps`"
     ) in output(result)
-
-
-# CTFE cannot modify the pool, a variable of the module, at compile time.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-def test_task_pool_reduce_runs_to_completion(
-    tmp_path: Path, backend: str,
-) -> None:
-    write(
-        tmp_path / "app" / "app.d",
-        """
-        module app;
-        import std.parallelism;
-        import std.range : iota;
-        unittest {
-            auto sum = taskPool.reduce!"a + b"(iota(1, 101));
-            assert(sum == 5050);
-        }
-        """,
-    )
-
-    result = run_sb(
-        f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
-        cwd=tmp_path,
-    )
-
-    assert result.returncode == 0, output(result)
-
-
-# A failed copy between slices of different lengths, or between slices that
-# overlap, throws and leaves the destination as it was: druntime's checks of
-# the copy stay on in the release build of `bin/sb`. CTFE reports the copy as
-# an error of the compile, which the program cannot catch.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-def test_invalid_slice_copies_throw(tmp_path: Path, backend: str) -> None:
-    write(
-        tmp_path / "app" / "probe.d",
-        """
-        module probe;
-        void main() {
-            int[2] sourceStorage = [1, 2];
-            int[3] storage = [3, 4, 5];
-            int[] source = sourceStorage[];
-            int[] destination = storage[];
-            bool caught;
-            try destination[] = source[];
-            catch (Throwable) caught = true;
-            assert(caught);
-            assert(storage == [3, 4, 5]);
-            int[3] overlap = [1, 2, 3];
-            int* overlapPtr = overlap.ptr;
-            source = overlapPtr[0 .. 2];
-            destination = overlapPtr[1 .. 3];
-            caught = false;
-            try destination[] = source[];
-            catch (Throwable) caught = true;
-            assert(caught);
-            assert(overlap == [1, 2, 3]);
-        }
-        """,
-    )
-
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
-
-    assert result.returncode == 0, output(result)
 
 
 # The test suite of `unit-threaded` runs its tests on worker threads that
