@@ -695,7 +695,7 @@ extern(C) int main() {{
 # The test program that dub builds from the project with
 # `--d-version=AutomemAsan` gives status 0. On CTFE the function of the
 # dependency is analysed without the version, and returns 17.
-@pytest.mark.parametrize("backend", ["bytecode", "interpreter"])
+@pytest.mark.parametrize("backend", ["native", "bytecode", "interpreter"])
 def test_command_line_version_reaches_a_dub_dependency(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -727,10 +727,14 @@ version (AutomemAsan) {} else static assert(false);
 unittest { assert(answer() == 42); }
 """, encoding="utf-8")
 
+    command = (
+        ["dub", "test", "--compiler=dmd", "--d-version=AutomemAsan"]
+        if backend == "native" else
+        [sb_path(), f"--backend={backend}", "--version=AutomemAsan", str(app)]
+    )
     result = subprocess.run(
-        [sb_path(), f"--backend={backend}", "--version=AutomemAsan", str(app)],
-        cwd=tmp_path, capture_output=True, check=False, text=True,
-        timeout=TIMEOUT,
+        command, cwd=app if backend == "native" else tmp_path,
+        capture_output=True, check=False, text=True, timeout=TIMEOUT,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

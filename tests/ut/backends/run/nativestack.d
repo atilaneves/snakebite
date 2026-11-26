@@ -544,11 +544,13 @@ static foreach (backend; Matrix!(
             import core.thread: Fiber;
 
             void main() {
+                enum stackSize = 64 * 1024;
+                enum guardPageSize = 0;
                 int value;
                 auto fiber = new Fiber({
                     value = 17;
                     value += 25;
-                }, 64 * 1024, 0);
+                }, stackSize, guardPageSize);
                 fiber.call();
                 assert(value == 42);
                 assert(fiber.state == Fiber.State.TERM);
@@ -563,7 +565,7 @@ static foreach (backend; Matrix!(
         0.shouldBeStatusOf!(backend, q{
             import core.thread: Fiber;
 
-            int threadCount;
+            int fiberStarts;
 
             int useStack(int value) {
                 int[128] values;
@@ -573,31 +575,31 @@ static foreach (backend; Matrix!(
 
             void main() {
                 int first, second;
-                auto a = new Fiber({
+                auto firstFiber = new Fiber({
                     int local = 17;
-                    ++threadCount;
+                    ++fiberStarts;
                     first = local;
                     Fiber.yield();
                     first = local + 25;
                 });
-                auto b = new Fiber({
+                auto secondFiber = new Fiber({
                     int local = 31;
-                    ++threadCount;
+                    ++fiberStarts;
                     second = local;
                     Fiber.yield();
                     second = local + 26;
                 });
-                a.call();
-                b.call();
+                firstFiber.call();
+                secondFiber.call();
                 assert(first == 17 && second == 31);
-                assert(threadCount == 2);
-                a.call();
+                assert(fiberStarts == 2);
+                firstFiber.call();
                 assert(first == 42);
                 assert(useStack(73) == 73);
-                b.call();
+                secondFiber.call();
                 assert(second == 57);
-                assert(a.state == Fiber.State.TERM);
-                assert(b.state == Fiber.State.TERM);
+                assert(firstFiber.state == Fiber.State.TERM);
+                assert(secondFiber.state == Fiber.State.TERM);
             }
         });
     }
@@ -684,9 +686,44 @@ static foreach (backend; Matrix!(
             void main() {
                 int result;
                 auto thread = new Thread({ result = depth(100_000); });
-                thread.start;
-                thread.join;
+                thread.start();
+                thread.join();
                 assert(result == 100_000);
+            }
+        });
+    }
+
+    // A thread that `std.concurrency` started receives a message that one
+    // of several handlers takes.
+    @("nativeStack.threadReceivesAMessageWithSeveralHandlers."
+        ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            import core.time: seconds;
+            import std.concurrency;
+
+            struct Flush {}
+
+            void writer(Tid parent) {
+                const received = receiveTimeout(2.seconds,
+                    (string message, Tid origin) {
+                        assert(origin == parent);
+                        parent.send(message);
+                    },
+                    (Flush message, Tid origin) { assert(false); },
+                );
+                assert(received);
+            }
+
+            void main() {
+                auto thread = spawn(&writer, thisTid);
+                thread.send("worker output", thisTid);
+                string echoed;
+                assert(receiveTimeout(3.seconds,
+                    (string message) { echoed = message; },
+                ));
+                assert(echoed == "worker output");
             }
         });
     }

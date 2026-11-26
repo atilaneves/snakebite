@@ -1693,30 +1693,33 @@ def test_thread_destructor_runs_before_that_of_a_dependency(
 
 
 def run_app(
-    tmp_path: Path, backend: str,
+    tmp_path: Path, backend: str, timeout_seconds: int = 120,
 ) -> subprocess.CompletedProcess[str]:
     if backend == "native":
-        return run_native_app(tmp_path)
+        return run_native_app(tmp_path, timeout_seconds)
 
     return run_sb(
         f"--backend={backend}", "--no-optimise-image", str(tmp_path / "app"),
-        cwd=tmp_path,
+        cwd=tmp_path, timeout_seconds=timeout_seconds,
     )
 
 
 # The program in `app`, built and run as compiled D builds and runs it.
-def run_native_app(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def run_native_app(
+    tmp_path: Path, timeout_seconds: int = 120,
+) -> subprocess.CompletedProcess[str]:
     dmd = shutil.which("dmd")
     if dmd is None:
         pytest.skip("dmd, the reference compiler, is not on PATH")
 
-    if (tmp_path / "app" / "dub.sdl").exists():
+    if any((tmp_path / "app" / recipe).exists()
+           for recipe in ("dub.sdl", "dub.json")):
         return subprocess.run(
             ["dub", "test", "--compiler=dmd", "-q"],
             capture_output=True,
             check=False,
             text=True,
-            timeout=120,
+            timeout=timeout_seconds,
             cwd=tmp_path / "app",
         )
 
@@ -8391,14 +8394,9 @@ def test_fork_keeps_compiled_functions_in_both_processes(
     assert result.returncode == 0, output(result)
 
 
-# The tests from here to the helpers start `bin/sb` on a program and check
-# what the process gives. Each expected value is what the same program gives
-# when it is compiled by dmd and run, unless its comment says otherwise.
-
-
 # A class object that the program leaves to the collector does not stop the
 # process from ending normally.
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
 def test_class_object_left_to_the_collector_at_shutdown(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -8414,14 +8412,15 @@ def test_class_object_left_to_the_collector_at_shutdown(
         """,
     )
 
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+    result = run_app(tmp_path, backend)
 
     assert result.returncode == 0, output(result)
 
 
 # The default test runner calls a module unittest with the context that its
-# nested delegate reads.
-@pytest.mark.parametrize("backend", BACKENDS)
+# nested delegate reads. The test runner is part of the process that
+# `bin/sb` starts; `bin/ut` runs `main` only.
+@pytest.mark.parametrize("backend", ["native", *BACKENDS])
 def test_module_unittest_with_a_nested_delegate(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -8437,30 +8436,7 @@ def test_module_unittest_with_a_nested_delegate(
         """,
     )
 
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
-
-    assert result.returncode == 0, output(result)
-
-
-# The comparison of a static array with an array literal calls a druntime
-# template that the dependency image selects by the types of the call.
-@pytest.mark.parametrize("backend", BACKENDS)
-def test_static_array_comparison_with_an_array_literal(
-    tmp_path: Path, backend: str,
-) -> None:
-    write(
-        tmp_path / "app" / "probe.d",
-        """
-        unittest {
-            ubyte[4] values = [23, 13, 42, 71];
-            assert(values == [23, 13, 42, 71]);
-            assert(values != [23, 13, 42, 72]);
-        }
-        void main() {}
-        """,
-    )
-
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+    result = run_app(tmp_path, backend)
 
     assert result.returncode == 0, output(result)
 
@@ -8543,8 +8519,8 @@ def test_task_pool_reduce_runs_to_completion(
         import std.parallelism;
         import std.range : iota;
         unittest {
-            auto s = taskPool.reduce!"a + b"(iota(1, 101));
-            assert(s == 5050);
+            auto sum = taskPool.reduce!"a + b"(iota(1, 101));
+            assert(sum == 5050);
         }
         """,
     )
@@ -8595,63 +8571,15 @@ def test_invalid_slice_copies_throw(tmp_path: Path, backend: str) -> None:
     assert result.returncode == 0, output(result)
 
 
-# A thread that `std.concurrency` started receives a message that one of
-# several handlers takes, and writes it. CTFE cannot start a thread.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
-def test_thread_receives_a_message_with_several_handlers(
-    tmp_path: Path, backend: str,
-) -> None:
-    write(
-        tmp_path / "app" / "probe.d",
-        """
-        import core.time: seconds;
-        import std.concurrency;
-        import std.stdio: stdout, write;
-
-        struct Flush {}
-
-        void writer(Tid parent) {
-            const received = receiveTimeout(2.seconds,
-                (string message, Tid origin) {
-                    assert(origin == parent);
-                    write(message);
-                    stdout.flush;
-                    parent.send(true);
-                },
-                (Flush message, Tid origin) { assert(false); },
-            );
-            assert(received);
-        }
-
-        void main(string[] args) {
-            assert(args.length == 1);
-            auto thread = spawn(&writer, thisTid);
-            thread.send("worker output\\n", thisTid);
-            bool finished;
-            assert(receiveTimeout(3.seconds,
-                (bool success) { finished = success; },
-            ));
-            assert(finished);
-        }
-        """,
-    )
-
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
-
-    assert result.returncode == 0, output(result)
-    assert guest_lines(result)[:1] == ["worker output"], output(result)
-
-
 # The test suite of `unit-threaded` runs its tests on worker threads that
 # can still be alive when the run returns. Such a thread must not end the
 # process with a fault when the dependency image goes away. The version is
 # the one that this project uses (`dub.selections.json`), which dub has
 # already fetched. The copy has a name from `dub_name`, so that its dub cache
-# record goes when the test ends. A backend may disagree with compiled D,
-# which gives 0, on a few of the suite's own tests, so status 1 is a pass
-# here too. The suite deletes `tmp/unit-threaded` below its working
-# directory, so the run is in the copy. CTFE cannot start a thread.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+# record goes when the test ends: the plain name `unit-threaded` fails the
+# check of `conftest.py`. The suite deletes `tmp/unit-threaded` below its
+# working directory, so the run is in the copy. CTFE cannot start a thread.
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_guest_thread_outlives_the_dependency_image(
     tmp_path: Path, backend: str,
 ) -> None:
@@ -8661,7 +8589,7 @@ def test_guest_thread_outlives_the_dependency_image(
         Path.home() / ".dub" / "packages" / "unit-threaded" / version
         / "unit-threaded"
     )
-    copy = tmp_path / "unit-threaded"
+    copy = tmp_path / "app"
     shutil.copytree(package, copy)
     for recipe in [*copy.rglob("dub.json"), *copy.rglob("dub.sdl")]:
         recipe.write_text(re.sub(
@@ -8669,12 +8597,9 @@ def test_guest_thread_outlives_the_dependency_image(
             recipe.read_text(),
         ))
 
-    result = run_sb(
-        f"--backend={backend}", "--no-optimise-image", str(copy), cwd=copy,
-        timeout_seconds=600,
-    )
+    result = run_app(tmp_path, backend, timeout_seconds=600)
 
-    assert result.returncode in (0, 1), output(result)
+    assert result.returncode == 0, output(result)
 
 
 # Each start of a project sees the edits of its source files since the
@@ -8710,13 +8635,13 @@ def test_each_start_sees_the_source_edits(tmp_path: Path, backend: str) -> None:
 # call makes has the layout that the guest reads. The project has no
 # dependency, so the only native code for the instance is in `bin/sb`.
 # CTFE cannot use files.
-@pytest.mark.parametrize("backend", ["interpreter", "bytecode"])
+@pytest.mark.parametrize("backend", PROGRAM_BACKENDS)
 def test_guest_template_instance_that_the_host_also_has(
     tmp_path: Path, backend: str,
 ) -> None:
     scanned = tmp_path / "scanned"
     write(
-        tmp_path / "app" / "source" / "app.d",
+        tmp_path / "app" / "app.d",
         f"""
         module app;
         import std.file: dirEntries, mkdirRecurse, rmdirRecurse, write, SpanMode;
@@ -8732,7 +8657,7 @@ def test_guest_template_instance_that_the_host_also_has(
         """,
     )
 
-    result = run_sb(f"--backend={backend}", str(tmp_path / "app"), cwd=tmp_path)
+    result = run_app(tmp_path, backend)
 
     assert result.returncode == 0, output(result)
 
@@ -8778,21 +8703,28 @@ def test_guest_reads_the_gc_configuration_of_the_process(
 
 # A library project that the default test runner of druntime, or a runner
 # that the project installs, tests. `status` and the lines in `present` are
-# what the test program that dub builds from the same project gives.
+# what the test program that dub builds from the same project gives. The
+# lines in `absent` are not in the output of `bin/sb`: it does not run a
+# `main` of the library.
 class StartupCase(NamedTuple):
-    sources: tuple[str, ...]
+    # The file name and the text of each source file.
+    sources: dict[str, str]
     status: int
     present: tuple[str, ...]
-    absent: tuple[str, ...] = ("All unit tests have been run successfully.",)
+    absent: tuple[str, ...]
     arguments: tuple[str, ...] = ()
     # CTFE cannot read a static variable that changes at run time: a counter
     # of the module constructors, or the test runner hook of druntime.
-    backends: tuple[str, ...] = tuple(BACKENDS)
+    # `native` is missing where the expected value is a fact of `bin/sb`
+    # that compiled D does not have, or where the case passes arguments.
+    backends: tuple[str, ...] = ("native", *BACKENDS)
 
+
+NO_MAIN = ("All unit tests have been run successfully.",)
 
 STARTUP_CASES: dict[str, StartupCase] = {
     "module_constructors_run_once": StartupCase(
-        ("""
+        {"probe.d": """
         module probe;
         __gshared int sharedCalls;
         int threadCalls;
@@ -8807,54 +8739,54 @@ STARTUP_CASES: dict[str, StartupCase] = {
             assert(sharedCalls == 1);
             assert(threadCalls == 1);
         }
-        """,),
+        """},
         0, ("1 modules passed unittests",), (),
-        backends=("interpreter", "bytecode"),
+        backends=("native", "interpreter", "bytecode"),
     ),
     "template_mixin_tests_run": StartupCase(
-        ("""
+        {"probe.d": """
         module probe;
         mixin template Tests() {
             unittest { assert(false, "mixin unittest ran"); }
         }
         mixin Tests!();
-        """,),
-        1, ("mixin unittest ran", "1/1 modules FAILED unittests"),
+        """},
+        1, ("mixin unittest ran", "1/1 modules FAILED unittests"), NO_MAIN,
     ),
     # `Nullable` declares unittests inside the template. DMD only parses
     # those in a root module; a Phobos instance carries empty placeholders
     # that compiled D never runs.
     "phobos_template_instance_tests_do_not_run": StartupCase(
-        ("""
+        {"probe.d": """
         module probe;
         import std.typecons: Nullable;
         struct Probe { int value; }
         unittest { Nullable!Probe maybe; assert(maybe.isNull); }
-        """,),
-        0, ("1 modules passed unittests",),
+        """},
+        0, ("1 modules passed unittests",), NO_MAIN,
     ),
     "default_test_runner": StartupCase(
-        ("""
+        {"probe.d": """
         module probe;
         unittest { assert(2 + 2 == 4); }
-        """,),
-        0, ("1 modules passed unittests",),
+        """},
+        0, ("1 modules passed unittests",), NO_MAIN,
     ),
     "default_runner_continues_after_a_failed_module": StartupCase(
-        ("""
+        {"probe.d": """
         module probe;
         unittest { assert(false, "first module failed"); }
-        """, """
+        """, "second.d": """
         module second;
         unittest { assert(false, "second module failed"); }
-        """),
+        """},
         1, ("first module failed", "second module failed",
-            "2/2 modules FAILED unittests"),
+            "2/2 modules FAILED unittests"), NO_MAIN,
     ),
     # The runner closes the streams of the program, and `bin/sb` still
     # writes its timing report. Compiled D writes no such report.
     "runner_output_does_not_hide_the_timing_report": StartupCase(
-        ("""
+        {"probe.d": """
         module probe;
         import core.runtime: Runtime, UnitTestResult;
         import std.stdio: File, stdout, stderr;
@@ -8865,12 +8797,13 @@ STARTUP_CASES: dict[str, StartupCase] = {
                 return UnitTestResult(1, 1, false, false);
             };
         }
-        """,),
+        """},
         0, ("frontend time:", "backend latency:"), (),
         backends=("interpreter", "bytecode"),
     ),
+    # `bin/sb` passes the arguments after `--`; the native arm passes none.
     "extended_test_runner_gets_the_arguments": StartupCase(
-        ("""
+        {"probe.d": """
         module probe;
         import core.runtime: Runtime, UnitTestResult;
         import std.stdio: writeln;
@@ -8882,13 +8815,13 @@ STARTUP_CASES: dict[str, StartupCase] = {
             };
         }
         unittest { assert(false, "custom runner must select tests"); }
-        """,),
-        0, ("custom runner called",),
+        """},
+        0, ("custom runner called",), NO_MAIN,
         arguments=("-d", "selected test"),
         backends=("interpreter", "bytecode"),
     ),
-    "failed_test_runner_skips_main": StartupCase(
-        ("""
+    "failed_extended_test_runner_gives_status_1": StartupCase(
+        {"probe.d": """
         module probe;
         import core.runtime: Runtime, UnitTestResult;
         shared static this() {
@@ -8896,9 +8829,9 @@ STARTUP_CASES: dict[str, StartupCase] = {
                 return UnitTestResult(2, 1, true, true);
             };
         }
-        """,),
-        1, ("1/2 modules FAILED unittests",),
-        backends=("interpreter", "bytecode"),
+        """},
+        1, ("1/2 modules FAILED unittests",), NO_MAIN,
+        backends=("native", "interpreter", "bytecode"),
     ),
 }
 
@@ -8925,18 +8858,28 @@ def test_test_runner_of_a_library(
         f'name "{dub_name("startup-probe")}"\ntargetType "library"\n'
         'configuration "unittest" {\n}\n',
     )
-    for index, source in enumerate(case.sources):
-        write(app / "source" / ("probe.d" if index == 0 else "second.d"), source)
+    for file_name, source in case.sources.items():
+        write(app / "source" / file_name, source)
 
-    result = run_sb(
-        f"--backend={backend}", str(app), "--", *case.arguments, cwd=tmp_path,
-    )
+    if backend == "native":
+        result = run_native_app(tmp_path)
+    else:
+        result = run_sb(
+            f"--backend={backend}", str(app), "--", *case.arguments,
+            cwd=tmp_path,
+        )
 
-    assert result.returncode == case.status, output(result)
+    if backend == "native":
+        # `dub test` gives its own status when the program fails.
+        assert (result.returncode != 0) == (case.status != 0), output(result)
+    else:
+        assert result.returncode == case.status, output(result)
     for line in case.present:
         assert line in output(result)
-    for line in case.absent:
-        assert line not in output(result)
+    if backend != "native":
+        for line in case.absent:
+            assert line not in output(result)
+
 
 
 def write(path: Path, text: str = "") -> None:

@@ -2378,6 +2378,22 @@ static foreach (backend; Matrix!()) {
     }
 }
 
+// The comparison of a static array with an array literal calls a druntime
+// template that the dependency image selects by the types of the call.
+static foreach (backend; Matrix!()) {
+    @("staticArrayComparisonWithAnArrayLiteral." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            void main() {
+                ubyte[4] values = [23, 13, 42, 71];
+                assert(values == [23, 13, 42, 71]);
+                assert(values != [23, 13, 42, 72]);
+            }
+        });
+    }
+}
+
 // An element with its own `opEquals` is not compared as bytes: dmd lowers
 // the comparison to call it.
 // Observed: `assert(left == same)` fails on Ctfe, which compares the
