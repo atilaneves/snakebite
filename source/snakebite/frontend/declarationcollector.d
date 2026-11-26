@@ -122,19 +122,20 @@ package(snakebite) bool hasClassInfoInObject(
 // mangles by name alone, so a duplicate name would silently collide at
 // link time instead of erroring.
 //
-// Shared traversal skeleton for the two collectors that walk the
-// declarations a real build compiles in, after semantic analysis:
-// `imagesource.d`'s `Collector` and `inlineasm.d`'s
-// `InlineAsmCollector`. Both need the same answer to "does this
-// declaration compile into the build", so that answer lives here once.
-// Each subclass overrides only `visit(FuncDeclaration)`, where the two
-// collectors' jobs differ.
+// The walk over the declarations that a real build compiles in, after
+// semantic analysis. Each walk that needs the answer to "does this
+// declaration compile into the build" extends it: the `Collector` of
+// `imagesource.d`, the `InlineAsmCollector` of `inlineasm.d` and the walk
+// of a compile to an SBC file in the bytecode compiler. So that answer has
+// one place.
 package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     alias visit = ImportCSafeVisitor.visit;
 
-    import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
+    import dmd.attrib: AttribDeclaration, ConditionalDeclaration,
+        MixinDeclaration;
     import dmd.dsymbolsem: include;
-    import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
+    import dmd.dtemplate: TemplateDeclaration, TemplateInstance,
+        TemplateMixin;
     import dmd.expression: FuncExp;
     import dmd.func: CtorDeclaration, DtorDeclaration,
         FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
@@ -150,6 +151,29 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     override void visit(TemplateInstance instance) {
         if (instance.members !is null && instance.compilesIntoBuild)
             foreach (member; *instance.members)
+                member.accept(this);
+    }
+
+    // The members of a template mixin compile into the object of the module
+    // that mixes it in, as any other member of that scope does: the code
+    // generator of dmd walks into a `TemplateMixin` with no test of
+    // `needsCodegen` (`dmd.glue.toobj`, `visit(TemplateMixin)`). Its
+    // `accept` calls this overload, not `visit(TemplateInstance)`, and the
+    // overload of `SemanticTimeTransitiveVisitor` walks only the type and
+    // the template arguments of the mixin.
+    override void visit(TemplateMixin instance) {
+        if (instance.members !is null)
+            foreach (member; *instance.members)
+                member.accept(this);
+    }
+
+    // The declarations of `mixin("...")` at declaration scope compile in as
+    // any other declaration of that scope. `include` gives the declarations
+    // that the string expanded into. The overload of
+    // `SemanticTimeTransitiveVisitor` walks only the string expression.
+    override void visit(MixinDeclaration declaration) {
+        if (auto members = include(declaration, null))
+            foreach (member; *members)
                 member.accept(this);
     }
 

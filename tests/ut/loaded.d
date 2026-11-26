@@ -155,12 +155,17 @@ public struct LoadedBytecode {
         return functionAt(*_loaded.program, (*position)[0], (*position)[1]);
     }
 
-    // Each function of the loaded program whose own name is `identifier`.
+    // Each function of the loaded program whose own name is `identifier`,
+    // other than the C `main` that dmd mixes into the module of the D `main`
+    // (`_d_cmain`). The saved program holds that C `main`, as the object of
+    // the module holds it, but the run starts at the D `main`: the name
+    // `main` is the D `main` of the guest.
     public void eachLoaded(
         in string identifier, scope void delegate(const(Function)*) visit,
     ) {
         foreach (declaration, position; _saved.positions)
-            if (declaration.ident.toString == identifier)
+            if (declaration.ident.toString == identifier
+                    && !declaration.isCMain)
                 visit(functionAt(
                     *_loaded.program, position[0], position[1]));
     }

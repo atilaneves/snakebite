@@ -61,10 +61,7 @@ private extern(C++) class InlineAsmCollector
     import snakebite.frontend.declarationcollector: DeclarationCollector;
     alias visit = DeclarationCollector.visit;
 
-    import dmd.attrib: MixinDeclaration;
     import dmd.dmodule: Module;
-    import dmd.dsymbolsem: include;
-    import dmd.dtemplate: TemplateMixin;
     import dmd.errors: error;
     import dmd.expression: SymbolExp;
     import dmd.declaration: VarDeclaration;
@@ -109,36 +106,6 @@ private extern(C++) class InlineAsmCollector
             frontendIsRootOwned = isRootOwned;
 
         return frontendIsRootOwned(function_, _rootModules);
-    }
-
-    // `mixin WithAsm;` instantiates a `mixin template` as a
-    // `TemplateMixin`. `TemplateMixin : TemplateInstance`, but it overrides
-    // `accept` with its own `v.visit(this)`, so it dispatches to this
-    // overload rather than `DeclarationCollector`'s `visit(TemplateInstance)`;
-    // `SemanticTimeTransitiveVisitor`'s own default `visit(TemplateMixin)`
-    // walks only the mixin's type and template arguments, never its
-    // instantiated members, so without this override a root-owned function
-    // inside a root-owned mixin template's own body was never walked.
-    override void visit(TemplateMixin instance) {
-        if (instance.members !is null)
-            foreach (member; *instance.members)
-                member.accept(this);
-    }
-
-    // `mixin("...")` at declaration scope is a `MixinDeclaration`;
-    // `SemanticTimeTransitiveVisitor`'s own traversal walks only its
-    // string argument expression for this exact type (parse-time shape,
-    // before expansion), shadowing `DeclarationCollector`'s generic
-    // `AttribDeclaration` override, so a mixin's own expanded declarations
-    // - including any `asm` block they compile in - are never reached at
-    // all (docs/adr/0012's known mixin gap: the version gate cannot see
-    // inside the mixin's source text either, so its `asm` compiles in
-    // rather than out). `include` returns `.decl`, the declarations the
-    // mixin expanded into once semantic analysis has run.
-    override void visit(MixinDeclaration declaration) {
-        if (auto members = include(declaration, null))
-            foreach (member; *members)
-                member.accept(this);
     }
 
     // Every other `visit` override in this class walks straight into a

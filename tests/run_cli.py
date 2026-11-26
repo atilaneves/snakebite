@@ -4018,8 +4018,10 @@ def test_build_module_runs_as_native_code_built_by_module(
 # gives: when the declaration that the call uses has other parameters or
 # another hidden `this` than the definition, the definition reads its
 # parameters from the registers that the caller fills. The call also reaches a
-# definition that needs a closure, and a D-variadic definition that reads its
-# extra arguments.
+# definition that needs a closure, a D-variadic definition that reads its
+# extra arguments, and a function that a template mixin and a string mixin
+# declare: native code defines each of them in the object of the module that
+# mixes it in.
 def test_build_module_call_to_a_name_runs_as_native_code(
     tmp_path: Path,
 ) -> None:
@@ -4043,10 +4045,13 @@ def test_build_module_call_to_a_name_runs_as_native_code(
                 sum += va_arg!int(_argptr);
             return sum;
         }
+        mixin template Twice() { int twice(int x) { return 2 * x; } }
+        mixin Twice;
+        mixin("int thrice(int x) { return 3 * x; }");
         """)
     write(app / "source" / "a.d", """
         module a;
-        import b: keep, total;
+        import b: keep, thrice, total, twice;
         import std.stdio: writeln;
         extern(C) int addc(long, long);
         extern(C) long widec(int, int);
@@ -4060,14 +4065,16 @@ def test_build_module_call_to_a_name_runs_as_native_code(
             writeln(t.g(7));
             writeln(keep(5)());
             writeln(total(1, 2, 3));
+            writeln(twice(4));
+            writeln(thrice(4));
         }
         """)
     native = subprocess.run(
         ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
         capture_output=True, check=False, text=True, timeout=300, cwd=app)
     assert native.returncode == 0, output(native)
-    assert native.stdout.splitlines() == ["42", "3004", "2", "7", "5", "6"], \
-        output(native)
+    expected = ["42", "3004", "2", "7", "5", "6", "8", "12"]
+    assert native.stdout.splitlines() == expected, output(native)
     built = run_sb("--build=module", str(app), cwd=tmp_path)
     assert built.returncode == 0, output(built)
     assert guest_lines(built) == native.stdout.splitlines(), output(built)
@@ -4077,8 +4084,9 @@ def test_build_module_call_to_a_name_runs_as_native_code(
 # are one datum, as in native code built one module at a time: a `__gshared`
 # variable that both modules read and write, a thread-local variable of which
 # each thread has its own copy, the class information, the vtable and the
-# initial image of a class that only the other module uses, and the type
-# information of a struct, an enum and a union.
+# initial image of a class that only the other module uses, the type
+# information of a struct, an enum and a union, and a `__gshared` variable that
+# a template mixin declares.
 def test_build_module_data_of_another_module_run_as_native_code(
     tmp_path: Path,
 ) -> None:
@@ -4098,6 +4106,8 @@ def test_build_module_data_of_another_module_run_as_native_code(
         struct S { int a = 7; long b = 9; }
         enum E { x = 3, y }
         union U { int i; float f; }
+        mixin template Held() { __gshared int held = 11; }
+        mixin Held;
         void bump() { total += 1; }
         int totalInB() { return total; }
         int perThreadInB() { return perThread; }
@@ -4133,6 +4143,7 @@ def test_build_module_data_of_another_module_run_as_native_code(
             writeln(S.init.a, " ", S.init.b, " ", typeid(S).initializer.length);
             writeln(typeid(E), " ", typeid(E) is enumInfoInB);
             writeln(typeid(U), " ", typeid(U) is unionInfoInB);
+            writeln(held);
         }
         """)
     expected = [
@@ -4145,6 +4156,7 @@ def test_build_module_data_of_another_module_run_as_native_code(
         "7 9 16",
         "b.E true",
         "b.U true",
+        "11",
     ]
     native = subprocess.run(
         ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
