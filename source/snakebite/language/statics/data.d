@@ -698,20 +698,27 @@ public struct NativeData {
             descriptorFacts.size = TlsDescriptor.sizeof;
             descriptorFacts.alignment = TlsDescriptor.alignof;
             descriptor = reserve(descriptorFacts, variable);
-            auto bytes = cast(ubyte*) descriptor.ptr;
-            auto tls = cast(TlsDescriptor*) bytes;
+            // The reserved bytes are untyped; this is their one view as the
+            // descriptor.
+            auto tls = cast(TlsDescriptor*) descriptor.ptr;
             tls.size = facts.size;
             tls.alignment = facts.alignment;
             if (nativeName.length) {
-                storeString(bytes + TlsDescriptor.nativeName.offsetof,
+                storeString(descriptor.ptr + TlsDescriptor.nativeName.offsetof,
                     nativeName);
-                storeString(bytes + TlsDescriptor.declaredBy.offsetof,
+                storeString(descriptor.ptr + TlsDescriptor.declaredBy.offsetof,
                     declaredBy);
             }
             if (ownCopy)
-                storeAddress(&this, bytes + TlsDescriptor.templateBytes.offsetof,
-                    Address(Target.Kind.staticData, template_.ptr,
-                        template_.where));
+                storeAddress(
+                    &this,
+                    descriptor.ptr + TlsDescriptor.templateBytes.offsetof,
+                    Address(
+                        Target.Kind.staticData,
+                        template_.ptr,
+                        template_.where,
+                    ),
+                );
             _tlsDescriptors.insert(variable, descriptor);
         });
         return descriptor;
