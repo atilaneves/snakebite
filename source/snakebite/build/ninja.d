@@ -67,10 +67,13 @@ private struct Compile {
 }
 
 
-// The compiles of mode `build`: one of all the source files of the root
-// package, or one of each source file, whose program file is in the build
-// files `files`, at the path of the source file in the project directory
-// `directory`.
+// The compiles of mode `build` (`Build` says which source files go into one
+// compile). The program file of a compile is in the build files `files`, at
+// the path in the project directory `directory` of its first source file.
+// reggae names the object of a D package for the path of the package and the
+// name of its first source file, joined with `_`; the program file is the
+// path of that source file, because two packages can give one name with `_`,
+// as `x/y_z` with `w` and `x/y` with `z_w`.
 private Compile[] compilesOf(
     in imported!"snakebite.build".BuildFiles files,
     in string directory,
@@ -79,8 +82,34 @@ private Compile[] compilesOf(
 ) {
     import snakebite.build: Build;
     import snakebite.failure.report: internalFailure;
-    import std.algorithm.iteration: map;
-    import std.array: array;
+    import std.path: absolutePath, buildNormalizedPath, dirName;
+
+    // The compiles of the compilation units: the source files that have one
+    // key are one compilation unit. The compiles keep the order in which dub
+    // gives the first source file of each compilation unit, because the
+    // order of the program files decides which of two weak definitions is
+    // kept and the order of the module constructors of modules that do not
+    // import each other. The key is made from the normalised absolute path of
+    // a source file, so that one directory has one key, whatever the spelling
+    // of the path of the source file.
+    Compile[] compilesOfKeys(alias keyOfPath)() {
+        Compile[] compiles;
+        size_t[string] indexOfKey;
+        foreach (sourceFile; sources.files) {
+            const path = sourceFile.absolutePath(directory).buildNormalizedPath;
+            const key = keyOfPath(path);
+            if (const index = key in indexOfKey)
+                compiles[*index].sources ~= sourceFile;
+            else {
+                indexOfKey[key] = compiles.length;
+                compiles ~= Compile(
+                    programOfFirstSource(files.directory, directory, path),
+                    [sourceFile],
+                );
+            }
+        }
+        return compiles;
+    }
 
     final switch (build) with (Build) {
         case off:
@@ -88,30 +117,27 @@ private Compile[] compilesOf(
         case project:
             return [Compile(files.projectProgram, sources.files.dup)];
         case module_:
-            return sources.files
-                .map!(source => Compile(
-                    programOfSource(files.directory, directory, source),
-                    [source],
-                ))
-                .array;
+            return compilesOfKeys!(path => path);
+        case package_:
+            return compilesOfKeys!(path => path.dirName);
     }
 }
 
 
-// The program file in `buildDirectory` of the compile of the source file
-// `source` alone: its path relative to the project directory `directory`.
-// A source file outside the project directory has a part `..`, which the
-// path of the program file spells `_`; a part that starts with `_` has one
-// more `_`, so that no two source files have one program file.
-private string programOfSource(
+// The program file in `buildDirectory` of the compile whose first source
+// file is at the absolute path `firstSource`: its path relative to the
+// project directory `directory`. A source file outside the project directory
+// has a part `..`, which the path of the program file spells `_`; a part
+// that starts with `_` has one more `_`, so that no two source files have
+// one program file.
+private string programOfFirstSource(
     in string buildDirectory,
     in string directory,
-    in string source,
+    in string firstSource,
 ) @safe {
     import std.algorithm.iteration: map;
     import std.algorithm.searching: startsWith;
-    import std.path: absolutePath, buildPath, pathSplitter, relativePath,
-        setExtension;
+    import std.path: buildPath, pathSplitter, relativePath, setExtension;
 
     static string spelled(in string part) {
         if (part == "..")
@@ -119,7 +145,7 @@ private string programOfSource(
         return part.startsWith("_") ? "_" ~ part : part;
     }
 
-    const relative = source.absolutePath(directory).relativePath(directory);
+    const relative = firstSource.relativePath(directory);
     const spelledPath = relative.pathSplitter.map!spelled.buildPath;
     return buildDirectory.buildPath(spelledPath).setExtension("sbc");
 }
@@ -184,9 +210,9 @@ private string buildFileText(
         ["restat = 1", "pool = console"],
     );
     // The one compile of the whole project gets the console, so that its
-    // output reaches the terminal as `bin/sb` writes it. The compiles of a
-    // build of each module run at the same time, as the compiles of a native
-    // ninja build do: ninja shows the output of each when it ends.
+    // output reaches the terminal as `bin/sb` writes it. The other compiles
+    // run at the same time, as the compiles of a native ninja build do: ninja
+    // shows the output of each when it ends.
     const consolePool = build == Build.project ? ["pool = console"] : null;
     text ~= rule(
         "compile",

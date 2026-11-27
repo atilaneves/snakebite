@@ -59,11 +59,13 @@ unittest {
         ["--lowmem", "project"],
         ["examples/empty"],
     ];
-    foreach (arguments; refused) {
-        const result = parseArgs(["sb", "--build=project"] ~ arguments);
-        result.status.should == 1;
-        "--build=project".should.be in result.diagnostic;
-    }
+    foreach (mode; ["project", "module", "package"])
+        foreach (arguments; refused) {
+            const string option = "--build=" ~ mode;
+            const result = parseArgs(["sb", option] ~ arguments.dup);
+            result.status.should == 1;
+            option.should.be in result.diagnostic;
+        }
 }
 
 
@@ -73,7 +75,8 @@ unittest {
 
     result.status.should == 1;
     "unknown build mode: bogus".should.be in result.diagnostic;
-    "valid build modes: off, project".should.be in result.diagnostic;
+    const valid = "valid build modes: off, project, module, package";
+    valid.should.be in result.diagnostic;
 }
 
 
