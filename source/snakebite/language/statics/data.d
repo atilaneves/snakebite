@@ -569,9 +569,10 @@ public struct NativeData {
     public Placed startStorage(VarDeclaration declaration) {
         auto variable = definitionOf(declaration);
         if (recordRelocs && !variable.isThreadLocalStorage)
-            if (auto name = storageName(variable))
-                return Placed((cast(void*) name)
-                    [0 .. typeFacts(variable.type).size]);
+            if (auto name = storageName(variable)) {
+                const size = storageFacts(variable).size;
+                return Placed((cast(void*) name)[0 .. size]);
+            }
         return storageOf(variable);
     }
 
@@ -698,8 +699,9 @@ public struct NativeData {
             descriptorFacts.alignment = TlsDescriptor.alignof;
             descriptor = reserve(descriptorFacts, variable);
             auto bytes = cast(ubyte*) descriptor.ptr;
-            (cast(TlsDescriptor*) bytes).size = facts.size;
-            (cast(TlsDescriptor*) bytes).alignment = facts.alignment;
+            auto tls = cast(TlsDescriptor*) bytes;
+            tls.size = facts.size;
+            tls.alignment = facts.alignment;
             if (nativeName.length) {
                 storeString(bytes + TlsDescriptor.nativeName.offsetof,
                     nativeName);

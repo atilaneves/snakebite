@@ -1224,10 +1224,16 @@ static foreach (backend; Matrix!(
 
 // The storage of a variable has the explicit alignment of its declaration,
 // else the alignment of its type, which is the explicit alignment of the
-// type when it has one. `before` puts the next free byte at 8 modulo 16.
+// type when it has one. This holds for a shared module variable, a
+// thread-local module variable and a function-local `static`, which is
+// thread-local. Each has a variable with a smaller alignment before it, so
+// that a correct address is not the result of chance.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "dmd's CTFE cannot take the address of a global to cast it at compile time"),
+    Omit!(
+        Ctfe,
+        Because.inexpressible,
+        "CTFE cannot interpret the address of a global",
+    ),
 )) {
     @("pointers.staticVariable.explicitAlignment." ~ backend.stringof)
     @Tags(backend.stringof)
@@ -1237,10 +1243,16 @@ static foreach (backend; Matrix!(
             shared ulong before;
             shared Pair slot;
             align(16) shared ulong[2] pairOfWords;
+            ubyte threadBefore;
+            align(4096) ubyte[2] threadPage;
             void main() {
+                static ubyte localBefore;
+                static align(4096) ubyte[2] localPage;
                 assert(Pair.alignof == 16);
                 assert(cast(size_t) &slot % 16 == 0, "slot");
                 assert(cast(size_t) &pairOfWords % 16 == 0, "pairOfWords");
+                assert(cast(size_t) &threadPage % 4096 == 0, "threadPage");
+                assert(cast(size_t) &localPage % 4096 == 0, "localPage");
             }
         });
     }

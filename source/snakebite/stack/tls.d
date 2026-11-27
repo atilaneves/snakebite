@@ -130,10 +130,12 @@ public struct TlsSlots {
             import core.sys.posix.stdlib: posix_memalign;
             import std.algorithm: max;
 
-            // `posix_memalign` takes no alignment below a pointer's.
+            // `posix_memalign` takes no alignment below a pointer's, and can
+            // give null for a request of no bytes, which is not a failure
+            // here: a variable of no size still has an address.
             const alignment = max(descriptor.alignment, (void*).sizeof);
-            if (posix_memalign(&entry.bytes, alignment,
-                    max(descriptor.size, 1)) != 0)
+            const requestSize = max(descriptor.size, 1);
+            if (posix_memalign(&entry.bytes, alignment, requestSize) != 0)
                 internalFailure("out of memory for a thread-local variable");
             memcpy(entry.bytes, descriptor.templateBytes, descriptor.size);
             if (descriptor.size)

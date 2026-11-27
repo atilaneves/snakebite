@@ -58,10 +58,12 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
 // alignment that native code gives the storage. dmd's semantic analysis
 // sets the alignment of a declaration that has none to the explicit
 // alignment of its type, and dmd's glue gives the symbol that alignment, or
-// the natural alignment of the type when there is no explicit one.
+// the alignment that the type has with no `align` attribute when there is
+// no explicit one.
 public TypeFacts storageFacts(
     imported!"dmd.declaration".VarDeclaration variable,
 ) {
+    // `auto`, not `const`: the alignment is replaced below.
     auto facts = typeFacts(variable.type);
     if (!variable.alignment.isDefault)
         facts.alignment = variable.alignment.get;
