@@ -155,15 +155,30 @@ public struct LoadedBytecode {
         return functionAt(*_loaded.program, (*position)[0], (*position)[1]);
     }
 
-    // Each function of the loaded program whose own name is `identifier`.
+    // Each function of the loaded program whose own name is `identifier`,
+    // other than the C `main` that dmd makes with `_d_cmain` and mixes into
+    // the module of the D `main`. The saved program holds that function, as
+    // the object of the module holds it, but a compile to RAM compiles only
+    // the functions that the run reaches, and the run starts at the D `main`:
+    // so the name `main` is the D `main`, in both forms.
     public void eachLoaded(
         in string identifier, scope void delegate(const(Function)*) visit,
     ) {
         foreach (declaration, position; _saved.positions)
-            if (declaration.ident.toString == identifier)
+            if (declaration.ident.toString == identifier
+                    && !isCMainOfDmd(declaration))
                 visit(functionAt(
                     *_loaded.program, position[0], position[1]));
     }
+}
+
+// Whether `function_` is the C `main` that dmd mixes in with the template
+// `_d_cmain`. A C `main` that the guest declares is not.
+private bool isCMainOfDmd(FuncDeclaration function_) {
+    auto parent = function_.parent;
+    auto mixed = parent is null ? null : parent.isTemplateMixin;
+    return function_.isCMain && mixed !is null
+        && mixed.tempdecl.ident.toString == "_d_cmain";
 }
 
 

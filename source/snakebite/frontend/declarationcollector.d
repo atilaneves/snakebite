@@ -116,25 +116,22 @@ package(snakebite) bool hasClassInfoInObject(
     return declaration.members !is null;
 }
 
-// Named distinctly from every class that extends it (`Collector` in
-// `imagesource.d`, `InlineAsmCollector` and `InlineAsmVersionGate` in
-// `inlineasm.d`): an `extern(C++) class` with no explicit C++ namespace
-// mangles by name alone, so a duplicate name would silently collide at
-// link time instead of erroring.
-//
-// Shared traversal skeleton for the two collectors that walk the
-// declarations a real build compiles in, after semantic analysis:
-// `imagesource.d`'s `Collector` and `inlineasm.d`'s
-// `InlineAsmCollector`. Both need the same answer to "does this
-// declaration compile into the build", so that answer lives here once.
-// Each subclass overrides only `visit(FuncDeclaration)`, where the two
-// collectors' jobs differ.
+// The walk over the declarations that a real build compiles in, after
+// semantic analysis. A walk that needs the answer to "does this declaration
+// compile into the build" extends this class, so that answer has one place.
+// Three classes extend it: the `Collector` of `imagesource.d`, the
+// `InlineAsmCollector` of `inlineasm.d` and the `EagerCompileCollector` of the
+// bytecode compiler, which finds the functions that `save` compiles for an
+// SBC file and for a saved program. Each has a name of its own: an
+// `extern(C++) class` with no explicit C++ namespace mangles by name alone, so
+// a duplicate name would silently collide at link time instead of erroring.
 package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
     alias visit = ImportCSafeVisitor.visit;
 
-    import dmd.attrib: AttribDeclaration, ConditionalDeclaration;
+    import dmd.attrib: AttribDeclaration, ConditionalDeclaration,
+        MixinDeclaration;
     import dmd.dsymbolsem: include;
-    import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
+    import dmd.dtemplate: TemplateDeclaration, TemplateInstance, TemplateMixin;
     import dmd.expression: FuncExp;
     import dmd.func: CtorDeclaration, DtorDeclaration,
         FuncDeclaration, FuncLiteralDeclaration, InvariantDeclaration,
@@ -151,6 +148,27 @@ package(snakebite) extern(C++) class DeclarationCollector : ImportCSafeVisitor {
         if (instance.members !is null && instance.compilesIntoBuild)
             foreach (member; *instance.members)
                 member.accept(this);
+    }
+
+    // The members of a template mixin compile into the object of the module
+    // that mixes it in, as any other member of that scope does: the code
+    // generator of dmd walks into a `TemplateMixin` with no test of
+    // `needsCodegen` (`dmd.glue.toobj`, `visit(TemplateMixin)`). Its
+    // `accept` calls this overload, not `visit(TemplateInstance)`, and the
+    // overload of `SemanticTimeTransitiveVisitor` walks only the type and
+    // the template arguments of the mixin.
+    override void visit(TemplateMixin instance) {
+        if (instance.members !is null)
+            foreach (member; *instance.members)
+                member.accept(this);
+    }
+
+    // `mixin("...")` at declaration scope is a `MixinDeclaration`. The
+    // overload of `SemanticTimeTransitiveVisitor` for it walks only the
+    // string expression, so the declarations that the string expanded into
+    // would not be reached. The `include`-based override below gives them.
+    override void visit(MixinDeclaration declaration) {
+        visit(cast(AttribDeclaration) declaration);
     }
 
     // `SemanticTimeTransitiveVisitor` gives most `AttribDeclaration`

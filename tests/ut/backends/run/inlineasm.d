@@ -189,17 +189,17 @@ private string withoutSnippetCounter(in string message) {
 // `mixin WithAsm;` instantiates a `mixin template` as a `TemplateMixin`,
 // not a plain `TemplateInstance`: `TemplateMixin : TemplateInstance` but
 // overrides `accept` with its own `v.visit(this)`, so it dispatches to a
-// dedicated `Visitor.visit(TemplateMixin)` overload instead of
-// `InlineAsmCollector.visit(TemplateInstance)`.
-// `SemanticTimeTransitiveVisitor`'s own default `visit(TemplateMixin)`
-// walks only the mixin's type and template arguments, never its
-// instantiated `members`, so a root-owned function inside a root-owned
-// mixin template's own body was not walked and its unguarded `asm` block
-// escaped the load diagnostic. Unlike the string-mixin gap above, this is
-// not a documented, accepted gap: the mixin template's syntax tree is
+// dedicated `Visitor.visit(TemplateMixin)` overload. The overload of
+// `SemanticTimeTransitiveVisitor` walks only the mixin's type and template
+// arguments, never its instantiated `members`, so a root-owned function inside
+// a root-owned mixin template's own body would not be walked and its
+// unguarded `asm` block would escape the load diagnostic.
+// `DeclarationCollector` (the base of `InlineAsmCollector`) overrides that
+// overload and walks the members. Unlike the string-mixin gap above, this is
+// not a documented, accepted gap: the syntax tree of the mixin template is
 // available up front, so the collector must walk it. This is the same
-// load-time check pinned above, reached through `parseSnippet` alone, so
-// one test is enough.
+// load-time check pinned above, reached through `parseSnippet` alone, so one
+// test is enough.
 @("inlineasm.loadDiagnostic.templateMixinFailsLoad")
 unittest {
     parseSnippet(q{
