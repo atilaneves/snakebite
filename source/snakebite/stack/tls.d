@@ -29,6 +29,9 @@ import snakebite.ffi.callplanstore: CallPlanStore;
 public struct TlsDescriptor {
     public const(void)* templateBytes;
     public size_t size;
+    // The alignment that native code gives the variable: each thread's copy
+    // has it.
+    public uint alignment;
     // Set when the variable's storage is native (a dependency image's
     // own thread-local, or an `extern` one), or can be (a variable of a
     // template instance, which has `templateBytes` too): the linker name
@@ -123,11 +126,14 @@ public struct TlsSlots {
             entry.bytes = native;
         else {
             import core.memory: GC;
-            import core.stdc.stdlib: calloc;
             import core.stdc.string: memcpy;
+            import core.sys.posix.stdlib: posix_memalign;
+            import std.algorithm: max;
 
-            entry.bytes = calloc(1, descriptor.size ? descriptor.size : 1);
-            if (entry.bytes is null)
+            // `posix_memalign` takes no alignment below a pointer's.
+            const alignment = max(descriptor.alignment, (void*).sizeof);
+            if (posix_memalign(&entry.bytes, alignment,
+                    max(descriptor.size, 1)) != 0)
                 internalFailure("out of memory for a thread-local variable");
             memcpy(entry.bytes, descriptor.templateBytes, descriptor.size);
             if (descriptor.size)

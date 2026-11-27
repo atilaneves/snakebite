@@ -536,7 +536,7 @@ public struct NativeData {
         if (auto found = variable in _statics)
             return *found;
 
-        const facts = typeFacts(variable.type);
+        const facts = storageFacts(variable);
         if (variable.isThreadLocalStorage)
             return Placed(_store.tlsSlots.slotFor(
                 cast(const(TlsDescriptor)*) tlsDescriptorOf(variable).ptr));
@@ -633,7 +633,7 @@ public struct NativeData {
             }
             // An initializer that refers to its own variable reaches this
             // again, and finds the storage that `buildInitialBytes` holds.
-            const own = buildInitialBytes(variable, typeFacts(variable.type));
+            const own = buildInitialBytes(variable, storageFacts(variable));
             name = planStore.names.namedWithOwn(nativeSymbolName(variable), 0,
                 variable.toString, own.ptr, own.where);
             if (!(variable in _storageNames))
@@ -662,7 +662,7 @@ public struct NativeData {
                 descriptor = *found;
                 return;
             }
-            const facts = typeFacts(variable.type);
+            const facts = storageFacts(variable);
             string nativeName;
             const(char)[] declaredBy;
             // Another object defines a native variable, and can define one
@@ -699,6 +699,7 @@ public struct NativeData {
             descriptor = reserve(descriptorFacts, variable);
             auto bytes = cast(ubyte*) descriptor.ptr;
             (cast(TlsDescriptor*) bytes).size = facts.size;
+            (cast(TlsDescriptor*) bytes).alignment = facts.alignment;
             if (nativeName.length) {
                 storeString(bytes + TlsDescriptor.nativeName.offsetof,
                     nativeName);

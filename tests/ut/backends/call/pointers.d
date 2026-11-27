@@ -1222,6 +1222,31 @@ static foreach (backend; Matrix!(
 }
 
 
+// The storage of a variable has the explicit alignment of its declaration,
+// else the alignment of its type, which is the explicit alignment of the
+// type when it has one. `before` puts the next free byte at 8 modulo 16.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "dmd's CTFE cannot take the address of a global to cast it at compile time"),
+)) {
+    @("pointers.staticVariable.explicitAlignment." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        0.shouldBeStatusOf!(backend, q{
+            align(16) struct Pair { ulong low, high; }
+            shared ulong before;
+            shared Pair slot;
+            align(16) shared ulong[2] pairOfWords;
+            void main() {
+                assert(Pair.alignof == 16);
+                assert(cast(size_t) &slot % 16 == 0, "slot");
+                assert(cast(size_t) &pairOfWords % 16 == 0, "pairOfWords");
+            }
+        });
+    }
+}
+
+
 // ADR-0006's first test (finding 3.1, partial): a real task pool -
 // `std.parallelism`'s, the same kind unit-threaded's own runner uses,
 // with no single-threaded setting anywhere - calls many distinct guest

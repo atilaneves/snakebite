@@ -54,6 +54,20 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     return facts;
 }
 
+// The facts for the storage of `variable`: those of its type, with the
+// alignment that native code gives the storage. dmd's semantic analysis
+// sets the alignment of a declaration that has none to the explicit
+// alignment of its type, and dmd's glue gives the symbol that alignment, or
+// the natural alignment of the type when there is no explicit one.
+public TypeFacts storageFacts(
+    imported!"dmd.declaration".VarDeclaration variable,
+) {
+    auto facts = typeFacts(variable.type);
+    if (!variable.alignment.isDefault)
+        facts.alignment = variable.alignment.get;
+    return facts;
+}
+
 // dmd's `toBasetype`, for code that runs after the frontend. Only an enum
 // has a base type other than itself, and to find it is frontend work: dmd
 // can resolve the enum's base, and can make, merge and mangle a qualified
