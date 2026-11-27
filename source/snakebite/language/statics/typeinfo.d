@@ -9,13 +9,12 @@ import snakebite.failure.report: internalFailure;
 
 // The suffixes of the symbols that dmd gives the data of a type: the initial
 // image of a class, its vtable, its class information, the class information
-// of an interface, and the type information of any other type (with the
-// prefix `TypeInfo_` and the mangled name of the type before it).
+// of an interface. The symbol of the type information of any other type comes
+// from the frontend (`typeInfoSymbol`).
 private enum initSuffix = "6__initZ";
 private enum vtableSuffix = "6__vtblZ";
 private enum classInfoSuffix = "7__ClassZ";
 private enum interfaceInfoSuffix = "11__InterfaceZ";
-private enum typeInfoSuffix = initSuffix;
 
 
 // DMD emits no linked metadata for guest declarations. Keep their fallback
@@ -279,7 +278,7 @@ public struct RuntimeTypes {
         // dmd emits no type information that druntime defines
         // (`builtinTypeInfo`): only druntime defines it.
         if (inFrontend!"builtinTypeInfo"(type))
-            return druntimeTypeInfo(type.deco.toDString);
+            return druntimeTypeInfo(type);
         auto own = ownInfo(type);
         if (isRootOwned(type) || own.name !is null || type.vtinfo is null)
             return own;
@@ -438,27 +437,24 @@ public struct RuntimeTypes {
         return Linked!TypeInfo.held(info);
     }
 
-    // The type information that druntime defines for the type whose mangled
-    // name is `mangled`, as the name of its symbol, which dmd gives it
-    // (`TypeInfoDeclaration`).
-    private Linked!TypeInfo druntimeTypeInfo(in char[] mangled) {
-        const symbol = typeInfoSymbol(mangled);
+    // The type information that druntime defines for `type`, as the name of
+    // its symbol, which dmd gives it (`TypeInfoDeclaration`).
+    private Linked!TypeInfo druntimeTypeInfo(Type type) {
+        const symbol = typeInfoSymbol(type);
         return Linked!TypeInfo.named(plans.names.named(symbol));
     }
 
-    // The symbol of the type information of the type with the mangled name
-    // `mangled`, as dmd names it (`TypeInfoDeclaration`).
-    private static string typeInfoSymbol(in char[] mangled) @safe pure nothrow {
-        import std.conv: text;
+    // The symbol of the type information of `type`, which the frontend names
+    // (`TypeInfoDeclaration`). Only a type that is not an associative array
+    // gets here: dmd needs a scope to make the declaration of that one, and
+    // the program has none.
+    private static string typeInfoSymbol(Type type) {
+        import snakebite.frontend.ast: Loc;
+        import snakebite.frontend.compiler: inFrontend;
 
-        enum prefix = "TypeInfo_";
-        return text(
-            "_D",
-            prefix.length + mangled.length,
-            prefix,
-            mangled,
-            typeInfoSuffix,
-        );
+        if (type.vtinfo is null)
+            inFrontend!"genTypeInfo"(null, Loc.initial, type, null);
+        return type.vtinfo.ident.toString.idup;
     }
 
     // The symbol of the class information of `declaration`.
@@ -621,14 +617,12 @@ public struct RuntimeTypes {
     public void makeAndDefineTypeInfo(Declaration)(Declaration declaration)
     if (is(Declaration == StructDeclaration)
             || is(Declaration == EnumDeclaration)) {
-        import snakebite.frontend.ast: toDString;
-
         // `auto`: `isRootOwned` and `get` take a mutable `Type`.
         auto type = declaration.type;
         if (!isRootOwned(type))
             return;
         const info = cast(const(void)*) get(type).held;
-        _data.defineSymbol(typeInfoSymbol(type.deco.toDString), info);
+        _data.defineSymbol(typeInfoSymbol(type), info);
     }
 
     // What `linkedClassInfo` needs of `declaration`, decided once.
