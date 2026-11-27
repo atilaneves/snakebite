@@ -14,13 +14,17 @@ import snakebite.native.value:
 
 // The facts for `type`, read from dmd exactly once by the caller
 // that builds this. `resolved`/`forceResolved` force any forward
-// reference `size`/`alignsize`/`toBasetype` below could still
-// resolve, under the frontend lock, before this asks dmd anything -
+// reference `size`/`alignsize`/`alignment`/`toBasetype` below could
+// still resolve, under the frontend lock, before this asks dmd anything -
 // see their own doc for why a call that finds nothing to force
-// needs no lock.
+// needs no lock. The alignment is the one of `type.alignof`: the explicit
+// alignment of the type when it has one, else its natural alignment
+// (dmd's `alignsize`). Native code built by ldc2 gives storage for a value
+// of the type, such as a local, a parameter or a temporary, that
+// alignment.
 public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     import dmd.astenums: Tarray, Tvector;
-    import dmd.typesem: hasPointers, isIntegral, isUnsigned, nextOf;
+    import dmd.typesem: alignment, hasPointers, isIntegral, isUnsigned, nextOf;
     import snakebite.frontend.compiler: forceIfNeeded;
 
     forceIfNeeded(() => resolved(type), () { forceResolved(type); });
@@ -51,22 +55,26 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
     facts.isIntegral = scalar && type.isIntegral;
     facts.isUnsigned = scalar && type.isUnsigned;
     facts.canHoldAddress = type.hasPointers;
-    return facts;
+    return withAlignment(facts, type.alignment);
 }
 
 // The facts for the storage of `variable`: those of its type, with the
-// alignment that native code gives the storage. dmd's semantic analysis
-// sets the alignment of a declaration that has none to the explicit
-// alignment of its type, and dmd's glue gives the symbol that alignment, or
-// the alignment that the type has with no `align` attribute when there is
-// no explicit one.
+// explicit alignment of the declaration when it has one. dmd's semantic
+// analysis sets the alignment of a declaration that has none to the
+// explicit alignment of its type, and dmd's glue gives the symbol that
+// alignment, or the alignment of the type when there is no explicit one.
 public TypeFacts storageFacts(
     imported!"dmd.declaration".VarDeclaration variable,
 ) {
-    // `auto`, not `const`: the alignment is replaced below.
-    auto facts = typeFacts(variable.type);
-    if (!variable.alignment.isDefault)
-        facts.alignment = variable.alignment.get;
+    return withAlignment(typeFacts(variable.type), variable.alignment);
+}
+
+private TypeFacts withAlignment(
+    TypeFacts facts,
+    in imported!"dmd.astenums".structalign_t alignment,
+) {
+    if (!alignment.isDefault)
+        facts.alignment = alignment.get;
     return facts;
 }
 

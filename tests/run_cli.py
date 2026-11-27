@@ -4301,6 +4301,52 @@ def test_build_module_with_a_dependency_runs_as_bin_sb(
         assert "other 42" in guest_lines(built), output(built)
 
 
+# With `--build=module`, two definitions of one symbol that are not template
+# instances are an error that names the symbol, and no unit test runs: a
+# native link that fails gives no program. The native reference is the link of
+# ldc2, the compiler that builds `bin/sb`; ADR-0021 says why dmd is not the
+# reference here.
+@pytest.mark.parametrize(
+    "symbol, definition_in_a, definition_in_b",
+    [
+        (
+            "same",
+            "extern(C) int same() { return 1; }",
+            "extern(C) int same() { return 2; }",
+        ),
+        (
+            "sameDatum",
+            "extern(C) __gshared int sameDatum = 1;",
+            "extern(C) __gshared int sameDatum = 2;",
+        ),
+        ("_Dmain", "void main() {}", ""),
+    ],
+)
+def test_build_module_two_definitions_of_one_symbol_are_an_error(
+    tmp_path: Path, symbol: str, definition_in_a: str, definition_in_b: str,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl",
+          dub_library("build-module-two-definitions")())
+    unittest_source = (
+        'unittest { import std.stdio: writeln; writeln("a test"); }')
+    write(app / "source" / "a.d",
+          f"module a;\n{definition_in_a}\n{unittest_source}\n")
+    write(app / "source" / "b.d", f"module b;\n{definition_in_b}\n")
+
+    native = subprocess.run(
+        ["dub", "test", "--compiler=ldc2", "--build-mode=singleFile", "-q"],
+        capture_output=True, check=False, text=True, timeout=300, cwd=app)
+    assert native.returncode != 0, output(native)
+    assert symbol in native.stdout + native.stderr, output(native)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+
+    assert built.returncode == 1, output(built)
+    assert f"multiple definition of the symbol `{symbol}`" in built.stderr, \
+        output(built)
+    assert "a test" not in built.stdout, output(built)
+
+
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(
