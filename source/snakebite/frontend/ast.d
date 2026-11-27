@@ -39,7 +39,7 @@ public import dmd.declaration: Declaration, ThisDeclaration,
     TypeInfoClassDeclaration, TypeInfoDeclaration, VarDeclaration;
 public import dmd.denum: EnumDeclaration;
 public import dmd.dmodule: Module;
-public import dmd.dstruct: StructDeclaration;
+public import dmd.dstruct: StructDeclaration, UnionDeclaration;
 public import dmd.dsymbol: Dsymbol;
 public import dmd.dtemplate: TemplateDeclaration, TemplateInstance;
 public import dmd.expression: AddAssignExp, AddExp, AddrExp, AndAssignExp,

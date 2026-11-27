@@ -6,6 +6,7 @@ private:
 
 import snakebite.failure.report: internalFailure;
 import snakebite.ffi.callplanstore: CallPlanStore;
+import snakebite.ffi.names: DefinitionHere;
 
 
 // A thread-local guest variable's compile-time-constant description
@@ -108,7 +109,17 @@ public struct TlsSlots {
 
         Entry entry = Entry(key);
         void* native;
-        if (descriptor.nativeName.length) {
+        // A variable that an SBC file defines has one copy on each thread,
+        // made from the descriptor of the definition, as a linker gives a
+        // thread-local symbol one place in the thread-local block of the
+        // process. It goes before the process, as `CallPlanStore.addressOf`
+        // does for any other symbol.
+        const here = descriptor.nativeName.length
+            ? _store.names.definitionHere(descriptor.nativeName)
+            : null;
+        if (here !is null)
+            native = slotFor(descriptorOf(*here)).ptr;
+        else if (descriptor.nativeName.length) {
             // Resolved on this thread: a thread-local symbol's address
             // is the calling thread's own, so another thread's answer
             // would be that thread's copy. A variable that the program
@@ -145,6 +156,26 @@ public struct TlsSlots {
         entry.size = descriptor.size;
         insert(entry);
         return entry.bytes[0 .. entry.size];
+    }
+
+    // The descriptor of a thread-local variable that an SBC file defines,
+    // which is the datum of its definition
+    // (`NativeData.makeAndDefineStorage`): one descriptor gives each thread
+    // its copy, as the template of a thread-local symbol does in native code.
+    private static const(TlsDescriptor)* descriptorOf(
+        in DefinitionHere definition,
+    ) {
+        import snakebite.ffi.names: GuestFunction;
+        import snakebite.native.address: DatumRef;
+        import snakebite.native.staticstore: startOf;
+        import std.sumtype: match;
+
+        return definition.match!(
+            (in GuestFunction guest) => internalFailure(
+                "a thread-local variable is defined by a function",
+            ),
+            (in DatumRef datum) => cast(const(TlsDescriptor)*) startOf(datum),
+        );
     }
 
     private Entry* find(const(void)* key) {

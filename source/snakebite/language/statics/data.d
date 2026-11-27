@@ -562,6 +562,36 @@ public struct NativeData {
         return bytes;
     }
 
+    // Makes the storage of `variable`, which the object of its module holds
+    // (`hasStorageInObject`), and defines its symbol in the SBC file when
+    // only the root modules define the variable, so that the other SBC files
+    // of the program reach the storage by name (ADR-0021). The definition of
+    // a thread-local variable is its descriptor, from which each thread
+    // makes its own copy (`TlsSlots.slotFor`).
+    public void makeAndDefineStorage(VarDeclaration variable) {
+        import snakebite.frontend.dmd.mangle: nativeSymbolName;
+
+        if (_whereDefined(variable) != Definition.rootOwned)
+            return;
+        const placed = variable.isThreadLocalStorage
+            ? tlsDescriptorOf(variable)
+            : storageOf(variable);
+        defineSymbol(nativeSymbolName(variable), placed.ptr);
+    }
+
+    // The datum that starts at `start` is the definition of `symbol` in the
+    // SBC file. Only a compile to an SBC file defines symbols: a compile to
+    // memory refers to each datum by its address, and no other SBC file
+    // needs its name.
+    public void defineSymbol(in string symbol, const(void)* start) {
+        import snakebite.ffi.names: DefinitionHere;
+
+        if (!recordRelocs)
+            internalFailure("a compile to memory defines a symbol");
+        const datum = addressOfData(start).target.datum;
+        planStore.names.defineHere(symbol, DefinitionHere(datum));
+    }
+
     // The storage of `variable` as the start data of the program hold it
     // (`Backend.staticStorage`). A save makes nothing ready to run: storage
     // that another object defines is the name of its symbol, as in a word,
