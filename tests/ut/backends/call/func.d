@@ -375,6 +375,117 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The temporary that holds a function result, or a struct literal, has the
+// alignment of its type, which is the explicit alignment of the type when it
+// has one, so `this` of a method that is called on it has that alignment.
+// Small locals come first, so that a correct address is not the result of
+// chance. dmd, which compiles the native arm of this test, does not align
+// this temporary; ldc2, the compiler that builds `sb` and so the reference,
+// does. The sibling test below pins the native behaviour that dmd and ldc2
+// share.
+static foreach (backend; Matrix!(
+    Omit!(
+        Native,
+        Because.diverges,
+        "dmd does not align this temporary; ldc2, the reference, does",
+    ),
+    Omit!(
+        Ctfe,
+        Because.inexpressible,
+        "CTFE cannot convert the address of `this` to an integer",
+    ),
+)) {
+    @("call.alignedTemporaryReceiver." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22L.shouldBeRetOf!(
+            backend,
+            q{
+                align(16) struct Pair {
+                    ulong low, high;
+
+                    long first() const {
+                        assert(cast(size_t) &this % 16 == 0, "align 16");
+                        return low;
+                    }
+                }
+
+                align(64) struct Line {
+                    ulong[8] words;
+
+                    long first() const {
+                        assert(cast(size_t) &this % 64 == 0, "align 64");
+                        return words[0];
+                    }
+                }
+
+                Pair makePair() {
+                    return Pair(1, 2);
+                }
+
+                Line makeLine() {
+                    return Line([3, 4, 5, 6, 7, 8, 9, 10]);
+                }
+
+                long answer() {
+                    ubyte one = 1;
+                    ubyte two = 2;
+                    const fromCall = makePair.first + makeLine.first;
+                    ubyte three = 3;
+                    const fromPair = Pair(5, 6).first;
+                    const fromLine = Line([7, 8, 9, 10, 11, 12, 13, 14]).first;
+                    return fromCall + fromPair + fromLine + one + two + three;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+@("call.alignedTemporaryReceiver.Native.diverges")
+@Tags("Native")
+unittest {
+    22L.shouldBeRetOf!(
+        Native,
+        q{
+            align(16) struct Pair {
+                ulong low, high;
+
+                long first() const {
+                    return low;
+                }
+            }
+
+            align(64) struct Line {
+                ulong[8] words;
+
+                long first() const {
+                    return words[0];
+                }
+            }
+
+            Pair makePair() {
+                return Pair(1, 2);
+            }
+
+            Line makeLine() {
+                return Line([3, 4, 5, 6, 7, 8, 9, 10]);
+            }
+
+            long answer() {
+                ubyte one = 1;
+                ubyte two = 2;
+                const fromCall = makePair.first + makeLine.first;
+                ubyte three = 3;
+                const fromPair = Pair(5, 6).first;
+                const fromLine = Line([7, 8, 9, 10, 11, 12, 13, 14]).first;
+                return fromCall + fromPair + fromLine + one + two + three;
+            }
+        },
+        "answer",
+    );
+}
+
 // Every D integral width, both signednesses, `bool` and a character type,
 // all in one parameter list - a backend that got any one parameter's
 // offset, width or signedness wrong reads back a different value for it.
