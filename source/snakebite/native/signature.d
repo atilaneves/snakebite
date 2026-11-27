@@ -80,8 +80,18 @@ package(snakebite) struct ArgumentFlow {
     package(snakebite) const(Shape)[] surplus;
     // The named parameters of the callee.
     package(snakebite) const(Shape)[] callee;
-    // Both sides pass a context first, in an integer register.
-    package(snakebite) bool context;
+    // Whether the caller passes a context first, in an integer register.
+    // When only the callee has a context, the context reads the argument in
+    // that register.
+    package(snakebite) bool declaredContext;
+    // Whether the callee reads a context first, from an integer register.
+    // When only the caller has a context, the parameter in that register
+    // reads it.
+    package(snakebite) bool calleeContext;
+
+    // What `sourceOf` and `contextSource` give for the context of the
+    // caller, which is not one of the arguments.
+    package(snakebite) enum size_t contextArgument = size_t.max - 1;
 
     package(snakebite) size_t argumentCount() const {
         return declared.length + surplus.length;
@@ -95,19 +105,21 @@ package(snakebite) struct ArgumentFlow {
     // The argument that the callee parameter `parameter` reads, or
     // `size_t.max` when no argument is in its register.
     package(snakebite) size_t sourceOf(in size_t parameter) const {
-        const wanted = locate(callee, null, parameter);
-        foreach (index; 0 .. argumentCount)
-            if (locate(declared, surplus, index) == wanted)
-                return index;
-        return size_t.max;
+        return sourceAt(locate(callee, null, parameter, calleeContext));
     }
 
-    // The arguments that no named parameter reads, in order.
+    // The argument that the context of the callee reads, or `size_t.max`
+    // when no argument is in its register.
+    package(snakebite) size_t contextSource() const {
+        return sourceAt(Location(Location.Kind.integer, 0));
+    }
+
+    // The arguments that no named parameter and no context reads, in order.
     package(snakebite) size_t[] unread() const {
         auto result = new size_t[](argumentCount);
         size_t count;
         foreach (index; 0 .. argumentCount) {
-            bool isRead;
+            bool isRead = calleeContext && contextSource == index;
             foreach (parameter; 0 .. callee.length)
                 isRead = isRead || sourceOf(parameter) == index;
             if (!isRead)
@@ -123,10 +135,24 @@ package(snakebite) struct ArgumentFlow {
         size_t index;
     }
 
+    private size_t sourceAt(in Location wanted) const {
+        if (declaredContext && wanted == Location(Location.Kind.integer, 0))
+            return contextArgument;
+        foreach (index; 0 .. argumentCount)
+            if (locate(declared, surplus, index, declaredContext) == wanted)
+                return index;
+        return size_t.max;
+    }
+
+    // Where the shape at `position` of `first ~ second` goes, after a
+    // context when `hasContext`.
     private Location locate(
-        in Shape[] first, in Shape[] second, in size_t position,
+        in Shape[] first,
+        in Shape[] second,
+        in size_t position,
+        in bool hasContext,
     ) const {
-        size_t integers = context ? 1 : 0;
+        size_t integers = hasContext ? 1 : 0;
         size_t floats;
         size_t stack;
         const shapeAt = (in size_t index) =>

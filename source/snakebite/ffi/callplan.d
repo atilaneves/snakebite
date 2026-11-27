@@ -51,6 +51,7 @@ package struct Pending {
 // it into the frame, call that one entry once, and read the result back.
 public struct CallPlan {
     import snakebite.ffi.argumentplan: ArgumentPlan, Register;
+    import snakebite.ffi.names: Name;
     import snakebite.ffi.sysv:
         CallEntry, CallFrame, snakebite_ffi_call_sysv_amd64,
         snakebite_ffi_call_sysv_amd64_integer;
@@ -159,6 +160,11 @@ public struct CallPlan {
     // What binds a plan that the process had no code for when it was made;
     // null for any other plan. `CallPlanStore.bound` reads it.
     package const(Pending)* pending;
+
+    // The name of the code of a plan that was made without code, or null.
+    package const(Name)* name() const @safe pure nothrow @nogc {
+        return pending is null ? null : pending.name;
+    }
 
     // Sets the address of a plan that was made without code. The plan is
     // `const` to every caller of a call, and binding is the one write that

@@ -90,6 +90,15 @@ public struct CallSite {
         // and the like), which has no host symbol FFI could ever find, so this VM calls the entry
         // directly instead of going through `executeCallPlan`.
         builtin,
+        // A call that a compile to a file makes to a function that the
+        // compile does not define: a call to the name of `nativePlan`, made
+        // from the signature alone. When the program is made ready to run,
+        // `connect` makes it a `guest` or a `native` site, so no `named`
+        // site runs. The member stays because the file holds the site before
+        // its definition is known: the site keeps the arguments of a guest
+        // definition and those of a native one, which differ for a variadic
+        // call, and a `guest` or a `native` site keeps one list.
+        named,
     }
 
     // `callee` already compiled, called directly.
@@ -210,6 +219,83 @@ public struct CallSite {
         site.nativeArgs = nativeArgs;
         site.returnWidth = returnWidth;
         return site;
+    }
+
+    // A call to the code that `nativePlan` names, from a declaration with
+    // `signature` and a context when `hasContext`. `args` are what a guest
+    // callee of the signature reads in its frame, and `nativeArgs` what the
+    // plan reads. The two lists differ only for a variadic call, which has
+    // no window: the frame of a variadic guest callee takes the `TypeInfo`
+    // tuple of a D variadic and a cursor over the extra values, and the plan
+    // takes the extra values themselves. A site with a window has one list
+    // for both.
+    public static CallSite named(
+        const(CallPlan)* nativePlan,
+        const(Signature)* signature,
+        Arg[] args,
+        Arg[] nativeArgs,
+        in size_t returnWidth,
+        in bool hasContext,
+    ) {
+        CallSite site;
+        site.kind = Kind.named;
+        site.nativePlan = nativePlan;
+        site.value.signature = signature;
+        site.args = args;
+        site.nativeArgs = nativeArgs;
+        site.returnWidth = returnWidth;
+        site.hasContext = hasContext;
+        return site;
+    }
+
+    // Makes a `named` site the call to the definition of its name, as a
+    // linker connects a reference: a `guest` site when an SBC file defines
+    // the name, else a `native` site, whose plan binds the code of the name
+    // or throws the failure of a symbol that no object defines. A site of
+    // any other kind stays as it is. A `native` site that the compiler makes
+    // by itself, such as a call to a bounds failure function of druntime,
+    // can call a name that an SBC file defines: its plan is bound here,
+    // because `bindNewPlans` does not bind the plan of such a name.
+    package void connect(ref const CallPlanStore plans) {
+        final switch (kind) with (Kind) {
+        case native:
+            CallPlanStore.bindDefinedHere(nativePlan);
+            return;
+        case guest, indirect, value, builtin:
+            return;
+        case named:
+            break;
+        }
+        const definition = plans.guestDefinitionOf(nativePlan);
+        if (definition is null) {
+            kind = Kind.native;
+            args = nativeArgs;
+            return;
+        }
+        kind = Kind.guest;
+        // The names of a program (`snakebite.ffi.names`) keep a guest
+        // function as an untyped address: the module of names is below the
+        // bytecode backend and does not know its types.
+        callee = cast(const(Function)*) definition;
+        // The window was laid out from the declaration, before the callee
+        // was known. A callee that a window cannot hold, or that reads the
+        // arguments by register, takes the generic path, which copies the
+        // arguments out of the window.
+        if (!callee.windowCallable || readsByRegister(*callee))
+            windowSlot = size_t.max;
+    }
+
+    // Whether `callee`, the definition of the name of a `guest` site that
+    // `connect` made, has another signature or another context than the
+    // declaration that the call uses. Native code then reads each parameter
+    // from the register that the caller filled, and so does the call
+    // (`redirectArguments`).
+    package bool readsByRegister(ref const Function callee) const
+            @safe pure nothrow @nogc {
+        const calleeHasContext = callee.contextOffset != size_t.max;
+        return value.signature !is null
+            && (value.signature !is callee.signature
+                || hasContext != calleeHasContext);
     }
 
     // No lazy-preparation overload: unlike `native`, a builtin's entry
@@ -2062,12 +2148,12 @@ private const(Instruction)* runColdThrow(Decoded)(ref Decoded execution) {
 }
 
 
-// Calls `callSites[execution.source]`'s callee, one of the four
-// `CallSite.Kind`s:
-// a guest callee already compiled to `Instruction`s, a native one reached
-// through a prepared FFI plan, an indirect one whose own address sits in
-// the caller's frame, or a builtin one reached through its own resolved
-// entry directly. `execution.width` is unused.
+// Calls the callee of `callSites[execution.source]`, of one of the
+// `CallSite.Kind`s that run: a guest callee compiled to `Instruction`s
+// (`guest`), a native one reached through a prepared FFI plan (`native`), one
+// whose address is in the frame of the caller (`indirect`, and `value` for a
+// call through a function pointer or a delegate), or a builtin one reached
+// through its resolved entry (`builtin`). `execution.width` is unused.
 private alias opCallGeneral =
     executeCall!(runCall, OperandKind.result, OperandKind.immediate);
 
@@ -2581,8 +2667,10 @@ private const(Instruction)* runCall(Decoded)(
     const site = &execution.callSites[execution.source];
     final switch (site.kind) with (CallSite.Kind) {
     case guest:
-        return callFunction(execution, *site,
-            site.callee !is null ? site.callee : site.prepareGuest());
+        const callee = site.callee !is null ? site.callee : site.prepareGuest();
+        if (site.readsByRegister(*callee))
+            return callFunction!true(execution, *site, callee);
+        return callFunction(execution, *site, callee);
     case indirect:
         return runIndirect!false(execution, site);
     case value:
@@ -2596,6 +2684,8 @@ private const(Instruction)* runCall(Decoded)(
             result, values.ptr, values.length,
         );
         return execution.next;
+    case named:
+        internalFailure("`Program.complete` connects each call to a name");
     case builtin:
         auto arguments = gatherArguments(execution, site.args);
         auto values = arguments.values;
@@ -2639,10 +2729,11 @@ private const(Instruction)* runIndirect(bool isValue, Decoded)(
 }
 
 
-// A call through a value whose type has another signature than the callee.
-// The context goes to the context of the callee, and each parameter takes the
-// argument that is in its register. A C-variadic callee gets a cursor over
-// the arguments that no named parameter reads.
+// A call through a value whose type has another signature than the callee,
+// or a call to a name whose definition has another signature or context than
+// the declaration that the call uses (`CallSite.readsByRegister`). Each
+// parameter takes the argument that is in its register. A C-variadic callee
+// gets a cursor over the arguments that no named parameter reads.
 pragma(inline, false)
 private void redirectArguments(Decoded)(
     ref Decoded execution, scope const ref CallSite site,
@@ -2657,32 +2748,47 @@ private void redirectArguments(Decoded)(
     const declared = value.signature.parameters.length;
     const first = site.hasContext ? 1 : 0;
     const calleeHasContext = callee.contextOffset != size_t.max;
+    // A call to a name passes a context as native code does: in the first
+    // integer register, which the other side can read as an argument or a
+    // parameter. A call through a value passes a context only to a callee
+    // that reads one, because a function literal that converts to a delegate
+    // can have no context slot (`callFunction`).
+    const byRegister = site.kind == CallSite.Kind.guest;
+    const bothHaveContext = site.hasContext && calleeHasContext;
+    const declaredContext = byRegister ? site.hasContext : bothHaveContext;
+    const calleeContext = byRegister ? calleeHasContext : bothHaveContext;
     const flow = ArgumentFlow(
-        value.signature.parameters, value.surplusShapes, parameters,
-        site.hasContext && calleeHasContext);
+        value.signature.parameters,
+        value.surplusShapes,
+        parameters,
+        declaredContext,
+        calleeContext,
+    );
     const(ubyte)* addressOf(in size_t argument) {
+        if (argument == ArgumentFlow.contextArgument)
+            return execution.storage(site.args[0].callerOffset);
         return execution.storage(argument < declared
             ? site.args[first + argument].callerOffset
             : value.surplus[argument - declared].callerOffset);
     }
+    size_t sizeOf(in size_t argument) {
+        return argument == ArgumentFlow.contextArgument
+            ? size_t.sizeof
+            : flow.argumentAt(argument).size;
+    }
+    // A parameter with no argument in its register is zero.
+    void read(ubyte* place, in size_t size, in size_t source) {
+        memset(place, 0, size);
+        if (source != size_t.max)
+            memcpy(place, addressOf(source), min(size, sizeOf(source)));
+    }
 
     if (calleeHasContext) {
-        // A function pointer has no context: its callee gets a null one.
-        auto context = frame + callee.contextOffset;
-        if (site.hasContext)
-            memcpy(context, execution.storage(site.args[0].callerOffset),
-                size_t.sizeof);
-        else
-            memset(context, 0, size_t.sizeof);
+        const source = calleeContext ? flow.contextSource : size_t.max;
+        read(frame + callee.contextOffset, size_t.sizeof, source);
     }
-    foreach (i, shape; parameters) {
-        auto place = frame + callee.parameterOffsets[i];
-        memset(place, 0, shape.size);
-        const source = flow.sourceOf(i);
-        if (source != size_t.max)
-            memcpy(place, addressOf(source),
-                min(shape.size, flow.argumentAt(source).size));
-    }
+    foreach (i, shape; parameters)
+        read(frame + callee.parameterOffsets[i], shape.size, flow.sourceOf(i));
 
     if (callee.cursorOffset != size_t.max) {
         const unread = flow.unread;

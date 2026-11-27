@@ -4013,6 +4013,66 @@ def test_build_module_runs_as_native_code_built_by_module(
     assert messages() == 2
 
 
+# With `--build=module`, a call from one module to a function that a
+# different module defines gives what native code built one module at a time
+# gives: when the declaration that the call uses has other parameters or
+# another hidden `this` than the definition, the definition reads its
+# parameters from the registers that the caller fills. The call also reaches a
+# definition that needs a closure, and a D-variadic definition that reads its
+# extra arguments.
+def test_build_module_call_to_a_name_runs_as_native_code(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl",
+          f'name "{dub_name("build-module-names")}"\ntargetType "library"\n')
+    write(app / "source" / "b.d", """
+        module b;
+        import core.vararg;
+        extern(C) int addc(int a, int b) { return a + b; }
+        extern(C) long widec(long a, long b) { return a * 1000 + b; }
+        struct S {
+            long v;
+            pragma(mangle, "ctxf") extern(C) long f(long x) { return x; }
+        }
+        extern(C) long ctxg(long a, long b) { return b; }
+        int delegate() keep(int x) { return () => x; }
+        int total(int first, ...) {
+            int sum = first;
+            foreach (i; 0 .. _arguments.length)
+                sum += va_arg!int(_argptr);
+            return sum;
+        }
+        """)
+    write(app / "source" / "a.d", """
+        module a;
+        import b: keep, total;
+        import std.stdio: writeln;
+        extern(C) int addc(long, long);
+        extern(C) long widec(int, int);
+        extern(C) long ctxf(long, long);
+        struct T { pragma(mangle, "ctxg") extern(C) long g(long); }
+        unittest {
+            writeln(addc(40, 2));
+            writeln(widec(3, 4));
+            writeln(ctxf(1, 2));
+            T t;
+            writeln(t.g(7));
+            writeln(keep(5)());
+            writeln(total(1, 2, 3));
+        }
+        """)
+    native = subprocess.run(
+        ["dub", "test", "--compiler=dmd", "--build-mode=singleFile", "-q"],
+        capture_output=True, check=False, text=True, timeout=300, cwd=app)
+    assert native.returncode == 0, output(native)
+    assert native.stdout.splitlines() == ["42", "3004", "2", "7", "5", "6"], \
+        output(native)
+    built = run_sb("--build=module", str(app), cwd=tmp_path)
+    assert built.returncode == 0, output(built)
+    assert guest_lines(built) == native.stdout.splitlines(), output(built)
+
+
 # A program saved with the perf map on names its JIT code in the perf map
 # after a load as the same program compiled and run from RAM does.
 def test_loaded_program_names_jit_code_as_the_compiled_program(

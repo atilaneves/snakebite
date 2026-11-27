@@ -77,11 +77,14 @@ that gives `sb` a rule for it, does not follow the model.
    with imported modules, with the signature of a function in a different
    module, and with a declaration that has no body, is what the dmd
    frontend already does. `sb` adds nothing there.
-6. The child gets the list of bytecode modules and loads no dependency
-   image. It uses the list for one decision: a call to a function of a
-   bytecode module is a call to bytecode, and a call to a function of any
-   other module is a native call. For a declaration with no body, the
-   compile does not decide where the definition is.
+6. The child loads no dependency image. A call to a function that the
+   compile does not define is a call to its name, made from the signature
+   of the function only. The compile does not know or ask where the
+   definition is. When the program is made ready to run (item 10), the
+   name is connected to bytecode when an `.sbc` file defines it, else to
+   native code. The owner: "It's a call to a function defined elsewhere,
+   it's the job of the linker or whatever maps names to actual functions
+   to connect it to bytecode or native."
 7. The child writes to the `.sbc` file: the functions and data that the
    modules of its compilation unit define; each template instance that the
    compile made, in the entry of the module that declares the template (as
@@ -234,6 +237,6 @@ closed. Its branch stays as a reference of what not to do.
   the program itself.
 - A rebuild compiles all functions of a stale compilation unit, not only
   the functions that the run calls.
-- A call to a function of a module that is not a bytecode module is a
-  native call, so a part of a project that is compiled to native code later
-  needs no change of the compile.
+- A call to a function that the compile does not define is connected to its
+  definition when the program is made ready to run, so a part of a project
+  that is compiled to native code later needs no change of the compile.

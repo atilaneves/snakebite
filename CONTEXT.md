@@ -36,10 +36,13 @@ are not root-owned are called across the barrier.
 **Defined elsewhere**:
 A declaration that the compile of the **Root modules** does not define: one
 with no body or an `extern` one, and each declaration of a
-dependency module that its archive defines. A call to it crosses the barrier.
-A missing symbol for it is an error when code that uses it runs, not when the
-program is made ready to run, where the link of a native build fails
-(ADR-0017). Compare **Definition**.
+dependency module that its archive defines. A call to it crosses the barrier,
+except in a compile to a file: there it is a call to its name, which the
+program connects to the bytecode of an **SBC file** that defines the name,
+else to native code, when the program is made ready to run. A missing symbol
+for it is an error when code that uses it runs, not when the program is made
+ready to run, where the link of a native build fails (ADR-0017). Compare
+**Definition**.
 
 **Definition**:
 The one decision, made for each declaration, of where it is defined
@@ -105,7 +108,9 @@ is the one that it has in dmd. Compare **Root-owned**.
 **Bytecode modules**:
 All the modules of the program that `sb` compiles to bytecode. The other
 modules are native code. A call to a function of a bytecode module is a call
-to bytecode; a call to a function of any other module is a native call.
+to bytecode, and a call to a function of any other module is a native call. A
+compile to RAM decides this. In a compile to a file, the program decides it
+when it is made ready to run (**Defined elsewhere**).
 _Avoid_: project modules
 
 **Static world**:

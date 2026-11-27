@@ -9,6 +9,7 @@ import snakebite.ffi.names: Linked, Name, Names;
 import snakebite.ffi.symbol: Resolver;
 import snakebite.image.dependency: DependencyImage;
 import snakebite.native.address: Target;
+import std.typecons: Flag, No, Yes;
 
 
 // The owner of the call plans of one backend, of the resolver that they bind
@@ -79,6 +80,14 @@ public struct CallPlanStore {
             }
         }
         return found is Name.absent ? null : found;
+    }
+
+    // The guest function that an SBC file defines for the code that `plan`
+    // names (`Names.defineHere`), or null.
+    public const(void)* guestDefinitionOf(const(CallPlan)* plan) const
+            @safe pure nothrow @nogc {
+        const name = plan.name;
+        return name is null ? null : names.definitionHere(name.symbol);
     }
 
     // The name of the symbol that `name` reaches: an entry that host code
@@ -305,8 +314,12 @@ public struct CallPlanStore {
     // symbol that it names, as a function that calls it is made ready to
     // run: a first call can then run where no allocation is allowed, in a
     // finalizer. A plan whose symbol no object defines stays unbound, and
-    // its call throws the failure. A plan is bound once; threads that bind
-    // the same plan write the same word.
+    // its call throws the failure. A plan of a symbol that an SBC file
+    // defines is not bound here: a call to that name is connected to the
+    // bytecode of the definition (`CallSite.connect`), and only a native site
+    // uses the entry through which native code calls the definition
+    // (`bindDefinedHere`). A plan is bound once; threads that bind the same
+    // plan write the same address.
     pragma(inline, true)
     public void bindNewPlans() {
         import core.atomic: atomicLoad, MemoryOrder;
@@ -327,18 +340,30 @@ public struct CallPlanStore {
         for (auto entry = cast(PlanEntry*) head;
                 entry !is null && entry !is cast(PlanEntry*) bound;
                 entry = entry.next)
-            bindIfPresent(&entry.plan);
+            bindIfPresent!(No.definedHere)(&entry.plan);
         cas(&_boundPlans, bound, head);
     }
 
-    private static void bindIfPresent(const(CallPlan)* plan) {
-        if (plan.address !is null || plan.pending is null)
+    // Binds `plan`, which a native site holds, when an SBC file defines the
+    // symbol that it names, as the function of the site is made ready to
+    // run: `bindNewPlans` leaves such a plan unbound. The address is the
+    // entry through which native code calls the definition.
+    public static void bindDefinedHere(const(CallPlan)* plan) {
+        bindIfPresent!(Yes.definedHere)(plan);
+    }
+
+    // Binds `plan` when the process or an SBC file has the symbol that it
+    // names, and an SBC file defines the symbol only if `definedHere`.
+    private static void bindIfPresent(Flag!"definedHere" definedHere)(
+        const(CallPlan)* plan,
+    ) {
+        const name = plan.name;
+        if (plan.address !is null || name is null)
             return;
-        const pending = plan.pending;
-        if (pending.name is null)
+        auto store = cast(CallPlanStore*) plan.pending.store;
+        if ((store.names.definitionHere(name.symbol) !is null) != definedHere)
             return;
-        if (auto address = (cast(CallPlanStore*) pending.store)
-                .addressIfPresent(cast(Name*) pending.name))
+        if (auto address = store.addressIfPresent(cast(Name*) name))
             plan.bindAddress(address);
     }
 
