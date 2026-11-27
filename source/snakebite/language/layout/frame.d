@@ -3,7 +3,7 @@ module snakebite.language.layout.frame;
 
 private:
 
-import snakebite.frontend.typefacts: typeFacts;
+import snakebite.frontend.typefacts: storageFacts, typeFacts;
 
 
 
@@ -44,7 +44,7 @@ package(snakebite) struct FrameLayout {
 
     // One parameter's slot: its offset into the frame, the facts needed
     // to place a value there, and whether it is `ref` - decided together,
-    // from the same `typeFacts` call, since a parameter's type never
+    // from the same `storageFacts` call, since a parameter's type never
     // changes between calls. For a `ref` parameter, `facts` are a
     // pointer's, not the parameter's own type's: a `ref` parameter
     // occupies a pointer slot in a compiled frame, the address of the
@@ -335,7 +335,7 @@ package(snakebite) struct FrameLayout {
     }
 
     // One slot `reserveSlot` just reserved: its offset into the frame,
-    // and the facts `typeFacts` already had to compute to know how
+    // and the facts `storageFacts` already had to compute to know how
     // big the slot was and how it had to be aligned - so a caller that
     // wants both, like a parameter's slot, gets them from the one call.
     package(snakebite) struct Slot {
@@ -349,17 +349,17 @@ package(snakebite) struct FrameLayout {
         return _allocatedSlots;
     }
 
-    // Reserves one slot for a value of `type` and returns its offset and
-    // facts. A parameter and a local differ in what they key the offset
-    // by, not in how the frame grows to fit them, so both come here.
+    // Reserves one slot for a value of `type` that no declaration with an
+    // `align` attribute owns, such as a parameter, and returns its offset
+    // and facts.
     private Slot reserveSlot(Type type) {
-        return reserveSlot(typeFacts(type));
+        return reserveSlot(storageFacts(type));
     }
 
-    // As above, for a caller that already knows the slot's facts rather
-    // than a `Type` to derive them from - a `ref` parameter's slot is a
-    // pointer's regardless of what it points to, so nothing about
-    // `parameter.type` is involved in sizing it.
+    // Reserves one slot with `facts` and returns its offset and facts. A
+    // parameter and a local differ in what they key the offset by, not in
+    // how the frame grows to fit them, so both come here. A `ref`
+    // parameter's slot is a pointer's regardless of what it points to.
     private Slot reserveSlot(in TypeFacts facts) {
         import std.algorithm: max;
 
@@ -514,7 +514,7 @@ package(snakebite) struct ClosureLayout {
                 ? TypeFacts.lazyArgument
                 : isRef
                     ? TypeFacts.pointer
-                    : typeFacts(variable.type);
+                    : storageFacts(variable);
             const offset = alignUp(closure.size, facts.alignment);
             closure._slots[variable] = Slot(offset, facts, isRef);
             closure.size = offset + facts.size;
@@ -693,7 +693,7 @@ extern(C++) private final class LocalsCollector:
     }
 
     private void collectCatchVariable(Catch catch_) {
-        const slot = _layout.reserveSlot(catch_.var.type);
+        const slot = _layout.reserveSlot(storageFacts(catch_.var));
         _layout._slotOf[catch_.var] =
             FrameLayout.VariableSlot(slot.offset, false);
     }
@@ -787,7 +787,7 @@ extern(C++) private final class LocalsCollector:
             : isRef
             ? _layout.reserveSlot(
                 TypeFacts.pointer)
-            : _layout.reserveSlot(variable.type);
+            : _layout.reserveSlot(storageFacts(variable));
         _layout._slotOf[variable] =
             FrameLayout.VariableSlot(
                 slot.offset, isRef, retains, isReturnPlace);

@@ -311,6 +311,57 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The storage of a parameter, of a local variable and of a variable in a
+// closure has the explicit alignment of its declaration, else the
+// alignment of its type, which is the explicit alignment of the type when
+// it has one. Each aligned variable comes after storage with a smaller
+// alignment (a `ubyte` parameter, the context pointer of the closure, or
+// the aligned variable before it, whose fields have an alignment of 8), so
+// that a correct address is not the result of chance. The parameter
+// asserts 16 bytes only: dmd, which builds the native arm, does not align a
+// parameter above that.
+static foreach (backend; Matrix!(
+    Omit!(Ctfe, Because.inexpressible,
+        "CTFE cannot convert a local variable's address to an integer"),
+)) {
+    @("call.explicitlyAlignedVariables." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2L.shouldBeRetOf!(backend, q{
+            align(16) struct Pair { ulong low, high; }
+
+            long read(ubyte before, Pair byValue) {
+                Pair pair;
+                align(16) ulong[2] words;
+                align(64) ulong line;
+                assert(cast(size_t) &byValue % 16 == 0, "parameter");
+                assert(cast(size_t) &pair % 16 == 0, "struct");
+                assert(cast(size_t) &words % 16 == 0, "declaration");
+                assert(cast(size_t) &line % 64 == 0, "align 64");
+                return before;
+            }
+
+            long delegate() capture(ubyte before) {
+                Pair pair;
+                align(16) ulong[2] words;
+                align(64) ulong line;
+                return () {
+                    assert(cast(size_t) &pair % 16 == 0, "closure struct");
+                    assert(cast(size_t) &words % 16 == 0,
+                        "closure declaration");
+                    assert(cast(size_t) &line % 64 == 0, "closure align 64");
+                    return long(before);
+                };
+            }
+
+            long answer() {
+                Pair pair;
+                return read(1, pair) + capture(1)();
+            }
+        }, "answer");
+    }
+}
+
 // Every D integral width, both signednesses, `bool` and a character type,
 // all in one parameter list - a backend that got any one parameter's
 // offset, width or signedness wrong reads back a different value for it.

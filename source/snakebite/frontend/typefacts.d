@@ -63,10 +63,29 @@ public TypeFacts typeFacts(imported!"dmd.mtype".Type type) {
 public TypeFacts storageFacts(
     imported!"dmd.declaration".VarDeclaration variable,
 ) {
-    // `auto`, not `const`: the alignment is replaced below.
-    auto facts = typeFacts(variable.type);
-    if (!variable.alignment.isDefault)
-        facts.alignment = variable.alignment.get;
+    return withAlignment(typeFacts(variable.type), variable.alignment);
+}
+
+// The facts for the storage of a value of `type` that no declaration with
+// an `align` attribute owns, such as a parameter: the alignment is the one
+// that dmd's semantic analysis gives a declaration of `type` with no
+// `align` attribute.
+public TypeFacts storageFacts(imported!"dmd.mtype".Type type) {
+    import dmd.typesem: alignment;
+
+    const facts = typeFacts(type);
+    // `typeFacts` sized a struct in `type`, so `alignment` only reads the
+    // alignment that the semantic analysis of the struct set: it needs no
+    // frontend lock.
+    return withAlignment(facts, type.alignment);
+}
+
+private TypeFacts withAlignment(
+    TypeFacts facts,
+    in imported!"dmd.astenums".structalign_t alignment,
+) {
+    if (!alignment.isDefault)
+        facts.alignment = alignment.get;
     return facts;
 }
 
