@@ -610,6 +610,27 @@ public struct NativeData {
         );
     }
 
+    // As `defineSymbol`, for the symbol of a function whose compiled body is
+    // `code`. Only a compile to an SBC file defines symbols.
+    public void defineFunctionSymbol(
+        in string symbol,
+        const(void)* code,
+        in Definition where,
+    ) {
+        import snakebite.ffi.names: DefinitionHere, GuestFunction,
+            SymbolDefinition;
+        import snakebite.language.definition: definitionInFile;
+
+        if (!compilesToFile)
+            internalFailure("a compile to RAM defines a symbol");
+        const weak = definitionInFile(where);
+        if (!weak.isNull)
+            planStore.names.defineHere(
+                symbol,
+                SymbolDefinition(DefinitionHere(GuestFunction(code)), weak.get),
+            );
+    }
+
     // The name of `symbol`, a datum that the program and another object can
     // both define, with the datum at `start` as the program's copy.
     // `declaredBy` is the declaration of the symbol. A compile to RAM makes

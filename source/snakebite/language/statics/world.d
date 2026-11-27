@@ -219,6 +219,23 @@ public struct StaticWorld {
         return definitionInFile(where).get(No.weak);
     }
 
+    // In a compile to an SBC file, a file holds the symbol of each function
+    // that it defines, as an object file does, so that the other files of a
+    // program reach it by name (ADR-0021). `code` is the compiled body of
+    // `function_`.
+    public void defineSymbolOf(FuncDeclaration function_, const(void)* code) {
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+        // The mangled name costs time that a compile to RAM does not need.
+        if (!data.compilesToFile)
+            return;
+        data.defineFunctionSymbol(
+            function_.mangledNameOf.idup,
+            code,
+            callSelection.whereDefined(function_),
+        );
+    }
+
     // `linked` as a backend that reads it as it runs, and does not save,
     // uses it: a name gives the address of its symbol
     // (`CallPlanStore.ready`).
