@@ -4168,6 +4168,27 @@ def test_build_module_data_of_another_module_run_as_native_code(
     assert guest_lines(built) == expected, output(built)
 
 
+# The text of a template function with a static variable, and of a class
+# template with a unit test, that the tests of `--build=module` and of
+# `--build=package` put in a guest module.
+GUEST_COUNTER_TEMPLATE = """
+        int f(T)(T step) {
+            static int counter;
+            counter += step;
+            return counter;
+        }
+"""
+GUEST_BOX_TEMPLATE = """
+        class Box(T) {
+            T value;
+            unittest {
+                import std.stdio: writeln;
+                writeln("test inside Box");
+            }
+        }
+"""
+
+
 # With `--build=module`, a template instance that several modules make exists
 # one time in the program, as in native code built one module at a time: the
 # calls of `f!int` from `a`, `b` and `t`, the module that declares `f`, count
@@ -4188,24 +4209,14 @@ def test_build_module_template_instance_exists_one_time(
     write(app / "dub.sdl",
           f'name "{dub_name("build-module-instances")}"\n'
           'targetType "library"\n')
-    write(app / "source" / "t.d", """
+    write(app / "source" / "t.d", f"""
         module t;
-        int f(T)(T step) {
-            static int counter;
-            counter += step;
-            return counter;
-        }
-        int countInT() { return f(1); }
-        struct Shared(T) {
+        {GUEST_COUNTER_TEMPLATE}
+        int countInT() {{ return f(1); }}
+        struct Shared(T) {{
             __gshared T value;
-        }
-        class Box(T) {
-            T value;
-            unittest {
-                import std.stdio: writeln;
-                writeln("test inside Box");
-            }
-        }
+        }}
+        {GUEST_BOX_TEMPLATE}
         """)
     write(app / "source" / "a.d", """
         module a;
@@ -4311,6 +4322,108 @@ def test_build_module_with_a_dependency_runs_as_bin_sb(
         assert_prints_dependency_lines(built, 42)
         assert "app 2" in guest_lines(built), output(built)
         assert "other 42" in guest_lines(built), output(built)
+
+
+# `--build=package` compiles the source files of each directory (a D package)
+# in one compile and runs the files as one program. The modules of `p` and of
+# `q` call functions and use data and templates of their own package and of
+# the other one. The unit test inside `Box` runs: `p.a` makes `Box!int`, and
+# `p.b`, which declares `Box`, is a root module of the same compile. `q.c` and
+# `q.d` both make `f!int` in one compile, and its static variable is one
+# variable. The expected lines are those of a native build of each package
+# (reggae 0.18.0, `reggae -b ninja --dc=dmd`, then `ninja ut`), which agree as
+# a set with `dub test --build-mode=allAtOnce`; a native build of each module
+# does not run the unit test inside `Box`. Native code fixes no order of the
+# constructors and unit tests of modules that do not import each other: the
+# lines are a set. The frontend prints the message of a `pragma(msg)` of each
+# module that a compile reads. The compile of `p` reads `p.b` and `q.c`, that
+# of `q` reads `q.c`, `q.d` and `p.b`, and the test runner module of dub
+# imports all modules. An edit of `q.d` starts the compiles of `q` and of the
+# runner, and not that of `p`; an edit of `p.a` starts those of `p` and of the
+# runner, and not that of `q`.
+def test_build_package_runs_as_native_code_built_by_package(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    write(app / "dub.sdl",
+          f'name "{dub_name("build-package-runs")}"\ntargetType "library"\n')
+    write(app / "source" / "p" / "a.d", """
+        module p.a;
+        import p.b: Box, factor, twiceInP;
+        import q.c: plusInQ, sum, total;
+        import std.stdio: writeln;
+        shared static this() { writeln("p.a ctor"); }
+        unittest {
+            auto box = new Box!int;
+            writeln("p.a ", plusInQ(total), " ", twiceInP(factor), " ",
+                sum(2, 3));
+        }
+        """)
+    write(app / "source" / "q" / "c.d", f"""
+        module q.c;
+        __gshared int total = 10;
+        int plusInQ(int x) {{ return x + 1; }}
+        T sum(T)(T a, T b) {{ return a + b; }}
+        {GUEST_COUNTER_TEMPLATE}
+        int countInC() {{ return f(1); }}
+        """)
+    message_of_p = "the frontend read p.b"
+    message_of_q = "the frontend read q.d"
+    write(app / "source" / "q" / "d.d", f"""
+        module q.d;
+        import p.b: twiceInP;
+        import q.c: countInC, f, plusInQ, total;
+        import std.stdio: writeln;
+        shared static this() {{ writeln("q.d ctor"); }}
+        int countInD() {{ return f(1); }}
+        unittest {{
+            writeln("q.d ", countInC, " ", countInD, " ", f(1), " ",
+                twiceInP(total), " ", plusInQ(1));
+        }}
+        pragma(msg, "{message_of_q}");
+        """)
+
+    def without_messages(
+        result: subprocess.CompletedProcess[str],
+    ) -> list[str]:
+        return [line for line in guest_lines(result)
+                if line not in (message_of_p, message_of_q)]
+
+    for factor in (2, 3):
+        write(app / "source" / "p" / "b.d", f"""
+            module p.b;
+            __gshared int factor = {factor};
+            T twiceInP(T)(T x) {{ return 2 * x; }}
+            {GUEST_BOX_TEMPLATE}
+            pragma(msg, "{message_of_p}");
+            """)
+        expected = [
+            "p.a ctor",
+            "q.d ctor",
+            f"p.a 11 {2 * factor} 5",
+            "test inside Box",
+            "q.d 1 2 3 20 2",
+        ]
+        built = run_sb("--build=package", str(app), cwd=tmp_path)
+        direct = run_sb(str(app), cwd=tmp_path)
+        assert built.returncode == 0, output(built)
+        assert direct.returncode == 0, output(direct)
+        assert sorted(without_messages(built)) == sorted(expected), \
+            output(built)
+        assert sorted(without_messages(direct)) == sorted(expected), \
+            output(direct)
+
+    def messages() -> tuple[int, int]:
+        result = run_sb("--build=package", str(app), cwd=tmp_path)
+        assert result.returncode == 0, output(result)
+        return output(result).count(message_of_p), \
+            output(result).count(message_of_q)
+
+    assert messages() == (0, 0)
+    touch(app / "source" / "q" / "d.d")
+    assert messages() == (2, 2)
+    touch(app / "source" / "p" / "a.d")
+    assert messages() == (2, 1)
 
 
 # With `--build=module`, two definitions of one symbol that are not template

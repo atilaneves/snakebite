@@ -8,11 +8,12 @@ module snakebite.build;
 private:
 
 
-// What `--build` selects: no build, one compile of the root package, or one
-// compile of each source file of the root package. `module` is a keyword of
-// D: the member has a trailing underscore that the name of the mode does not
-// have (`buildName`).
-public enum Build { off, project, module_ }
+// What `--build` selects: no build, one compile of the root package, one
+// compile of each source file of the root package, or one compile of each
+// D package of the root package. `module` and `package` are keywords of D:
+// those members have a trailing underscore that the name of the mode does
+// not have (`buildName`).
+public enum Build { off, project, module_, package_ }
 
 
 // The name of `build` on the command line.
@@ -37,7 +38,13 @@ public bool parseBuildName(in string name, out Build build) {
 }
 
 
-public enum validBuildNames = "off, project, module";
+public enum validBuildNames = {
+    import std.algorithm.iteration: map;
+    import std.array: join;
+    import std.traits: EnumMembers;
+
+    return [EnumMembers!Build].map!buildName.join(", ");
+}();
 
 
 // The files of the build of one project in one mode, in its project state
