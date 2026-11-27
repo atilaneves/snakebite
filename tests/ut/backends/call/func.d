@@ -317,48 +317,61 @@ static foreach (backend; Matrix!(
 // it has one. Each aligned variable comes after storage with a smaller
 // alignment (a `ubyte` parameter, the context pointer of the closure, or
 // the aligned variable before it, whose fields have an alignment of 8), so
-// that a correct address is not the result of chance. The parameter
-// asserts 16 bytes only: dmd, which builds the native arm, does not align a
-// parameter above that.
+// that a correct address is not the result of chance. The parameter is of
+// a type with an alignment of 16 only: ldc2 gives a parameter the alignment
+// of its type, but dmd, which compiles the native arm of this test, aligns a
+// parameter to 16 bytes at most.
 static foreach (backend; Matrix!(
-    Omit!(Ctfe, Because.inexpressible,
-        "CTFE cannot convert a local variable's address to an integer"),
+    Omit!(
+        Ctfe,
+        Because.inexpressible,
+        "CTFE cannot convert a local variable's address to an integer",
+    ),
 )) {
     @("call.explicitlyAlignedVariables." ~ backend.stringof)
     @Tags(backend.stringof)
     unittest {
-        2L.shouldBeRetOf!(backend, q{
-            align(16) struct Pair { ulong low, high; }
+        2L.shouldBeRetOf!(
+            backend,
+            q{
+                align(16) struct Pair { ulong low, high; }
 
-            long read(ubyte before, Pair byValue) {
-                Pair pair;
-                align(16) ulong[2] words;
-                align(64) ulong line;
-                assert(cast(size_t) &byValue % 16 == 0, "parameter");
-                assert(cast(size_t) &pair % 16 == 0, "struct");
-                assert(cast(size_t) &words % 16 == 0, "declaration");
-                assert(cast(size_t) &line % 64 == 0, "align 64");
-                return before;
-            }
+                long read(ubyte before, Pair byValue) {
+                    Pair pair;
+                    align(16) ulong[2] words;
+                    align(64) ulong line;
+                    assert(cast(size_t) &byValue % 16 == 0, "parameter");
+                    assert(cast(size_t) &pair % 16 == 0, "struct");
+                    assert(cast(size_t) &words % 16 == 0, "declaration");
+                    assert(cast(size_t) &line % 64 == 0, "align 64");
+                    return before;
+                }
 
-            long delegate() capture(ubyte before) {
-                Pair pair;
-                align(16) ulong[2] words;
-                align(64) ulong line;
-                return () {
-                    assert(cast(size_t) &pair % 16 == 0, "closure struct");
-                    assert(cast(size_t) &words % 16 == 0,
-                        "closure declaration");
-                    assert(cast(size_t) &line % 64 == 0, "closure align 64");
-                    return long(before);
-                };
-            }
+                long delegate() capture(ubyte before) {
+                    Pair pair;
+                    align(16) ulong[2] words;
+                    align(64) ulong line;
+                    return () {
+                        assert(cast(size_t) &pair % 16 == 0, "closure struct");
+                        assert(
+                            cast(size_t) &words % 16 == 0,
+                            "closure declaration",
+                        );
+                        assert(
+                            cast(size_t) &line % 64 == 0,
+                            "closure align 64",
+                        );
+                        return long(before);
+                    };
+                }
 
-            long answer() {
-                Pair pair;
-                return read(1, pair) + capture(1)();
-            }
-        }, "answer");
+                long answer() {
+                    Pair pair;
+                    return read(1, pair) + capture(1)();
+                }
+            },
+            "answer",
+        );
     }
 }
 
