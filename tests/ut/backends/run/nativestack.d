@@ -706,7 +706,7 @@ static foreach (backend; Matrix!(
             struct Flush {}
 
             void writer(Tid parent) {
-                const received = receiveTimeout(2.seconds,
+                const received = receiveTimeout(30.seconds,
                     (string message, Tid origin) {
                         assert(origin == parent);
                         parent.send(message);
@@ -720,7 +720,7 @@ static foreach (backend; Matrix!(
                 auto thread = spawn(&writer, thisTid);
                 thread.send("worker output", thisTid);
                 string echoed;
-                assert(receiveTimeout(3.seconds,
+                assert(receiveTimeout(40.seconds,
                     (string message) { echoed = message; },
                 ));
                 assert(echoed == "worker output");

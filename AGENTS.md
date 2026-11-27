@@ -67,7 +67,10 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   corresponding class/struct so that one uses `Foo.Enum` instead.
 * Do not use "magic literals" like `foo(true, 0, 42, "bar")`. It's
   impossible to know what those values are from the calling context.
-  Either name them with a variable or add a comment.
+  Either name them with a variable or add a comment. A number in a type
+  or in an expression that has a meaning, like the `2` in `size_t[2][]` or
+  the `+ 1` in a loop bound, gets a name: an `alias`, an `enum` or a
+  named value.
 * Do not use `__gshared` unless absolutely necessary. Shared code
   should be `immutable` if it can be, `shared` otherwise. All global
   and TLS data is suspect and must have its existence justified.
@@ -124,9 +127,14 @@ Use ASD-STE100 - Simplified Technical English in all communication.
 * A comment is a sentence that a reader who has not seen the PR can
   understand. When a change makes part of a comment false, rewrite the
   whole comment.
+* A comment on a type says what the type is. A parameter of its constructor
+  is explained at the constructor or at the function that takes it, and a
+  field is explained at the field.
 * A name says what the thing is: `fileName`, not `file`, for a string.
   A function that returns the name or path of a file is named for the name
   or path.
+* A variable or field that holds how many things there are is named `num`
+  and the plural of the thing: `numModules`, not `moduleCount`.
 
 ## Production code (in `source`)
 
