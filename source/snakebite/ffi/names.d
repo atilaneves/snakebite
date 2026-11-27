@@ -475,10 +475,15 @@ public struct Names {
         return symbol in _definedHere;
     }
 
-    // Each symbol that an SBC file defines, with its definition.
+    // Each symbol that an SBC file defines, with its definition, in the
+    // order of the symbols: the SBC file is the same for the same program,
+    // and a load that finds two definitions of a symbol names the same one
+    // each time.
     public void eachDefinitionHere(Visit)(scope Visit visit) const {
-        foreach (symbol, ref definition; _definedHere)
-            visit(symbol, definition);
+        import std.algorithm.sorting: sort;
+
+        foreach (symbol; _definedHere.keys.sort)
+            visit(symbol, _definedHere[symbol]);
     }
 
     private void refuseAfterFile() const {
