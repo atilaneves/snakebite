@@ -540,7 +540,7 @@ public struct NativeData {
         if (auto found = variable in _statics)
             return *found;
 
-        const facts = typeFacts(variable.type);
+        const facts = storageFacts(variable);
         if (variable.isThreadLocalStorage)
             return Placed(_store.tlsSlots.slotFor(
                 cast(const(TlsDescriptor)*) tlsDescriptorOf(variable).ptr));
@@ -610,6 +610,27 @@ public struct NativeData {
         );
     }
 
+    // As `defineSymbol`, for the symbol of a function whose compiled body is
+    // `code`. Only a compile to an SBC file defines symbols.
+    public void defineFunctionSymbol(
+        in string symbol,
+        const(void)* code,
+        in Definition where,
+    ) {
+        import snakebite.ffi.names: DefinitionHere, GuestFunction,
+            SymbolDefinition;
+        import snakebite.language.definition: definitionInFile;
+
+        if (!compilesToFile)
+            internalFailure("a compile to RAM defines a symbol");
+        const weak = definitionInFile(where);
+        if (!weak.isNull)
+            planStore.names.defineHere(
+                symbol,
+                SymbolDefinition(DefinitionHere(GuestFunction(code)), weak.get),
+            );
+    }
+
     // The name of `symbol`, a datum that the program and another object can
     // both define, with the datum at `start` as the program's copy.
     // `declaredBy` is the declaration of the symbol. A compile to RAM makes
@@ -643,9 +664,10 @@ public struct NativeData {
     public Placed startStorage(VarDeclaration declaration) {
         auto variable = definitionOf(declaration);
         if (recordRelocs && !variable.isThreadLocalStorage)
-            if (auto name = storageName(variable))
-                return Placed((cast(void*) name)
-                    [0 .. typeFacts(variable.type).size]);
+            if (auto name = storageName(variable)) {
+                const size = storageFacts(variable).size;
+                return Placed((cast(void*) name)[0 .. size]);
+            }
         return storageOf(variable);
     }
 
@@ -707,7 +729,7 @@ public struct NativeData {
             }
             // An initializer that refers to its own variable reaches this
             // again, and finds the storage that `buildInitialBytes` holds.
-            const own = buildInitialBytes(variable, typeFacts(variable.type));
+            const own = buildInitialBytes(variable, storageFacts(variable));
             name = nameWithProgramCopy(
                 nativeSymbolName(variable),
                 variable.toString,
@@ -739,7 +761,7 @@ public struct NativeData {
                 descriptor = *found;
                 return;
             }
-            const facts = typeFacts(variable.type);
+            const facts = storageFacts(variable);
             string nativeName;
             const(char)[] declaredBy;
             // Another object defines a native variable, and can define one
@@ -775,18 +797,27 @@ public struct NativeData {
             descriptorFacts.size = TlsDescriptor.sizeof;
             descriptorFacts.alignment = TlsDescriptor.alignof;
             descriptor = reserve(descriptorFacts, variable);
-            auto bytes = cast(ubyte*) descriptor.ptr;
-            (cast(TlsDescriptor*) bytes).size = facts.size;
+            // The reserved bytes are untyped; this is their one view as the
+            // descriptor.
+            auto tls = cast(TlsDescriptor*) descriptor.ptr;
+            tls.size = facts.size;
+            tls.alignment = facts.alignment;
             if (nativeName.length) {
-                storeString(bytes + TlsDescriptor.nativeName.offsetof,
+                storeString(descriptor.ptr + TlsDescriptor.nativeName.offsetof,
                     nativeName);
-                storeString(bytes + TlsDescriptor.declaredBy.offsetof,
+                storeString(descriptor.ptr + TlsDescriptor.declaredBy.offsetof,
                     declaredBy);
             }
             if (ownCopy)
-                storeAddress(&this, bytes + TlsDescriptor.templateBytes.offsetof,
-                    Address(Target.Kind.staticData, template_.ptr,
-                        template_.where));
+                storeAddress(
+                    &this,
+                    descriptor.ptr + TlsDescriptor.templateBytes.offsetof,
+                    Address(
+                        Target.Kind.staticData,
+                        template_.ptr,
+                        template_.where,
+                    ),
+                );
             // In a compile to an SBC file, the descriptor of a variable that
             // has a symbol name is the definition of the symbol, as
             // `defineSymbol` decides for any datum.
