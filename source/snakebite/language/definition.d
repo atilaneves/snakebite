@@ -23,3 +23,23 @@ public enum Definition {
     // error, never a reason to use the body.
     definedElsewhere,
 }
+
+
+// How a compile to an SBC file defines the symbol of a declaration that is
+// defined as `where` says: a strong definition (`No.weak`) for `rootOwned`, a
+// weak one (`Yes.weak`) for `rootOrElsewhere`, as the glossary says, and none
+// (null) for `definedElsewhere`.
+public imported!"std.typecons".Nullable!(imported!"std.typecons".Flag!"weak")
+definitionInFile(in Definition where) @safe pure nothrow @nogc {
+    import std.typecons: Flag, No, Nullable, Yes;
+
+    alias Defined = Nullable!(Flag!"weak");
+    final switch (where) with (Definition) {
+        case rootOwned:
+            return Defined(No.weak);
+        case rootOrElsewhere:
+            return Defined(Yes.weak);
+        case definedElsewhere:
+            return Defined.init;
+    }
+}

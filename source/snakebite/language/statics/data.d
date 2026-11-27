@@ -70,6 +70,10 @@ public struct NativeData {
     private bool recordRelocs() const @safe pure nothrow @nogc {
         return _store.recordsAddresses;
     }
+    // Whether this is a compile to an SBC file, not a compile to RAM.
+    public bool compilesToFile() const @safe pure nothrow @nogc {
+        return _store.recordsAddresses;
+    }
     // The blocks that hold a datum of this, for `recordRelocs`. Under the
     // compiler lock only.
     private StaticBlocks*[] _knownBlocks;
@@ -543,9 +547,7 @@ public struct NativeData {
 
         if (auto name = storageName(variable)) {
             auto address = planStore.addressOf(name);
-            return *_statics.insert(variable, address is name.own
-                ? Placed(address[0 .. facts.size], name.ownDatum)
-                : Placed(address[0 .. facts.size]));
+            return *_statics.insert(variable, Placed(address[0 .. facts.size]));
         }
 
         import snakebite.frontend.compiler: withCompilerLock;
@@ -567,29 +569,92 @@ public struct NativeData {
     // only the root modules define the variable, so that the other SBC files
     // of the program reach the storage by name (ADR-0021). The definition of
     // a thread-local variable is its descriptor, from which each thread
-    // makes its own copy (`TlsSlots.slotFor`).
+    // makes its own copy (`TlsSlots.slotFor`). The storage of a variable
+    // that other objects can define too is made, and defined, when the
+    // program uses it (`storageNameWithProgramCopy`, `tlsDescriptorOf`), as
+    // a native object file holds an instance only where it is used.
     public void makeAndDefineStorage(VarDeclaration variable) {
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
-        if (_whereDefined(variable) != Definition.rootOwned)
+        const where = _whereDefined(variable);
+        if (where != Definition.rootOwned)
             return;
         const placed = variable.isThreadLocalStorage
             ? tlsDescriptorOf(variable)
             : storageOf(variable);
-        defineSymbol(nativeSymbolName(variable), placed.ptr);
+        defineSymbol(nativeSymbolName(variable), placed.ptr, where);
     }
 
     // The datum that starts at `start` is the definition of `symbol` in the
-    // SBC file. Only a compile to an SBC file defines symbols: a compile to
-    // memory refers to each datum by its address, and no other SBC file
-    // needs its name.
-    public void defineSymbol(in string symbol, const(void)* start) {
-        import snakebite.ffi.names: DefinitionHere;
+    // SBC file, as a compile to a file defines the symbol of a declaration
+    // that is defined as `where` says (`definitionInFile`). Only a compile to
+    // an SBC file defines symbols: a compile to RAM refers to each datum by
+    // its address, and no other SBC file needs its name.
+    public void defineSymbol(
+        in string symbol,
+        const(void)* start,
+        in Definition where,
+    ) {
+        import snakebite.ffi.names: DefinitionHere, SymbolDefinition;
+        import snakebite.language.definition: definitionInFile;
 
-        if (!recordRelocs)
-            internalFailure("a compile to memory defines a symbol");
+        if (!compilesToFile)
+            internalFailure("a compile to RAM defines a symbol");
+        const weak = definitionInFile(where);
+        if (weak.isNull)
+            return;
         const datum = addressOfData(start).target.datum;
-        planStore.names.defineHere(symbol, DefinitionHere(datum));
+        planStore.names.defineHere(
+            symbol,
+            SymbolDefinition(DefinitionHere(datum), weak.get),
+        );
+    }
+
+    // As `defineSymbol`, for the symbol of a function whose compiled body is
+    // `code`. Only a compile to an SBC file defines symbols.
+    public void defineFunctionSymbol(
+        in string symbol,
+        const(void)* code,
+        in Definition where,
+    ) {
+        import snakebite.ffi.names: DefinitionHere, GuestFunction,
+            SymbolDefinition;
+        import snakebite.language.definition: definitionInFile;
+
+        if (!compilesToFile)
+            internalFailure("a compile to RAM defines a symbol");
+        const weak = definitionInFile(where);
+        if (!weak.isNull)
+            planStore.names.defineHere(
+                symbol,
+                SymbolDefinition(DefinitionHere(GuestFunction(code)), weak.get),
+            );
+    }
+
+    // The name of `symbol`, a datum that the program and another object can
+    // both define, with the datum at `start` as the program's copy.
+    // `declaredBy` is the declaration of the symbol. A compile to RAM makes
+    // the copy the own copy of the name (`Names.namedWithOwn`). A compile to
+    // an SBC file defines the symbol with the copy (`defineSymbol`), so that
+    // all the SBC files of the program use one copy, as a native linker
+    // keeps one.
+    public Name* nameWithProgramCopy(
+        Symbol: const(char)[],
+        Declaration: const(char)[],
+    )(Symbol symbol, Declaration declaredBy, const(void)* start) {
+        // Each name is of the start of its symbol.
+        enum distance = 0;
+        if (!compilesToFile)
+            return planStore.names.namedWithOwn(
+                symbol,
+                distance,
+                declaredBy,
+                start,
+            );
+        // `auto`: `const` makes the `Name*` that this returns const.
+        auto name = planStore.names.named(symbol, distance, declaredBy);
+        defineSymbol(name.symbol, start, Definition.rootOrElsewhere);
+        return name;
     }
 
     // The storage of `variable` as the start data of the program hold it
@@ -621,7 +686,7 @@ public struct NativeData {
     // thread-local, or null when only the program holds the storage. The
     // declaration decides that another object defines the variable. A
     // variable that the program and another object can both define is the
-    // name with the program's own copy (`namedWithOwnCopy`).
+    // name with the program's copy (`storageNameWithProgramCopy`).
     private Name* storageName(VarDeclaration variable) {
         if (auto found = variable in _storageNames)
             return *found;
@@ -640,16 +705,16 @@ public struct NativeData {
             // A native build keeps one copy, so the native copy is used when
             // the process has one.
             case rootOrElsewhere:
-                return namedWithOwnCopy(variable);
+                return storageNameWithProgramCopy(variable);
         }
     }
 
     // The name of the storage of `variable`, which is not thread-local and
     // which the program and another object can both define, with the
-    // program's own storage as its own copy (`Names.defineOwn`). The process
-    // is not asked: `CallPlanStore.chosenCopy` decides which copy is used
-    // when the program is made ready to run.
-    public Name* namedWithOwnCopy(VarDeclaration variable) {
+    // program's own storage as its copy (`nameWithProgramCopy`). The process
+    // is not asked: the program chooses the copy that it uses when it is made
+    // ready to run (`CallPlanStore.addressIfPresent`).
+    public Name* storageNameWithProgramCopy(VarDeclaration variable) {
         import snakebite.frontend.compiler: withCompilerLock;
         import snakebite.frontend.dmd.mangle: nativeSymbolName;
 
@@ -665,8 +730,11 @@ public struct NativeData {
             // An initializer that refers to its own variable reaches this
             // again, and finds the storage that `buildInitialBytes` holds.
             const own = buildInitialBytes(variable, storageFacts(variable));
-            name = planStore.names.namedWithOwn(nativeSymbolName(variable), 0,
-                variable.toString, own.ptr, own.where);
+            name = nameWithProgramCopy(
+                nativeSymbolName(variable),
+                variable.toString,
+                own.ptr,
+            );
             if (!(variable in _storageNames))
                 _storageNames.insert(variable, name);
         });
@@ -702,7 +770,8 @@ public struct NativeData {
             // other variable.
             bool named;
             bool ownCopy;
-            final switch (_whereDefined(variable)) with (Definition) {
+            const where = _whereDefined(variable);
+            final switch (where) with (Definition) {
                 case rootOwned:
                     ownCopy = true;
                     break;
@@ -749,6 +818,11 @@ public struct NativeData {
                         template_.where,
                     ),
                 );
+            // In a compile to an SBC file, the descriptor of a variable that
+            // has a symbol name is the definition of the symbol, as
+            // `defineSymbol` decides for any datum.
+            if (named && compilesToFile)
+                defineSymbol(nativeName, descriptor.ptr, where);
             _tlsDescriptors.insert(variable, descriptor);
         });
         return descriptor;

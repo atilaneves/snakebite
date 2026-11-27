@@ -48,8 +48,9 @@ public struct CallPlanStore {
     // As `addressOf`, but null for a symbol that no object defines. The order
     // is that of a linker: a function or a datum that an SBC file defines
     // (`Names.defineHere`), then, for any other symbol, the copy that
-    // `chosenCopy` decides, which is the process or the own copy
-    // (`Names.defineOwn`).
+    // `chosenCopy` decides, which is the process or the program's copy: the
+    // own copy (`Names.namedWithOwn`) or a weak datum of an SBC file
+    // (`SymbolDefinition.usesProcessCopyFirst`).
     public void* addressIfPresent(Name* name) {
         import core.atomic: atomicLoad, atomicStore, MemoryOrder;
 
@@ -67,20 +68,31 @@ public struct CallPlanStore {
                 atomicStore!(MemoryOrder.rel)(
                     name.address, cast(shared(void*)) found);
             }
-            else if (auto here = names.definitionHere(name.symbol)) {
-                found = names.keep(name, (own) {
-                    return addressOfDefinition(*here) + name.distance;
-                });
-            }
-            else {
-                auto processCopy = resolver.resolve(name.symbol);
-                found = names.keep(name, (own) {
-                    auto copy = chosenCopy(processCopy, own);
-                    return copy is null ? Name.absent : copy + name.distance;
-                });
-            }
+            else
+                found = keptAddressOfSymbol(name);
         }
         return found is Name.absent ? null : found;
+    }
+
+    // The address that `name`, which no adjustment reaches, keeps for its
+    // symbol (`addressIfPresent`). The process is asked only when its copy
+    // can be the one that the program uses.
+    private void* keptAddressOfSymbol(Name* name) {
+        const here = names.definitionHere(name.symbol);
+        if (here !is null && !here.usesProcessCopyFirst)
+            return names.keep(name, (own) {
+                return addressOfDefinition(here.definition) + name.distance;
+            });
+        // `auto`: `chosenCopy` takes a mutable pointer.
+        auto processCopy = resolver.resolve(name.symbol);
+        return names.keep(name, (own) {
+            const programCopy = here is null
+                ? own
+                : addressOfDefinition(here.definition);
+            // `auto`: the address that `keep` takes is mutable.
+            auto copy = chosenCopy(processCopy, programCopy);
+            return copy is null ? Name.absent : copy + name.distance;
+        });
     }
 
     // The address of `definition`, which an SBC file holds: host code calls
@@ -94,7 +106,8 @@ public struct CallPlanStore {
     }
 
     // The guest function that an SBC file defines for the code that `plan`
-    // names (`Names.defineHere`), or null.
+    // names (`Names.defineHere`), or null. A function of an SBC file goes
+    // before the process, weak or strong.
     public const(void)* guestDefinitionOf(const(CallPlan)* plan) const
             @safe pure nothrow @nogc {
         const name = plan.name;
@@ -103,7 +116,7 @@ public struct CallPlanStore {
         const here = names.definitionHere(name.symbol);
         if (here is null)
             return null;
-        return (*here).match!(
+        return here.definition.match!(
             (in GuestFunction guest) => guest.code,
             (in DatumRef datum) => cast(const(void)*) null,
         );
@@ -117,9 +130,9 @@ public struct CallPlanStore {
 
     // The one decision for a datum that the program and another object can
     // both define: the copy of the process, `processCopy`, when the process
-    // has the symbol, else the program's own copy `own`. Null when there is
-    // neither. A compile to RAM asks when it makes the datum ready to run, a
-    // load when it makes the loaded program ready; a compile never asks.
+    // has the symbol, else the program's copy `own`. Null when there is
+    // neither. A program asks when it makes the datum ready to run; a
+    // compile to an SBC file never asks.
     public static void* chosenCopy(
         void* processCopy, const(void)* own,
     ) pure nothrow @nogc {

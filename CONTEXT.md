@@ -51,6 +51,11 @@ root modules define it, and a backend executes it), `rootOrElsewhere` (the
 root modules define it and another object can too, as for a template instance,
 of which one copy is kept) and `definedElsewhere` (see **Defined elsewhere**).
 
+**Weak definition**:
+A definition of a symbol that several **SBC files** can hold, such as a
+template instance. The program keeps one of them. A strong definition is one
+that only one file can hold: a second one is an error (ADR-0021).
+
 **Native layout**:
 The memory representation compiled D uses. Guest values always use
 native layout, so crossing the barrier never copies or converts.

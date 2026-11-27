@@ -183,9 +183,17 @@ public struct StaticWorld {
         if (callSelection.usesNativeVariadicAddress(method))
             return Linked!(void*).named(plans.nameOf(method));
         if (callSelection.usesGuestBody(method)) {
+            // The body is ready to run also when the address is the name of
+            // its symbol: the compile defines the function.
             word = _backend.guestWord(method);
             if (callSelection.storesGuestWord(method, adjustment))
                 return Linked!(void*).held(cast(void*) word);
+            // An address with an adjustment is the entry of a slot of an
+            // interface virtual table, which the class information of the
+            // instance holds. That datum is weak too: the program keeps one
+            // table, and so one entry for each slot.
+            if (adjustment == 0 && hasWeakDefinition(method))
+                return Linked!(void*).named(plans.nameOf(method));
         }
         auto address = plans.callableAddress(word, method, adjustment);
         // An adjusted address is the entry of a vtable slot. Only a virtual
@@ -193,6 +201,39 @@ public struct StaticWorld {
         if (adjustment == 0 && _backend.addressGiven !is null)
             _backend.addressGiven(method, address);
         return address;
+    }
+
+    // Whether a compile to an SBC file gives `method`, which has a guest
+    // body, a weak definition (`definitionInFile`), as a template instance
+    // has. The program then keeps one of the copies of the SBC files
+    // (`Names.defineHere`), and the address of the function is the name of
+    // its symbol, so that it is one address in the program, as a native
+    // linker gives.
+    private bool hasWeakDefinition(FuncDeclaration method) {
+        import snakebite.language.definition: definitionInFile;
+        import std.typecons: No;
+
+        if (!data.compilesToFile)
+            return false;
+        const where = callSelection.whereDefined(method);
+        return definitionInFile(where).get(No.weak);
+    }
+
+    // In a compile to an SBC file, a file holds the symbol of each function
+    // that it defines, as an object file does, so that the other files of a
+    // program reach it by name (ADR-0021). `code` is the compiled body of
+    // `function_`.
+    public void defineSymbolOf(FuncDeclaration function_, const(void)* code) {
+        import snakebite.frontend.dmd.mangle: mangledNameOf;
+
+        // The mangled name costs time that a compile to RAM does not need.
+        if (!data.compilesToFile)
+            return;
+        data.defineFunctionSymbol(
+            function_.mangledNameOf.idup,
+            code,
+            callSelection.whereDefined(function_),
+        );
     }
 
     // `linked` as a backend that reads it as it runs, and does not save,
