@@ -536,7 +536,7 @@ public struct NativeData {
         if (auto found = variable in _statics)
             return *found;
 
-        const facts = typeFacts(variable.type);
+        const facts = storageFacts(variable);
         if (variable.isThreadLocalStorage)
             return Placed(_store.tlsSlots.slotFor(
                 cast(const(TlsDescriptor)*) tlsDescriptorOf(variable).ptr));
@@ -599,9 +599,10 @@ public struct NativeData {
     public Placed startStorage(VarDeclaration declaration) {
         auto variable = definitionOf(declaration);
         if (recordRelocs && !variable.isThreadLocalStorage)
-            if (auto name = storageName(variable))
-                return Placed((cast(void*) name)
-                    [0 .. typeFacts(variable.type).size]);
+            if (auto name = storageName(variable)) {
+                const size = storageFacts(variable).size;
+                return Placed((cast(void*) name)[0 .. size]);
+            }
         return storageOf(variable);
     }
 
@@ -663,7 +664,7 @@ public struct NativeData {
             }
             // An initializer that refers to its own variable reaches this
             // again, and finds the storage that `buildInitialBytes` holds.
-            const own = buildInitialBytes(variable, typeFacts(variable.type));
+            const own = buildInitialBytes(variable, storageFacts(variable));
             name = planStore.names.namedWithOwn(nativeSymbolName(variable), 0,
                 variable.toString, own.ptr, own.where);
             if (!(variable in _storageNames))
@@ -692,7 +693,7 @@ public struct NativeData {
                 descriptor = *found;
                 return;
             }
-            const facts = typeFacts(variable.type);
+            const facts = storageFacts(variable);
             string nativeName;
             const(char)[] declaredBy;
             // Another object defines a native variable, and can define one
@@ -727,18 +728,27 @@ public struct NativeData {
             descriptorFacts.size = TlsDescriptor.sizeof;
             descriptorFacts.alignment = TlsDescriptor.alignof;
             descriptor = reserve(descriptorFacts, variable);
-            auto bytes = cast(ubyte*) descriptor.ptr;
-            (cast(TlsDescriptor*) bytes).size = facts.size;
+            // The reserved bytes are untyped; this is their one view as the
+            // descriptor.
+            auto tls = cast(TlsDescriptor*) descriptor.ptr;
+            tls.size = facts.size;
+            tls.alignment = facts.alignment;
             if (nativeName.length) {
-                storeString(bytes + TlsDescriptor.nativeName.offsetof,
+                storeString(descriptor.ptr + TlsDescriptor.nativeName.offsetof,
                     nativeName);
-                storeString(bytes + TlsDescriptor.declaredBy.offsetof,
+                storeString(descriptor.ptr + TlsDescriptor.declaredBy.offsetof,
                     declaredBy);
             }
             if (ownCopy)
-                storeAddress(&this, bytes + TlsDescriptor.templateBytes.offsetof,
-                    Address(Target.Kind.staticData, template_.ptr,
-                        template_.where));
+                storeAddress(
+                    &this,
+                    descriptor.ptr + TlsDescriptor.templateBytes.offsetof,
+                    Address(
+                        Target.Kind.staticData,
+                        template_.ptr,
+                        template_.where,
+                    ),
+                );
             _tlsDescriptors.insert(variable, descriptor);
         });
         return descriptor;

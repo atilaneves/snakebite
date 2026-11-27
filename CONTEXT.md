@@ -205,3 +205,15 @@ defines the failure that names it, and the innermost guest function and the
 line when the backend knows them), then the default action of the signal
 ends the process, as it ends compiled D.
 _Avoid_: crash, trap
+
+**Gate**:
+dmd's own word for a hidden `int` variable (`__gate`) that dmd adds to a
+`static` constructor or destructor (`shared` or not) that is a member of a
+template instance. The code that dmd puts at the start of the function
+returns early unless the gate has the first value (constructor: 1 after
+`++gate`; destructor: 0 after `--gate`). Several modules can hold the same
+template instance, and the constructors of each module call it; with no gate
+the body runs once for each such module instead of once. For a destructor,
+the module constructors increment the gate first, so only the last call of
+the destructors runs the body. `GateStorage` is the storage of a gate
+variable.
