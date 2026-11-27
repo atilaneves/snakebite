@@ -122,8 +122,15 @@ that gives `sb` a rule for it, does not follow the model.
     process also holds is taken from native code: that native code cannot
     be made to use the copy of a file, and the program keeps one copy of the
     datum. Two other definitions of one name are an error that
-    names the symbol, and so are two `main` functions, as a native linker
-    reports. A name with no definition is an error only when code that uses
+    names the symbol, as the link of native code that LDC, the compiler of
+    the host, builds one module at a time reports. A `main` in a module of a
+    library that dub tests is such a second definition, because the test
+    runner module of dub defines `main`. dmd gives the error for a variable
+    only: it makes each function a symbol that the linker lets a second
+    definition replace or drop with no error, and its link keeps the first
+    of two functions, also of two `main` functions. In
+    one compile, dmd and LDC report two `main` functions as an error of the
+    compile. A name with no definition is an error only when code that uses
     it runs (ADR-0017). The order of module constructors and of unit tests
     of modules that do not import each other is not fixed. Native builds give
     different orders for different ways of building, and the D

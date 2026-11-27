@@ -311,6 +311,181 @@ static foreach (backend; Matrix!(
     }
 }
 
+// The storage of a parameter, of a local variable and of a variable in a
+// closure has the explicit alignment of its declaration, else the
+// alignment of its type, which is the explicit alignment of the type when
+// it has one. Each aligned variable comes after storage with a smaller
+// alignment (a `ubyte` parameter, the context pointer of the closure, or
+// the aligned variable before it, whose fields have an alignment of 8), so
+// that a correct address is not the result of chance. The parameter is of
+// a type with an alignment of 16 only: ldc2 gives a parameter the alignment
+// of its type, but dmd, which compiles the native arm of this test, aligns a
+// parameter to 16 bytes at most.
+static foreach (backend; Matrix!(
+    Omit!(
+        Ctfe,
+        Because.inexpressible,
+        "CTFE cannot convert a local variable's address to an integer",
+    ),
+)) {
+    @("call.explicitlyAlignedVariables." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        2L.shouldBeRetOf!(
+            backend,
+            q{
+                align(16) struct Pair { ulong low, high; }
+
+                long read(ubyte before, Pair byValue) {
+                    Pair pair;
+                    align(16) ulong[2] words;
+                    align(64) ulong line;
+                    assert(cast(size_t) &byValue % 16 == 0, "parameter");
+                    assert(cast(size_t) &pair % 16 == 0, "struct");
+                    assert(cast(size_t) &words % 16 == 0, "declaration");
+                    assert(cast(size_t) &line % 64 == 0, "align 64");
+                    return before;
+                }
+
+                long delegate() capture(ubyte before) {
+                    Pair pair;
+                    align(16) ulong[2] words;
+                    align(64) ulong line;
+                    return () {
+                        assert(cast(size_t) &pair % 16 == 0, "closure struct");
+                        assert(
+                            cast(size_t) &words % 16 == 0,
+                            "closure declaration",
+                        );
+                        assert(
+                            cast(size_t) &line % 64 == 0,
+                            "closure align 64",
+                        );
+                        return long(before);
+                    };
+                }
+
+                long answer() {
+                    Pair pair;
+                    return read(1, pair) + capture(1)();
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+// The temporary that holds a function result, or a struct literal, has the
+// alignment of its type, which is the explicit alignment of the type when it
+// has one, so `this` of a method that is called on it has that alignment.
+// Small locals come first, so that a correct address is not the result of
+// chance. dmd, which compiles the native arm of this test, does not align
+// this temporary; ldc2, the compiler that builds `sb` and so the reference,
+// does. The sibling test below pins the native behaviour that dmd and ldc2
+// share.
+static foreach (backend; Matrix!(
+    Omit!(
+        Native,
+        Because.diverges,
+        "dmd does not align this temporary; ldc2, the reference, does",
+    ),
+    Omit!(
+        Ctfe,
+        Because.inexpressible,
+        "CTFE cannot convert the address of `this` to an integer",
+    ),
+)) {
+    @("call.alignedTemporaryReceiver." ~ backend.stringof)
+    @Tags(backend.stringof)
+    unittest {
+        22L.shouldBeRetOf!(
+            backend,
+            q{
+                align(16) struct Pair {
+                    ulong low, high;
+
+                    long first() const {
+                        assert(cast(size_t) &this % 16 == 0, "align 16");
+                        return low;
+                    }
+                }
+
+                align(64) struct Line {
+                    ulong[8] words;
+
+                    long first() const {
+                        assert(cast(size_t) &this % 64 == 0, "align 64");
+                        return words[0];
+                    }
+                }
+
+                Pair makePair() {
+                    return Pair(1, 2);
+                }
+
+                Line makeLine() {
+                    return Line([3, 4, 5, 6, 7, 8, 9, 10]);
+                }
+
+                long answer() {
+                    ubyte one = 1;
+                    ubyte two = 2;
+                    const fromCall = makePair.first + makeLine.first;
+                    ubyte three = 3;
+                    const fromPair = Pair(5, 6).first;
+                    const fromLine = Line([7, 8, 9, 10, 11, 12, 13, 14]).first;
+                    return fromCall + fromPair + fromLine + one + two + three;
+                }
+            },
+            "answer",
+        );
+    }
+}
+
+@("call.alignedTemporaryReceiver.Native.diverges")
+@Tags("Native")
+unittest {
+    22L.shouldBeRetOf!(
+        Native,
+        q{
+            align(16) struct Pair {
+                ulong low, high;
+
+                long first() const {
+                    return low;
+                }
+            }
+
+            align(64) struct Line {
+                ulong[8] words;
+
+                long first() const {
+                    return words[0];
+                }
+            }
+
+            Pair makePair() {
+                return Pair(1, 2);
+            }
+
+            Line makeLine() {
+                return Line([3, 4, 5, 6, 7, 8, 9, 10]);
+            }
+
+            long answer() {
+                ubyte one = 1;
+                ubyte two = 2;
+                const fromCall = makePair.first + makeLine.first;
+                ubyte three = 3;
+                const fromPair = Pair(5, 6).first;
+                const fromLine = Line([7, 8, 9, 10, 11, 12, 13, 14]).first;
+                return fromCall + fromPair + fromLine + one + two + three;
+            }
+        },
+        "answer",
+    );
+}
+
 // Every D integral width, both signednesses, `bool` and a character type,
 // all in one parameter list - a backend that got any one parameter's
 // offset, width or signedness wrong reads back a different value for it.
