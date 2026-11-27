@@ -113,6 +113,12 @@ Use ASD-STE100 - Simplified Technical English in all communication.
   interface. Its null or empty value says "none".
 * Do not take a value apart to pass its fields to a function that can take
   the value.
+* Call the object that you hold; do not reach through it into the objects
+  inside. A chain such as `a.b.c.doIt(x)` through the members of another
+  object is a fault: give `a` a function that does the work, and call
+  `a.doIt(x)`. A UFCS chain or a range pipeline, where each step returns a
+  new value, is not such a chain. A plain value with public fields that the
+  code owns, such as a struct of results, is not an object to call through.
 * Do not add a `static assert` that repeats the field names of a struct to
   guard a hand-written walk over its fields. Write the walk with
   compile-time reflection, so that it needs no list.
