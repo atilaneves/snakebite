@@ -75,7 +75,6 @@ Callers can also prepare an image explicitly:
 import snakebite.image.preparation: prepareImage;
 
 auto image = prepareImage(q{
-    module image;
     import core.atomic: MemoryOrder;
     import core.internal.atomic: atomicLoad;
     export __gshared auto retained = &atomicLoad!(MemoryOrder.seq, int);
@@ -87,8 +86,10 @@ scope backend = new Bytecode(program);
 // Run the program with the prepared image.
 ```
 
-Guest code imports and calls `core.internal.atomic.atomicLoad` directly. The
-retained pointer causes the compiler to emit its D symbol. The resolver finds
+The source is the declarations of one image source, with no module
+declaration: `prepareImage` gives the image source its module. Guest code
+imports and calls `core.internal.atomic.atomicLoad` directly. The retained
+pointer causes the compiler to emit its D symbol. The resolver finds
 that symbol and the normal FFI path calls it.
 
 Prepare the image before constructing any backend. Each backend searches the
@@ -97,9 +98,13 @@ cached. There is no compile step on symbol lookup.
 
 The image handle search has two steps. First, `dlsym` looks up the mangled name
 in the image. If `dlsym` misses, the lookup asks the image's function registry,
-the exported `extern(C)` function `snakebite_dependency_image_symbols_v1`. The
-generated source defines the registry. It returns the address of the retained
-function for a mangled name, or `null`. The registry is needed because LDC
+the exported `extern(C)` function `snakebite_dependency_image_symbols_v1`. It
+returns the address of the retained function for a mangled name, or `null`.
+Each image source defines a part of the registry, a function in its own
+module. The image module defines the registry: it asks each part in turn. The
+image compiles the image module and all image sources to one object, so the
+compiler emits each template instance one time. A build with `--build=module`
+has one image source for each compile. The registry is needed because LDC
 images use `--linkonce-templates`. A template body then has no name that
 `dlsym` can find, but the address that the generated source takes still reaches
 the body. DMD images keep `-allinst`.
@@ -122,7 +127,7 @@ druntime still performs D module initialization and thread cleanup.
 The default compiler is `dmd` for a DMD host and `ldc2` for an LDC host. Callers
 can supply its path. Use the same compiler installation as the host. Preparation
 does not run the compiler to check its family or version. A compiler of the
-wrong family fails when it compiles the image. The image source holds a
+wrong family fails when it compiles the image. The image module holds a
 `static assert` on the frontend version, so a compiler with a different
 frontend version also fails when it compiles the image. A compiler that is a
 wrapper script is identified by the path and the content of the wrapper only.

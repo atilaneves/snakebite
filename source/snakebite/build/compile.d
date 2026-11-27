@@ -12,17 +12,16 @@ private:
 // It runs in the project directory DIR, where a compiler finds the
 // configuration of the project, as `bin/sb DIR` does. It runs the frontend on
 // the root files, loads no dependency image, and writes the program to FILE
-// with the save of
-// `--save`. Beside FILE it writes what the image needs from the root code
-// (`imageSourceOf`), only when that changed, and `FILE.dep`: the files that
-// the frontend read.
+// with the save of `--save`. Beside FILE it writes the image source of the
+// program (`imageSourcePath`), only when that changed, and `FILE.dep`: the
+// files that the frontend read.
 public int compile(string[] args) {
     import snakebite.backends.bytecode.vm: JitSetting;
-    import snakebite.build: imageSourceOf, writeChanged;
+    import snakebite.build: imageSourcePath, writeChanged;
     import snakebite.build.dependencyfile: writeDependencyFile;
     import snakebite.driver.execution: loadedProject, saveProgram;
     import snakebite.frontend.compiler: FrontendFlags;
-    import snakebite.project.dependencies: imageModule;
+    import snakebite.project.dependencies: imageSource;
     import snakebite.project.dub: SourceSet;
     import snakebite.project.loading: ProjectDirectory;
     import std.getopt: getopt;
@@ -56,7 +55,7 @@ public int compile(string[] args) {
     const buildsDependencyImage = true;
     auto project = loadedProject(directory, sources, buildsDependencyImage);
     saveProgram(project.program, output, JitSetting.init);
-    writeChanged(imageSourceOf(output), imageModule(project.program));
+    writeChanged(imageSourcePath(output), imageSource(project.program).text);
     writeDependencyFile(output ~ ".dep", output, directory);
     return 0;
 }

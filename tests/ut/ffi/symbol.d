@@ -13,7 +13,7 @@ import snakebite.image.preparation: Optimise;
 import snakebite.program: Program;
 import snakebite.frontend.compiler: parseSnippet;
 import snakebite.frontend.dmd.functions: findFunction;
-import snakebite.project.imagesource: imageInputs, imageSource;
+import snakebite.project.imagesource: imageInputs, imageDeclarations;
 import ut.backends;
 import std.file: setTimes, timeLastModified;
 import std.path: buildPath;
@@ -165,7 +165,7 @@ unittest {
         shared Thread thread;
         Thread current() { return cast(Thread) atomicLoad(thread); }
     });
-    const source = imageSource(Program([module_]));
+    const source = imageDeclarations(Program([module_]));
     "import core.thread.osthread;".should.be in source;
 }
 
@@ -223,7 +223,7 @@ unittest {
     const imports = [sandbox.inSandboxPath("deps")];
     // Nothing here needs the built image: only the source that is made for it.
     auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
-    const source = imageSource(project.program);
+    const source = imageDeclarations(project.program);
     "Thing".should.not.be in source;
     (moduleName ~ ".store!(" ~ moduleName ~ ".Bucket!(string, void delegate(int)))")
         .should.be in source;
@@ -254,9 +254,9 @@ unittest {
     const imports = [sandbox.inSandboxPath("deps")];
     // `plain` is not itself part of a linkable dependency library in this
     // sandbox, so building the real dependency image would fail to link;
-    // this test only checks what `imageSource` generates, not that it links.
+    // this test only checks what `imageDeclarations` generates, not that it links.
     auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
-    const source = imageSource(project.program);
+    const source = imageDeclarations(project.program);
     "apply!".should.be in source;
 }
 
@@ -296,7 +296,7 @@ unittest {
     });
     const imports = [sandbox.inSandboxPath("deps")];
     auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
-    const source = imageSource(project.program);
+    const source = imageDeclarations(project.program);
     "apply!".should.not.be in source;
 }
 
@@ -335,7 +335,7 @@ unittest {
     });
     const imports = [sandbox.inSandboxPath("deps")];
     auto project = prepareProject(sandbox.inSandboxPath("app"), imports, null, false, optimise: Optimise.no).project;
-    const source = imageSource(project.program);
+    const source = imageDeclarations(project.program);
     // The registry holds the guest mangle of `pick!Thing`'s members, so the
     // name `Thing` appears. The alias argument must not.
     "apply!(__T4pickTC".should.not.be in source;
@@ -346,7 +346,7 @@ unittest {
 // The image source of a program with one root module.
 private string snippetImageSource(in string code) {
     // Program requires a mutable AST.
-    return imageSource(Program([parseSnippet(code)]));
+    return imageDeclarations(Program([parseSnippet(code)]));
 }
 
 
@@ -462,7 +462,7 @@ private string nestedInstanceImageSource(in string moduleName, in string body_) 
     auto project = prepareProject(
         sandbox.inSandboxPath("app"), [sandbox.inSandboxPath("deps")], null,
         false, optimise: Optimise.no).project;
-    return imageSource(project.program);
+    return imageDeclarations(project.program);
 }
 
 
@@ -556,7 +556,7 @@ static foreach (backend; Matrix!()) {
         } else {
             auto module_ = parseSnippet(code);
             auto program = Program([module_]);
-            imageSource(program);
+            imageDeclarations(program);
             auto instance = ownedBackend!backend(program);
             int result;
             instance.call(findFunction(module_, "answer"), &result, []);

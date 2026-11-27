@@ -53,43 +53,63 @@ private DependencyAnalysis dependencyAnalysis(
     imported!"snakebite.program".Program program,
 ) {
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.project.imagesource: imageSource, imageInputs;
+    import snakebite.project.imagesource: imageDeclarations, imageInputs;
 
     DependencyAnalysis result;
     withCompilerLock({
-        result = DependencyAnalysis(imageSource(program), imageInputs(program),
-            defersStartup(program));
+        result = DependencyAnalysis(
+            imageDeclarations(program),
+            imageInputs(program),
+            defersStartup(program),
+        );
     });
     return result;
 }
 
 
-// The image module of `program` (`imageModuleText`): what the image of a
-// project entry needs from the root code.
-public string imageModule(imported!"snakebite.program".Program program) {
+// The image source of `program`: what the image of a project entry needs
+// from the root code, in the module of `sourceModuleName`.
+public imported!"snakebite.image.preparation".ImageSource imageSource(
+    imported!"snakebite.program".Program program,
+) {
     import snakebite.frontend.compiler: withCompilerLock;
-    import snakebite.image.preparation: imageModuleText;
-    import snakebite.project.imagesource: imageSource;
+    import snakebite.image.preparation: ImageSource;
+    import snakebite.project.imagesource: imageDeclarations;
 
-    string text;
+    ImageSource source;
     withCompilerLock({
-        text = imageModuleText(moduleSource(imageSource(program)),
-            defersStartup(program));
+        source = ImageSource(
+            sourceModuleName(program),
+            defersStartup(program),
+            imageDeclarations(program),
+        );
     });
-    return text;
+    return source;
+}
+
+
+// The name of the module of the image source of `program`. The image
+// compiles the image sources of all the compiles of a build together, and
+// each compile has other root modules.
+private string sourceModuleName(imported!"snakebite.program".Program program) {
+    import snakebite.frontend.dmd.functions: prettyNameOf;
+    import std.algorithm.iteration: map;
+    import std.algorithm.sorting: sort;
+    import std.array: array, join;
+    import std.conv: text;
+    import std.digest.sha: sha1Of;
+    import std.digest: toHexString;
+
+    // `auto`: `sort` reorders the names in place.
+    auto rootNames = program.rootModules.map!prettyNameOf.array;
+    const digest = rootNames.sort.join("\n").sha1Of.toHexString;
+    return text("snakebite_image_source_", digest);
 }
 
 
 // Whether the image of a project entry defers the start of its modules.
 private bool defersStartup(imported!"snakebite.program".Program program) {
     return program.hasCEntryPoint && !program.checks.betterC;
-}
-
-
-// The source of the image module: `generated`, or an empty module when the
-// image has no code of the root package.
-private string moduleSource(in string generated) {
-    return generated.length ? generated : "module snakebite_dependency_image;\n";
 }
 
 
@@ -147,7 +167,7 @@ private struct Preparation {
                 const generated = source();
                 DependencyImage built;
                 if (generated.length || _sources.linkerFiles.length)
-                    built = buildImage(moduleSource(generated), analysis);
+                    built = buildImage(generated, analysis);
                 return ProjectImageCache.Prepared(built,
                     watchedInputs(analysis.inputs));
             });

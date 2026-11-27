@@ -4,10 +4,15 @@ module snakebite.project.imagesource;
 private:
 
 
+// The declarations of the image source of `program` (`ImageSource`), or
+// empty when the program needs no native template instance. The part of the
+// registry of the image source is one of them
+// (`DependencyImage.registryPartName`).
+//
 // Takes the frontend lock: a parse on another thread appends template
 // instances to the member list of a root module it does not own, and that
 // must not happen while this walk iterates the list.
-public string imageSource(imported!"snakebite.program".Program program) {
+public string imageDeclarations(imported!"snakebite.program".Program program) {
     import snakebite.frontend.compiler: withCompilerLock;
 
     string source;
@@ -21,7 +26,7 @@ public string imageSource(imported!"snakebite.program".Program program) {
 }
 
 
-// Takes the frontend lock for the same reason as `imageSource`.
+// Takes the frontend lock for the same reason as `imageDeclarations`.
 //
 // Cache inputs include imported source files: changing a dependency must
 // invalidate its compiled template bodies even when their names stay the same.
@@ -148,12 +153,12 @@ private extern(C++) class Collector
                 }
             }
         }
-        string result = "module snakebite_dependency_image;\n";
+        string result;
         foreach (name; _imports.keys.sort)
             result ~= "import " ~ name ~ ";\n";
         result ~= _opaqueDeclarations;
-        string registry = "export extern(C) void* "
-            ~ DependencyImage.registrySymbol ~ "(const(char)[] name) {\n";
+        string registry = "void* " ~ DependencyImage.registryPartName
+            ~ "(const(char)[] name) {\n";
         foreach (i, guestKey; _references.keys.sort.array) {
             auto reference = _references[guestKey]; // Function identities are mutable AST nodes.
             import std.algorithm: canFind;

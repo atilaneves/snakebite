@@ -4257,6 +4257,50 @@ def test_build_module_template_instance_exists_one_time(
     assert guest_lines(built) == expected, output(built)
 
 
+# `--build=module` gives the result of `bin/sb DIR` for the project of
+# `write_build_project_with_dependency` with a second module: on the first
+# run, on a run with no change, on a run after a touch of a root file and on a
+# run after a touch of a source file of the dependency. `plusOne` has inline
+# assembler, so no backend executes its instance and the dependency image
+# holds it: the compiles of `app` and of `other` each need `plusOne!int`.
+# Native code fixes no order of the unit tests of modules that do not import
+# each other: the lines are a set.
+def test_build_module_with_a_dependency_runs_as_bin_sb(
+    tmp_path: Path,
+) -> None:
+    app = write_build_project_with_dependency(tmp_path, "build-module-dep")
+    write(tmp_path / "dep" / "source" / "depnative.d", """
+        module depnative;
+        T plusOne(T)(T value) { asm { nop; } return value + 1; }
+        """)
+    root = app / "source" / "app.d"
+    root.write_text(root.read_text() + """
+        unittest {
+            import depnative: plusOne;
+            printf("app %d\\n", plusOne(1));
+        }
+        """)
+    write(app / "source" / "other.d", """
+        module other;
+        import core.stdc.stdio: printf;
+        import depnative: plusOne;
+        unittest { printf("other %d\\n", plusOne(41)); }
+        """)
+
+    for change in (None, None, root, tmp_path / "dep" / "source" / "dep.d"):
+        if change is not None:
+            touch(change)
+        built = run_sb("--build=module", str(app), cwd=tmp_path)
+        direct = run_sb(str(app), cwd=tmp_path)
+        assert built.returncode == direct.returncode, output(built)
+        assert sorted(guest_lines(built)) == sorted(guest_lines(direct)), \
+            output(built)
+        assert built.stderr == direct.stderr, output(built)
+        assert_prints_dependency_lines(built, 42)
+        assert "app 2" in guest_lines(built), output(built)
+        assert "other 42" in guest_lines(built), output(built)
+
+
 # With `--build=module`, two definitions of one symbol that are not template
 # instances are an error that names the symbol, and no unit test runs: a
 # native link that fails gives no program. The native reference is the link of

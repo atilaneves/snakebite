@@ -17,7 +17,9 @@ import snakebite.host.runtimeentry: RuntimeEntry;
 public alias Optimise = imported!"std.typecons".Flag!"optimise";
 
 
-// The compiler must be from the host's installation. Inputs lists every
+// Builds and loads the image of one image source: the declarations `source`,
+// with no module declaration, in a module that this names. The compiler must
+// be from the host's installation. Inputs lists every
 // imported source or other file supplied by the caller, so edits invalidate
 // the cache. The compiler installation is assumed immutable at a given
 // path and version. No shell interprets source paths or compiler arguments.
@@ -85,9 +87,10 @@ public DependencyImage prepareImage(
         const staging = directory.buildPath(text("build-", randomUUID));
         staging.mkdirRecurse;
         scope(exit) staging.rmdirRecurse;
-        const sourcePath = staging.buildPath("image.d");
-        sourcePath.write(imageModuleText(source, deferStartup));
-        build.make(sourcePath, staging, destination);
+        const sourcePath = staging.buildPath("source.d");
+        enum moduleName = "snakebite_image_source";
+        sourcePath.write(ImageSource(moduleName, deferStartup, source).text);
+        build.make([sourcePath], staging, destination);
     }
     auto image = loadImage(destination); // Returned as mutable: its handle is.
     stamps.save(destination, source, inputs ~ linkerFiles);
@@ -95,37 +98,61 @@ public DependencyImage prepareImage(
 }
 
 
-// The D module that the image compiles: the line of `startupFact`, `source`,
-// the code that defers the start of its modules when `deferStartup`, and a
-// check that the image compiler is the host compiler.
-public string imageModuleText(in string source, in bool deferStartup) {
-    import std.conv: text;
+// An image source: a module of the declarations that one compile gives the
+// image. The image compiles the image sources of all the compiles of a build,
+// together with the image module (`imageModuleText`), which imports each
+// image source by its module name.
+public struct ImageSource {
+    // The name of the module: a different one for each image source of an
+    // image.
+    public string moduleName;
+    // Whether the program of the compile defers the start of the modules of
+    // the image: it has a C entry point.
+    public bool defersStartup;
+    // The declarations of the module, with no module declaration.
+    public string declarations;
 
-    return startupFact(deferStartup) ~ "\n" ~ source
-        ~ (deferStartup ? DependencyImage.entryStartupSettings : "")
-        ~ text("\nstatic assert(__VERSION__ == ", __VERSION__,
-            ", \"Image compiler must match the host compiler version\");\n");
+    // The module declaration of the text of the file is `keyword`, the module
+    // name and `end`.
+    private enum keyword = "module ", end = ";";
+
+    // The text of the file of the image source: the line of `startupFact`,
+    // the module declaration, then the declarations.
+    public string text() const {
+        return startupFact(defersStartup) ~ "\n" ~ keyword ~ moduleName ~ end
+            ~ "\n" ~ declarations;
+    }
+
+    // The image source of the file text `fileText` (`text`).
+    public static ImageSource parse(in string fileText) {
+        import std.algorithm.searching: endsWith, findSplit, startsWith;
+
+        // The parts of a result of `findSplit` before and after the line end.
+        enum before = 0, after = 2;
+        const startupLine = fileText.findSplit("\n");
+        const moduleLine = startupLine[after].findSplit("\n");
+        const fact = startupLine[before];
+        const defers = fact == startupFact(deferStartup: true);
+        if (fact != startupFact(defers))
+            internalFailure("an image source has no line of the startup fact");
+        const declaration = moduleLine[before];
+        if (!declaration.startsWith(keyword) || !declaration.endsWith(end))
+            internalFailure("an image source has no module declaration");
+        const moduleName = declaration[keyword.length .. $ - end.length];
+        return ImageSource(moduleName, defers, moduleLine[after]);
+    }
 }
 
 
-// Whether the image module `text` (`imageModuleText`) defers the start of
-// its modules.
-public bool defersStartup(in string text) {
-    import std.algorithm.searching: startsWith;
-
-    return text.startsWith(startupFact(true) ~ "\n");
-}
-
-
-// The first line of an image module: the one place that says whether the
-// module defers the start of its modules.
+// The first line of the file of an image source, which says whether the
+// program of its compile defers the start of the modules of the image.
 private string startupFact(in bool deferStartup) {
     return "// defers startup: " ~ (deferStartup ? "yes" : "no");
 }
 
 
-// The commands that compile an image module and link it with the libraries
-// of the dependencies.
+// The commands that compile the image sources of an image to one object file
+// and link it with the libraries of the dependencies to the image.
 public struct ImageBuild {
     public string executable;
     public string[] compileFlags;
@@ -133,6 +160,10 @@ public struct ImageBuild {
     public string[] importFlags;
     public string[] dependencyFlags;
     public string[] linkerArguments;
+    // Whether the image defers the start of its modules: the link wraps the
+    // start functions of druntime, and the image module holds the code that
+    // defers them.
+    public bool deferStartup;
 
     public this(
         in string compiler,
@@ -224,30 +255,42 @@ public struct ImageBuild {
                 dependencyFlags ~= path;
         }
         this.linkerArguments = linkerArguments.dup;
+        this.deferStartup = deferStartup;
     }
 
-    // Compiles the image module `sourcePath` and links it to `destination`,
-    // with the intermediate files in the existing directory `staging`. With
-    // `makeDependencies`, the compiler writes there the files that it read,
-    // for its output, the object file that this returns.
+    // Writes the image module of the image sources at `sourcePaths` to
+    // `modulePath(staging)`, compiles it and the image sources to one object
+    // file, so that the compiler emits each template instance one time, and
+    // links that to `destination`. The existing directory `staging` holds the
+    // intermediate files. With `makeDependencies`, the compiler writes there
+    // the files that it read, the image module too, for its output, the
+    // object file that this returns.
     public string make(
-        in string sourcePath,
+        in string[] sourcePaths,
         in string staging,
         in string destination,
         in string makeDependencies = null,
     ) const {
         import std.algorithm.iteration: map;
         import std.array: array, join;
-        import std.file: rename, write;
+        import std.file: readText, rename, write;
         import std.path: buildPath;
         import std.string: replace;
 
+        const imageModulePath = modulePath(staging);
+        const moduleNames = sourcePaths
+            .map!(path => ImageSource.parse(path.readText).moduleName)
+            .array;
+        imageModulePath.write(imageModuleText(moduleNames, deferStartup));
         const objectPath = staging.buildPath("image.o");
         const imagePath = staging.buildPath("image.so");
         const dependencyFlag = makeDependencies.length
             ? ["-makedeps=" ~ makeDependencies] : null;
-        runCompiler("compilation", [executable] ~ compileFlags ~ importFlags
-            ~ dependencyFlag ~ [sourcePath, "-of=" ~ objectPath]);
+        runCompiler(
+            "compilation",
+            [executable] ~ compileFlags ~ importFlags ~ dependencyFlag
+                ~ [imageModulePath] ~ sourcePaths ~ ["-of=" ~ objectPath],
+        );
 
         const responsePath = staging.buildPath("linker.rsp");
         responsePath.write(dependencyFlags.map!(argument =>
@@ -271,6 +314,48 @@ public struct ImageBuild {
         rename(imagePath, destination);
         return objectPath;
     }
+
+    // The path in the directory `staging` of the image module that `make`
+    // writes.
+    public static string modulePath(in string staging) @safe pure nothrow {
+        import std.path: buildPath;
+
+        return staging.buildPath("image.d");
+    }
+}
+
+
+// The D module that the image compiles together with the image sources of
+// the modules `sourceModuleNames`: the registry, which asks the part of the
+// registry of each image source in turn
+// (`DependencyImage.registryPartName`), the code that defers the start of
+// the modules of the image when `deferStartup`, and a check that the image
+// compiler is the host compiler.
+private string imageModuleText(
+    in string[] sourceModuleNames,
+    in bool deferStartup,
+) {
+    import std.conv: text;
+    import std.format: format;
+
+    // The lines of the registry that ask the part of the registry `%2$s` of
+    // the image source of the module `%1$s`. The image source of a program
+    // that needs no native template instance has no part of the registry.
+    enum partQuery = "    static if (__traits(hasMember, %1$s, \"%2$s\"))\n"
+        ~ "        if (auto address = %1$s.%2$s(name))\n"
+        ~ "            return address;\n";
+    string imports;
+    string registry = "export extern(C) void* "
+        ~ DependencyImage.registrySymbol ~ "(const(char)[] name) {\n";
+    foreach (name; sourceModuleNames) {
+        imports ~= "static import " ~ name ~ ";\n";
+        registry ~= format(partQuery, name, DependencyImage.registryPartName);
+    }
+    registry ~= "    return null;\n}\n";
+    return "module snakebite_dependency_image;\n" ~ imports ~ registry
+        ~ (deferStartup ? DependencyImage.entryStartupSettings : "")
+        ~ text("\nstatic assert(__VERSION__ == ", __VERSION__,
+            ", \"Image compiler must match the host compiler version\");\n");
 }
 
 
