@@ -80,7 +80,8 @@ private extern(C++) final class EagerCompileCollector
     override void visit(FuncDeclaration function_) {
         if (!firstVisit(function_))
             return;
-        const defined = _bytecode._world.callSelection.whereDefined(function_);
+        const defined = _bytecode._staticWorld.callSelection
+            .whereDefined(function_);
         final switch (defined) with (Definition) {
             case rootOwned:
                 _found ~= function_;
@@ -109,7 +110,7 @@ private extern(C++) final class EagerCompileCollector
             return;
         super.visitVarDecl(variable);
         if (variable.hasStorageInObject)
-            _bytecode._world.data.makeAndDefineStorage(variable);
+            _bytecode._staticWorld.data.makeAndDefineStorage(variable);
     }
 
     override void visit(StructDeclaration declaration) {
@@ -119,7 +120,7 @@ private extern(C++) final class EagerCompileCollector
             return;
         super.visit(declaration);
         if (declaration.hasTypeInfoInObject)
-            _bytecode._world.types.makeAndDefineTypeInfo(declaration);
+            _bytecode._staticWorld.types.makeAndDefineTypeInfo(declaration);
     }
 
     // A union is a struct to the code generator of dmd, but the walk of dmd
@@ -135,7 +136,7 @@ private extern(C++) final class EagerCompileCollector
             return;
         super.visit(declaration);
         if (declaration.hasTypeInfoInObject)
-            _bytecode._world.types.makeAndDefineTypeInfo(declaration);
+            _bytecode._staticWorld.types.makeAndDefineTypeInfo(declaration);
     }
 
     override void visit(ClassDeclaration declaration) {
@@ -145,7 +146,7 @@ private extern(C++) final class EagerCompileCollector
             return;
         super.visit(declaration);
         if (declaration.hasClassInfoInObject)
-            _bytecode._world.types.makeAndDefineClassInfo(declaration);
+            _bytecode._staticWorld.types.makeAndDefineClassInfo(declaration);
     }
 
     // An interface has class information too, but the walk of dmd visits it
@@ -190,12 +191,13 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     package Program compiledProgram = void;
     // The static data, type information, class information, call plans and
     // callable addresses of the program.
-    private StaticWorld _world;
+    private StaticWorld _staticWorld;
     // The machinery that runs the compiled functions. A `Function` points
     // to its JIT instance, so the address of this field must never change.
-    // Declared after `compiledProgram` and `_world`, so that it is destroyed
-    // before them: its states release through `_world.data`,
-    // and its callback entry reads `compiledProgram.plans`.
+    // Declared after `compiledProgram` and `_staticWorld`, so that it is
+    // destroyed before them: its states release through
+    // `_staticWorld.data`, and its callback entry reads
+    // `compiledProgram.plans`.
     private Runner _runner = void;
     // The index from a declaration to its function, which `compiledProgram`
     // owns. Keyed by pointer, not by value: a call site compiled while
@@ -254,7 +256,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
         emplace(&compiledProgram, program.dependencyImage, recordsAddresses);
         _compilation.hasCompiler = true;
-        _world = StaticWorld(program, &compiledProgram.store,
+        _staticWorld = StaticWorld(program, &compiledProgram.store,
             &compiledProgram.plans,
             StaticWorld.Backend(&guestWord, null, null,
                 (module_) => &moduleForD(module_).blocks));
@@ -342,7 +344,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     // How many chunks of callback entries this instance's bridge has.
     version(unittest)
     public size_t callbackChunkCount() {
-        return _world.plans.callbackChunkCount;
+        return _staticWorld.plans.callbackChunkCount;
     }
 
     // The owner ends the instance. The JIT code stays while host code holds
@@ -379,7 +381,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     public override imported!"snakebite.native.staticstore".Placed staticStorage(
         imported!"snakebite.frontend.ast".VarDeclaration variable,
     ) {
-        return _world.data.startStorage(variable);
+        return _staticWorld.data.startStorage(variable);
     }
 
     // The handle is a `StartFunction`. Until its function is compiled it
@@ -424,7 +426,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     }
 
     package FuncDeclaration definitionOf(FuncDeclaration function_) {
-        return _world.definitionOf(function_);
+        return _staticWorld.definitionOf(function_);
     }
 
     package Checks checks() const {
@@ -443,7 +445,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     package void registerGuestWord(
         FuncDeclaration function_, const(Function)* compiled,
     ) {
-        _world.plans.registerGuestFunction(compiled, function_);
+        _staticWorld.plans.registerGuestFunction(compiled, function_);
     }
 
     // The prepared FFI plan for druntime's own `gc_malloc`, the real
@@ -462,7 +464,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
         // `SharedTable`, ADR-0006), so two threads racing here store the
         // same value; the store just needs to be visible to a later
         // reader.
-        auto plan = planOf(_world.plans, DruntimeHook.gcMalloc);
+        auto plan = planOf(_staticWorld.plans, DruntimeHook.gcMalloc);
         atomicStore!(MemoryOrder.rel)(_allocatorPlan, plan);
         return plan;
     }
@@ -470,7 +472,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
     package Linked!TypeInfo_Class classRuntimeInfo(
         ClassDeclaration declaration,
     ) {
-        return _world.classRuntimeInfo(declaration);
+        return _staticWorld.classRuntimeInfo(declaration);
     }
 
     // The compiled function of `method`, as the word that stands for its
@@ -502,11 +504,11 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
 
         if (_speculating != 0)
             throw new SpeculationRejected;
-        auto address = _world.callableAddress(method, adjustment);
+        auto address = _staticWorld.callableAddress(method, adjustment);
         if (auto name = address.name)
             return Address(Target.Kind.hostSymbol, name);
         const word = cast(const(void)*) address.word;
-        return Address(_world.callableKind(word), word);
+        return Address(_staticWorld.callableKind(word), word);
     }
 
     // The address of a copy of the C string `text` that the process store owns.
@@ -890,25 +892,7 @@ public final class Bytecode: imported!"snakebite.backends.api".Backend {
                     text(reason, " in `", function_.toString, "`"));
             }
             _complete.insert(function_, placeholder);
-            // A file holds the symbol of each function that it defines, as
-            // an object file does, so that the other files of a program reach
-            // it by name (ADR-0021).
-            if (_world.data.compilesToFile) {
-                import snakebite.ffi.names: DefinitionHere, GuestFunction,
-                    SymbolDefinition;
-                import snakebite.language.definition: definitionInFile;
-
-                const where = _world.callSelection.whereDefined(function_);
-                const weak = definitionInFile(where);
-                if (!weak.isNull)
-                    compiledProgram.plans.names.defineHere(
-                        function_.mangledNameOf.idup,
-                        SymbolDefinition(
-                            DefinitionHere(GuestFunction(placeholder)),
-                            weak.get,
-                        ),
-                    );
-            }
+            _staticWorld.defineSymbolOf(function_, placeholder);
             if (outermost)
                 prepareCallbackBodies;
 
@@ -1089,7 +1073,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     alias visit = LoweringVisitor.visit;
 
     extern(D) protected override CallSelection* callSelection() {
-        return &_bytecode._world.callSelection;
+        return &_bytecode._staticWorld.callSelection;
     }
 
     extern(D):
@@ -1411,7 +1395,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             foreach (index, ref site; _code.callSites)
                 recordRelocs(_code.relocs, index, site);
         foreach (index, ref handler; exceptionHandlers) {
-            const type = _bytecode._world.data.addressOfData(
+            const type = _bytecode._staticWorld.data.addressOfData(
                 _code.exceptionHandlers[index]._type).target;
             if (recordsAddress(type))
                 recordRelocs(_code.relocs, index, handler, type);
@@ -2559,7 +2543,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // DMD AST nodes stay mutable through this plan for code generation.
         auto plan = catchPlanOf(
             statement,
-            catch_ => _bytecode._world.types.unqualifiedClassInfo(catch_.type),
+            catch_ => _bytecode._staticWorld.types
+                .unqualifiedClassInfo(catch_.type),
         );
         const finallyDepthAtStart = _pendingFinallyBodies.length;
         const bodyStart = _code.instructions.length;
@@ -2638,7 +2623,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opRangeEnd, 0, 0, 0);
         foreach (range; protectedRanges(bodyStart, bodyEnd, finallyDepth))
             _code.exceptionHandlers ~= PendingExceptionHandler(
-                _bytecode._world.types.throwableInfo,
+                _bytecode._staticWorld.types.throwableInfo,
                 range.start, range.end,
                 handler,
                 size_t.max, cleanupEnd,
@@ -3190,7 +3175,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(_bytecode.adoptedString(file), size_t.sizeof),
             constantArgument(expression.loc.linnum, uint.sizeof),
         ];
-        auto plan = planOf(_bytecode._world.plans, DruntimeHook.assertMessage);
+        auto plan = planOf(
+            _bytecode._staticWorld.plans,
+            DruntimeHook.assertMessage,
+        );
         _code.callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _code.callSites.length - 1, 0);
     }
@@ -3225,7 +3213,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             constantArgument(
                 _bytecode.adoptedString(call.function_), size_t.sizeof),
         ];
-        auto plan = planOf(_bytecode._world.plans, DruntimeHook.cAssertFail);
+        auto plan = planOf(
+            _bytecode._staticWorld.plans,
+            DruntimeHook.cAssertFail,
+        );
         _code.callSites ~= CallSite.native(plan, args, 0);
         emit(&opCall, discardResult, _code.callSites.length - 1, 0);
     }
@@ -3294,7 +3285,10 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     private void compileClassInvariantCall(
         in size_t objectOffset,
     ) {
-        auto plan = planOf(_bytecode._world.plans, DruntimeHook.classInvariant);
+        auto plan = planOf(
+            _bytecode._staticWorld.plans,
+            DruntimeHook.classInvariant,
+        );
 
         _code.callSites ~= CallSite.native(
             plan, [Arg(objectOffset, 0, size_t.sizeof)], 0);
@@ -3881,8 +3875,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // storage, which is what a resolved address here would bake in.
     private Address staticAddressOf(VarDeclaration variable) {
         if (variable.isThreadLocalStorage)
-            return _bytecode._world.data.addressOfTlsDescriptor(variable);
-        return _bytecode._world.data.addressOfStorage(variable);
+            return _bytecode._staticWorld.data.addressOfTlsDescriptor(variable);
+        return _bytecode._staticWorld.data.addressOfStorage(variable);
     }
 
     private Instruction.Handler staticLoadHandler(VarDeclaration variable) {
@@ -5126,7 +5120,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     private void compileConstant(Expression expression) {
         requireDestination(expression);
-        emitBytes(_bytecode._world.data.value(_valueType, expression, _function));
+        emitBytes(_bytecode._staticWorld.data.value(
+            _valueType,
+            expression,
+            _function,
+        ));
     }
 
     override void visit(IntegerExp expression) {
@@ -5145,7 +5143,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
     extern(D) override void visitConstantBytes(Expression expression, in void[] bytes) {
         requireDestination(expression);
-        emitBytes(_bytecode._world.data.value(_valueType, bytes, _function));
+        emitBytes(_bytecode._staticWorld.data.value(
+            _valueType,
+            bytes,
+            _function,
+        ));
     }
 
     // `1.0f + 0.0fi`: dmd's own constant folding already reduces
@@ -5204,7 +5206,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         // class runtime information so its address remains valid.
         if (auto symbol = expression.var.isSymbolDeclaration) {
             if (symbol.type.isTypeStruct !is null) {
-                emitBytes(_bytecode._world.data.initialValue(
+                emitBytes(_bytecode._staticWorld.data.initialValue(
                     _valueType, expression.loc));
                 return;
             }
@@ -5212,14 +5214,15 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto declaration = symbol.dsym.isAggregateDeclaration;
             assert(declaration !is null,
                 "an initializer symbol names an aggregate");
-            const initial = _bytecode._world.types.initializer(declaration);
+            const initial = _bytecode._staticWorld.types
+                .initializer(declaration);
 
             import snakebite.native.value: arrayLengthOffset, arrayPointerOffset;
 
             emit(&opConstant, _destination + arrayLengthOffset,
                 addConstant(cast(long) initial.length), size_t.sizeof);
             emit(&opConstant, _destination + arrayPointerOffset,
-                addConstant(_bytecode._world.data.addressOfData(initial)),
+                addConstant(_bytecode._staticWorld.data.addressOfData(initial)),
                 size_t.sizeof);
             return;
         }
@@ -5446,7 +5449,9 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         requireDestination(expression);
 
-        auto typeInfo = expression.typeInfoAddressedBy(_bytecode._world.types);
+        auto typeInfo = expression.typeInfoAddressedBy(
+            _bytecode._staticWorld.types,
+        );
         if (!typeInfo.isNull) {
             emitTypeInfoConstant(typeInfo);
             return;
@@ -6194,13 +6199,14 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            const initial = _bytecode._world.types.initializer(declaration);
+            const initial = _bytecode._staticWorld.types
+                .initializer(declaration);
             const alignment = declaration.alignsize == 0
                 ? 1 : declaration.alignsize;
             const object = reserveTemp(
                 TypeFacts(declaration.structsize, alignment));
             emit(&opStaticLoad, object,
-                _bytecode._world.data.addressOfData(initial),
+                _bytecode._staticWorld.data.addressOfData(initial),
                 initial.length);
             emit(&opFrameAddress, _destination, object, size_t.sizeof);
         }
@@ -6210,12 +6216,13 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             auto classType = expression.newtype.baseType.isTypeClass;
             assert(classType !is null);
             auto declaration = classType.sym;
-            const initial = _bytecode._world.types.initializer(declaration);
+            const initial = _bytecode._staticWorld.types
+                .initializer(declaration);
             const image = reserveTemp(TypeFacts(
                 initial.length, declaration.alignsize == 0
                     ? 1 : declaration.alignsize));
             emit(&opStaticLoad, image,
-                _bytecode._world.data.addressOfData(initial),
+                _bytecode._staticWorld.data.addressOfData(initial),
                 initial.length);
             emit(&opStoreIndirect, _destination, image,
                 initial.length);
@@ -6288,7 +6295,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto deletion = planDelete(expression);
         const object = reserveTemp(pointerFacts);
         evalInto(deletion.object, object, size_t.sizeof);
-        auto plan = planOf(_bytecode._world.plans, deletion.hook);
+        auto plan = planOf(_bytecode._staticWorld.plans, deletion.hook);
         _code.callSites ~= CallSite.native(plan,
             [Arg(object, 0, size_t.sizeof)], 0);
         emit(&opCall, discardResult, _code.callSites.length - 1, 0);
@@ -6342,7 +6349,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         in size_t width = size_t.max,
     ) {
         emitTypeInfoConstant(
-            _bytecode._world.types.get(type), destination, width);
+            _bytecode._staticWorld.types.get(type), destination, width);
     }
 
     private void emitTypeInfoConstant(T)(
@@ -6352,7 +6359,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     ) {
         emit(&opConstant,
             destination == size_t.max ? _destination : destination,
-            addConstant(_bytecode._world.data.addressOfData(info)),
+            addConstant(_bytecode._staticWorld.data.addressOfData(info)),
             width == size_t.max ? _width : width);
     }
 
@@ -6444,7 +6451,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         assert(elementBase.ty == Tchar || elementBase.ty == Twchar);
         const hook = elementBase.ty == Twchar
             ? DruntimeHook.arrayAppendWchar : DruntimeHook.arrayAppendChar;
-        auto plan = planOf(_bytecode._world.plans, hook);
+        auto plan = planOf(_bytecode._staticWorld.plans, hook);
 
         const arrayOffset = compileAddress(expression.e1);
 
@@ -6558,7 +6565,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         emit(&opLoadIndirect, objectInfo, objectInfo, size_t.sizeof);
         const targetInfo = reserveTemp(pointerFacts);
         emitTypeInfoConstant(
-            _bytecode._world.types.unqualifiedClassInfo(expression.to),
+            _bytecode._staticWorld.types.unqualifiedClassInfo(expression.to),
             targetInfo, size_t.sizeof);
 
         // The `final` rule of druntime's `_d_cast`: no class derives from a
@@ -6578,7 +6585,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
 
         enum resultWidth = int.sizeof;
         const result = reserveTemp(pointerFacts);
-        auto plan = planOf(_bytecode._world.plans, DruntimeHook.isBaseOf);
+        auto plan = planOf(_bytecode._staticWorld.plans, DruntimeHook.isBaseOf);
         _code.callSites ~= CallSite.native(plan, [
             Arg(objectInfo, 0, size_t.sizeof),
             Arg(targetInfo, 0, size_t.sizeof),
@@ -7533,7 +7540,11 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
     // The address in the native constant pool of `value`.
     private Address constantWord(in size_t value) {
         const placed =
-            _bytecode._world.data.value(Type.tuns64, (&value)[0 .. 1], _function);
+            _bytecode._staticWorld.data.value(
+                Type.tuns64,
+                (&value)[0 .. 1],
+                _function,
+            );
         return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
@@ -7622,10 +7633,18 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (operand.op == EXP.null_) {
             const size_t zero;
             const placed =
-                _bytecode._world.data.value(type, (&zero)[0 .. 1], _function);
+                _bytecode._staticWorld.data.value(
+                    type,
+                    (&zero)[0 .. 1],
+                    _function,
+                );
             return Address(Target.Kind.constantPool, placed.ptr, placed.where);
         }
-        const placed = _bytecode._world.data.value(type, operand, _function);
+        const placed = _bytecode._staticWorld.data.value(
+            type,
+            operand,
+            _function,
+        );
         return Address(Target.Kind.constantPool, placed.ptr, placed.where);
     }
 
@@ -7880,7 +7899,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             pointer = slot;
         }
 
-        const data = _bytecode._world.data.value(Type.tuns8,
+        const data = _bytecode._staticWorld.data.value(Type.tuns8,
             (&value)[0 .. 1], _function);
         const byteConstant = Address(Target.Kind.constantPool, data.ptr,
             data.where);
@@ -9223,7 +9242,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             ? DruntimeHook.newArrayUninitialized
             : inFrontend!"isZeroInit"(elementType, Loc.initial)
             ? DruntimeHook.newArrayZeroed : DruntimeHook.newArrayInitialized;
-        auto plan = planOf(_bytecode._world.plans, hook);
+        auto plan = planOf(_bytecode._staticWorld.plans, hook);
 
         const length = reserveTemp(pointerFacts);
         evalInto((*expression.arguments)[0], length, size_t.sizeof);
@@ -9249,7 +9268,8 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (destOffset == discardResult)
             return false;
         Instruction.Handler handler;
-        final switch (_bytecode._world.callSelection.floatIntrinsicOf(expression, callee))
+        final switch (_bytecode._staticWorld.callSelection
+            .floatIntrinsicOf(expression, callee))
             with (CallSelection.FloatIntrinsic) {
             case none: return false;
             case sqrt: handler = &opFloatSqrt; break;
@@ -9478,7 +9498,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         auto type = typeFunctionOf(callee);
 
         const decision = CallSelection.atCallSite(
-            _bytecode._world.callSelection.decisionOf(callee),
+            _bytecode._staticWorld.callSelection.decisionOf(callee),
             site,
         );
         final switch (decision.route) with (CallSelection.Route) {
@@ -9603,7 +9623,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             /* mayUseWindow */ true,
         );
         auto site = CallSite.named(
-            preparation.plan(_bytecode._world.plans, callee),
+            preparation.plan(_bytecode._staticWorld.plans, callee),
             layout.signature,
             parts.guest,
             parts.native,
@@ -9764,7 +9784,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         if (callee.isCtorDeclaration !is null)
             return size_t.max;
         const decision = CallSelection.atCallSite(
-            _bytecode._world.callSelection.decisionOf(callee),
+            _bytecode._staticWorld.callSelection.decisionOf(callee),
             site,
         );
         if (decision.route != CallSelection.Route.guest)
@@ -10003,7 +10023,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 // execution reaches it, and fails if the symbol is still
                 // absent.
                 return CallSite.native(
-                    preparation.plan(_bytecode._world.plans, callee),
+                    preparation.plan(_bytecode._staticWorld.plans, callee),
                     args, returnWidth);
             });
     }
@@ -10297,7 +10317,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
             args,
             mayUseWindow,
         );
-        auto plans = &_bytecode._world.plans;
+        auto plans = &_bytecode._staticWorld.plans;
         const nativePlan = functionType.parameterList.varargs == VarArg.variadic
             ? preparation.prepareWithoutCode(*plans, hasContext)
             : plans.signatureOf(functionType, hasContext);
@@ -10612,7 +10632,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
         Arg[] extraArgs,
         in Loc loc,
     ) {
-        auto plan = planOf(_bytecode._world.plans, hook);
+        auto plan = planOf(_bytecode._staticWorld.plans, hook);
 
         const fileOffset = reserveTemp(pointerFacts);
         emit(&opConstant, fileOffset,
@@ -10944,7 +10964,7 @@ extern(C++) private final class FunctionCompiler: LoweringVisitor {
                 const result = compiler.reserveTemp(compiler.pointerFacts);
                 compiler.emitTypeInfoConstant(
                     typeInfoObjectOf(
-                        typeInfo, compiler._bytecode._world.types),
+                        typeInfo, compiler._bytecode._staticWorld.types),
                     result, size_t.sizeof,
                 );
                 return result;
