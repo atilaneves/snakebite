@@ -62,6 +62,12 @@ static foreach (backend; Matrix!(
         Because.inexpressible,
         "CTFE cannot run module destructors",
     ),
+    Omit!(
+        LoadedBytecode,
+        Because.inexpressible,
+        "a process loads an SBC file one time and then ends, so the memory "
+            ~ "that a load keeps is not a growth with each program",
+    ),
 )) {
     @("registrationOfEndedProgramIsGivenBack." ~ backend.stringof)
     @Tags(backend.stringof)
